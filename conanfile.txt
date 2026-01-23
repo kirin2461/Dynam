@@ -1,0 +1,9 @@
+[requires]
+libsodium/1.0.18
+openssl/3.1.4
+sqlite3/3.44.0
+gtest/1.14.0
+
+[generators]
+CMakeDeps
+CMakeToolchain

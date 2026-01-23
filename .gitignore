@@ -1,0 +1,63 @@
+# Build directories
+build/
+cmake-build-*/
+.build/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CMakeLists.txt.user
+*.cmake
+
+# Compiled binaries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-project
+*.sublime-workspace
+
+# Conan
+conaninfo.txt
+conanbuildinfo.txt
+conan.lock
+.conan/
+
+# Testing
+*.gcov
+*.gcda
+*.gcno
+Coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Temporary files
+*.tmp
+*.backup
+*.bak
+
+# Database files (for testing)
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated documentation
+docs/_build/
