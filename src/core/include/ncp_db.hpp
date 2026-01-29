@@ -43,16 +43,21 @@ public:
 
     // Table management
     bool create_table(const std::string& table_name,
-                     const std::vector<std::pair<std::string, std::string>>& columns);
+                      const std::vector<std::pair<std::string, std::string>>& columns);
     bool table_exists(const std::string& table_name);
 
-    // Data operations
+    // Data operations - using parameterized where clause
     bool insert(const std::string& table_name,
-               const std::map<std::string, std::string>& data);
+                const std::map<std::string, std::string>& data);
+    
     bool update(const std::string& table_name,
-               const std::map<std::string, std::string>& data,
-               const std::string& where_clause);
-    bool remove(const std::string& table_name, const std::string& where_clause);
+                const std::map<std::string, std::string>& data,
+                const std::string& where_column,
+                const std::string& where_value);
+    
+    bool remove(const std::string& table_name,
+                const std::string& where_column,
+                const std::string& where_value);
 
 private:
 #ifdef HAVE_SQLITE
