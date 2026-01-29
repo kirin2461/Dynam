@@ -120,7 +120,7 @@ sqlite3_bind_text(stmt, 1, table_name.c_str(), -1, SQLITE_TRANSIENT);
 
 ## 7. REMAINING ISSUES
 
-### 7.1 ❌ insert() - NEEDS FIX
+### 6.4 ✅ insert() SQL Injection - FIXED
 
 ```cpp
 // Current vulnerable code:
@@ -132,11 +132,11 @@ sqlite3_bind_text(stmt, 1, value1.c_str(), -1, SQLITE_TRANSIENT);
 sqlite3_bind_text(stmt, 2, value2.c_str(), -1, SQLITE_TRANSIENT);
 ```
 
-### 7.2 ❌ update() - NEEDS FIX
+### 6.5 ✅ update() SQL Injection - FIXED
 
 Same approach as insert() - use prepared statements with bound parameters.
 
-### 7.3 ❌ remove() - NEEDS FIX
+### 6.6 ✅ remove() SQL Injection - FIXED
 
 Same approach - parameterized WHERE clause required.
 
@@ -148,3 +148,31 @@ Recommended approach:
 std::vector<std::string> safe_execute(const std::string& program,
                                        const std::vector<std::string>& args);
 ```
+
+### 6.7 ✅ Raw Sockets Privilege Check - FIXED
+
+**File:** `src/core/src/network.cpp` (function `send_raw_packet()`)
+
+**Fix:** Added `geteuid()` check before creating raw sockets to ensure root/admin privileges are present.
+
+```cpp
+// SECURITY FIX: Check for raw socket privileges (Linux only)
+if (geteuid() != 0) {
+    last_error_ = "Raw sockets require root/admin privileges";
+    return false;
+}
+```
+
+### 6.8 ✅ DoH Thread Exception Handling - FIXED
+
+**File:** `src/core/src/doh.cpp` (function `resolve_async()`)
+
+**Fix:** Added try-catch blocks in detached thread to prevent unhandled exceptions and provide error feedback through callbacks.
+
+---
+
+## 8. STILL PENDING
+
+### 8.1 ❌ execute_command() - NEEDS COMPLETE REWRITE
+
+(See section 7.4 above for details)
