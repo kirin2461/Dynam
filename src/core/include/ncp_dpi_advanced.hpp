@@ -36,6 +36,9 @@ enum class EvasionTechnique {
     // HTTP/HTTPS techniques
     HTTP_HEADER_SPLIT,      // Split HTTP headers
     HTTP_SPACE_TRICK,       // Space before colon in headers
+    SNI_SPLIT,            // Split SNI extension in ClientHello
+    GREASE_INJECTION,     // Inject GREASE extensions
+    FAKE_SNI,             // Send fake SNI before real
     HTTP_CASE_VARIATION,    // Mixed case in method/headers
     HTTP_HOST_CONFUSION,    // Host header obfuscation
     
@@ -162,6 +165,7 @@ struct AdvancedDPIStats {
     uint64_t tcp_overlaps_sent = 0;
     uint64_t tcp_oob_sent = 0;
     uint64_t tls_records_split = 0;
+    uint64_t grease_injected = 0;
     uint64_t packets_padded = 0;
     uint64_t bytes_padding = 0;
     uint64_t timing_delays_applied = 0;
@@ -346,7 +350,8 @@ public:
     /**
      * @brief Get statistics
      */
-    AdvancedDPIStats get_stats() const;
+    34
+get_stats() const;
     
     /**
      * @brief Process and transform data for evasion
