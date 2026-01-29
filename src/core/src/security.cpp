@@ -235,8 +235,20 @@ void ForensicLogger::log(EventType type, const std::string& source,
 void ForensicLogger::write_entry(const LogEntry&) {}
 void ForensicLogger::log_dns_query(const std::string&, const std::string&) {}
 void ForensicLogger::log_dns_response(const std::string&, uint32_t, bool) {}
-void ForensicLogger::log_cert_verification(const std::string&, bool) {}
-void ForensicLogger::log_latency_alert(const std::string&, uint32_t) {}
+std::string ForensicLogger::event_type_to_string(EventType type) const {
+    switch (type) {
+        case EventType::DNS_QUERY: return "DNS_QUERY";
+        case EventType::DNS_RESPONSE: return "DNS_RESPONSE";
+        case EventType::CERTIFICATE_VERIFICATION: return "CERT_VERIFY";
+        case EventType::LATENCY_ALERT: return "LATENCY_ALERT";
+        case EventType::ROUTE_SWITCH: return "ROUTE_SWITCH";
+        case EventType::CANARY_TRIGGERED: return "CANARY";
+        case EventType::ERROR: return "ERROR";
+        case EventType::WARNING: return "WARNING";
+        case EventType::INFO: return "INFO";
+        default: return "UNKNOWN";
+    }
+}void ForensicLogger::log_latency_alert(const std::string&, uint32_t) {}
 void ForensicLogger::log_route_switch(const std::string&, const std::string&, const std::string&) {}
 void ForensicLogger::log_canary_triggered(const std::string&, const std::string&) {}
 void ForensicLogger::log_error(const std::string&, const std::string&) {}
