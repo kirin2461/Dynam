@@ -152,14 +152,45 @@ TrafficPadder::TrafficPadder(uint32_t min_size, uint32_t max_size)
 TrafficPadder::~TrafficPadder() {}
 
 std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data) {
-    // Stub: Returns data as-is
-    return data;
-}
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<uint8_t> result = data;
+    
+    // Генерируем случайный размер padding
+    std::uniform_int_distribution<uint32_t> dist(min_size_, max_size_);
+    uint32_t padding_size = dist(rng_);
+    
+    // Добавляем padding в конец
+    // Формат: [original_data][padding_size:4 bytes][random_padding]
+    uint32_t original_size = data.size();
+    result.reserve(original_size + 4 + padding_size);
+    
+    // Записываем размер оригинальных данных
+    result.push_back((original_size >> 24) & 0xFF);
+    result.push_back((original_size >> 16) & 0xFF);
+    result.push_back((original_size >> 8) & 0xFF);
+    result.push_back(original_size & 0xFF);
+    
+    // Генерируем случайный padding
+    std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
+    for (uint32_t i = 0; i < padding_size; ++i) {
+        result.push_back(byte_dist(rng_));
+    }
+    
+    return result;}
 
 std::vector<uint8_t> TrafficPadder::remove_padding(const std::vector<uint8_t>& data) {
-    // Stub: Returns data as-is
-    return data;
-}
+    if (data.size() < 4) return data;
+    
+    // Извлекаем размер оригинальных данных
+    size_t offset = data.size() - 4 - (data[data.size()-4] << 24 | 
+                                       data[data.size()-3] << 16 | 
+                                       data[data.size()-2] << 8 | 
+                                       data[data.size()-1]);
+    
+    uint32_t original_size = (data[offset] << 24) | (data[offset+1] << 16) | 
+                             (data[offset+2] << 8) | data[offset+3];
+    
+    return std::vector<uint8_t>(data.begin(), data.begin() + original_size);}
 
 void TrafficPadder::set_padding_range(uint32_t min_size, uint32_t max_size) {
     std::lock_guard<std::mutex> lock(mutex_);
