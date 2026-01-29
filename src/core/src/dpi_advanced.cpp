@@ -685,5 +685,102 @@ void AdvancedDPIBypass::apply_preset(BypassPreset preset) {
                std::to_string(impl_->active_techniques.size()) + " techniques");
 }
 
+// ==================== ECH (Encrypted Client Hello) ====================
+
+// Apply ECH encryption to ClientHello
+std::vector<uint8_t> DPIEvasion::apply_ech(
+    const std::vector<uint8_t>& client_hello,
+    const std::vector<uint8_t>& ech_config
+) {
+    std::vector<uint8_t> result = client_hello;
+    
+#ifdef HAVE_OPENSSL
+    // ECH implementation using OpenSSL (TLS 1.3)
+    // This is a simplified version - full ECH requires ECHConfig parsing
+    // and HPKE encryption (RFC 9180)
+    
+    // ECH uses HPKE for encryption
+    // For now, we add the ECH extension with encrypted payload
+    
+    if (ech_config.empty()) {
+        return result; // No ECH config available
+    }
+    
+    // Find extensions section in ClientHello
+    // ClientHello structure: type(1) + length(3) + version(2) + random(32) + ...
+    if (result.size() < 43) return result;
+    
+    // Add ECH extension (type 0xfe0d)
+    std::vector<uint8_t> ech_extension;
+    ech_extension.push_back(0xfe); // ECH extension type (high byte)
+    ech_extension.push_back(0x0d); // ECH extension type (low byte)
+    
+    // Extension length (placeholder)
+    uint16_t ext_len = ech_config.size() + 4;
+    ech_extension.push_back(ext_len >> 8);
+    ech_extension.push_back(ext_len & 0xFF);
+    
+    // ECH payload (simplified - should be HPKE encrypted)
+    ech_extension.insert(ech_extension.end(), ech_config.begin(), ech_config.end());
+    
+    // Insert ECH extension into ClientHello
+    result.insert(result.end(), ech_extension.begin(), ech_extension.end());
+#endif
+    
+    return result;
+}
+
+// ==================== Domain Fronting ====================
+
+// Apply domain fronting by manipulating SNI and Host headers
+std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
+    const std::vector<uint8_t>& data,
+    const std::string& front_domain,
+    const std::string& real_domain
+) {
+    std::vector<uint8_t> result = data;
+    
+    // Replace SNI in TLS ClientHello
+    // SNI is in TLS extensions (type 0x0000)
+    for (size_t i = 0; i < result.size() - 5; i++) {
+        // Look for SNI extension pattern
+        if (result[i] == 0x00 && result[i+1] == 0x00) {
+            // Found potential SNI extension
+            uint16_t ext_len = (result[i+2] << 8) | result[i+3];
+            
+            if (i + 4 + ext_len <= result.size()) {
+                // Replace SNI hostname with front domain
+                // SNI structure: type(2) + length(2) + list_length(2) + type(1) + hostname_length(2) + hostname
+                size_t hostname_offset = i + 9;
+                
+                if (hostname_offset < result.size()) {
+                    // Replace hostname with front domain
+                    std::vector<uint8_t> new_sni(front_domain.begin(), front_domain.end());
+                    
+                    // Update lengths
+                    uint16_t new_hostname_len = new_sni.size();
+                    uint16_t new_list_len = new_hostname_len + 3;
+                    uint16_t new_ext_len = new_list_len + 2;
+                    
+                    result[i+2] = new_ext_len >> 8;
+                    result[i+3] = new_ext_len & 0xFF;
+                    result[i+4] = new_list_len >> 8;
+                    result[i+5] = new_list_len & 0xFF;
+                    result[i+7] = new_hostname_len >> 8;
+                    result[i+8] = new_hostname_len & 0xFF;
+                    
+                    // Replace hostname
+                    result.erase(result.begin() + hostname_offset, result.begin() + hostname_offset + ext_len - 5);
+                    result.insert(result.begin() + hostname_offset, new_sni.begin(), new_sni.end());
+                    
+                    break;
+                }
+            }
+        }
+    }
+    
+    return result;
+}
+
 } // namespace DPI
 } // namespace NCP
