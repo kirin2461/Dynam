@@ -132,7 +132,7 @@ void LatencyMonitor::set_alert_callback(AlertCallback callback) {
 
 bool LatencyMonitor::is_anomalous(const std::string& provider, uint32_t latency_ms) const {
     auto stats = get_stats(provider);
-    if (stats.sample_count < 10) return false;  // Need more data
+    if (stats.sample_count < 10) return false; // Need more data
     
     // Anomalous if > mean + 2*stddev
     return latency_ms > (stats.avg_ms + 2 * stats.stddev_ms);
@@ -145,7 +145,6 @@ void LatencyMonitor::reset_stats() {
 
 // ==================== TrafficPadder ====================
 
-// NOTE: Implementation stubs - to be completed
 TrafficPadder::TrafficPadder(uint32_t min_size, uint32_t max_size) 
     : min_size_(min_size), max_size_(max_size), rng_(std::random_device{}()) {}
 
@@ -155,42 +154,38 @@ std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<uint8_t> result = data;
     
-    // Генерируем случайный размер padding
     std::uniform_int_distribution<uint32_t> dist(min_size_, max_size_);
     uint32_t padding_size = dist(rng_);
     
-    // Добавляем padding в конец
-    // Формат: [original_data][padding_size:4 bytes][random_padding]
     uint32_t original_size = data.size();
     result.reserve(original_size + 4 + padding_size);
     
-    // Записываем размер оригинальных данных
     result.push_back((original_size >> 24) & 0xFF);
     result.push_back((original_size >> 16) & 0xFF);
     result.push_back((original_size >> 8) & 0xFF);
     result.push_back(original_size & 0xFF);
     
-    // Генерируем случайный padding
     std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
     for (uint32_t i = 0; i < padding_size; ++i) {
         result.push_back(byte_dist(rng_));
     }
     
-    return result;}
+    return result;
+}
 
 std::vector<uint8_t> TrafficPadder::remove_padding(const std::vector<uint8_t>& data) {
     if (data.size() < 4) return data;
     
-    // Извлекаем размер оригинальных данных
     size_t offset = data.size() - 4 - (data[data.size()-4] << 24 | 
-                                       data[data.size()-3] << 16 | 
-                                       data[data.size()-2] << 8 | 
-                                       data[data.size()-1]);
+                                        data[data.size()-3] << 16 | 
+                                        data[data.size()-2] << 8 | 
+                                        data[data.size()-1]);
     
     uint32_t original_size = (data[offset] << 24) | (data[offset+1] << 16) | 
                              (data[offset+2] << 8) | data[offset+3];
     
-    return std::vector<uint8_t>(data.begin(), data.begin() + original_size);}
+    return std::vector<uint8_t>(data.begin(), data.begin() + original_size);
+}
 
 void TrafficPadder::set_padding_range(uint32_t min_size, uint32_t max_size) {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -198,18 +193,24 @@ void TrafficPadder::set_padding_range(uint32_t min_size, uint32_t max_size) {
     max_size_ = max_size;
 }
 
-// ==================== ForensicLogger (stub) ====================
+// ==================== ForensicLogger ====================
+
+ForensicLogger::ForensicLogger() : enabled_(false) {}
+
 ForensicLogger::ForensicLogger(const std::string& log_path) : log_path_(log_path), enabled_(true) {
     log_file_.open(log_path_, std::ios::app);
     if (!log_file_.is_open()) {
         enabled_ = false;
     }
+}
+
 ForensicLogger::~ForensicLogger() {
     flush();
-}void ForensicLogger::log(EventType, const std::string&, const std::string&, const std::map<std::string, std::string>&) {}
-void ForensicLogger::set_log_path(const std::string& path) { log_path_ = path; }
-void ForensicLogger::set_enabled(bool enabled) { enabled_ = enabled; }
-void ForensicLogger::flush() {}
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+}
+
 void ForensicLogger::log(EventType type, const std::string& source, 
                          const std::string& message,
                          const std::map<std::string, std::string>& metadata) {
@@ -227,14 +228,12 @@ void ForensicLogger::log(EventType type, const std::string& source,
     entries_.push_back(entry);
     write_entry(entry);
     
-    // Держим только последние 1000 записей в памяти
+    // Keep only last 1000 entries in memory
     if (entries_.size() > 1000) {
         entries_.erase(entries_.begin());
     }
-}std::string ForensicLogger::event_type_to_string(EventType) const { return ""; }
-void ForensicLogger::write_entry(const LogEntry&) {}
-void ForensicLogger::log_dns_query(const std::string&, const std::string&) {}
-void ForensicLogger::log_dns_response(const std::string&, uint32_t, bool) {}
+}
+
 std::string ForensicLogger::event_type_to_string(EventType type) const {
     switch (type) {
         case EventType::DNS_QUERY: return "DNS_QUERY";
@@ -248,45 +247,436 @@ std::string ForensicLogger::event_type_to_string(EventType type) const {
         case EventType::INFO: return "INFO";
         default: return "UNKNOWN";
     }
-}void ForensicLogger::log_latency_alert(const std::string&, uint32_t) {}
-void ForensicLogger::log_route_switch(const std::string&, const std::string&, const std::string&) {}
-void ForensicLogger::log_canary_triggered(const std::string&, const std::string&) {}
-void ForensicLogger::log_error(const std::string&, const std::string&) {}
-void ForensicLogger::log_warning(const std::string&, const std::string&) {}
-void ForensicLogger::log_info(const std::string&, const std::string&) {}
+}
 
-// ==================== AutoRouteSwitch (stub) ====================
-AutoRouteSwitch::AutoRouteSwitch(uint32_t threshold) : failure_threshold_(threshold) {}
+void ForensicLogger::write_entry(const LogEntry& entry) {
+    if (!log_file_.is_open()) return;
+    
+    // Format timestamp as ISO 8601
+    auto time_t = std::chrono::system_clock::to_time_t(entry.timestamp);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        entry.timestamp.time_since_epoch()) % 1000;
+    
+    std::ostringstream oss;
+    oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
+    oss << '.' << std::setfill('0') << std::setw(3) << ms.count() << "Z";
+    
+    // Write JSON-like format
+    log_file_ << "{\"timestamp\":\"" << oss.str() << "\","
+              << "\"type\":\"" << event_type_to_string(entry.type) << "\","
+              << "\"source\":\"" << entry.source << "\","
+              << "\"message\":\"" << entry.message << "\"";
+    
+    // Add metadata if present
+    if (!entry.metadata.empty()) {
+        log_file_ << ",\"metadata\":{";
+        bool first = true;
+        for (const auto& [key, value] : entry.metadata) {
+            if (!first) log_file_ << ",";
+            log_file_ << "\"" << key << "\":\"" << value << "\"";
+            first = false;
+        }
+        log_file_ << "}";
+    }
+    
+    log_file_ << "}\n";
+}
+
+void ForensicLogger::flush() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (log_file_.is_open()) {
+        log_file_.flush();
+    }
+}
+
+void ForensicLogger::set_log_path(const std::string& path) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (log_file_.is_open()) {
+        log_file_.close();
+    }
+    log_path_ = path;
+    log_file_.open(log_path_, std::ios::app);
+    enabled_ = log_file_.is_open();
+}
+
+void ForensicLogger::set_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    enabled_ = enabled;
+}
+
+std::vector<ForensicLogger::LogEntry> ForensicLogger::get_recent_entries(size_t count) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (count >= entries_.size()) {
+        return entries_;
+    }
+    return std::vector<LogEntry>(entries_.end() - count, entries_.end());
+}
+
+void ForensicLogger::log_dns_query(const std::string& hostname, const std::string& provider) {
+    log(EventType::DNS_QUERY, "DNSResolver", "DNS query for " + hostname,
+        {{"hostname", hostname}, {"provider", provider}});
+}
+
+void ForensicLogger::log_dns_response(const std::string& hostname, uint32_t latency_ms, bool success) {
+    log(EventType::DNS_RESPONSE, "DNSResolver", 
+        success ? "DNS response received" : "DNS query failed",
+        {{"hostname", hostname}, {"latency_ms", std::to_string(latency_ms)}, 
+         {"success", success ? "true" : "false"}});
+}
+
+void ForensicLogger::log_cert_verification(const std::string& hostname, bool valid) {
+    log(EventType::CERTIFICATE_VERIFICATION, "CertPinner",
+        valid ? "Certificate verified" : "Certificate verification failed",
+        {{"hostname", hostname}, {"valid", valid ? "true" : "false"}});
+}
+
+void ForensicLogger::log_latency_alert(const std::string& provider, uint32_t latency_ms) {
+    log(EventType::LATENCY_ALERT, "LatencyMonitor", "High latency detected",
+        {{"provider", provider}, {"latency_ms", std::to_string(latency_ms)}});
+}
+
+void ForensicLogger::log_route_switch(const std::string& from_provider, 
+                                       const std::string& to_provider, 
+                                       const std::string& reason) {
+    log(EventType::ROUTE_SWITCH, "AutoRouteSwitch", "Route switched",
+        {{"from", from_provider}, {"to", to_provider}, {"reason", reason}});
+}
+
+void ForensicLogger::log_canary_triggered(const std::string& domain, const std::string& details) {
+    log(EventType::CANARY_TRIGGERED, "CanaryTokens", "Canary triggered - possible interception",
+        {{"domain", domain}, {"details", details}});
+}
+
+void ForensicLogger::log_error(const std::string& source, const std::string& message) {
+    log(EventType::ERROR, source, message, {});
+}
+
+void ForensicLogger::log_warning(const std::string& source, const std::string& message) {
+    log(EventType::WARNING, source, message, {});
+}
+
+void ForensicLogger::log_info(const std::string& source, const std::string& message) {
+    log(EventType::INFO, source, message, {});
+}
+
+// ==================== AutoRouteSwitch ====================
+
+AutoRouteSwitch::AutoRouteSwitch(uint32_t failure_threshold) 
+    : failure_threshold_(failure_threshold) {}
+
 AutoRouteSwitch::~AutoRouteSwitch() {}
-void AutoRouteSwitch::register_provider(const std::string&, int) {}
-void AutoRouteSwitch::record_success(const std::string&) {}
-void AutoRouteSwitch::record_failure(const std::string&) {}
-std::string AutoRouteSwitch::get_active_provider() const { return ""; }
-std::string AutoRouteSwitch::get_next_provider() const { return ""; }
-AutoRouteSwitch::ProviderStatus AutoRouteSwitch::get_provider_status(const std::string&) const { return {}; }
-std::vector<AutoRouteSwitch::ProviderStatus> AutoRouteSwitch::get_all_provider_status() const { return {}; }
-void AutoRouteSwitch::set_failure_threshold(uint32_t) {}
-void AutoRouteSwitch::set_switch_callback(SwitchCallback) {}
-void AutoRouteSwitch::reset_provider(const std::string&) {}
-void AutoRouteSwitch::reset_all() {}
-void AutoRouteSwitch::check_and_switch(const std::string&) {}
 
-// ==================== CanaryTokens (stub) ====================
+void AutoRouteSwitch::register_provider(const std::string& name, int priority) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Add to providers list sorted by priority (higher first)
+    auto it = std::find_if(providers_.begin(), providers_.end(),
+        [&name](const auto& p) { return p.first == name; });
+    
+    if (it == providers_.end()) {
+        providers_.push_back({name, priority});
+        std::sort(providers_.begin(), providers_.end(),
+            [](const auto& a, const auto& b) { return a.second > b.second; });
+        
+        // Initialize status
+        ProviderStatus status;
+        status.name = name;
+        status.consecutive_failures = 0;
+        status.total_failures = 0;
+        status.total_successes = 0;
+        status.is_active = (active_provider_.empty());
+        status_.insert_or_assign(name, status);
+        
+        // Set first provider as active
+        if (active_provider_.empty()) {
+            active_provider_ = name;
+        }
+    }
+}
+
+void AutoRouteSwitch::record_success(const std::string& provider) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto it = status_.find(provider);
+    if (it != status_.end()) {
+        it->second.consecutive_failures = 0;
+        it->second.total_successes++;
+        it->second.last_success = std::chrono::system_clock::now();
+    }
+}
+
+void AutoRouteSwitch::record_failure(const std::string& provider) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto it = status_.find(provider);
+    if (it != status_.end()) {
+        it->second.consecutive_failures++;
+        it->second.total_failures++;
+        it->second.last_failure = std::chrono::system_clock::now();
+        
+        // Check if we need to switch
+        if (it->second.consecutive_failures >= failure_threshold_ && 
+            provider == active_provider_) {
+            check_and_switch(provider);
+        }
+    }
+}
+
+void AutoRouteSwitch::check_and_switch(const std::string& failed_provider) {
+    // Find next available provider
+    std::string next_provider;
+    
+    for (const auto& [name, priority] : providers_) {
+        if (name != failed_provider) {
+            auto it = status_.find(name);
+            if (it != status_.end() && it->second.consecutive_failures < failure_threshold_) {
+                next_provider = name;
+                break;
+            }
+        }
+    }
+    
+    if (!next_provider.empty() && next_provider != active_provider_) {
+        std::string old_provider = active_provider_;
+        
+        // Update status
+        if (auto it = status_.find(active_provider_); it != status_.end()) {
+            it->second.is_active = false;
+        }
+        
+        active_provider_ = next_provider;
+        
+        if (auto it = status_.find(active_provider_); it != status_.end()) {
+            it->second.is_active = true;
+        }
+        
+        // Notify callback
+        if (switch_callback_) {
+            switch_callback_(old_provider, next_provider, "Consecutive failures exceeded threshold");
+        }
+    }
+}
+
+std::string AutoRouteSwitch::get_active_provider() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return active_provider_;
+}
+
+std::string AutoRouteSwitch::get_next_provider() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    for (const auto& [name, priority] : providers_) {
+        if (name != active_provider_) {
+            auto it = status_.find(name);
+            if (it != status_.end() && it->second.consecutive_failures < failure_threshold_) {
+                return name;
+            }
+        }
+    }
+    return "";
+}
+
+AutoRouteSwitch::ProviderStatus AutoRouteSwitch::get_provider_status(const std::string& provider) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto it = status_.find(provider);
+    if (it != status_.end()) {
+        return it->second;
+    }
+    return {};
+}
+
+std::vector<AutoRouteSwitch::ProviderStatus> AutoRouteSwitch::get_all_provider_status() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::vector<ProviderStatus> result;
+    for (const auto& [name, status] : status_) {
+        result.push_back(status);
+    }
+    return result;
+}
+
+void AutoRouteSwitch::set_failure_threshold(uint32_t threshold) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    failure_threshold_ = threshold;
+}
+
+void AutoRouteSwitch::set_switch_callback(SwitchCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    switch_callback_ = callback;
+}
+
+void AutoRouteSwitch::reset_provider(const std::string& provider) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto it = status_.find(provider);
+    if (it != status_.end()) {
+        it->second.consecutive_failures = 0;
+        it->second.total_failures = 0;
+        it->second.total_successes = 0;
+    }
+}
+
+void AutoRouteSwitch::reset_all() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    for (auto& [name, status] : status_) {
+        status.consecutive_failures = 0;
+        status.total_failures = 0;
+        status.total_successes = 0;
+    }
+    
+    // Reset to first provider
+    if (!providers_.empty()) {
+        if (auto it = status_.find(active_provider_); it != status_.end()) {
+            it->second.is_active = false;
+        }
+        active_provider_ = providers_.front().first;
+        if (auto it = status_.find(active_provider_); it != status_.end()) {
+            it->second.is_active = true;
+        }
+    }
+}
+
+// ==================== CanaryTokens ====================
+
 CanaryTokens::CanaryTokens() {}
+
 CanaryTokens::~CanaryTokens() {}
-void CanaryTokens::add_canary(const std::string&, const std::string&) {}
-void CanaryTokens::remove_canary(const std::string&) {}
-CanaryTokens::CanaryResult CanaryTokens::check_canary(const std::string&, const std::string&) { return {}; }
-std::vector<CanaryTokens::CanaryResult> CanaryTokens::check_all_canaries(std::function<std::string(const std::string&)>) { return {}; }
-void CanaryTokens::set_trigger_callback(TriggerCallback) {}
-std::vector<std::string> CanaryTokens::get_canary_domains() const { return {}; }
-void CanaryTokens::clear_canaries() {}
+
+void CanaryTokens::add_canary(const std::string& domain, const std::string& expected_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    canaries_[domain] = expected_response;
+}
+
+void CanaryTokens::remove_canary(const std::string& domain) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    canaries_.erase(domain);
+}
+
+CanaryTokens::CanaryResult CanaryTokens::check_canary(const std::string& domain, 
+                                                       const std::string& actual_response) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    CanaryResult result;
+    result.domain = domain;
+    result.check_time = std::chrono::system_clock::now();
+    result.actual_response = actual_response;
+    
+    auto it = canaries_.find(domain);
+    if (it != canaries_.end()) {
+        result.expected_response = it->second;
+        result.triggered = (actual_response != it->second);
+        
+        if (result.triggered) {
+            result.details = "Response mismatch: expected '" + it->second + 
+                           "', got '" + actual_response + "'";
+            
+            // Notify callback
+            if (trigger_callback_) {
+                trigger_callback_(result);
+            }
+        } else {
+            result.details = "Response matches expected value";
+        }
+    } else {
+        result.triggered = false;
+        result.details = "Unknown canary domain";
+    }
+    
+    return result;
+}
+
+std::vector<CanaryTokens::CanaryResult> CanaryTokens::check_all_canaries(
+    std::function<std::string(const std::string&)> resolver) {
+    
+    std::vector<CanaryResult> results;
+    
+    // Copy canaries to avoid holding lock during resolution
+    std::map<std::string, std::string> canaries_copy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        canaries_copy = canaries_;
+    }
+    
+    for (const auto& [domain, expected] : canaries_copy) {
+        std::string actual;
+        try {
+            actual = resolver(domain);
+        } catch (...) {
+            actual = "RESOLUTION_FAILED";
+        }
+        
+        auto result = check_canary(domain, actual);
+        results.push_back(result);
+    }
+    
+    return results;
+}
+
+void CanaryTokens::set_trigger_callback(TriggerCallback callback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    trigger_callback_ = callback;
+}
+
+std::vector<std::string> CanaryTokens::get_canary_domains() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    std::vector<std::string> domains;
+    for (const auto& [domain, _] : canaries_) {
+        domains.push_back(domain);
+    }
+    return domains;
+}
+
+void CanaryTokens::clear_canaries() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    canaries_.clear();
+}
 
 // ==================== SecurityManager ====================
+
 SecurityManager::SecurityManager() {}
-SecurityManager::SecurityManager(const Config& config) : config_(config) {}
+
+SecurityManager::SecurityManager(const Config& config) : config_(config) {
+    // Initialize components based on config
+    if (config_.enable_latency_monitoring) {
+        latency_monitor_.set_threshold(config_.latency_threshold_ms);
+    }
+    
+    if (config_.enable_traffic_padding) {
+        traffic_padder_.set_padding_range(config_.min_padding_size, config_.max_padding_size);
+    }
+    
+    if (config_.enable_forensic_logging && !config_.forensic_log_path.empty()) {
+        forensic_logger_.set_log_path(config_.forensic_log_path);
+        forensic_logger_.set_enabled(true);
+    }
+    
+    if (config_.enable_auto_route_switch) {
+        auto_route_switch_.set_failure_threshold(config_.route_switch_threshold);
+    }
+}
+
 SecurityManager::~SecurityManager() {}
-void SecurityManager::configure(const Config& config) { config_ = config; }
-SecurityManager::Config SecurityManager::get_config() const { return config_; }
+
+void SecurityManager::configure(const Config& config) {
+    config_ = config;
+    
+    // Reconfigure components
+    latency_monitor_.set_threshold(config_.latency_threshold_ms);
+    traffic_padder_.set_padding_range(config_.min_padding_size, config_.max_padding_size);
+    
+    if (config_.enable_forensic_logging && !config_.forensic_log_path.empty()) {
+        forensic_logger_.set_log_path(config_.forensic_log_path);
+    }
+    forensic_logger_.set_enabled(config_.enable_forensic_logging);
+    
+    auto_route_switch_.set_failure_threshold(config_.route_switch_threshold);
+}
+
+SecurityManager::Config SecurityManager::get_config() const {
+    return config_;
+}
 
 } // namespace NCP
