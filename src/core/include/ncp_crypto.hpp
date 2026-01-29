@@ -36,6 +36,22 @@ public:
         const std::vector<uint8_t>& public_key
     );
 
+#ifdef HAVE_LIBOQS
+    // Post-quantum signatures (CRYSTALS-Dilithium)
+    KeyPair generate_dilithium_keypair();
+    
+    std::vector<uint8_t> sign_dilithium(
+        const std::vector<unsigned char>& message,
+        const std::vector<unsigned char>& secret_key
+    );
+    
+    bool verify_dilithium(
+        const std::vector<unsigned char>& message,
+        const std::vector<unsigned char>& signature,
+        const std::vector<unsigned char>& public_key
+    );
+#endif
+
     // ChaCha20 encryption/decryption
     std::vector<uint8_t> encrypt_chacha20(
         const std::vector<uint8_t>& plaintext,
