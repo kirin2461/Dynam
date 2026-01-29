@@ -223,6 +223,7 @@ bool Database::table_exists(const std::string& table_name) {
 #else
     return true; // Assume exists in fallback mode
 #endif
+    }
 
 // ==================== Data Operations ====================
 
