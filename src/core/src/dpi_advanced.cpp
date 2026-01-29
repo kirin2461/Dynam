@@ -101,7 +101,8 @@ void TCPManipulator::shuffle_segments(
 ) {
     if (segments.size() <= 1) return;
     for (size_t i = segments.size() - 1; i > 0; --i) {
-        size_t j = rng() % (i + 1);
+        std::uniform_int_distribution<size_t> dist(0, i);  // Proper uniform distribution
+            size_t j = dist(rng);
         if (j != i && (rng() % 2 == 0)) {
             std::swap(segments[i], segments[j]);
         }
@@ -269,7 +270,11 @@ std::vector<uint8_t> TLSManipulator::inject_grease(
     
     // Update extensions length
     uint16_t old_ext_len = (result[ext_len_pos] << 8) | result[ext_len_pos + 1];
-    uint16_t new_ext_len = old_ext_len + grease_ext.size();
+    // Check for overflow before modifying lengths
+    if (old_ext_len > UINT16_MAX - grease_ext.size()) {
+        return result; // Would overflow, return unmodified
+    }
+        uint16_t new_ext_len = old_ext_len + grease_ext.size();
     result[ext_len_pos] = (new_ext_len >> 8) & 0xFF;
     result[ext_len_pos + 1] = new_ext_len & 0xFF;
     
