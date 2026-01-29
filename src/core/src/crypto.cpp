@@ -15,6 +15,11 @@
 
 #include <sodium.h>
 
+// Post-quantum signature support via liboqs
+#ifdef HAVE_LIBOQS
+#include <oqs/oqs.h>
+#endif
+
 namespace NCP {
 
 Crypto::Crypto() {
@@ -177,5 +182,99 @@ std::vector<uint8_t> Crypto::hex_to_bytes(const std::string& hex) {
     }
     return bytes;
 }
+
+// ==================== Post-Quantum Signatures (CRYSTALS-Dilithium) ====================
+
+#ifdef HAVE_LIBOQS
+
+// Generate Dilithium5 keypair (highest security level)
+Crypto::KeyPair Crypto::generate_dilithium_keypair() {
+    KeyPair kp;
+    
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_5);
+    if (!sig) {
+        throw std::runtime_error("Failed to initialize Dilithium5 signature scheme");
+    }
+    
+    kp.public_key.resize(sig->length_public_key);
+    kp.secret_key.resize(sig->length_secret_key);
+    
+    if (OQS_SIG_keypair(sig, kp.public_key.data(), kp.secret_key.data()) != OQS_SUCCESS) {
+        OQS_SIG_free(sig);
+        throw std::runtime_error("Failed to generate Dilithium5 keypair");
+    }
+    
+    OQS_SIG_free(sig);
+    return kp;
+}
+
+// Sign message with Dilithium5
+std::vector<uint8_t> Crypto::sign_dilithium(
+    const std::vector<uint8_t>& message,
+    const std::vector<uint8_t>& secret_key
+) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_5);
+    if (!sig) {
+        throw std::runtime_error("Failed to initialize Dilithium5 for signing");
+    }
+    
+    std::vector<uint8_t> signature(sig->length_signature);
+    size_t signature_len = 0;
+    
+    if (OQS_SIG_sign(sig, signature.data(), &signature_len,
+                     message.data(), message.size(),
+                     secret_key.data()) != OQS_SUCCESS) {
+        OQS_SIG_free(sig);
+        throw std::runtime_error("Dilithium5 signing failed");
+    }
+    
+    signature.resize(signature_len);
+    OQS_SIG_free(sig);
+    return signature;
+}
+
+// Verify Dilithium5 signature
+bool Crypto::verify_dilithium(
+    const std::vector<uint8_t>& signature,
+    const std::vector<uint8_t>& message,
+    const std::vector<uint8_t>& public_key
+) {
+    OQS_SIG *sig = OQS_SIG_new(OQS_SIG_alg_dilithium_5);
+    if (!sig) {
+        return false;
+    }
+    
+    OQS_STATUS result = OQS_SIG_verify(sig,
+                                        message.data(), message.size(),
+                                        signature.data(), signature.size(),
+                                        public_key.data());
+    
+    OQS_SIG_free(sig);
+    return result == OQS_SUCCESS;
+}
+
+#else
+
+// Fallback implementations when liboqs is not available
+Crypto::KeyPair Crypto::generate_dilithium_keypair() {
+    throw std::runtime_error("Dilithium not available: liboqs required");
+}
+
+std::vector<uint8_t> Crypto::sign_dilithium(
+    const std::vector<uint8_t>& /*message*/,
+    const std::vector<uint8_t>& /*secret_key*/
+) {
+    throw std::runtime_error("Dilithium not available: liboqs required");
+}
+
+bool Crypto::verify_dilithium(
+    const std::vector<uint8_t>& /*signature*/,
+    const std::vector<uint8_t>& /*message*/,
+    const std::vector<uint8_t>& /*public_key*/
+) {
+    throw std::runtime_error("Dilithium not available: liboqs required");
+}
+
+#endif // HAVE_LIBOQS
 
 } // namespace NCP
