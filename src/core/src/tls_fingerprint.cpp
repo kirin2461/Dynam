@@ -90,7 +90,6 @@ TLSFingerprint::TLSFingerprint() {}
 TLSFingerprint::~TLSFingerprint() {}
 
 std::vector<uint16_t> TLSFingerprint::get_cipher_suites(BrowserType browser) const {
-    // Chrome/Edge cipher suites
     return {
         0x1301, 0x1302, 0x1303, 0xc02b, 0xc02f, 0xc02c, 0xc030,
         0xcca9, 0xcca8, 0xc013, 0xc014, 0x009c, 0x009d, 0x002f, 0x0035
@@ -98,7 +97,6 @@ std::vector<uint16_t> TLSFingerprint::get_cipher_suites(BrowserType browser) con
 }
 
 std::vector<uint16_t> TLSFingerprint::get_extensions(BrowserType browser) const {
-    // Standard extensions
     return {
         0x0000, 0x0017, 0x0023, 0x000d, 0x0005, 0x000a, 0x000b,
         0x0010, 0x0012, 0x002b, 0x002d, 0x001b, 0x0033, 0xfe0d
@@ -106,17 +104,15 @@ std::vector<uint16_t> TLSFingerprint::get_extensions(BrowserType browser) const 
 }
 
 std::vector<uint16_t> TLSFingerprint::get_supported_groups(BrowserType browser) const {
-    // Standard elliptic curves
     return {0x001d, 0x0017, 0x0018, 0x0019};
 }
 
 std::vector<uint8_t> TLSFingerprint::get_signature_algorithms(BrowserType browser) const {
-    // Standard signature algorithms
     return {0x04, 0x03, 0x05, 0x03, 0x06, 0x03, 0x08, 0x04, 0x08, 0x05, 0x08, 0x06};
 }
 
 std::vector<uint16_t> TLSFingerprint::get_supported_versions(BrowserType browser) const {
-    return {0x0304, 0x0303}; // TLS 1.3, TLS 1.2
+    return {0x0304, 0x0303};
 }
 
 std::string TLSFingerprint::generate_ja3_fingerprint(BrowserType browser) const {
@@ -139,43 +135,17 @@ void TLSFingerprint::set_custom_profile(const FingerprintProfile& profile) {
     custom_profile_ = profile;
 }
 
-void TLSFingerprint::randomize_fingerprint() {
-    // Stub implementation
-}
+void TLSFingerprint::randomize_fingerprint() {}
 
 std::string TLSFingerprint::get_client_hello_data(BrowserType browser) const {
     return "client_hello_stub";
 }
 
-void TLSFingerprint::apply_to_connection(void* ssl_ctx, BrowserType browser) {
-    // Stub implementation
-}
+void TLSFingerprint::apply_to_connection(void* ssl_ctx, BrowserType browser) {}
 
-void TLSFingerprint::load_browser_profile(BrowserType browser) {
-    // Stub implementation
-}
-
-// JA3Fingerprint implementation
-std::string JA3Fingerprint::to_string() const {
-    return "stub";
-}
-
-std::string JA3Fingerprint::hash() const {
-    return "stub";
-}
-
-// JA4Fingerprint implementation
-std::string JA4Fingerprint::to_string() const {
-    return "stub";
-}
-
-std::string JA4Fingerprint::hash() const {
-    return "stub";
-}
-
-// Browser profile loading stubs
 void TLSFingerprint::load_browser_profile(BrowserType browser) {}
 
+// JA3Fingerprint implementation
 std::string TLSFingerprint::JA3Fingerprint::to_string() const {
     return "stub";
 }
@@ -184,6 +154,7 @@ std::string TLSFingerprint::JA3Fingerprint::hash() const {
     return "stub";
 }
 
+// JA4Fingerprint implementation
 std::string TLSFingerprint::JA4Fingerprint::to_string() const {
     return "stub";
 }
