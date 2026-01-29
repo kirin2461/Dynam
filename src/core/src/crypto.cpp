@@ -158,6 +158,10 @@ std::string Crypto::bytes_to_hex(const std::vector<uint8_t>& bytes) {
 }
 
 std::vector<uint8_t> Crypto::hex_to_bytes(const std::string& hex) {
+        // Validate hex string length is even
+    if (hex.size() % 2 != 0) {
+        throw std::invalid_argument("Hex string must have even length");
+    }
     std::vector<uint8_t> bytes;
     bytes.reserve(hex.size() / 2);
     for (size_t i = 0; i < hex.size(); i += 2) {
