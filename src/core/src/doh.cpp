@@ -384,6 +384,18 @@ std::vector<uint8_t> DoHClient::perform_https_doh_request(
     SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
     if (!ctx) return response;
     
+    // Enable certificate verification
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+    
+    // Load default CA certificates
+    if (SSL_CTX_set_default_verify_paths(ctx) != 1) {
+        SSL_CTX_free(ctx);
+        return response; // Failed to load CA certificates
+    }
+    
+    // Set minimum TLS version to 1.2 for security
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    
     // Create BIO for connection
     std::string connect_str = host + ":443";
     BIO* bio = BIO_new_ssl_connect(ctx);
