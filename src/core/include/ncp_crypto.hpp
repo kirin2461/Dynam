@@ -24,7 +24,7 @@ public:
     // Random generation
     std::vector<uint8_t> generate_random(size_t size);
 
-    // Digital signatures
+    // Digital signatures (Ed25519)
     std::vector<uint8_t> sign_message(
         const std::string& message,
         const std::vector<uint8_t>& secret_key
@@ -36,21 +36,20 @@ public:
         const std::vector<uint8_t>& public_key
     );
 
-#ifdef HAVE_LIBOQS
     // Post-quantum signatures (CRYSTALS-Dilithium)
+    // Always declared - throws exception if liboqs not available
     KeyPair generate_dilithium_keypair();
     
     std::vector<uint8_t> sign_dilithium(
-        const std::vector<unsigned char>& message,
-        const std::vector<unsigned char>& secret_key
+        const std::vector<uint8_t>& message,
+        const std::vector<uint8_t>& secret_key
     );
     
     bool verify_dilithium(
-        const std::vector<unsigned char>& message,
-        const std::vector<unsigned char>& signature,
-        const std::vector<unsigned char>& public_key
+        const std::vector<uint8_t>& signature,
+        const std::vector<uint8_t>& message,
+        const std::vector<uint8_t>& public_key
     );
-#endif
 
     // ChaCha20 encryption/decryption
     std::vector<uint8_t> encrypt_chacha20(
