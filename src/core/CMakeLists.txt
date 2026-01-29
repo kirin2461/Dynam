@@ -23,7 +23,7 @@ set(NCP_CORE_SRC_SOURCES
     src/license.cpp
     src/network.cpp
     src/spoofer.cpp
-        src/ncp_dpi.cpp
+    src/ncp_dpi.cpp
 )
 
 # Header files in include/ subdirectory
@@ -31,7 +31,7 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_crypto.hpp
     include/ncp_db.hpp
     include/ncp_license.hpp
-        include/ncp_dpi.hpp
+    include/ncp_dpi.hpp
     include/ncp_network.hpp
     include/ncp_spoofer.hpp
 )
@@ -70,13 +70,25 @@ if(UNIX)
     endif()
 endif()
 
-# Find sodium (optional)
+# Find sodium (REQUIRED - no fallback implementations allowed)
+# Security: libsodium is mandatory for all cryptographic operations
 find_library(SODIUM_LIBRARY NAMES sodium libsodium)
-if(SODIUM_LIBRARY)
+find_path(SODIUM_INCLUDE_DIR NAMES sodium.h)
+if(SODIUM_LIBRARY AND SODIUM_INCLUDE_DIR)
+    message(STATUS "Found libsodium: ${SODIUM_LIBRARY}")
     target_link_libraries(ncp_core PUBLIC ${SODIUM_LIBRARY})
+    target_include_directories(ncp_core PRIVATE ${SODIUM_INCLUDE_DIR})
     target_compile_definitions(ncp_core PRIVATE HAVE_SODIUM)
 else()
-    message(STATUS "libsodium not found - crypto features will be limited")
+    message(FATAL_ERROR 
+        "libsodium is REQUIRED but was not found!\n"
+        "libsodium is mandatory for secure cryptographic operations.\n"
+        "Please install libsodium:\n"
+        "  Ubuntu/Debian: sudo apt-get install libsodium-dev\n"
+        "  Fedora/RHEL: sudo dnf install libsodium-devel\n"
+        "  macOS: brew install libsodium\n"
+        "  Windows: vcpkg install libsodium\n"
+    )
 endif()
 
 # Find libnetfilter_queue for DPI bypass (Linux only)
