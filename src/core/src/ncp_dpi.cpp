@@ -20,6 +20,7 @@
     #include <netinet/tcp.h>
     #include <arpa/inet.h>
     #include <unistd.h>
+    #include <netdb.h>
     #define SOCKET int
     #define INVALID_SOCKET -1
     #define CLOSE_SOCKET close
