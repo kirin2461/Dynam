@@ -199,10 +199,14 @@ void TrafficPadder::set_padding_range(uint32_t min_size, uint32_t max_size) {
 }
 
 // ==================== ForensicLogger (stub) ====================
-ForensicLogger::ForensicLogger() : enabled_(false) {}
-ForensicLogger::ForensicLogger(const std::string& log_path) : log_path_(log_path), enabled_(true) {}
-ForensicLogger::~ForensicLogger() { flush(); }
-void ForensicLogger::log(EventType, const std::string&, const std::string&, const std::map<std::string, std::string>&) {}
+ForensicLogger::ForensicLogger(const std::string& log_path) : log_path_(log_path), enabled_(true) {
+    log_file_.open(log_path_, std::ios::app);
+    if (!log_file_.is_open()) {
+        enabled_ = false;
+    }
+ForensicLogger::~ForensicLogger() {
+    flush();
+}void ForensicLogger::log(EventType, const std::string&, const std::string&, const std::map<std::string, std::string>&) {}
 void ForensicLogger::set_log_path(const std::string& path) { log_path_ = path; }
 void ForensicLogger::set_enabled(bool enabled) { enabled_ = enabled; }
 void ForensicLogger::flush() {}
