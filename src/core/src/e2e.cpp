@@ -418,6 +418,9 @@ uint64_t E2ESession::get_messages_received() const {
     return pImpl_->messages_received;
 }
 
+    
+} // namespace NCP
+
 // E2EManager implementation
 struct E2EManager::Impl {
     std::unordered_map<std::string, std::shared_ptr<E2ESession>> sessions;
@@ -499,6 +502,8 @@ bool E2EManager::import_keys(
     throw std::runtime_error("Key import requires additional security review");
 }
 
+
+namespace NCP {
 // E2EUtils namespace implementation
 namespace E2EUtils {
 
