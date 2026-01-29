@@ -27,6 +27,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_dpi.cpp
     src/tls_fingerprint.cpp
     src/e2e.cpp
+    src/dpi_advanced.cpp
 )
 
 # Header files in include/ subdirectory
@@ -40,6 +41,7 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_spoofer.hpp
     include/ncp_tls_fingerprint.hpp
     include/ncp_e2e.hpp
+    include/ncp_dpi_advanced.hpp
 )
 
 # Combine all sources and headers
