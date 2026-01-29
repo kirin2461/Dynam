@@ -19,6 +19,7 @@ set(NCP_CORE_ROOT_HEADERS
 # Source files in src/ subdirectory
 set(NCP_CORE_SRC_SOURCES
     src/crypto.cpp
+    src/doh.cpp
     src/db.cpp
     src/license.cpp
     src/network.cpp
@@ -29,6 +30,7 @@ set(NCP_CORE_SRC_SOURCES
 # Header files in include/ subdirectory
 set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_crypto.hpp
+    include/ncp_doh.hpp
     include/ncp_db.hpp
     include/ncp_license.hpp
     include/ncp_dpi.hpp
