@@ -210,8 +210,28 @@ ForensicLogger::~ForensicLogger() {
 void ForensicLogger::set_log_path(const std::string& path) { log_path_ = path; }
 void ForensicLogger::set_enabled(bool enabled) { enabled_ = enabled; }
 void ForensicLogger::flush() {}
-std::vector<ForensicLogger::LogEntry> ForensicLogger::get_recent_entries(size_t) const { return {}; }
-std::string ForensicLogger::event_type_to_string(EventType) const { return ""; }
+void ForensicLogger::log(EventType type, const std::string& source, 
+                         const std::string& message,
+                         const std::map<std::string, std::string>& metadata) {
+    if (!enabled_) return;
+    
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    LogEntry entry;
+    entry.timestamp = std::chrono::system_clock::now();
+    entry.type = type;
+    entry.source = source;
+    entry.message = message;
+    entry.metadata = metadata;
+    
+    entries_.push_back(entry);
+    write_entry(entry);
+    
+    // Держим только последние 1000 записей в памяти
+    if (entries_.size() > 1000) {
+        entries_.erase(entries_.begin());
+    }
+}std::string ForensicLogger::event_type_to_string(EventType) const { return ""; }
 void ForensicLogger::write_entry(const LogEntry&) {}
 void ForensicLogger::log_dns_query(const std::string&, const std::string&) {}
 void ForensicLogger::log_dns_response(const std::string&, uint32_t, bool) {}
