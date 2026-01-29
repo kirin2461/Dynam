@@ -7,6 +7,11 @@
 #include <mutex>
 #include <unordered_map>
 
+// Post-quantum cryptography support via liboqs
+#ifdef HAVE_LIBOQS
+#include <oqs/oqs.h>
+#endif
+
 namespace NCP {
 
 // E2ESession::Impl - Private implementation
@@ -95,14 +100,31 @@ KeyPair E2ESession::generate_key_pair() {
             break;
             
         case KeyExchangeProtocol::Kyber1024:
-            // Kyber1024 post-quantum KEM
-            // Kyber public key: 1568 bytes, secret key: 3168 bytes
-            // This is a placeholder - real implementation needs liboqs or pqcrypto
+#ifdef HAVE_LIBOQS
+            // Real Kyber1024 implementation using liboqs
+            {
+                OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_kyber_1024);
+                if (!kem) {
+                    throw std::runtime_error("Failed to initialize Kyber1024 KEM");
+                }
+                
+                kp.public_key = SecureMemory(kem->length_public_key);
+                kp.private_key = SecureMemory(kem->length_secret_key);
+                
+                if (OQS_KEM_keypair(kem, kp.public_key.data(), kp.private_key.data()) != OQS_SUCCESS) {
+                    OQS_KEM_free(kem);
+                    throw std::runtime_error("Failed to generate Kyber1024 keypair");
+                }
+                
+                OQS_KEM_free(kem);
+            }
+#else
+            // Fallback: placeholder when liboqs not available (NOT SECURE)
             kp.public_key = SecureMemory(1568);
             kp.private_key = SecureMemory(3168);
-            // Generate random keys as placeholder (NOT SECURE - needs real Kyber impl)
             randombytes_buf(kp.public_key.data(), kp.public_key.size());
             randombytes_buf(kp.private_key.data(), kp.private_key.size());
+#endif
             break;
     
     return kp;
