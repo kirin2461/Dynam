@@ -295,7 +295,8 @@ bool Database::insert(const std::string& table_name,
 
 bool Database::update(const std::string& table_name,
                        const std::map<std::string, std::string>& data,
-                       const std::string& where_clause) {
+                       const std::string& where_column,
+                       const std::string& where_value) {
 #ifdef HAVE_SQLITE
     if (!is_connected_ || !db_handle_) {
         last_error_ = "Database not connected";
@@ -321,12 +322,13 @@ bool Database::update(const std::string& table_name,
         first = false;
     }
     
-    // Note: where_clause should ideally also use parameters
-    // For now, append it directly (caller should sanitize)
-    if (!where_clause.empty()) {
-        sql << " WHERE " << where_clause;
+        // Add parameterized WHERE clause
+    if (!where_column.empty()) {
+        sql << " WHERE " << where_column << " = ?";
+        values.push_back(where_value);
     }
-    
+
+
     // Prepare statement
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
@@ -360,7 +362,9 @@ bool Database::update(const std::string& table_name,
 }
 
 
-bool Database::remove(const std::string& table_name, const std::string& where_clause) {
+bool Database::remove(const std::string& table_name,
+                       const std::string& where_column,
+                       const std::string& where_value) {
 #ifdef HAVE_SQLITE
     if (!is_connected_ || !db_handle_) {
         last_error_ = "Database not connected";
@@ -368,15 +372,16 @@ bool Database::remove(const std::string& table_name, const std::string& where_cl
     }
     
     // Build DELETE SQL
-    // Note: where_clause should ideally use parameters
-    // For table deletion operations, caller should sanitize where_clause
+        // Build parameterized DELETE SQL
     std::ostringstream sql;
     sql << "DELETE FROM " << table_name;
     
-    if (!where_clause.empty()) {
-        sql << " WHERE " << where_clause;
+    // Add parameterized WHERE clause
+    if (!where_column.empty()) {
+        sql << " WHERE " << where_column << " = ?";
     }
-    
+
+
     // Use prepared statement for execution
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
@@ -384,6 +389,12 @@ bool Database::remove(const std::string& table_name, const std::string& where_cl
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
+    
+    // Bind WHERE value if provided
+    if (!where_column.empty()) {
+        sqlite3_bind_text(stmt, 1, where_value.c_str(), -1, SQLITE_TRANSIENT);
+    }
+
     
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
