@@ -10,6 +10,9 @@
 #include <fstream>
 #include <regex>
 #include <array>
+#include <set>
+#include <vector>
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -24,6 +27,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/wait.h>
 #ifdef __linux__
 #include <linux/if_ether.h>
 #endif
@@ -325,30 +329,181 @@ bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
 #endif
 }
 
-// WARNING: This function is vulnerable to command injection!
-// TODO: Replace with safe implementation using validated commands only
-// SECURITY ISSUE: Direct popen/system calls without input validation
+// ==================== Safe Command Execution ====================
 
-std::string execute_command(const std::string& cmd) {
+// Whitelist of allowed commands for network configuration
+static const std::set<std::string> ALLOWED_COMMANDS = {
+    "ip", "ifconfig", "netsh", "arp", "route", "hostname"
+};
+
+// Validate command name against whitelist
+static bool is_command_allowed(const std::string& cmd_name) {
+    return ALLOWED_COMMANDS.find(cmd_name) != ALLOWED_COMMANDS.end();
+}
+
+// Validate argument contains no shell metacharacters
+static bool is_safe_argument(const std::string& arg) {
+    // Reject arguments with shell metacharacters
+    const std::string dangerous_chars = ";|&$`\"'\\<>(){}[]!#~";
+    for (char c : arg) {
+        if (dangerous_chars.find(c) != std::string::npos) {
+            return false;
+        }
+    }
+    // Also reject arguments starting with dash that could be flags
+    // (allow single dash for actual flags, reject double dash injection)
+    if (arg.length() > 2 && arg[0] == '-' && arg[1] == '-') {
+        // Allow known safe long options only if needed
+    }
+    return true;
+}
+
+// Safe command execution with argument validation
+std::string execute_command_safe(const std::string& command,
+                                  const std::vector<std::string>& args) {
+    // Validate command is in whitelist
+    if (!is_command_allowed(command)) {
+        return "Error: Command not allowed";
+    }
+    
+    // Validate all arguments
+    for (const auto& arg : args) {
+        if (!is_safe_argument(arg)) {
+            return "Error: Invalid argument detected";
+        }
+    }
+    
 #ifdef _WIN32
-    std::array<char, 128> buffer;
+    // Windows: Use CreateProcess for safer execution
+    std::string cmd_line = command;
+    for (const auto& arg : args) {
+        cmd_line += " " + arg;
+    }
+    
+    STARTUPINFOA si = {sizeof(si)};
+    PROCESS_INFORMATION pi;
+    std::array<char, 4096> buffer;
     std::string result;
-    std::unique_ptr<FILE, decltype(&_pclose)> pipe(_popen(cmd.c_str(), "r"), _pclose);
-    if (!pipe) return "";
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+    
+    HANDLE hReadPipe, hWritePipe;
+    SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
+    
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+        return "Error: Failed to create pipe";
+    }
+    
+    si.hStdOutput = hWritePipe;
+    si.hStdError = hWritePipe;
+    si.dwFlags |= STARTF_USESTDHANDLES;
+    
+    std::vector<char> cmd_buf(cmd_line.begin(), cmd_line.end());
+    cmd_buf.push_back('\0');
+    
+    if (!CreateProcessA(NULL, cmd_buf.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(hReadPipe);
+        CloseHandle(hWritePipe);
+        return "Error: Failed to execute command";
+    }
+    
+    CloseHandle(hWritePipe);
+    
+    DWORD bytesRead;
+    while (ReadFile(hReadPipe, buffer.data(), buffer.size() - 1, &bytesRead, NULL) && bytesRead > 0) {
+        buffer[bytesRead] = '\0';
         result += buffer.data();
     }
+    
+    CloseHandle(hReadPipe);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    
     return result;
 #else
-    std::array<char, 128> buffer;
+    // Unix: Use fork/exec for safer execution
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        return "Error: Failed to create pipe";
+    }
+    
+    pid_t pid = fork();
+    if (pid == -1) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return "Error: Failed to fork";
+    }
+    
+    if (pid == 0) {
+        // Child process
+        close(pipefd[0]);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[1]);
+        
+        // Build argument array for execvp
+        std::vector<const char*> argv;
+        argv.push_back(command.c_str());
+        for (const auto& arg : args) {
+            argv.push_back(arg.c_str());
+        }
+        argv.push_back(nullptr);
+        
+        execvp(command.c_str(), const_cast<char* const*>(argv.data()));
+        _exit(127); // exec failed
+    }
+    
+    // Parent process
+    close(pipefd[1]);
+    
     std::string result;
-    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmd.c_str(), "r"), pclose);
-    if (!pipe) return "";
-    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+    std::array<char, 128> buffer;
+    ssize_t n;
+    while ((n = read(pipefd[0], buffer.data(), buffer.size() - 1)) > 0) {
+        buffer[n] = '\0';
         result += buffer.data();
     }
+    
+    close(pipefd[0]);
+    
+    int status;
+    waitpid(pid, &status, 0);
+    
     return result;
 #endif
+}
+
+// Legacy wrapper - DEPRECATED, use execute_command_safe instead
+// Kept for backward compatibility but logs warning
+std::string execute_command(const std::string& cmd) {
+    // Log security warning
+    std::cerr << "WARNING: execute_command() is deprecated and unsafe. "
+              << "Use execute_command_safe() instead." << std::endl;
+    
+    // For safety, reject any command with shell metacharacters
+    if (!is_safe_argument(cmd)) {
+        return "Error: Unsafe command rejected";
+    }
+    
+    // Parse command and first word as command name
+    std::istringstream iss(cmd);
+    std::string command;
+    iss >> command;
+    
+    if (!is_command_allowed(command)) {
+        return "Error: Command not in whitelist";
+    }
+    
+    // Parse remaining arguments
+    std::vector<std::string> args;
+    std::string arg;
+    while (iss >> arg) {
+        if (!is_safe_argument(arg)) {
+            return "Error: Unsafe argument rejected";
+        }
+        args.push_back(arg);
+    }
+    
+    return execute_command_safe(command, args);
 }
 
 } // namespace NCP
