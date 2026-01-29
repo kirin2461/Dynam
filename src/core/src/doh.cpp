@@ -337,6 +337,103 @@ DoHClient::DNSResult DoHClient::parse_dns_response(const std::vector<uint8_t>& r
 // ==================== HTTPS Communication (Simplified) ====================
 // Note: Full implementation would use libcurl or similar for proper HTTPS
 
+#ifdef HAVE_OPENSSL
+// Perform actual HTTPS DoH request using OpenSSL
+std::vector<uint8_t> DoHClient::perform_https_doh_request(
+    const std::string& server_url,
+    const std::vector<uint8_t>& dns_query
+) {
+    std::vector<uint8_t> response;
+    
+    // Parse URL to extract host and path
+    std::string host, path;
+    size_t pos = server_url.find("://");
+    if (pos != std::string::npos) {
+        std::string rest = server_url.substr(pos + 3);
+        size_t path_pos = rest.find('/');
+        if (path_pos != std::string::npos) {
+            host = rest.substr(0, path_pos);
+            path = rest.substr(path_pos);
+        } else {
+            host = rest;
+            path = "/dns-query";
+        }
+    } else {
+        return response; // Invalid URL
+    }
+    
+    // Base64url encode the DNS query for GET request
+    std::string encoded_query;
+    static const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    size_t i = 0;
+    uint32_t val = 0;
+    int bits = 0;
+    for (uint8_t byte : dns_query) {
+        val = (val << 8) | byte;
+        bits += 8;
+        while (bits >= 6) {
+            bits -= 6;
+            encoded_query += base64_chars[(val >> bits) & 0x3F];
+        }
+    }
+    if (bits > 0) {
+        encoded_query += base64_chars[(val << (6 - bits)) & 0x3F];
+    }
+    
+    // Initialize SSL
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) return response;
+    
+    // Create BIO for connection
+    std::string connect_str = host + ":443";
+    BIO* bio = BIO_new_ssl_connect(ctx);
+    BIO_set_conn_hostname(bio, connect_str.c_str());
+    
+    SSL* ssl = nullptr;
+    BIO_get_ssl(bio, &ssl);
+    if (ssl) {
+        SSL_set_tlsext_host_name(ssl, host.c_str());
+    }
+    
+    if (BIO_do_connect(bio) <= 0) {
+        BIO_free_all(bio);
+        SSL_CTX_free(ctx);
+        return response;
+    }
+    
+    // Build HTTP GET request
+    std::string request = "GET " + path + "?dns=" + encoded_query + " HTTP/1.1\r\n";
+    request += "Host: " + host + "\r\n";
+    request += "Accept: application/dns-message\r\n";
+    request += "Connection: close\r\n\r\n";
+    
+    // Send request
+    BIO_write(bio, request.c_str(), request.size());
+    
+    // Read response
+    char buffer[4096];
+    std::string http_response;
+    int len;
+    while ((len = BIO_read(bio, buffer, sizeof(buffer) - 1)) > 0) {
+        buffer[len] = '\0';
+        http_response.append(buffer, len);
+    }
+    
+    BIO_free_all(bio);
+    SSL_CTX_free(ctx);
+    
+    // Parse HTTP response - find body after \r\n\r\n
+    size_t body_start = http_response.find("\r\n\r\n");
+    if (body_start != std::string::npos) {
+        body_start += 4;
+        response.assign(http_response.begin() + body_start, http_response.end());
+    }
+    
+    return response;
+}
+#endif
+
+
 DoHClient::DNSResult DoHClient::perform_doh_query(const std::string& hostname, RecordType type) {
     DNSResult result;
     result.hostname = hostname;
@@ -350,11 +447,20 @@ DoHClient::DNSResult DoHClient::perform_doh_query(const std::string& hostname, R
         // Get provider URL
         std::string server_url = get_provider_url(pImpl->config.provider);
         
-        // Simulate HTTPS request (in real implementation use libcurl/OpenSSL)
-        // For now, fallback to system DNS
+#ifdef HAVE_OPENSSL
+        // Real HTTPS DoH request using OpenSSL
+        std::vector<uint8_t> response = perform_https_doh_request(server_url, query);
+        if (!response.empty()) {
+            result = parse_dns_response(response);
+            result.status_code = 200;
+        } else {
+            throw std::runtime_error("Empty DoH response");
+        }
+#else
+        // Fallback: system DNS when OpenSSL not available
         result = fallback_to_system_dns(hostname, type);
         result.status_code = 200;
-        
+#endif
         // Calculate response time
         auto end_time = std::chrono::steady_clock::now();
         result.response_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
