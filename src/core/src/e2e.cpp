@@ -55,6 +55,7 @@ struct E2ESession::Impl {
         session_id = oss.str();
     }
 };
+}; // E2ESession::Impl
 
 // E2ESession implementation
 E2ESession::E2ESession(const E2EConfig& config)
