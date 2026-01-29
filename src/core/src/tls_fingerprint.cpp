@@ -5,6 +5,10 @@
 #include <cstring>
 #include <stdexcept>
 
+#ifdef HAVE_OPENSSL
+#include <openssl/md5.h>
+#endif
+
 namespace NCP {
 
 // SecureMemory implementation
@@ -121,9 +125,17 @@ std::string TLSFingerprint::generate_ja3() const {
     }
     ja3_str += ",0";  // Point formats
     
-    // MD5 hash of JA3 string
-    unsigned char hash[crypto_hash_sha256_BYTES];
-    crypto_hash_sha256(hash, reinterpret_cast<const unsigned char*>(ja3_str.c_str()), ja3_str.length());
+    // MD5 hash of JA3 string (per JA3 specification)
+#ifdef HAVE_OPENSSL
+    unsigned char hash[16]; // MD5 produces 16 bytes
+    MD5(reinterpret_cast<const unsigned char*>(ja3_str.c_str()), ja3_str.length(), hash);
+#else
+    // Fallback to SHA-256 truncated to 16 bytes when OpenSSL not available
+    unsigned char full_hash[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(full_hash, reinterpret_cast<const unsigned char*>(ja3_str.c_str()), ja3_str.length());
+    unsigned char hash[16];
+    memcpy(hash, full_hash, 16);
+#endif
     
     // Convert to hex
     std::string result;
