@@ -29,10 +29,18 @@ void CertificatePinner::add_pins(const std::vector<PinnedCert>& pins) {
 }
 
 void CertificatePinner::load_default_pins() {
-    // Default pins for major DoH providers
-    add_pin("cloudflare-dns.com", "base64_sha256_hash_here");
-    add_pin("dns.google", "base64_sha256_hash_here");
-    add_pin("dns9.quad9.net", "base64_sha256_hash_here");
+        // Default pins for major DoH providers (SPKI SHA256 hashes)
+    // Cloudflare DNS - https://developers.cloudflare.com/1.1.1.1/
+    add_pin("cloudflare-dns.com", "GP8Knf7qBae+aIfythytMbYnL+yowaWVeD6MoLHkVRg=");
+    add_pin("cloudflare-dns.com", "RQeZkB42znUfsDIIFWIRiYEcKl7nHwNFwWCrnMMJbVc=", true); // backup
+    
+    // Google DNS - https://dns.google/
+    add_pin("dns.google", "WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=");
+    add_pin("dns.google", "lCppFqbkrlJ3EcVFAkeip0+44VaoJUymbnOaEUk7tEU=", true); // backup
+    
+    // Quad9 DNS - https://www.quad9.net/
+    add_pin("dns9.quad9.net", "yioEpqeR4WtDwE9YxNVnCEkTxIjx6EEIwFSQW+lJsbc=");
+    add_pin("dns9.quad9.net", "Wg+cUJTh+h6OwLd0NWW7R7IlMBuEMkzh/x2IG0S/VLg=", true); // backupadd_pin("dns9.quad9.net", "base64_sha256_hash_here");
 }
 
 bool CertificatePinner::verify_certificate(const std::string& hostname, const std::string& cert_hash) const {
@@ -152,19 +160,24 @@ TrafficPadder::~TrafficPadder() {}
 
 std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<uint8_t> result = data;
     
     std::uniform_int_distribution<uint32_t> dist(min_size_, max_size_);
     uint32_t padding_size = dist(rng_);
+    uint32_t original_size = static_cast<uint32_t>(data.size());
     
-    uint32_t original_size = data.size();
-    result.reserve(original_size + 4 + padding_size);
+    std::vector<uint8_t> result;
+    result.reserve(4 + original_size + padding_size);
     
+    // Size header FIRST (big-endian)
     result.push_back((original_size >> 24) & 0xFF);
     result.push_back((original_size >> 16) & 0xFF);
     result.push_back((original_size >> 8) & 0xFF);
     result.push_back(original_size & 0xFF);
     
+    // Original data
+    result.insert(result.end(), data.begin(), data.end());
+    
+    // Random padding
     std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
     for (uint32_t i = 0; i < padding_size; ++i) {
         result.push_back(byte_dist(rng_));
@@ -174,17 +187,24 @@ std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data
 }
 
 std::vector<uint8_t> TrafficPadder::remove_padding(const std::vector<uint8_t>& data) {
-    if (data.size() < 4) return data;
+    // Minimum: 4 bytes for size header
+    if (data.size() < 4) {
+        throw std::runtime_error("Data too small to contain padding header");
+    }
     
-    size_t offset = data.size() - 4 - (data[data.size()-4] << 24 | 
-                                        data[data.size()-3] << 16 | 
-                                        data[data.size()-2] << 8 | 
-                                        data[data.size()-1]);
+    // Read size from the FIRST 4 bytes (big-endian)
+    uint32_t original_size = (static_cast<uint32_t>(data[0]) << 24) |
+                             (static_cast<uint32_t>(data[1]) << 16) |
+                             (static_cast<uint32_t>(data[2]) << 8) |
+                              static_cast<uint32_t>(data[3]);
     
-    uint32_t original_size = (data[offset] << 24) | (data[offset+1] << 16) | 
-                             (data[offset+2] << 8) | data[offset+3];
+    // Validate size
+    if (original_size > data.size() - 4) {
+        throw std::runtime_error("Invalid padding: claimed size exceeds data");
+    }
     
-    return std::vector<uint8_t>(data.begin(), data.begin() + original_size);
+    // Return original data (skip the 4-byte size header)
+    return std::vector<uint8_t>(data.begin() + 4, data.begin() + 4 + original_size);
 }
 
 void TrafficPadder::set_padding_range(uint32_t min_size, uint32_t max_size) {
@@ -634,14 +654,42 @@ void CanaryTokens::clear_canaries() {
     canaries_.clear();
 }
 
+// Helper function to validate SecurityManager configuration
+void validate_security_config(const SecurityManager::Config& config) {
+    // Latency threshold validation
+    if (config.latency_threshold_ms == 0) {
+        throw std::invalid_argument("latency_threshold_ms must be greater than 0");
+    }
+    if (config.latency_threshold_ms > 30000) {
+        throw std::invalid_argument("latency_threshold_ms exceeds maximum (30000ms)");
+    }
+    
+    // Padding size validation
+    if (config.min_padding_size > config.max_padding_size) {
+        throw std::invalid_argument("min_padding_size cannot exceed max_padding_size");
+    }
+    if (config.max_padding_size > 65536) {
+        throw std::invalid_argument("max_padding_size exceeds maximum (65536 bytes)");
+    }
+    
+    // Route switch threshold validation
+    if (config.enable_auto_route_switch && config.route_switch_threshold == 0) {
+        throw std::invalid_argument("route_switch_threshold must be greater than 0");
+    }
+}
+
+
 // ==================== SecurityManager ====================
 
 SecurityManager::SecurityManager() {}
 
 SecurityManager::SecurityManager(const Config& config) : config_(config) {
+    validate_security_config(config);  // Validate before use
     // Initialize components based on config
     if (config_.enable_latency_monitoring) {
         latency_monitor_.set_threshold(config_.latency_threshold_ms);
+
+        
     }
     
     if (config_.enable_traffic_padding) {
@@ -661,11 +709,12 @@ SecurityManager::SecurityManager(const Config& config) : config_(config) {
 SecurityManager::~SecurityManager() {}
 
 void SecurityManager::configure(const Config& config) {
+    validate_security_config(config);  // Validate before use
     config_ = config;
     
     // Reconfigure components
     latency_monitor_.set_threshold(config_.latency_threshold_ms);
-    traffic_padder_.set_padding_range(config_.min_padding_size, config_.max_padding_size);
+traffic_padder_.set_padding_range(config_.min_padding_size, config_.max_padding_size);
     
     if (config_.enable_forensic_logging && !config_.forensic_log_path.empty()) {
         forensic_logger_.set_log_path(config_.forensic_log_path);
