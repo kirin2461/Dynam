@@ -178,3 +178,55 @@ All identified critical and medium-risk security vulnerabilities have been succe
 - Password handling in db.cpp - **FIXED** using sqlite3_key_v2()
 
 
+
+
+---
+
+## 9. 🛡️ RECOMMENDED SECURITY ENHANCEMENTS
+
+The following security features are recommended for future implementation:
+
+| Function | Complexity | Benefit |
+|----------|------------|----------|
+| Certificate Pinning | Low | High |
+| Latency Monitoring | Low | Medium |
+| Auto Route Switch | Medium | High |
+| Canary Tokens | Medium | High |
+| Traffic Padding | Low | Medium |
+| Forensic Logging | Low | High |
+| Tor Auto-Fallback | Already implemented | High |
+
+### 9.1 Certificate Pinning
+**Complexity:** Low | **Benefit:** High
+
+Pin expected certificates/public keys for DoH servers to prevent MITM attacks. Recommended implementation in `doh.cpp`.
+
+### 9.2 Latency Monitoring  
+**Complexity:** Low | **Benefit:** Medium
+
+Monitor DNS resolution latency to detect potential interception or degraded service.
+
+### 9.3 Auto Route Switch
+**Complexity:** Medium | **Benefit:** High
+
+Automatically switch to backup DoH providers when primary fails or shows signs of blocking.
+
+### 9.4 Canary Tokens
+**Complexity:** Medium | **Benefit:** High
+
+Embed detection tokens to identify if traffic is being intercepted or logged by third parties.
+
+### 9.5 Traffic Padding
+**Complexity:** Low | **Benefit:** Medium
+
+Add random padding to DNS queries to prevent traffic analysis and fingerprinting.
+
+### 9.6 Forensic Logging
+**Complexity:** Low | **Benefit:** High
+
+Implement secure logging for security events to enable post-incident analysis.
+
+### 9.7 Tor Auto-Fallback ✅
+**Status:** Already implemented
+
+Automatic fallback to Tor network when direct connections fail.
