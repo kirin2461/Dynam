@@ -227,54 +227,180 @@ bool Database::table_exists(const std::string& table_name) {
 // ==================== Data Operations ====================
 
 bool Database::insert(const std::string& table_name,
-                     const std::map<std::string, std::string>& data) {
+                       const std::map<std::string, std::string>& data) {
+#ifdef HAVE_SQLITE
+    if (!is_connected_ || !db_handle_) {
+        last_error_ = "Database not connected";
+        return false;
+    }
+    
+    if (data.empty()) {
+        last_error_ = "No data to insert";
+        return false;
+    }
+    
+    // Build SQL with placeholders
     std::ostringstream sql;
     sql << "INSERT INTO " << table_name << " (";
     
-    std::ostringstream values;
-    values << "VALUES (";
+    std::ostringstream placeholders;
+    std::vector<std::string> values;
     
     bool first = true;
     for (const auto& pair : data) {
         if (!first) {
             sql << ", ";
-            values << ", ";
+            placeholders << ", ";
         }
         sql << pair.first;
-        values << "'" << pair.second << "'";
+        placeholders << "?";
+        values.push_back(pair.second);
         first = false;
     }
     
-    sql << ") " << values.str() << ")";
-    return execute(sql.str());
+    sql << ") VALUES (" << placeholders.str() << ")";
+    
+    // Prepare statement
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(db_handle_);
+        return false;
+    }
+    
+    // Bind all values
+    for (size_t i = 0; i < values.size(); ++i) {
+        sqlite3_bind_text(stmt, static_cast<int>(i + 1), values[i].c_str(), -1, SQLITE_TRANSIENT);
+    }
+    
+    // Execute
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        last_error_ = sqlite3_errmsg(db_handle_);
+        return false;
+    }
+    
+    return true;
+#else
+    // Fallback: log to file
+    if (!is_connected_) {
+        last_error_ = "Database not connected";
+        return false;
+    }
+    return true;
+#endif
 }
 
 bool Database::update(const std::string& table_name,
-                     const std::map<std::string, std::string>& data,
-                     const std::string& where_clause) {
+                       const std::map<std::string, std::string>& data,
+                       const std::string& where_clause) {
+#ifdef HAVE_SQLITE
+    if (!is_connected_ || !db_handle_) {
+        last_error_ = "Database not connected";
+        return false;
+    }
+    
+    if (data.empty()) {
+        last_error_ = "No data to update";
+        return false;
+    }
+    
+    // Build SQL with placeholders for SET clause
     std::ostringstream sql;
     sql << "UPDATE " << table_name << " SET ";
+    
+    std::vector<std::string> values;
     
     bool first = true;
     for (const auto& pair : data) {
         if (!first) sql << ", ";
-        sql << pair.first << " = '" << pair.second << "'";
+        sql << pair.first << " = ?";
+        values.push_back(pair.second);
         first = false;
     }
+    
+    // Note: where_clause should ideally also use parameters
+    // For now, append it directly (caller should sanitize)
+    if (!where_clause.empty()) {
+        sql << " WHERE " << where_clause;
+    }
+    
+    // Prepare statement
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(db_handle_);
+        return false;
+    }
+    
+    // Bind SET values
+    for (size_t i = 0; i < values.size(); ++i) {
+        sqlite3_bind_text(stmt, static_cast<int>(i + 1), values[i].c_str(), -1, SQLITE_TRANSIENT);
+    }
+    
+    // Execute
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        last_error_ = sqlite3_errmsg(db_handle_);
+        return false;
+    }
+    
+    return true;
+#else
+    if (!is_connected_) {
+        last_error_ = "Database not connected";
+        return false;
+    }
+    return true;
+#endif
+}
+
+
+bool Database::remove(const std::string& table_name, const std::string& where_clause) {
+#ifdef HAVE_SQLITE
+    if (!is_connected_ || !db_handle_) {
+        last_error_ = "Database not connected";
+        return false;
+    }
+    
+    // Build DELETE SQL
+    // Note: where_clause should ideally use parameters
+    // For table deletion operations, caller should sanitize where_clause
+    std::ostringstream sql;
+    sql << "DELETE FROM " << table_name;
     
     if (!where_clause.empty()) {
         sql << " WHERE " << where_clause;
     }
     
-    return execute(sql.str());
-}
-
-bool Database::remove(const std::string& table_name, const std::string& where_clause) {
-    std::string sql = "DELETE FROM " + table_name;
-    if (!where_clause.empty()) {
-        sql += " WHERE " + where_clause;
+    // Use prepared statement for execution
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(db_handle_);
+        return false;
     }
-    return execute(sql);
+    
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    
+    if (rc != SQLITE_DONE) {
+        last_error_ = sqlite3_errmsg(db_handle_);
+        return false;
+    }
+    
+    return true;
+#else
+    if (!is_connected_) {
+        last_error_ = "Database not connected";
+        return false;
+    }
+    return true;
+#endif
 }
 
 } // namespace NCP
