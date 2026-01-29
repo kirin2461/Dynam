@@ -12,12 +12,80 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, windows-latest]
         include:
           - os: ubuntu-latest
             c_compiler: gcc
             cpp_compiler: g++
+          - os: windows-latest
+            c_compiler: cl
+            cpp_compiler: cl
+    
+    steps:
+      - uses: actions/checkout@v4
 
+      - name: Install Qt6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.5.*'
+          host: ${{ runner.os == 'Linux' && 'linux' || 'windows' }}
+          target: 'desktop'
+          arch: ${{ runner.os == 'Linux' && 'gcc_64' || 'win64_msvc2019_64' }}
+          modules: 'qtcharts qtnetworkauth'
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential pkg-config libpcap-dev libssl-dev libgtest-dev libsodium-dev
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          choco install npcap -y
+
+      - name: Setup MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Create build directory
+        run: mkdir -p build
+        shell: bash
+
+      - name: Configure CMake
+        run: |
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
+        shell: bash
+
+      - name: Build
+        run: |
+          cd build
+          cmake --build . 
+        shell: bash
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --output-on-failure 
+        shell: bash
+
+      - name: Archive build artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ncp-cpp-${{ runner.os }}
+          path: build/bin/
+          retention-days: 7
+
+  sanitizers:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [asan, tsan, ubsan]
+    
     steps:
       - uses: actions/checkout@v4
 
@@ -30,34 +98,33 @@ jobs:
           arch: 'gcc_64'
           modules: 'qtcharts qtnetworkauth'
 
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential pkg-config libpcap-dev libssl-dev libgtest-dev libsodium-dev
 
-      - name: Create build directory
-        run: mkdir -p build
+      - name: Configure with ${{ matrix.sanitizer }}
+        run: |
+          mkdir -p build
+          cd build
+          case "${{ matrix.sanitizer }}" in
+            asan)
+              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer"
+              ;;
+            tsan)
+              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DCMAKE_CXX_FLAGS="-fsanitize=thread" -DCMAKE_C_FLAGS="-fsanitize=thread"
+              ;;
+            ubsan)
+              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DCMAKE_CXX_FLAGS="-fsanitize=undefined" -DCMAKE_C_FLAGS="-fsanitize=undefined"
+              ;;
+          esac
 
-      - name: Configure CMake
+      - name: Build with ${{ matrix.sanitizer }}
         run: |
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
+          cmake --build .
 
-      - name: Build
+      - name: Run tests with ${{ matrix.sanitizer }}
         run: |
           cd build
-          cmake --build . 
-
-      - name: Run tests
-        run: |
-          cd build
-          ctest --output-on-failure 
-
-      - name: Archive build artifacts
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ncp-cpp-${{ runner.os }}
-          path: build/bin/
-          retention-days: 7
+          ctest --output-on-failure
