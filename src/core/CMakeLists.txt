@@ -26,6 +26,7 @@ set(NCP_CORE_SRC_SOURCES
     src/spoofer.cpp
     src/ncp_dpi.cpp
     src/tls_fingerprint.cpp
+    src/e2e.cpp
 )
 
 # Header files in include/ subdirectory
@@ -38,6 +39,7 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_network.hpp
     include/ncp_spoofer.hpp
     include/ncp_tls_fingerprint.hpp
+    include/ncp_e2e.hpp
 )
 
 # Combine all sources and headers
