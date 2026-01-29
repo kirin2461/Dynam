@@ -325,6 +325,10 @@ bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
 #endif
 }
 
+// WARNING: This function is vulnerable to command injection!
+// TODO: Replace with safe implementation using validated commands only
+// SECURITY ISSUE: Direct popen/system calls without input validation
+
 std::string execute_command(const std::string& cmd) {
 #ifdef _WIN32
     std::array<char, 128> buffer;
