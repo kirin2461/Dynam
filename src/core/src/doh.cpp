@@ -601,10 +601,29 @@ DoHClient::DNSResult DoHClient::resolve_ipv6(const std::string& hostname) {
 // ==================== Async Resolution ====================
 
 void DoHClient::resolve_async(const std::string& hostname, RecordType type, ResolveCallback callback) {
+    // SECURITY FIX: Added exception handling for detached thread
+    // Note: Detached threads can cause issues if DoHClient is destroyed while thread runs.
+    // Consider using a thread pool for production use.
     std::thread([this, hostname, type, callback]() {
-        DNSResult result = resolve(hostname, type);
-        if (callback) {
-            callback(result);
+        try {
+            DNSResult result = resolve(hostname, type);
+            if (callback) {
+                callback(result);
+            }
+        } catch (const std::exception& e) {
+            // Log error but don't propagate - detached thread cannot throw
+            DNSResult error_result;
+            error_result.error_message = std::string("Async resolution failed: ") + e.what();
+            if (callback) {
+                callback(error_result);
+            }
+        } catch (...) {
+            // Handle unknown exceptions
+            DNSResult error_result;
+            error_result.error_message = "Async resolution failed: unknown error";
+            if (callback) {
+                callback(error_result);
+            }
         }
     }).detach();
 }
