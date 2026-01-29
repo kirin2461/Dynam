@@ -277,6 +277,12 @@ bool Network::send_raw_packet(
         const std::vector<uint8_t>& data) {
     
 #ifndef _WIN32
+        // SECURITY FIX: Check for raw socket privileges (Linux only)
+    if (geteuid() != 0) {
+        last_error_ = "Raw sockets require root/admin privileges";
+        return false;
+    }
+
     int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sock < 0) {
         last_error_ = "Failed to create raw socket";
