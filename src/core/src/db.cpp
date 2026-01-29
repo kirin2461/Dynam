@@ -46,21 +46,18 @@ bool Database::open(const std::string& db_path, const std::string& password) {
     }
 
     // Enable SQLCipher encryption if password provided
+        // Enable SQLCipher encryption if password provided
     if (!password.empty()) {
-        std::string key_pragma = "PRAGMA key = '" + password + "';";
-        char* err_msg = nullptr;
-        rc = sqlite3_exec(db_handle_, key_pragma.c_str(), nullptr, nullptr, &err_msg);
+        // Use sqlite3_key_v2 API instead of SQL injection-prone PRAGMA
+        rc = sqlite3_key_v2(db_handle_, "main", password.c_str(), password.length());
         if (rc != SQLITE_OK) {
-            last_error_ = err_msg ? err_msg : "Failed to set encryption key";
-            sqlite3_free(err_msg);
+            last_error_ = "Failed to set encryption key";
             sqlite3_close(db_handle_);
             db_handle_ = nullptr;
             return false;
         }
     }
-
-    is_connected_ = true;
-    return true;
+return true;
 #else
     // Fallback: use file-based storage
     db_path_ = db_path;
@@ -203,13 +200,29 @@ bool Database::create_table(const std::string& table_name,
 
 bool Database::table_exists(const std::string& table_name) {
 #ifdef HAVE_SQLITE
-    std::string sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='" + table_name + "'";
-    auto result = query(sql);
-    return result.success && !result.rows.empty();
+    // Use prepared statement to prevent SQL injection
+    const char* sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
+    sqlite3_stmt* stmt = nullptr;
+    
+    int rc = sqlite3_prepare_v2(db_handle_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        last_error_ = sqlite3_errmsg(db_handle_);
+        return false;
+    }
+    
+    // Bind table_name parameter
+    sqlite3_bind_text(stmt, 1, table_name.c_str(), -1, SQLITE_TRANSIENT);
+    
+    bool exists = false;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        exists = true;
+    }
+    
+    sqlite3_finalize(stmt);
+    return exists;
 #else
     return true; // Assume exists in fallback mode
 #endif
-}
 
 // ==================== Data Operations ====================
 
