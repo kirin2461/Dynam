@@ -71,3 +71,80 @@ std::string key_pragma = "PRAGMA key = '" + password + "';";
 ### ⚠️ Notes:
 - `std::thread(...).detach()` in `resolve_async()` - potential resource leak
 - DNS cache without TTL limit for records
+
+---
+
+## 6. APPLIED FIXES
+
+### 6.1 ✅ Password SQL Injection - FIXED
+
+**File:** `src/core/src/db.cpp` (function `open()`)
+
+**Before:**
+```cpp
+std::string key_pragma = "PRAGMA key = '" + password + "';";
+```
+
+**After:**
+```cpp
+rc = sqlite3_key_v2(db_handle_, "main", password.c_str(), password.length());
+```
+
+### 6.2 ✅ table_exists SQL Injection - FIXED
+
+**File:** `src/core/src/db.cpp` (function `table_exists()`)
+
+**Before:**
+```cpp
+std::string sql = "SELECT name FROM sqlite_master WHERE type='table' AND name='" + table_name + "'";
+```
+
+**After:**
+```cpp
+const char* sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
+sqlite3_stmt* stmt = nullptr;
+sqlite3_prepare_v2(db_handle_, sql, -1, &stmt, nullptr);
+sqlite3_bind_text(stmt, 1, table_name.c_str(), -1, SQLITE_TRANSIENT);
+```
+
+### 6.3 ⚠️ Command Injection - DOCUMENTED
+
+**File:** `src/core/src/spoofer.cpp` (function `execute_command()`)
+
+**Status:** Added warning comments. Needs complete rewrite with:
+- Whitelist of allowed commands
+- execve() with argument array instead of popen()
+- Input validation and sanitization
+
+---
+
+## 7. REMAINING ISSUES
+
+### 7.1 ❌ insert() - NEEDS FIX
+
+```cpp
+// Current vulnerable code:
+values << "'" << pair.second << "'";
+
+// Required fix - use prepared statements:
+const char* sql = "INSERT INTO table (col1, col2) VALUES (?, ?)";
+sqlite3_bind_text(stmt, 1, value1.c_str(), -1, SQLITE_TRANSIENT);
+sqlite3_bind_text(stmt, 2, value2.c_str(), -1, SQLITE_TRANSIENT);
+```
+
+### 7.2 ❌ update() - NEEDS FIX
+
+Same approach as insert() - use prepared statements with bound parameters.
+
+### 7.3 ❌ remove() - NEEDS FIX
+
+Same approach - parameterized WHERE clause required.
+
+### 7.4 ❌ execute_command() - NEEDS COMPLETE REWRITE
+
+Recommended approach:
+```cpp
+// Use execve() with argument array:
+std::vector<std::string> safe_execute(const std::string& program,
+                                       const std::vector<std::string>& args);
+```
