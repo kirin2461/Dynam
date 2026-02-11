@@ -1,0 +1,103 @@
+name: NCP C++ Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        build_type: [Release, Debug]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          cmake \
+          build-essential \
+          libsodium-dev \
+          libpcap-dev \
+          libnetfilter-queue-dev \
+          pkg-config
+
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DENABLE_TESTS=ON \
+          -DENABLE_CLI=ON \
+          -DENABLE_GUI=OFF \
+          -DENABLE_LIBOQS=OFF \
+          -DENABLE_WEBSOCKETS=OFF \
+          -DENABLE_TOR_PROXY=OFF
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }} -j$(nproc)
+
+    - name: Run tests
+      working-directory: build
+      run: ctest --output-on-failure -C ${{ matrix.build_type }}
+
+  build-macos:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        brew install libsodium cmake
+
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DENABLE_TESTS=ON \
+          -DENABLE_CLI=ON \
+          -DENABLE_GUI=OFF \
+          -DENABLE_LIBOQS=OFF \
+          -DENABLE_WEBSOCKETS=OFF \
+          -DENABLE_TOR_PROXY=OFF
+
+    - name: Build
+      run: cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+
+    - name: Run tests
+      working-directory: build
+      run: ctest --output-on-failure -C Release
+
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install vcpkg dependencies
+      run: |
+        vcpkg install libsodium:x64-windows
+
+    - name: Configure CMake
+      run: |
+        cmake -B build `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+          -DENABLE_TESTS=ON `
+          -DENABLE_CLI=ON `
+          -DENABLE_GUI=OFF `
+          -DENABLE_LIBOQS=OFF `
+          -DENABLE_WEBSOCKETS=OFF `
+          -DENABLE_TOR_PROXY=OFF
+
+    - name: Build
+      run: cmake --build build --config Release
+
+    - name: Run tests
+      working-directory: build
+      run: ctest --output-on-failure -C Release
