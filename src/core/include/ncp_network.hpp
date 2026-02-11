@@ -16,7 +16,8 @@ enum class BypassTechnique {
     TCP_FRAGMENTATION,
     SNI_SPOOFING,
     FAKE_PACKET,
-    DISORDER
+    DISORDER,
+    OBFUSCATION // Packet obfuscation
 };
 
 // Forward declaration of NetworkStats for use outside class
@@ -59,6 +60,15 @@ public:
         bool fake_seq_number = false;
         bool disorder_enabled = false;
         int disorder_delay_ms = 0;
+        bool obfuscation_enabled = false;
+        uint8_t obfuscation_key = 0x55; // XOR key
+    };
+
+    struct TorConfig {
+        bool enabled = false;
+        std::string proxy_host = "127.0.0.1";
+        uint16_t proxy_port = 9050;
+        int hops = 3;
     };
 
     // Callback type for packet capture (data, timestamp)
@@ -66,6 +76,9 @@ public:
 
     Network();
     ~Network();
+
+    bool set_tor_config(const TorConfig& config);
+    bool is_tor_active() const;
 
     // Interface management
     std::vector<std::string> get_interfaces();

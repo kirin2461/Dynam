@@ -206,9 +206,21 @@ bool Network::enable_bypass(BypassTechnique technique) {
             return setup_fake_packet();
         case BypassTechnique::DISORDER:
             return setup_packet_disorder();
+        case BypassTechnique::OBFUSCATION:
+            bypass_config_.obfuscation_enabled = true;
+            return true;
         default:
             return false;
     }
+}
+
+bool Network::set_tor_config(const TorConfig& config) {
+    // Basic Tor configuration - in a real app, this would integrate with a SOCKS5 client
+    return true; 
+}
+
+bool Network::is_tor_active() const {
+    return false; // Stub implementation
 }
 
 void Network::disable_bypass() {
@@ -350,6 +362,14 @@ void Network::apply_bypass_to_packet(std::vector<uint8_t>& packet) {
             if (bypass_config_.use_bad_checksum) {
                 packet[10] = 0xFF;  // Bad IP checksum
                 packet[11] = 0xFF;
+            }
+            break;
+            
+        case BypassTechnique::OBFUSCATION:
+            if (bypass_config_.obfuscation_enabled) {
+                for (size_t i = 20; i < packet.size(); ++i) { // Skip IP header
+                    packet[i] ^= bypass_config_.obfuscation_key;
+                }
             }
             break;
             
