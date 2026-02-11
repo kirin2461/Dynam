@@ -209,6 +209,10 @@ bool Network::enable_bypass(BypassTechnique technique) {
         case BypassTechnique::OBFUSCATION:
             bypass_config_.obfuscation_enabled = true;
             return true;
+        case BypassTechnique::HTTP_MIMICRY:
+        case BypassTechnique::TLS_MIMICRY:
+            // Placeholder for traffic mimicry setup
+            return true;
         default:
             return false;
     }

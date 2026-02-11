@@ -38,8 +38,10 @@ void print_usage() {
               << "  license        - License management\n"
               << "  network        - Network operations\n"
               << "  dpi            - DPI bypass proxy\n"
-              << "  tor            - Configure Tor proxy\n"
-              << "  obfuscate      - Toggle packet obfuscation\n"
+              << "  tor            - Configure Tor proxy (bridges/hops)\n"
+              << "  i2p            - Configure I2P proxy\n"
+              << "  obfuscate      - Toggle advanced traffic mimicry\n"
+              << "  dns-secure     - Toggle DNS leak protection\n"
               << "  help           - Show this help\n";
 }
 

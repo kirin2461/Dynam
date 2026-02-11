@@ -17,7 +17,9 @@ enum class BypassTechnique {
     SNI_SPOOFING,
     FAKE_PACKET,
     DISORDER,
-    OBFUSCATION // Packet obfuscation
+    OBFUSCATION, // Packet obfuscation
+    HTTP_MIMICRY, // Mimic HTTP traffic
+    TLS_MIMICRY   // Mimic TLS traffic
 };
 
 // Forward declaration of NetworkStats for use outside class
@@ -62,6 +64,7 @@ public:
         int disorder_delay_ms = 0;
         bool obfuscation_enabled = false;
         uint8_t obfuscation_key = 0x55; // XOR key
+        bool dns_leak_protection = true;
     };
 
     struct TorConfig {
@@ -69,6 +72,13 @@ public:
         std::string proxy_host = "127.0.0.1";
         uint16_t proxy_port = 9050;
         int hops = 3;
+        bool use_bridges = false;
+    };
+
+    struct I2PConfig {
+        bool enabled = false;
+        std::string proxy_host = "127.0.0.1";
+        uint16_t proxy_port = 4444;
     };
 
     // Callback type for packet capture (data, timestamp)
