@@ -431,9 +431,15 @@ public:
 
         // Add Noise/Junk data before the actual ClientHello
         if (is_client_hello && config.enable_noise) {
-            std::vector<uint8_t> junk(config.noise_size > 0 ? config.noise_size : 64);
-            // Simple random junk (not cryptographically secure, just for DPI noise)
-            for(auto& b : junk) b = static_cast<uint8_t>(rand() % 256);
+            std::vector<uint8_t> junk;
+            if (!config.fake_host.empty()) {
+                // Use fake host as noise to mislead DPI
+                std::string mask = "GET / HTTP/1.1\r\nHost: " + config.fake_host + "\r\n\r\n";
+                junk.assign(mask.begin(), mask.end());
+            } else {
+                junk.resize(config.noise_size > 0 ? config.noise_size : 64);
+                for(auto& b : junk) b = static_cast<uint8_t>(rand() % 256);
+            }
             
             // Send junk with low TTL if fake_packet is enabled, otherwise just as noise
 #ifdef IP_TTL
@@ -652,6 +658,7 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.enable_noise = true;
         config.noise_size = 128;
         config.enable_host_case = true;
+        config.fake_host = "yandex.ru";
         break;
     case DPIPreset::NONE:
     default:

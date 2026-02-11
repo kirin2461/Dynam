@@ -46,6 +46,7 @@ struct DPIConfig {
     bool enable_noise = true;           // Add junk data to confuse DPI
     int noise_size = 64;                // Size of noise/junk data
     bool enable_host_case = true;       // Randomize case in Host/SNI if possible
+    std::string fake_host;              // Domain for masking (e.g. yandex.ru)
     
     // TTL manipulation
     bool enable_fake_packet = true;     // Send fake packets with low TTL
