@@ -1,4 +1,5 @@
 #include "../include/ncp_network.hpp"
+#include "../include/ncp_mimicry.hpp"
 #include <stdexcept>
 #include <sstream>
 #include <cstring>

@@ -40,6 +40,7 @@ void print_usage() {
               << "  dpi            - DPI bypass proxy\n"
               << "  tor            - Configure Tor proxy (bridges/hops)\n"
               << "  i2p            - Configure I2P proxy\n"
+              << "  mimic <type>   - Set traffic mimicry (http|tls|none)\n"
               << "  obfuscate      - Toggle advanced traffic mimicry\n"
               << "  dns-secure     - Toggle DNS leak protection\n"
               << "  help           - Show this help\n";
@@ -350,6 +351,23 @@ int main(int argc, char* argv[]) {
     else if (cmd == "network") handle_network(args);
     else if (cmd == "license") handle_license(args);
     else if (cmd == "dpi") handle_dpi(args);
+    else if (cmd == "mimic") {
+        if (args.size() < 3) {
+            std::cout << "Usage: ncp mimic <http|tls|none>\n";
+        } else {
+            Network network;
+            if (args[2] == "http") {
+                network.enable_bypass(BypassTechnique::HTTP_MIMICRY);
+                std::cout << "[+] HTTP Mimicry enabled\n";
+            } else if (args[2] == "tls") {
+                network.enable_bypass(BypassTechnique::TLS_MIMICRY);
+                std::cout << "[+] TLS Mimicry enabled\n";
+            } else {
+                network.disable_bypass();
+                std::cout << "[+] Mimicry disabled\n";
+            }
+        }
+    }
     else {
         std::cout << "Unknown: " << cmd << ". Use 'ncp help'\n";
         return 1;
