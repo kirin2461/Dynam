@@ -68,6 +68,20 @@ struct DPIConfig {
     // Advanced
     int fragment_size = 2;              // Fragment size in bytes
     int fragment_offset = 2;            // Offset for fragmentation
+
+    // Validation method
+    bool validate() const {
+        if (fragment_size < 1 || fragment_size > 1460) return false;
+        if (fragment_offset < 0) return false;
+        if (split_position < 0) return false;
+        if (noise_size < 0 || noise_size > 65535) return false;
+        if (fake_ttl < 1 || fake_ttl > 255) return false;
+        if (disorder_delay_ms < 0 || disorder_delay_ms > 10000) return false;
+        if (listen_port == 0) return false;
+        if (nfqueue_num < 0 || nfqueue_num > 65535) return false;
+        if (mode == DPIMode::PROXY && target_host.empty()) return false;
+        return true;
+    }
 };
 
 /**
