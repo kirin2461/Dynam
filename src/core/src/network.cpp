@@ -344,6 +344,14 @@ bool Network::send_tcp_packet(
     packet[8] = bypass_enabled_ ? bypass_config_.ttl_value : 64;  // TTL
     packet[9] = IPPROTO_TCP;  // Protocol
     
+    // Source IP spoofing
+    if (bypass_enabled_ && bypass_config_.spoof_source_ip && !bypass_config_.custom_source_ip.empty()) {
+        struct in_addr src_addr;
+        if (inet_aton(bypass_config_.custom_source_ip.c_str(), &src_addr)) {
+            memcpy(&packet[12], &src_addr.s_addr, 4);
+        }
+    }
+    
     // Fill TCP header
     // ... (detailed TCP header construction)
     

@@ -60,6 +60,8 @@ public:
         bool split_sni = false;
         bool use_bad_checksum = false;
         bool fake_seq_number = false;
+        bool spoof_source_ip = false;
+        std::string custom_source_ip;
         bool disorder_enabled = false;
         int disorder_delay_ms = 0;
         bool obfuscation_enabled = false;
