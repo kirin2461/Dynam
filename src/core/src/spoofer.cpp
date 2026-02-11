@@ -200,7 +200,39 @@ bool NetworkSpoofer::rotate_mac() {
 
 bool NetworkSpoofer::rotate_dns() {
     if (!enabled_ || !config_.spoof_dns) return false;
-    return true;
+    
+    std::vector<std::string> providers = {
+        "1.1.1.1", "8.8.8.8", "9.9.9.9", "1.0.0.1", "8.8.4.4"
+    };
+    std::shuffle(providers.begin(), providers.end(), rng_);
+    std::vector<std::string> selected = {providers[0], providers[1]};
+    
+    if (apply_dns(selected)) {
+        status_.current_dns = selected;
+        status_.last_dns_rotation = std::chrono::steady_clock::now();
+        if (rotation_callback_) {
+            rotation_callback_("dns", "previous", selected[0]);
+        }
+        return true;
+    }
+    return false;
+}
+
+bool NetworkSpoofer::rotate_hostname() {
+    if (!enabled_) return false;
+    
+    std::vector<std::string> prefixes = {"PC-", "WORK-", "HOME-", "LAPTOP-", "NODE-"};
+    std::string new_hostname = prefixes[dist_(rng_) % prefixes.size()] + std::to_string(1000 + dist_(rng_) % 9000);
+    
+    if (apply_hostname(new_hostname)) {
+        status_.current_hostname = new_hostname;
+        status_.last_hostname_rotation = std::chrono::steady_clock::now();
+        if (rotation_callback_) {
+            rotation_callback_("hostname", "previous", new_hostname);
+        }
+        return true;
+    }
+    return false;
 }
 
 bool NetworkSpoofer::rotate_all() {
@@ -209,6 +241,7 @@ bool NetworkSpoofer::rotate_all() {
     if (config_.spoof_ipv6) success &= rotate_ipv6();
     if (config_.spoof_mac) success &= rotate_mac();
     if (config_.spoof_dns) success &= rotate_dns();
+    success &= rotate_hostname();
     return success;
 }
 
