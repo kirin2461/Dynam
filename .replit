@@ -1,4 +1,4 @@
-modules = ["bash", "cpp-clang20"]
+modules = ["bash"]
 [agent]
 expertMode = true
 
@@ -22,9 +22,9 @@ args = "Build and Run NCP CLI"
 name = "Build and Run NCP CLI"
 author = "agent"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd /home/runner/workspace/build && cmake --build . -j$(nproc) 2>&1 && echo \"=== Build Complete ===\" && ./bin/ncp help"
-
-[workflows.workflow.metadata]
-outputType = "console"
