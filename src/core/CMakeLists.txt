@@ -29,6 +29,7 @@ set(NCP_CORE_SRC_SOURCES
     src/e2e.cpp
     src/dpi_advanced.cpp
     src/mimicry.cpp
+    src/i2p.cpp
 )
 
 # Header files in include/ subdirectory
@@ -44,6 +45,7 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_e2e.hpp
     include/ncp_dpi_advanced.hpp
     include/ncp_mimicry.hpp
+    include/ncp_i2p.hpp
 )
 
 # Combine all sources and headers

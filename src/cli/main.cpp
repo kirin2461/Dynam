@@ -11,6 +11,7 @@
 #include "ncp_db.hpp"
 #include "ncp_spoofer.hpp"
 #include "ncp_dpi.hpp"
+#include "ncp_i2p.hpp"
 
 using namespace NCP;
 
@@ -332,6 +333,30 @@ void handle_dpi(const std::vector<std::string>& args) {
     std::cout << "[+] DPI Bypass stopped\n";
 }
 
+void handle_i2p(const std::vector<std::string>& args) {
+    I2PManager i2p;
+    I2PManager::Config config;
+    
+    if (args.size() < 3) {
+        std::cout << "Usage: ncp i2p <status|enable|disable|tunnel>\n";
+        return;
+    }
+
+    if (args[2] == "enable") {
+        config.enabled = true;
+        i2p.initialize(config);
+        std::cout << "[+] I2P Integration enabled. Destination: " << i2p.get_destination() << "\n";
+    } else if (args[2] == "disable") {
+        i2p.set_enabled(false);
+        std::cout << "[+] I2P Integration disabled\n";
+    } else if (args[2] == "status") {
+        std::cout << "I2P Status: " << (i2p.is_active() ? "ACTIVE" : "INACTIVE") << "\n";
+        if (i2p.is_active()) {
+            std::cout << "Destination: " << i2p.get_destination() << "\n";
+        }
+    }
+}
+
 int main(int argc, char* argv[]) {
     std::vector<std::string> args(argv, argv + argc);
     
@@ -351,6 +376,7 @@ int main(int argc, char* argv[]) {
     else if (cmd == "network") handle_network(args);
     else if (cmd == "license") handle_license(args);
     else if (cmd == "dpi") handle_dpi(args);
+    else if (cmd == "i2p") handle_i2p(args);
     else if (cmd == "mimic") {
         if (args.size() < 3) {
             std::cout << "Usage: ncp mimic <http|tls|none>\n";
