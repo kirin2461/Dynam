@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
-# NCP Core Library CMakeLists.txt
-# Core library does NOT depend on Qt6 - only CLI/GUI do
+# NCP Core Library
+# Core library has NO Qt6 dependency
 
 # Source files in root of core/
 set(NCP_CORE_ROOT_SOURCES
@@ -26,10 +26,24 @@ set(NCP_CORE_SRC_SOURCES
     src/spoofer.cpp
     src/ncp_dpi.cpp
     src/tls_fingerprint.cpp
-    src/e2e.cpp
     src/dpi_advanced.cpp
+)
+
+# Conditionally add sources that depend on optional libraries
+if(ENABLE_LIBOQS OR HAVE_LIBOQS)
+    # e2e.cpp uses liboqs for post-quantum key exchange
+endif()
+
+if(ENABLE_WEBSOCKETS OR HAVE_LIBWEBSOCKETS)
+    # mimicry.cpp uses libwebsockets
+endif()
+
+# Always compile these with #ifdef guards inside
+list(APPEND NCP_CORE_SRC_SOURCES
+    src/e2e.cpp
     src/mimicry.cpp
     src/i2p.cpp
+    src/security.cpp
 )
 
 # Header files in include/ subdirectory
@@ -46,6 +60,9 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_dpi_advanced.hpp
     include/ncp_mimicry.hpp
     include/ncp_i2p.hpp
+    include/ncp_security.hpp
+    include/ncp_config.hpp
+    include/ncp_logger.hpp
 )
 
 # Combine all sources and headers
@@ -65,27 +82,10 @@ add_library(ncp_core STATIC
     ${NCP_CORE_HEADERS}
 )
 
-# Find libpcap on Unix systems (optional)
-if(UNIX)
-    find_package(PkgConfig)
-    if(PkgConfig_FOUND)
-        pkg_check_modules(PCAP libpcap)
-        if(PCAP_FOUND)
-            target_compile_definitions(ncp_core PRIVATE HAVE_PCAP)
-            target_link_libraries(ncp_core PUBLIC ${PCAP_LIBRARIES})
-            target_include_directories(ncp_core PUBLIC ${PCAP_INCLUDE_DIRS})
-        endif()
-    endif()
-    find_package(Threads)
-    if(Threads_FOUND)
-        target_link_libraries(ncp_core PUBLIC Threads::Threads)
-    endif()
-endif()
-
-# Find sodium (REQUIRED - no fallback implementations allowed)
-# Security: libsodium is mandatory for all cryptographic operations
+# ==================== Required: libsodium ====================
 find_library(SODIUM_LIBRARY NAMES sodium libsodium)
 find_path(SODIUM_INCLUDE_DIR NAMES sodium.h)
+
 if(SODIUM_LIBRARY AND SODIUM_INCLUDE_DIR)
     message(STATUS "Found libsodium: ${SODIUM_LIBRARY}")
     target_link_libraries(ncp_core PUBLIC ${SODIUM_LIBRARY})
@@ -94,16 +94,36 @@ if(SODIUM_LIBRARY AND SODIUM_INCLUDE_DIR)
 else()
     message(FATAL_ERROR 
         "libsodium is REQUIRED but was not found!\n"
-        "libsodium is mandatory for secure cryptographic operations.\n"
         "Please install libsodium:\n"
         "  Ubuntu/Debian: sudo apt-get install libsodium-dev\n"
-        "  Fedora/RHEL: sudo dnf install libsodium-devel\n"
-        "  macOS: brew install libsodium\n"
-        "  Windows: vcpkg install libsodium\n"
+        "  Fedora/RHEL:   sudo dnf install libsodium-devel\n"
+        "  macOS:         brew install libsodium\n"
+        "  Windows:       vcpkg install libsodium\n"
     )
 endif()
 
-# Find libnetfilter_queue for DPI bypass (Linux only)
+# ==================== Optional: libpcap ====================
+if(UNIX)
+    find_package(PkgConfig QUIET)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(PCAP QUIET libpcap)
+        if(PCAP_FOUND)
+            target_compile_definitions(ncp_core PRIVATE HAVE_PCAP)
+            target_link_libraries(ncp_core PUBLIC ${PCAP_LIBRARIES})
+            target_include_directories(ncp_core PUBLIC ${PCAP_INCLUDE_DIRS})
+            message(STATUS "Found libpcap: ${PCAP_LIBRARIES}")
+        else()
+            message(STATUS "libpcap not found - packet capture disabled")
+        endif()
+    endif()
+
+    find_package(Threads QUIET)
+    if(Threads_FOUND)
+        target_link_libraries(ncp_core PUBLIC Threads::Threads)
+    endif()
+endif()
+
+# ==================== Optional: libnetfilter_queue ====================
 if(UNIX AND NOT APPLE)
     find_library(NFQ_LIBRARY NAMES netfilter_queue)
     if(NFQ_LIBRARY)
@@ -113,6 +133,18 @@ if(UNIX AND NOT APPLE)
     else()
         message(STATUS "libnetfilter_queue not found - DPI driver mode disabled")
     endif()
+endif()
+
+# ==================== Optional: liboqs ====================
+if(ENABLE_LIBOQS AND liboqs_FOUND)
+    target_link_libraries(ncp_core PUBLIC OQS::oqs)
+    target_compile_definitions(ncp_core PRIVATE HAVE_LIBOQS)
+endif()
+
+# ==================== Optional: libwebsockets ====================
+if(ENABLE_WEBSOCKETS AND Libwebsockets_FOUND)
+    target_link_libraries(ncp_core PUBLIC websockets)
+    target_compile_definitions(ncp_core PRIVATE HAVE_LIBWEBSOCKETS)
 endif()
 
 # Include directories
