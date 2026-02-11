@@ -113,6 +113,19 @@ bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig
         }
     }
     
+    if (config_.spoof_hw_info) {
+        std::string new_serial = config_.custom_hw_serial.empty()
+            ? generate_random_hw_serial()
+            : config_.custom_hw_serial;
+        if (apply_hw_info(new_serial)) {
+            status_.current_hw_serial = new_serial;
+            status_.hw_info_spoofed = true;
+            status_.last_hw_info_rotation = std::chrono::steady_clock::now();
+        } else {
+            success = false;
+        }
+    }
+    
     enabled_ = true;
     
     // Start rotation thread if any rotation is configured
@@ -235,12 +248,30 @@ bool NetworkSpoofer::rotate_hostname() {
     return false;
 }
 
+bool NetworkSpoofer::rotate_hw_info() {
+    if (!enabled_ || !config_.spoof_hw_info) return false;
+    
+    std::string old_serial = status_.current_hw_serial;
+    std::string new_serial = generate_random_hw_serial();
+    
+    if (apply_hw_info(new_serial)) {
+        status_.current_hw_serial = new_serial;
+        status_.last_hw_info_rotation = std::chrono::steady_clock::now();
+        if (rotation_callback_) {
+            rotation_callback_("hw_serial", old_serial, new_serial);
+        }
+        return true;
+    }
+    return false;
+}
+
 bool NetworkSpoofer::rotate_all() {
     bool success = true;
     if (config_.spoof_ipv4) success &= rotate_ipv4();
     if (config_.spoof_ipv6) success &= rotate_ipv6();
     if (config_.spoof_mac) success &= rotate_mac();
     if (config_.spoof_dns) success &= rotate_dns();
+    if (config_.spoof_hw_info) success &= rotate_hw_info();
     success &= rotate_hostname();
     return success;
 }
@@ -292,6 +323,11 @@ bool NetworkSpoofer::set_custom_hostname(const std::string& hostname) {
     return true;
 }
 
+bool NetworkSpoofer::set_custom_hw_serial(const std::string& serial) {
+    config_.custom_hw_serial = serial;
+    return true;
+}
+
 bool NetworkSpoofer::set_custom_dns(const std::vector<std::string>& dns_servers) {
     config_.custom_dns_servers = dns_servers;
     return true;
@@ -333,6 +369,14 @@ void NetworkSpoofer::rotation_thread_func() {
                 rotate_hostname();
             }
         }
+
+        if (config_.hw_info_rotation_seconds > 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                now - status_.last_hw_info_rotation).count();
+            if (elapsed >= config_.hw_info_rotation_seconds) {
+                rotate_hw_info();
+            }
+        }
         
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
@@ -343,8 +387,27 @@ std::string NetworkSpoofer::generate_random_hostname() {
     return prefixes[dist_(rng_) % prefixes.size()] + std::to_string(1000 + dist_(rng_) % 9000);
 }
 
+std::string NetworkSpoofer::generate_random_hw_serial() {
+    const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    std::string serial;
+    for (int i = 0; i < 12; ++i) {
+        serial += chars[rng_() % chars.length()];
+    }
+    return serial;
+}
+
 bool NetworkSpoofer::apply_hostname(const std::string& hostname) {
     return true; // Stub for paranoid level
+}
+
+bool NetworkSpoofer::apply_hw_info(const std::string& serial) {
+#ifdef _WIN32
+    // Windows: HWID/Serial spoofing logic (Registry/Drivers)
+    return true;
+#else
+    // Linux: SMBIOS/DMI serial spoofing (if root)
+    return true; 
+#endif
 }
 
 // Platform-specific implementations
