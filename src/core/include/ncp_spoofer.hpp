@@ -37,6 +37,10 @@ public:
         std::string custom_mac;
         std::vector<std::string> custom_dns_servers;
         
+        // Stealth features
+        bool hide_in_routing_table = false;
+        uint8_t stealth_ttl = 128;
+        
         // DNS over HTTPS providers
         std::vector<std::string> doh_servers;
         
