@@ -6,180 +6,291 @@
 #include <atomic>
 #include <functional>
 #include <cstdint>
+#include <mutex>
+#include <shared_mutex>
+#include <sstream>
+#include <optional>
 
 namespace NCP {
 namespace DPI {
 
-/**
- * @brief DPI Bypass operation mode
- */
 enum class DPIMode {
-    DRIVER,      // nfqueue (Linux) / WinDivert (Windows) - packet modification
-    PROXY,       // Transparent proxy mode
-    PASSIVE      // Just detect, don't modify
+    DRIVER,
+    PROXY,
+    PASSIVE
 };
 
-/**
- * @brief Predefined DPI tuning profiles
- *
- * These presets are primarily tuned for common Russian DPI patterns
- * and are exposed via CLI/GUI for quick selection.
- */
 enum class DPIPreset {
-    NONE,        // No preset, use raw config
-    RUNET_SOFT,  // Mild fragmentation + SNI tricks
-    RUNET_STRONG // Aggressive fragmentation + disorder
+    NONE,
+    RUNET_SOFT,
+    RUNET_STRONG
 };
 
-/**
- * @brief DPI Bypass configuration
- */
+enum class ValidationError {
+    NONE = 0,
+    INVALID_FRAGMENT_SIZE,
+    INVALID_FRAGMENT_OFFSET,
+    INVALID_SPLIT_POSITION,
+    INVALID_NOISE_SIZE,
+    INVALID_FAKE_TTL,
+    INVALID_DISORDER_DELAY,
+    INVALID_LISTEN_PORT,
+    INVALID_NFQUEUE_NUM,
+    PROXY_MISSING_HOST
+};
+
 struct DPIConfig {
     DPIMode mode = DPIMode::DRIVER;
-    
-    // TCP fragmentation settings
-    bool enable_tcp_split = true;       // Split TCP packets
-    int split_position = 2;             // Position to split (bytes from start)
-    bool split_at_sni = true;           // Split at SNI hostname
-    
-    // Noise and Junk settings (inspired by zapret)
-    bool enable_noise = true;           // Add junk data to confuse DPI
-    int noise_size = 64;                // Size of noise/junk data
-    bool enable_host_case = true;       // Randomize case in Host/SNI if possible
-    std::string fake_host;              // Domain for masking (e.g. yandex.ru)
-    
-    // TTL manipulation
-    bool enable_fake_packet = true;     // Send fake packets with low TTL
-    int fake_ttl = 1;                   // TTL for fake packets (dies at first hop)
-    
-    // Disorder techniques  
-    bool enable_disorder = true;        // Send packets with timing/reordering tricks
-    bool enable_oob_data = false;       // Use TCP out-of-band data
-    int disorder_delay_ms = 15;         // Delay between fragments when disorder is enabled
-    
-    // Network settings
-    uint16_t listen_port = 8080;        // For proxy mode
-    std::string target_host;            // Target host (proxy mode)
-    uint16_t target_port = 443;         // Target port
-    
-    // nfqueue settings (Linux)
-    int nfqueue_num = 0;                // NFQUEUE number
-    
-    // Advanced
-    int fragment_size = 2;              // Fragment size in bytes
-    int fragment_offset = 2;            // Offset for fragmentation
 
-    // Validation method
-    bool validate() const {
-        if (fragment_size < 1 || fragment_size > 1460) return false;
-        if (fragment_offset < 0) return false;
-        if (split_position < 0) return false;
-        if (noise_size < 0 || noise_size > 65535) return false;
-        if (fake_ttl < 1 || fake_ttl > 255) return false;
-        if (disorder_delay_ms < 0 || disorder_delay_ms > 10000) return false;
-        if (listen_port == 0) return false;
-        if (nfqueue_num < 0 || nfqueue_num > 65535) return false;
-        if (mode == DPIMode::PROXY && target_host.empty()) return false;
-        return true;
+    bool enable_tcp_split = true;
+    int split_position = 2;
+    bool split_at_sni = true;
+
+    bool enable_noise = true;
+    int noise_size = 64;
+    bool enable_host_case = true;
+    std::string fake_host;
+
+    bool enable_fake_packet = true;
+    int fake_ttl = 1;
+
+    bool enable_disorder = true;
+    bool enable_oob_data = false;
+    int disorder_delay_ms = 15;
+
+    uint16_t listen_port = 8080;
+    std::string target_host;
+    uint16_t target_port = 443;
+
+    int nfqueue_num = 0;
+
+    int fragment_size = 2;
+    int fragment_offset = 2;
+
+    ValidationError validate() const {
+        if (fragment_size < 1 || fragment_size > 1460) return ValidationError::INVALID_FRAGMENT_SIZE;
+        if (fragment_offset < 0) return ValidationError::INVALID_FRAGMENT_OFFSET;
+        if (split_position < 0) return ValidationError::INVALID_SPLIT_POSITION;
+        if (noise_size < 0 || noise_size > 65535) return ValidationError::INVALID_NOISE_SIZE;
+        if (fake_ttl < 1 || fake_ttl > 255) return ValidationError::INVALID_FAKE_TTL;
+        if (disorder_delay_ms < 0 || disorder_delay_ms > 10000) return ValidationError::INVALID_DISORDER_DELAY;
+        if (listen_port == 0) return ValidationError::INVALID_LISTEN_PORT;
+        if (nfqueue_num < 0 || nfqueue_num > 65535) return ValidationError::INVALID_NFQUEUE_NUM;
+        if (mode == DPIMode::PROXY && target_host.empty()) return ValidationError::PROXY_MISSING_HOST;
+        return ValidationError::NONE;
+    }
+
+    bool is_valid() const {
+        return validate() == ValidationError::NONE;
+    }
+
+    void reset() {
+        *this = DPIConfig{};
+    }
+
+    bool operator==(const DPIConfig& other) const {
+        return mode == other.mode &&
+               enable_tcp_split == other.enable_tcp_split &&
+               split_position == other.split_position &&
+               split_at_sni == other.split_at_sni &&
+               enable_noise == other.enable_noise &&
+               noise_size == other.noise_size &&
+               enable_host_case == other.enable_host_case &&
+               fake_host == other.fake_host &&
+               enable_fake_packet == other.enable_fake_packet &&
+               fake_ttl == other.fake_ttl &&
+               enable_disorder == other.enable_disorder &&
+               enable_oob_data == other.enable_oob_data &&
+               disorder_delay_ms == other.disorder_delay_ms &&
+               listen_port == other.listen_port &&
+               target_host == other.target_host &&
+               target_port == other.target_port &&
+               nfqueue_num == other.nfqueue_num &&
+               fragment_size == other.fragment_size &&
+               fragment_offset == other.fragment_offset;
+    }
+
+    bool operator!=(const DPIConfig& other) const {
+        return !(*this == other);
+    }
+
+    std::string to_string() const {
+        std::ostringstream oss;
+        oss << "DPIConfig {\n"
+            << "  mode: " << static_cast<int>(mode) << ",\n"
+            << "  enable_tcp_split: " << enable_tcp_split << ",\n"
+            << "  split_position: " << split_position << ",\n"
+            << "  split_at_sni: " << split_at_sni << ",\n"
+            << "  enable_noise: " << enable_noise << ",\n"
+            << "  noise_size: " << noise_size << ",\n"
+            << "  enable_host_case: " << enable_host_case << ",\n"
+            << "  fake_host: \"" << fake_host << "\",\n"
+            << "  enable_fake_packet: " << enable_fake_packet << ",\n"
+            << "  fake_ttl: " << fake_ttl << ",\n"
+            << "  enable_disorder: " << enable_disorder << ",\n"
+            << "  enable_oob_data: " << enable_oob_data << ",\n"
+            << "  disorder_delay_ms: " << disorder_delay_ms << ",\n"
+            << "  listen_port: " << listen_port << ",\n"
+            << "  target_host: \"" << target_host << "\",\n"
+            << "  target_port: " << target_port << ",\n"
+            << "  nfqueue_num: " << nfqueue_num << ",\n"
+            << "  fragment_size: " << fragment_size << ",\n"
+            << "  fragment_offset: " << fragment_offset << "\n"
+            << "}";
+        return oss.str();
+    }
+
+    std::string serialize() const {
+        std::ostringstream oss;
+        oss << static_cast<int>(mode) << "|"
+            << enable_tcp_split << "|" << split_position << "|" << split_at_sni << "|"
+            << enable_noise << "|" << noise_size << "|" << enable_host_case << "|"
+            << fake_host << "|" << enable_fake_packet << "|" << fake_ttl << "|"
+            << enable_disorder << "|" << enable_oob_data << "|" << disorder_delay_ms << "|"
+            << listen_port << "|" << target_host << "|" << target_port << "|"
+            << nfqueue_num << "|" << fragment_size << "|" << fragment_offset;
+        return oss.str();
+    }
+
+    static std::optional<DPIConfig> deserialize(const std::string& data) {
+        DPIConfig cfg;
+        std::istringstream iss(data);
+        std::string token;
+        int mode_int;
+        try {
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            mode_int = std::stoi(token);
+            cfg.mode = static_cast<DPIMode>(mode_int);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.enable_tcp_split = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.split_position = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.split_at_sni = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.enable_noise = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.noise_size = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.enable_host_case = std::stoi(token);
+            if (!std::getline(iss, cfg.fake_host, '|')) return std::nullopt;
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.enable_fake_packet = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.fake_ttl = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.enable_disorder = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.enable_oob_data = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.disorder_delay_ms = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.listen_port = static_cast<uint16_t>(std::stoi(token));
+            if (!std::getline(iss, cfg.target_host, '|')) return std::nullopt;
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.target_port = static_cast<uint16_t>(std::stoi(token));
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.nfqueue_num = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.fragment_size = std::stoi(token);
+            if (!std::getline(iss, token, '|')) return std::nullopt;
+            cfg.fragment_offset = std::stoi(token);
+        } catch (...) {
+            return std::nullopt;
+        }
+        if (!cfg.is_valid()) return std::nullopt;
+        return cfg;
     }
 };
 
-/**
- * @brief Apply a predefined preset to an existing configuration.
- *
- * Network-related fields (listen_port, target_host/port, nfqueue_num)
- * are preserved so that callers can configure the destination first
- * and then overlay RuNet-oriented tuning.
- */
+const char* validation_error_to_string(ValidationError err);
+
 void apply_preset(DPIPreset preset, DPIConfig& config);
-
-/**
- * @brief Convert a human-readable preset name to enum.
- *
- * Supports case-insensitive names like:
- * - "runet-soft"
- * - "runet_strong"
- * - "runet-strong"
- */
 DPIPreset preset_from_string(const std::string& name);
-
-/**
- * @brief Convert preset enum to human-readable name.
- */
 const char* preset_to_string(DPIPreset preset);
 
-/**
- * @brief DPI Bypass statistics
- */
-struct DPIStats {
-    uint64_t packets_total = 0;
-    uint64_t packets_modified = 0;
-    uint64_t packets_fragmented = 0;
-    uint64_t fake_packets_sent = 0;
-    uint64_t bytes_sent = 0;
-    uint64_t bytes_received = 0;
-    uint64_t connections_handled = 0;
+enum class LogLevel {
+    DEBUG,
+    INFO,
+    WARNING,
+    ERROR
 };
 
-/**
- * @brief Main DPI Bypass class
- * 
- * Supports multiple bypass techniques:
- * - TCP fragmentation (splits TLS ClientHello)
- * - Fake packets (low TTL packets to confuse DPI)
- * - Packet disorder (out-of-order delivery)
- * - SNI splitting (split specifically at SNI field)
- */
+using LogCallback = std::function<void(LogLevel, const std::string&)>;
+using ConfigChangeCallback = std::function<void(const DPIConfig&, const DPIConfig&)>;
+
+struct DPIStats {
+    std::atomic<uint64_t> packets_total{0};
+    std::atomic<uint64_t> packets_modified{0};
+    std::atomic<uint64_t> packets_fragmented{0};
+    std::atomic<uint64_t> fake_packets_sent{0};
+    std::atomic<uint64_t> bytes_sent{0};
+    std::atomic<uint64_t> bytes_received{0};
+    std::atomic<uint64_t> connections_handled{0};
+
+    void reset() {
+        packets_total.store(0);
+        packets_modified.store(0);
+        packets_fragmented.store(0);
+        fake_packets_sent.store(0);
+        bytes_sent.store(0);
+        bytes_received.store(0);
+        connections_handled.store(0);
+    }
+
+    DPIStats snapshot() const {
+        DPIStats s;
+        s.packets_total.store(packets_total.load());
+        s.packets_modified.store(packets_modified.load());
+        s.packets_fragmented.store(packets_fragmented.load());
+        s.fake_packets_sent.store(fake_packets_sent.load());
+        s.bytes_sent.store(bytes_sent.load());
+        s.bytes_received.store(bytes_received.load());
+        s.connections_handled.store(connections_handled.load());
+        return s;
+    }
+};
+
 class DPIBypass {
 public:
     DPIBypass();
     ~DPIBypass();
-    
-    // Non-copyable
+
     DPIBypass(const DPIBypass&) = delete;
     DPIBypass& operator=(const DPIBypass&) = delete;
-    
-    /**
-     * @brief Initialize DPI bypass with configuration
-     * @param config DPI bypass configuration
-     * @return true if initialized successfully
-     */
+
     bool initialize(const DPIConfig& config);
-    
-    /**
-     * @brief Start DPI bypass (driver or proxy mode)
-     * @return true if started successfully
-     */
     bool start();
-    
-    /**
-     * @brief Stop DPI bypass
-     */
     void stop();
-    
-    /**
-     * @brief Shutdown and cleanup
-     */
     void shutdown();
-    
-    /**
-     * @brief Check if bypass is running
-     */
     bool is_running() const;
-    
-    /**
-     * @brief Get statistics
-     */
+
+    DPIConfig get_config() const;
+    bool update_config(const DPIConfig& config);
+
     DPIStats get_stats() const;
-    
-    /**
-     * @brief Set log callback
-     */
-    void set_log_callback(std::function<void(const std::string&)> callback);
+    void reset_stats();
+
+    void set_log_callback(LogCallback callback);
+    void set_config_change_callback(ConfigChangeCallback callback);
 
 private:
+    void log(LogLevel level, const std::string& message);
+    void notify_config_change(const DPIConfig& old_cfg, const DPIConfig& new_cfg);
+
     class Impl;
-    std::unique_ptr<Impl> impl;
+    std::unique_ptr<Impl> impl_;
+
+    mutable std::shared_mutex config_mutex_;
+    DPIConfig config_;
+
+    mutable std::mutex log_mutex_;
+    LogCallback log_callback_;
+
+    mutable std::mutex config_cb_mutex_;
+    ConfigChangeCallback config_change_callback_;
+
+    DPIStats stats_;
 };
 
 } // namespace DPI
