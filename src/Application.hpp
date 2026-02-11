@@ -1,15 +1,28 @@
 #ifndef NCP_APPLICATION_HPP
 #define NCP_APPLICATION_HPP
 
-#include <QApplication>
 #include <memory>
 #include <string>
+#include <functional>
+
 #include "core/NetworkManager.hpp"
-#include "core/PacketCapture.hpp"
+#include "core/include/ncp_config.hpp"
+#include "core/include/ncp_logger.hpp"
+#include "core/include/ncp_security.hpp"
+
+#ifdef ENABLE_GUI
+#include <QApplication>
 #include "gui/MainWindow.hpp"
+#endif
 
-namespace ncp {
+namespace NCP {
 
+/**
+ * @brief Main application orchestrator for NCP
+ *
+ * Works in both CLI and GUI modes.
+ * GUI components are conditionally compiled only when Qt6 is available.
+ */
 class Application {
 public:
     Application(int& argc, char** argv);
@@ -28,37 +41,46 @@ public:
 
     // Component access
     NetworkManager* networkManager() const { return network_manager_.get(); }
-    PacketCapture* packetCapture() const { return packet_capture_.get(); }
+    Config& config() { return NCP::Config::instance(); }
+    Logger& logger() { return NCP::Logger::instance(); }
+
+#ifdef ENABLE_GUI
     MainWindow* mainWindow() const { return main_window_.get(); }
+#endif
 
     // Lifecycle management
     void initialize();
     void shutdown();
 
-    // Signals and slots connections
-    void connectSignals();
+    // Mode detection
+    bool isGuiMode() const { return gui_mode_; }
+    bool isInitialized() const { return initialized_; }
 
 private:
-    // Qt application instance
-    std::unique_ptr<QApplication> qt_app_;
-
     // Core components
     std::unique_ptr<NetworkManager> network_manager_;
-    std::unique_ptr<PacketCapture> packet_capture_;
 
-    // GUI components
+#ifdef ENABLE_GUI
+    std::unique_ptr<QApplication> qt_app_;
     std::unique_ptr<MainWindow> main_window_;
+    void initializeGui();
+    void connectSignals();
+#endif
 
     // Application state
     bool initialized_;
+    bool gui_mode_;
     std::string config_path_;
+    int argc_;
+    char** argv_;
 
     // Private initialization helpers
     void initializeCore();
-    void initializeGui();
     void initializeLogging();
+    void initializeSecurity();
+    void parseArguments();
 };
 
-} // namespace ncp
+} // namespace NCP
 
 #endif // NCP_APPLICATION_HPP
