@@ -457,39 +457,43 @@ public:
 
         // Optional fake low‑TTL probe before main ClientHello
         if (is_client_hello && config.enable_fake_packet) {
+            std::vector<uint8_t> fake_data = {0x16, 0x03, 0x01, 0x00, 0x01, 0x01}; // Minimum TLS-like record
+            
+            // Send multiple fake packets with different characteristics
+            for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
 #ifdef IP_TTL
-            int original_ttl = 0;
-            socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
-            bool ttl_changed = false;
-            if (getsockopt(sock, IPPROTO_IP, IP_TTL,
-                           reinterpret_cast<char*>(&original_ttl),
-                           &optlen) == 0) {
-                int ttl = (config.fake_ttl > 0) ? config.fake_ttl : 1;
-                if (setsockopt(sock, IPPROTO_IP, IP_TTL,
-                               reinterpret_cast<const char*>(&ttl),
-                               sizeof(ttl)) == 0) {
-                    ttl_changed = true;
+                int original_ttl = 0;
+                socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
+                bool ttl_changed = false;
+                if (getsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<char*>(&original_ttl),
+                               &optlen) == 0) {
+                    int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
+                    if (setsockopt(sock, IPPROTO_IP, IP_TTL,
+                                   reinterpret_cast<const char*>(&ttl),
+                                   sizeof(ttl)) == 0) {
+                        ttl_changed = true;
+                    }
                 }
-            }
 #endif
-
-            const size_t probe_len = 1; // minimal harmless probe
-            size_t sent = send_all(data, std::min(probe_len, len));
-            {
-                std::lock_guard<std::mutex> lock(stats_mutex);
-                stats.bytes_sent += static_cast<uint64_t>(sent);
-                if (sent > 0) {
+                send_all(fake_data.data(), fake_data.size());
+                
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
                     stats.fake_packets_sent++;
                 }
-            }
 
 #ifdef IP_TTL
-            if (ttl_changed) {
-                setsockopt(sock, IPPROTO_IP, IP_TTL,
-                           reinterpret_cast<const char*>(&original_ttl),
-                           sizeof(original_ttl));
-            }
+                if (ttl_changed) {
+                    setsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<const char*>(&original_ttl),
+                               sizeof(original_ttl));
+                }
 #endif
+                if (config.disorder_delay_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
+                }
+            }
         }
 
         // If this is not a ClientHello or TCP splitting is disabled,
@@ -526,24 +530,23 @@ public:
         size_t remaining = (sent_first < len) ? (len - sent_first) : 0;
 
         if (remaining > 0) {
-            // Optionally fragment the remaining payload into small pieces
-            size_t frag_size = (config.fragment_size > 0)
+            // Advanced fragmentation with randomness
+            size_t base_frag_size = (config.fragment_size > 0)
                                    ? static_cast<size_t>(config.fragment_size)
-                                   : remaining;
-            frag_size = std::max<size_t>(1, frag_size);
-
+                                   : 2;
+            
             size_t offset = 0;
             while (offset < remaining) {
-                size_t chunk = std::min(frag_size, remaining - offset);
+                // Randomize fragment size slightly for evasion
+                size_t jitter = (rand() % 3); 
+                size_t current_frag = std::min(base_frag_size + jitter, remaining - offset);
 
                 if (config.enable_disorder && config.disorder_delay_ms > 0) {
-                    // Simple timing-based "disorder": introduce a small delay
-                    // before sending each subsequent fragment to desync DPI.
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(config.disorder_delay_ms));
                 }
 
-                size_t sent = send_all(data + sent_first + offset, chunk);
+                size_t sent = send_all(data + sent_first + offset, current_frag);
                 sent_total += sent;
                 if (sent == 0) {
                     break;

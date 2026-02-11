@@ -370,22 +370,27 @@ void Network::apply_bypass_to_packet(std::vector<uint8_t>& packet) {
             break;
             
         case BypassTechnique::TCP_FRAGMENTATION:
-            // Fragment the packet
             fragment_packet(packet);
             break;
             
         case BypassTechnique::FAKE_PACKET:
-            // Corrupt checksum so DPI sees it but server drops
             if (bypass_config_.use_bad_checksum) {
                 packet[10] = 0xFF;  // Bad IP checksum
                 packet[11] = 0xFF;
+                // Add TCP bad checksum too if enough data
+                if (packet.size() >= 40) {
+                   packet[36] = 0xDE;
+                   packet[37] = 0xAD;
+                }
             }
             break;
             
         case BypassTechnique::OBFUSCATION:
             if (bypass_config_.obfuscation_enabled) {
-                for (size_t i = 20; i < packet.size(); ++i) { // Skip IP header
-                    packet[i] ^= bypass_config_.obfuscation_key;
+                // Skip IP and TCP headers (min 40 bytes)
+                size_t header_len = 40; 
+                for (size_t i = header_len; i < packet.size(); ++i) {
+                    packet[i] ^= (bypass_config_.obfuscation_key + (i % 256));
                 }
             }
             break;
