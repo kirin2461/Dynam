@@ -24,17 +24,20 @@ public:
         bool spoof_ipv6 = true;
         bool spoof_mac = true;
         bool spoof_dns = true;
+        bool enable_chaffing = false;
         
         // Rotation intervals (0 = no auto-rotation)
         int ipv4_rotation_seconds = 0;
         int ipv6_rotation_seconds = 0;
         int mac_rotation_seconds = 0;
         int dns_rotation_seconds = 0;
+        int hostname_rotation_seconds = 0;
         
         // Custom values (empty = generate random)
         std::string custom_ipv4;
         std::string custom_ipv6;
         std::string custom_mac;
+        std::string custom_hostname;
         std::vector<std::string> custom_dns_servers;
         
         // Stealth features
@@ -62,6 +65,7 @@ public:
         std::string ipv6_address;
         std::string ipv6_prefix;
         std::string mac_address;
+        std::string hostname;
         std::vector<std::string> dns_servers;
     };
     
@@ -71,16 +75,19 @@ public:
         bool ipv6_spoofed = false;
         bool mac_spoofed = false;
         bool dns_spoofed = false;
+        bool hostname_spoofed = false;
         
         std::string current_ipv4;
         std::string current_ipv6;
         std::string current_mac;
+        std::string current_hostname;
         std::vector<std::string> current_dns;
         
         std::chrono::steady_clock::time_point last_ipv4_rotation;
         std::chrono::steady_clock::time_point last_ipv6_rotation;
         std::chrono::steady_clock::time_point last_mac_rotation;
         std::chrono::steady_clock::time_point last_dns_rotation;
+        std::chrono::steady_clock::time_point last_hostname_rotation;
     };
     
     NetworkSpoofer();
@@ -100,18 +107,21 @@ public:
     bool rotate_ipv6();
     bool rotate_mac();
     bool rotate_dns();
+    bool rotate_hostname();
     bool rotate_all();
     
     // Set custom values
     bool set_custom_ipv4(const std::string& ipv4);
     bool set_custom_ipv6(const std::string& ipv6);
     bool set_custom_mac(const std::string& mac);
+    bool set_custom_hostname(const std::string& hostname);
     bool set_custom_dns(const std::vector<std::string>& dns_servers);
     
     // Random value generators (instance methods, not static)
     std::string generate_random_ipv4();
     std::string generate_random_ipv6();
     std::string generate_random_mac();
+    std::string generate_random_hostname();
     
     // Callbacks for rotation events
     using RotationCallback = std::function<void(const std::string& type, const std::string& old_value, const std::string& new_value)>;
@@ -126,6 +136,7 @@ private:
     bool apply_ipv6(const std::string& ipv6);
     bool apply_mac(const std::string& mac);
     bool apply_dns(const std::vector<std::string>& dns_servers);
+    bool apply_hostname(const std::string& hostname);
     
     // Auto-rotation thread
     void rotation_thread_func();

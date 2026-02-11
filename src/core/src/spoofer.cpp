@@ -287,6 +287,11 @@ bool NetworkSpoofer::set_custom_mac(const std::string& mac) {
     return true;
 }
 
+bool NetworkSpoofer::set_custom_hostname(const std::string& hostname) {
+    config_.custom_hostname = hostname;
+    return true;
+}
+
 bool NetworkSpoofer::set_custom_dns(const std::vector<std::string>& dns_servers) {
     config_.custom_dns_servers = dns_servers;
     return true;
@@ -321,16 +326,21 @@ void NetworkSpoofer::rotation_thread_func() {
             }
         }
 
-        if (true) { // Hostname rotation logic
+        if (config_.hostname_rotation_seconds > 0) { 
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 now - status_.last_hostname_rotation).count();
-            if (elapsed >= 1800) {
+            if (elapsed >= config_.hostname_rotation_seconds) {
                 rotate_hostname();
             }
         }
         
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+}
+
+std::string NetworkSpoofer::generate_random_hostname() {
+    std::vector<std::string> prefixes = {"PC-", "WORK-", "HOME-", "LAPTOP-", "NODE-"};
+    return prefixes[dist_(rng_) % prefixes.size()] + std::to_string(1000 + dist_(rng_) % 9000);
 }
 
 bool NetworkSpoofer::apply_hostname(const std::string& hostname) {

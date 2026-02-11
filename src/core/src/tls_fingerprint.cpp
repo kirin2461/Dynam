@@ -2,6 +2,9 @@
 #include <sodium.h>
 #include <cstring>
 #include <stdexcept>
+#include <algorithm>
+#include <random>
+#include <vector>
 
 namespace NCP {
 
@@ -171,24 +174,32 @@ void TLSFingerprint::randomize_all() {
 
 void TLSFingerprint::randomize_ciphers() {
     auto all_ciphers = get_profile_ciphers(pImpl->profile);
-    std::shuffle(all_ciphers.begin(), all_ciphers.end(), std::random_device{}());
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(all_ciphers.begin(), all_ciphers.end(), g);
     pImpl->ciphers = all_ciphers;
 }
 
 void TLSFingerprint::randomize_extensions() {
     auto all_exts = get_profile_extensions(pImpl->profile);
-    std::shuffle(all_exts.begin(), all_exts.end(), std::random_device{}());
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(all_exts.begin(), all_exts.end(), g);
     pImpl->extensions = all_exts;
 }
 
 void TLSFingerprint::randomize_curves() {
     auto all_curves = get_profile_curves(pImpl->profile);
-    std::shuffle(all_curves.begin(), all_curves.end(), std::random_device{}());
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(all_curves.begin(), all_curves.end(), g);
     pImpl->curves = all_curves;
 }
 
 void TLSFingerprint::shuffle_order() {
-    std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), std::random_device{}());
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), g);
 }
 
 void TLSFingerprint::enable_esni(const ESNIConfig&) { pImpl->esni_enabled = true; }
