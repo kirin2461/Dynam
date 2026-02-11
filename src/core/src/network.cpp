@@ -210,8 +210,12 @@ bool Network::enable_bypass(BypassTechnique technique) {
             bypass_config_.obfuscation_enabled = true;
             return true;
         case BypassTechnique::HTTP_MIMICRY:
+            bypass_config_.mimicry_enabled = true;
+            bypass_config_.mimicry_profile = "HTTP";
+            return true;
         case BypassTechnique::TLS_MIMICRY:
-            // Placeholder for traffic mimicry setup
+            bypass_config_.mimicry_enabled = true;
+            bypass_config_.mimicry_profile = "TLS";
             return true;
         default:
             return false;

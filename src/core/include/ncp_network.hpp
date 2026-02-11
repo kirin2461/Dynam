@@ -65,6 +65,8 @@ public:
         bool obfuscation_enabled = false;
         uint8_t obfuscation_key = 0x55; // XOR key
         bool dns_leak_protection = true;
+        bool mimicry_enabled = false;
+        std::string mimicry_profile = "HTTP";
     };
 
     struct TorConfig {
