@@ -55,7 +55,6 @@ struct E2ESession::Impl {
         session_id = oss.str();
     }
 };
-}; // E2ESession::Impl
 
 // E2ESession implementation
 E2ESession::E2ESession(const E2EConfig& config)
@@ -127,8 +126,9 @@ KeyPair E2ESession::generate_key_pair() {
             randombytes_buf(kp.private_key.data(), kp.private_key.size());
 #endif
             break;
+    }
     
-    return kp;
+    return std::move(kp);
 }
 
 std::vector<uint8_t> E2ESession::create_key_exchange_request(
@@ -136,7 +136,13 @@ std::vector<uint8_t> E2ESession::create_key_exchange_request(
 ) {
     std::lock_guard<std::mutex> lock(pImpl_->mutex);
     
-    pImpl_->local_identity_keys = local_keys;
+    pImpl_->local_identity_keys.protocol = local_keys.protocol;
+    pImpl_->local_identity_keys.created_at = local_keys.created_at;
+    pImpl_->local_identity_keys.expires_at = local_keys.expires_at;
+    pImpl_->local_identity_keys.public_key = SecureMemory(local_keys.public_key.size());
+    std::memcpy(pImpl_->local_identity_keys.public_key.data(), local_keys.public_key.data(), local_keys.public_key.size());
+    pImpl_->local_identity_keys.private_key = SecureMemory(local_keys.private_key.size());
+    std::memcpy(pImpl_->local_identity_keys.private_key.data(), local_keys.private_key.data(), local_keys.private_key.size());
     pImpl_->state = E2ESessionState::KeyExchangeInitiated;
     
     // Create request: [protocol][public_key]
@@ -162,7 +168,13 @@ std::vector<uint8_t> E2ESession::process_key_exchange_request(
     // Parse protocol and remote public key
     KeyExchangeProtocol protocol = static_cast<KeyExchangeProtocol>(request[0]);
     
-    pImpl_->local_identity_keys = local_keys;
+    pImpl_->local_identity_keys.protocol = local_keys.protocol;
+    pImpl_->local_identity_keys.created_at = local_keys.created_at;
+    pImpl_->local_identity_keys.expires_at = local_keys.expires_at;
+    pImpl_->local_identity_keys.public_key = SecureMemory(local_keys.public_key.size());
+    std::memcpy(pImpl_->local_identity_keys.public_key.data(), local_keys.public_key.data(), local_keys.public_key.size());
+    pImpl_->local_identity_keys.private_key = SecureMemory(local_keys.private_key.size());
+    std::memcpy(pImpl_->local_identity_keys.private_key.data(), local_keys.private_key.data(), local_keys.private_key.size());
     pImpl_->remote_identity_public_key = SecureMemory(request.size() - 1);
     std::memcpy(pImpl_->remote_identity_public_key.data(),
                 request.data() + 1,
@@ -419,8 +431,6 @@ uint64_t E2ESession::get_messages_received() const {
     return pImpl_->messages_received;
 }
 
-    
-} // namespace NCP
 
 // E2EManager implementation
 struct E2EManager::Impl {
@@ -504,7 +514,6 @@ bool E2EManager::import_keys(
 }
 
 
-namespace NCP {
 // E2EUtils namespace implementation
 namespace E2EUtils {
 

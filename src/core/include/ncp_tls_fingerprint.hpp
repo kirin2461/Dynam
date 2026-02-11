@@ -14,6 +14,7 @@ namespace NCP {
  */
 class SecureMemory {
 public:
+    SecureMemory();
     SecureMemory(size_t size);
     ~SecureMemory();
     
@@ -28,6 +29,8 @@ public:
     uint8_t* data() { return data_; }
     const uint8_t* data() const { return data_; }
     size_t size() const { return size_; }
+    
+    void zero();
     
     // Static utility functions
     static void secure_zero(void* ptr, size_t size);

@@ -149,6 +149,8 @@ public:
     uint64_t get_messages_received() const;
 
 private:
+    void init_ratchet_keys();
+
     struct Impl;
     std::unique_ptr<Impl> pImpl_;
 };

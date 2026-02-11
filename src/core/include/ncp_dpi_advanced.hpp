@@ -350,8 +350,7 @@ public:
     /**
      * @brief Get statistics
      */
-    34
-get_stats() const;
+    AdvancedDPIStats get_stats() const;
     
     /**
      * @brief Process and transform data for evasion
@@ -384,9 +383,35 @@ get_stats() const;
      */
     std::vector<EvasionTechnique> get_active_techniques() const;
 
+    enum class BypassPreset {
+        MINIMAL,
+        MODERATE,
+        AGGRESSIVE,
+        STEALTH
+    };
+
+    void apply_preset(BypassPreset preset);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+};
+
+/**
+ * @brief DPI evasion utility class for ECH and domain fronting
+ */
+class DPIEvasion {
+public:
+    static std::vector<uint8_t> apply_ech(
+        const std::vector<uint8_t>& client_hello,
+        const std::vector<uint8_t>& ech_config
+    );
+
+    static std::vector<uint8_t> apply_domain_fronting(
+        const std::vector<uint8_t>& data,
+        const std::string& front_domain,
+        const std::string& real_domain
+    );
 };
 
 /**

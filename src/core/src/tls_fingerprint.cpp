@@ -6,6 +6,8 @@
 namespace NCP {
 
 // SecureMemory implementation
+SecureMemory::SecureMemory() : data_(nullptr), size_(0) {}
+
 SecureMemory::SecureMemory(size_t size) : data_(nullptr), size_(size) {
     if (size == 0) return;
     data_ = static_cast<uint8_t*>(sodium_malloc(size));
@@ -38,6 +40,12 @@ SecureMemory& SecureMemory::operator=(SecureMemory&& other) noexcept {
         other.size_ = 0;
     }
     return *this;
+}
+
+void SecureMemory::zero() {
+    if (data_ && size_ > 0) {
+        sodium_memzero(data_, size_);
+    }
 }
 
 void SecureMemory::secure_zero(void* ptr, size_t size) {

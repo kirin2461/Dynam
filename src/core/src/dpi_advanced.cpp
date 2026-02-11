@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iomanip>
 #include <random>
+#include <set>
 
 namespace NCP {
 namespace DPI {
@@ -646,7 +647,7 @@ std::vector<EvasionTechnique> AdvancedDPIBypass::get_active_techniques() const {
         impl_->active_techniques.end());
 }
 
-void AdvancedDPIBypass::apply_preset(BypassPreset preset) {
+void AdvancedDPIBypass::apply_preset(AdvancedDPIBypass::BypassPreset preset) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     impl_->active_techniques.clear();
     
@@ -677,7 +678,7 @@ void AdvancedDPIBypass::apply_preset(BypassPreset preset) {
             impl_->active_techniques.insert(EvasionTechnique::SNI_SPLIT);
             impl_->active_techniques.insert(EvasionTechnique::GREASE_INJECTION);
             impl_->active_techniques.insert(EvasionTechnique::TCP_DISORDER);
-            impl_->active_techniques.insert(EvasionTechnique::TCP_OOB);
+            impl_->active_techniques.insert(EvasionTechnique::TCP_OOB_DATA);
             break;
     }
     
