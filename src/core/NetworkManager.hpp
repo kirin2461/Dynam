@@ -6,8 +6,11 @@
 #include <memory>
 #include <cstdint>
 #include <functional>
+#include <mutex>
+#include <atomic>
+#include <chrono>
 
-namespace ncp {
+namespace NCP {
 
 struct NetworkInterface {
     std::string name;
@@ -27,43 +30,51 @@ struct NetworkStats {
     uint64_t packets_received = 0;
     double upload_speed = 0.0;
     double download_speed = 0.0;
+    std::chrono::steady_clock::time_point last_update;
 };
 
 class NetworkManager {
 public:
     NetworkManager();
     ~NetworkManager();
-    
+
+    // Non-copyable, movable
+    NetworkManager(const NetworkManager&) = delete;
+    NetworkManager& operator=(const NetworkManager&) = delete;
+    NetworkManager(NetworkManager&&) noexcept = default;
+    NetworkManager& operator=(NetworkManager&&) noexcept = default;
+
     // Interface management
     std::vector<NetworkInterface> get_interfaces() const;
     NetworkInterface get_interface(const std::string& name) const;
     bool set_active_interface(const std::string& name);
-    std::string get_active_interface_name() const { return active_interface_; }
-    
-    // Statistics
+    std::string get_active_interface_name() const;
+
+    // Statistics (thread-safe)
     NetworkStats get_stats() const;
     NetworkStats get_interface_stats(const std::string& name) const;
-    
+
     // Connection testing
-    bool test_connection(const std::string& host = "8.8.8.8", int port = 53);
+    bool test_connection(const std::string& host = "8.8.8.8", int port = 53, int timeout_ms = 3000);
     int get_latency(const std::string& host = "8.8.8.8");
-    
+
     // Callbacks
     using StatsCallback = std::function<void(const NetworkStats&)>;
-    void set_stats_callback(StatsCallback callback) { stats_callback_ = callback; }
-    
+    void set_stats_callback(StatsCallback callback);
+
     // Update stats (call periodically)
     void update_stats();
-    
+
 private:
     std::string active_interface_;
     NetworkStats current_stats_;
     StatsCallback stats_callback_;
-    
+    mutable std::mutex mutex_;
+
     // Platform-specific helpers
     std::vector<NetworkInterface> enumerate_interfaces() const;
 };
 
-} // namespace ncp
+} // namespace NCP
 
 #endif // NCP_NETWORK_MANAGER_HPP
