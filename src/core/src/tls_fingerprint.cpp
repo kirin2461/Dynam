@@ -162,11 +162,34 @@ TLSFingerprint::JA4Fingerprint TLSFingerprint::generate_ja4() const {
 void TLSFingerprint::apply_ja4(const JA4Fingerprint&) {}
 std::string TLSFingerprint::get_ja4_string() const { return "stub"; }
 
-void TLSFingerprint::randomize_all() {}
-void TLSFingerprint::randomize_ciphers() {}
-void TLSFingerprint::randomize_extensions() {}
-void TLSFingerprint::randomize_curves() {}
-void TLSFingerprint::shuffle_order() {}
+void TLSFingerprint::randomize_all() {
+    randomize_ciphers();
+    randomize_extensions();
+    randomize_curves();
+    shuffle_order();
+}
+
+void TLSFingerprint::randomize_ciphers() {
+    auto all_ciphers = get_profile_ciphers(pImpl->profile);
+    std::shuffle(all_ciphers.begin(), all_ciphers.end(), std::random_device{}());
+    pImpl->ciphers = all_ciphers;
+}
+
+void TLSFingerprint::randomize_extensions() {
+    auto all_exts = get_profile_extensions(pImpl->profile);
+    std::shuffle(all_exts.begin(), all_exts.end(), std::random_device{}());
+    pImpl->extensions = all_exts;
+}
+
+void TLSFingerprint::randomize_curves() {
+    auto all_curves = get_profile_curves(pImpl->profile);
+    std::shuffle(all_curves.begin(), all_curves.end(), std::random_device{}());
+    pImpl->curves = all_curves;
+}
+
+void TLSFingerprint::shuffle_order() {
+    std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), std::random_device{}());
+}
 
 void TLSFingerprint::enable_esni(const ESNIConfig&) { pImpl->esni_enabled = true; }
 void TLSFingerprint::enable_ech(const std::vector<uint8_t>&) { pImpl->esni_enabled = true; }

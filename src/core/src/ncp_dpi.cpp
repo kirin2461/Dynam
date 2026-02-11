@@ -654,11 +654,12 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.fragment_offset = 1;
         config.enable_fake_packet = true;
         config.enable_disorder = true;
-        config.enable_oob_data = false;
+        config.enable_oob_data = true;
         config.enable_noise = true;
-        config.noise_size = 128;
+        config.noise_size = 256;
         config.enable_host_case = true;
-        config.fake_host = "yandex.ru";
+        config.fake_host = "google.com";
+        config.fake_ttl = 2; // Paranoid level
         break;
     case DPIPreset::NONE:
     default:

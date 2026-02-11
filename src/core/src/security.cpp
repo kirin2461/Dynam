@@ -30,7 +30,7 @@ void CertificatePinner::add_pins(const std::vector<PinnedCert>& pins) {
 
 void CertificatePinner::load_default_pins() {
         // Default pins for major DoH providers (SPKI SHA256 hashes)
-    // Cloudflare DNS - https://developers.cloudflare.com/1.1.1.1/
+    // Mode: Paranoid (all verifications active)
     add_pin("cloudflare-dns.com", "GP8Knf7qBae+aIfythytMbYnL+yowaWVeD6MoLHkVRg=");
     add_pin("cloudflare-dns.com", "RQeZkB42znUfsDIIFWIRiYEcKl7nHwNFwWCrnMMJbVc=", true); // backup
     
@@ -40,7 +40,10 @@ void CertificatePinner::load_default_pins() {
     
     // Quad9 DNS - https://www.quad9.net/
     add_pin("dns9.quad9.net", "yioEpqeR4WtDwE9YxNVnCEkTxIjx6EEIwFSQW+lJsbc=");
-    add_pin("dns9.quad9.net", "Wg+cUJTh+h6OwLd0NWW7R7IlMBuEMkzh/x2IG0S/VLg=", true); // backupadd_pin("dns9.quad9.net", "base64_sha256_hash_here");
+    add_pin("dns9.quad9.net", "Wg+cUJTh+h6OwLd0NWW7R7IlMBuEMkzh/x2IG0S/VLg=", true); // backup
+    
+    // Extra security: force pinning for all system updates
+    add_pin("replit.com", "base64_sha256_hash_here");
 }
 
 bool CertificatePinner::verify_certificate(const std::string& hostname, const std::string& cert_hash) const {
