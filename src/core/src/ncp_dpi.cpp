@@ -429,6 +429,26 @@ public:
             return total_sent;
         };
 
+        // Add Noise/Junk data before the actual ClientHello
+        if (is_client_hello && config.enable_noise) {
+            std::vector<uint8_t> junk(config.noise_size > 0 ? config.noise_size : 64);
+            // Simple random junk (not cryptographically secure, just for DPI noise)
+            for(auto& b : junk) b = static_cast<uint8_t>(rand() % 256);
+            
+            // Send junk with low TTL if fake_packet is enabled, otherwise just as noise
+#ifdef IP_TTL
+            int original_ttl = 64;
+            socklen_t optlen = sizeof(original_ttl);
+            getsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<char*>(&original_ttl), &optlen);
+            int low_ttl = 2; 
+            setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&low_ttl), sizeof(low_ttl));
+            send_all(junk.data(), junk.size());
+            setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&original_ttl), sizeof(original_ttl));
+#else
+            send_all(junk.data(), junk.size());
+#endif
+        }
+
         // Optional fake low‑TTL probe before main ClientHello
         if (is_client_hello && config.enable_fake_packet) {
 #ifdef IP_TTL
@@ -619,7 +639,7 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.enable_oob_data = false;
         break;
     case DPIPreset::RUNET_STRONG:
-        // Aggressive profile for heavily filtered networks
+        // Aggressive profile for heavily filtered networks (modernized for TSPU)
         config.mode = DPIMode::PROXY;
         config.enable_tcp_split = true;
         config.split_at_sni = true;
@@ -629,6 +649,9 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.enable_fake_packet = true;
         config.enable_disorder = true;
         config.enable_oob_data = false;
+        config.enable_noise = true;
+        config.noise_size = 128;
+        config.enable_host_case = true;
         break;
     case DPIPreset::NONE:
     default:

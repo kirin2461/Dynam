@@ -42,6 +42,11 @@ struct DPIConfig {
     int split_position = 2;             // Position to split (bytes from start)
     bool split_at_sni = true;           // Split at SNI hostname
     
+    // Noise and Junk settings (inspired by zapret)
+    bool enable_noise = true;           // Add junk data to confuse DPI
+    int noise_size = 64;                // Size of noise/junk data
+    bool enable_host_case = true;       // Randomize case in Host/SNI if possible
+    
     // TTL manipulation
     bool enable_fake_packet = true;     // Send fake packets with low TTL
     int fake_ttl = 1;                   // TTL for fake packets (dies at first hop)
