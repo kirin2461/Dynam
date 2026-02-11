@@ -3,15 +3,24 @@
 #include <fstream>
 #include <stdexcept>
 
-namespace ncp {
+namespace NCP {
 
 Application::Application(int& argc, char** argv)
-    : initialized_(false) {
-    // Create Qt application
-    qt_app_ = std::make_unique<QApplication>(argc, argv);
-    qt_app_->setApplicationName("NCP - Network Control Protocol");
-    qt_app_->setApplicationVersion("1.0.0");
-    qt_app_->setOrganizationName("NCP Project");
+    : initialized_(false)
+    , gui_mode_(false)
+    , argc_(argc)
+    , argv_(argv)
+{
+    parseArguments();
+
+#ifdef ENABLE_GUI
+    if (gui_mode_) {
+        qt_app_ = std::make_unique<QApplication>(argc_, argv_);
+        qt_app_->setApplicationName("NCP - Network Control Protocol");
+        qt_app_->setApplicationVersion("1.0.0");
+        qt_app_->setOrganizationName("NCP Project");
+    }
+#endif
 }
 
 Application::~Application() {
@@ -23,96 +32,115 @@ int Application::run() {
         initialize();
     }
 
-    // Show main window
-    main_window_->show();
+#ifdef ENABLE_GUI
+    if (gui_mode_ && main_window_) {
+        main_window_->show();
+        return qt_app_->exec();
+    }
+#endif
 
-    // Run Qt event loop
-    return qt_app_->exec();
+    // CLI mode - run core logic
+    NCP_LOG_INFO("NCP running in CLI mode");
+    return 0;
 }
 
 void Application::loadConfig(const std::string& config_path) {
     config_path_ = config_path;
-    std::ifstream file(config_path);
-    if (!file.is_open()) {
-        std::cerr << "Warning: Could not open config file: " << config_path << std::endl;
-        return;
+    auto& cfg = NCP::Config::instance();
+    if (!cfg.loadFromFile(config_path)) {
+        NCP_LOG_WARN("Config file not found: " + config_path + ", using defaults");
+    } else {
+        NCP_LOG_INFO("Configuration loaded from: " + config_path);
     }
-    // TODO: Parse configuration file
-    file.close();
 }
 
 void Application::saveConfig(const std::string& config_path) const {
-    std::ofstream file(config_path);
-    if (!file.is_open()) {
-        throw std::runtime_error("Could not save config file: " + config_path);
+    auto& cfg = NCP::Config::instance();
+    if (cfg.saveToFile(config_path)) {
+        NCP_LOG_INFO("Configuration saved to: " + config_path);
+    } else {
+        NCP_LOG_ERROR("Failed to save configuration to: " + config_path);
     }
-    // TODO: Write configuration
-    file.close();
 }
 
 void Application::initialize() {
     if (initialized_) return;
 
     initializeLogging();
+    NCP_LOG_INFO("Initializing NCP Application v1.0.0");
+
+    initializeSecurity();
     initializeCore();
-    initializeGui();
-    connectSignals();
+
+#ifdef ENABLE_GUI
+    if (gui_mode_) {
+        initializeGui();
+        connectSignals();
+    }
+#endif
 
     initialized_ = true;
+    NCP_LOG_INFO("NCP Application initialized successfully");
 }
 
 void Application::shutdown() {
     if (!initialized_) return;
 
-    // Stop packet capture if running
-    if (packet_capture_ && packet_capture_->isCapturing()) {
-        packet_capture_->stopCapture();
-    }
+    NCP_LOG_INFO("Shutting down NCP Application");
 
-    // Cleanup in reverse order
+#ifdef ENABLE_GUI
     main_window_.reset();
-    packet_capture_.reset();
-    network_manager_.reset();
+#endif
 
+    network_manager_.reset();
     initialized_ = false;
 }
 
-void Application::connectSignals() {
-    // Connect NetworkManager signals to MainWindow
-    QObject::connect(network_manager_.get(), &NetworkManager::statsUpdated,
-                     main_window_.get(), &MainWindow::updateStats);
-
-    QObject::connect(network_manager_.get(), &NetworkManager::connectionChanged,
-                     main_window_.get(), &MainWindow::updateNetworkFlow);
-
-    // Connect PacketCapture signals
-    QObject::connect(packet_capture_.get(), &PacketCapture::packetCaptured,
-                     main_window_.get(), &MainWindow::updateActivityLog);
-}
-
 void Application::initializeCore() {
-    // Create network manager
+    NCP_LOG_DEBUG("Initializing core components");
     network_manager_ = std::make_unique<NetworkManager>();
-
-    // Create packet capture
-    packet_capture_ = std::make_unique<PacketCapture>();
-}
-
-void Application::initializeGui() {
-    // Create main window with core components
-    main_window_ = std::make_unique<MainWindow>(
-        network_manager_.get(),
-        packet_capture_.get()
-    );
-
-    // Set window properties
-    main_window_->setWindowTitle("NCP - Network Control Protocol");
-    main_window_->resize(1200, 800);
 }
 
 void Application::initializeLogging() {
-    // TODO: Initialize logging system
-    std::cout << "NCP Application initializing..." << std::endl;
+    auto& log = NCP::Logger::instance();
+    auto& cfg = NCP::Config::instance();
+
+    std::string level_str = cfg.get("log.level", "info");
+    log.setLevel(Logger::levelFromString(level_str));
+    log.setConsoleOutput(cfg.getBool("log.console", true));
+
+    std::string log_file = cfg.get("log.file");
+    if (!log_file.empty()) {
+        log.setFileOutput(log_file);
+    }
 }
 
-} // namespace ncp
+void Application::initializeSecurity() {
+    NCP_LOG_DEBUG("Initializing security subsystem");
+    // Security initialization handled by SecurityManager
+}
+
+void Application::parseArguments() {
+    for (int i = 1; i < argc_; ++i) {
+        std::string arg(argv_[i]);
+        if (arg == "--gui") {
+            gui_mode_ = true;
+        } else if (arg == "--config" && i + 1 < argc_) {
+            loadConfig(std::string(argv_[++i]));
+        }
+    }
+}
+
+#ifdef ENABLE_GUI
+void Application::initializeGui() {
+    NCP_LOG_DEBUG("Initializing GUI components");
+    main_window_ = std::make_unique<MainWindow>();
+}
+
+void Application::connectSignals() {
+    NCP_LOG_DEBUG("Connecting signals and slots");
+    // Connect GUI signals to core slots here
+}
+#endif
+
+} // namespace NCP
