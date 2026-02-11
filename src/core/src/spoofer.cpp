@@ -121,7 +121,7 @@ bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig
                          (config_.mac_rotation_seconds > 0) ||
                          (config_.dns_rotation_seconds > 0);
     
-    if (needs_rotation) {
+    if (needs_rotation || config_.enable_chaffing) {
         rotation_running_ = true;
         rotation_thread_ = std::thread(&NetworkSpoofer::rotation_thread_func, this);
     }
@@ -263,6 +263,7 @@ void NetworkSpoofer::rotation_thread_func() {
     while (rotation_running_) {
         auto now = std::chrono::steady_clock::now();
         
+        if (config_.enable_chaffing) { /* Traffic Chaffing logic */ }
         if (config_.ipv4_rotation_seconds > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                 now - status_.last_ipv4_rotation).count();
