@@ -1,0 +1,7 @@
+modules = ["bash", "cpp-clang20"]
+[agent]
+expertMode = true
+
+[nix]
+channel = "stable-25_05"
+packages = ["cmake", "pkg-config", "libsodium", "libpcap", "sqlite"]
