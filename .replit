@@ -27,4 +27,4 @@ outputType = "console"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd /home/runner/workspace/build && cmake --build . -j$(nproc) 2>&1 && echo \"=== Build Complete ===\" && ./bin/ncp help"
+args = "cd build && cmake .. -DENABLE_CLI=ON -DENABLE_GUI=OFF && make -j$(nproc) && ./bin/ncp help"

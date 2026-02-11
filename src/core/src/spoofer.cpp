@@ -312,9 +312,29 @@ void NetworkSpoofer::rotation_thread_func() {
                 rotate_mac();
             }
         }
+
+        if (config_.dns_rotation_seconds > 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                now - status_.last_dns_rotation).count();
+            if (elapsed >= config_.dns_rotation_seconds) {
+                rotate_dns();
+            }
+        }
+
+        if (true) { // Hostname rotation logic
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                now - status_.last_hostname_rotation).count();
+            if (elapsed >= 1800) {
+                rotate_hostname();
+            }
+        }
         
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+}
+
+bool NetworkSpoofer::apply_hostname(const std::string& hostname) {
+    return true; // Stub for paranoid level
 }
 
 // Platform-specific implementations
