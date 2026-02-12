@@ -6,7 +6,7 @@ All dependencies required for building NCP C++ (Dynam).
 
 ### 1. **libsodium** - Cryptographic library
 
-Used for: Ed25519, Curve25519, ChaCha20-Poly1305, X25519, AEAD encryption.
+Used for: Ed25519, Curve25519, ChaCha20-Poly1305, X25519, XChaCha20-Poly1305 AEAD encryption, `sodium_memzero` secure memory wiping.
 
 ```bash
 # Ubuntu/Debian
@@ -132,7 +132,7 @@ sudo make install
 sudo ldconfig
 ```
 
-**CMake option**: `ENABLE_LIBOQS=ON` (default: ON)
+**CMake option**: `ENABLE_LIBOQS=OFF` (default: OFF)
 
 > Without liboqs, post-quantum features fall back to insecure placeholders.
 
@@ -151,7 +151,7 @@ sudo dnf install libwebsockets-devel
 brew install libwebsockets
 ```
 
-**CMake option**: `ENABLE_WEBSOCKETS=ON` (default: ON)
+**CMake option**: `ENABLE_WEBSOCKETS=OFF` (default: OFF)
 
 ### 10. **Tor** - Anonymous proxy support
 
@@ -168,7 +168,7 @@ sudo dnf install tor
 brew install tor
 ```
 
-**CMake option**: `ENABLE_TOR_PROXY=ON` (default: ON)
+**CMake option**: `ENABLE_TOR_PROXY=OFF` (default: OFF)
 
 ### 11. **Qt6** - GUI application
 
@@ -185,24 +185,22 @@ brew install qt@6
 
 **CMake option**: `ENABLE_GUI=OFF` (disable if Qt6 not needed)
 
----
-
 ## Quick Install (All Required)
 
 ### Ubuntu/Debian
 
 ```bash
 sudo apt-get install -y cmake build-essential git \
-  libsodium-dev libssl-dev libsqlite3-dev libgtest-dev \
-  libpcap-dev
+    libsodium-dev libssl-dev libsqlite3-dev libgtest-dev \
+    libpcap-dev
 ```
 
 ### Fedora/RHEL
 
 ```bash
 sudo dnf install -y cmake gcc-c++ git \
-  libsodium-devel openssl-devel sqlite-devel gtest-devel \
-  libpcap-devel
+    libsodium-devel openssl-devel sqlite-devel gtest-devel \
+    libpcap-devel
 ```
 
 ### macOS
@@ -225,15 +223,13 @@ conan install . --build=missing
 
 Dependencies from `conanfile.txt`: libsodium/1.0.18, openssl/3.1.4, sqlite3/3.44.0, gtest/1.14.0
 
----
-
 ## Build Configuration
 
 ### Full build with all features
 
 ```bash
 mkdir build && cd build
-cmake -DENABLE_LIBOQS=ON -DENABLE_WEBSOCKETS=ON -DENABLE_TOR_PROXY=ON -DENABLE_TESTS=ON ..
+cmake -DENABLE_LIBOQS=ON -DENABLE_WEBSOCKETS=ON -DENABLE_TOR_PROXY=ON -DENABLE_TESTS=ON -DENABLE_FUZZING=ON ..
 make -j$(nproc)
 ```
 
@@ -241,17 +237,15 @@ make -j$(nproc)
 
 ```bash
 mkdir build && cd build
-cmake -DENABLE_LIBOQS=OFF -DENABLE_WEBSOCKETS=OFF -DENABLE_TOR_PROXY=OFF -DENABLE_GUI=OFF ..
+cmake -DENABLE_GUI=OFF -DENABLE_TESTS=OFF ..
 make -j$(nproc)
 ```
-
----
 
 ## Summary Table
 
 | Dependency | Required | Purpose | Install (Ubuntu) |
 |-----------|----------|---------|-----------------|
-| libsodium | Yes | Core crypto (Ed25519, ChaCha20) | `apt-get install libsodium-dev` |
+| libsodium | Yes | Core crypto (Ed25519, ChaCha20, AEAD) | `apt-get install libsodium-dev` |
 | OpenSSL | Yes | TLS, DoH | `apt-get install libssl-dev` |
 | SQLite3 | Yes | Encrypted database | `apt-get install libsqlite3-dev` |
 | CMake | Yes | Build system | `apt-get install cmake` |
@@ -290,15 +284,18 @@ which tor
 ## Platform Notes
 
 ### Windows
+
 - Use vcpkg: `vcpkg install libsodium:x64-windows openssl:x64-windows sqlite3:x64-windows gtest:x64-windows`
 - Or use Conan: `conan install . --build=missing`
 - liboqs: Build from source using Visual Studio
 - Tor: Download Expert Bundle from torproject.org
 
 ### macOS
+
 - Use Homebrew for all dependencies
 - May need `CMAKE_PREFIX_PATH` for Qt6: `cmake -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/qt@6 ..`
 
 ### Linux
+
 - All dependencies available in package managers
 - Use `sudo ldconfig` after installing libraries from source
