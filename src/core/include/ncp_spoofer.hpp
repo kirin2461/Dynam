@@ -50,6 +50,34 @@ public:
         // DNS over HTTPS providers
         std::vector<std::string> doh_servers;
         
+        // Advanced anti-correlation features
+        bool enable_traffic_padding = false;  // Add random padding to packets
+        int min_padding_bytes = 0;
+        int max_padding_bytes = 256;
+        
+        bool enable_timing_randomization = true;  // Randomize rotation timings
+        int timing_variance_percent = 20;  // ±20% variance
+        
+        bool coordinated_rotation = true;  // Rotate all identifiers together
+        bool enable_decoy_traffic = false;  // Generate decoy traffic
+        int decoy_packets_per_minute = 10;
+        
+        // Browser/OS fingerprint spoofing
+        bool spoof_tcp_fingerprint = false;  // Spoof TCP/IP stack fingerprint
+        std::string target_os_fingerprint;  // "Windows10", "Linux", "macOS", etc.
+        
+        bool spoof_mtu = false;  // Spoof MTU size
+        int custom_mtu = 1500;
+        
+        // Advanced network behavior
+        bool enable_multi_path = false;  // Use multiple network paths
+        bool randomize_packet_order = false;  // Randomize outgoing packet order
+        
+        // Anti-tracking features  
+        bool clear_arp_cache = true;  // Clear ARP cache on rotation
+        bool flush_dns_cache = true;  // Flush DNS cache on rotation
+        bool reset_tcp_timestamps = true;  // Reset TCP timestamps
+        
         SpoofConfig() {
             doh_servers = {
                 "https://1.1.1.1/dns-query",
