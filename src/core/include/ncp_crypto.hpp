@@ -2,6 +2,7 @@
 #define NCP_CRYPTO_HPP
 
 #include "ncp_secure_memory.hpp"
+#include "ncp_secure_buffer.hpp"
 #include <vector>
 #include <string>
 #include <cstdint>
