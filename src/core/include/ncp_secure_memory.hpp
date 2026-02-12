@@ -7,6 +7,7 @@
 #include <vector>
 
 namespace ncp {
+
 /**
  * @brief Secure Memory Management with auto-zeroing
  *
@@ -31,6 +32,12 @@ public:
     const uint8_t* data() const { return data_; }
     size_t size() const { return size_; }
     bool empty() const { return size_ == 0 || data_ == nullptr; }
+
+    // Iterator support for range-based for loops
+    uint8_t* begin() { return data_; }
+    uint8_t* end() { return data_ + size_; }
+    const uint8_t* begin() const { return data_; }
+    const uint8_t* end() const { return data_ + size_; }
 
     // Securely zero the memory contents
     void zero();
@@ -76,6 +83,7 @@ public:
     size_t size() const { return size_; }
     size_t length() const { return size_; }
     bool empty() const { return size_ == 0; }
+
     void clear();
 
 private:
@@ -104,4 +112,5 @@ namespace SecureOps {
 }
 
 } // namespace ncp
+
 #endif // NCP_SECURE_MEMORY_HPP
