@@ -1,5 +1,5 @@
-#include "../include/ncp_license.hpp"
 #include "../include/ncp_crypto.hpp"
+#include "../include/ncp_license.hpp"
 #include <stdexcept>
 #include <fstream>
 #include <sstream>
@@ -28,7 +28,13 @@
 
 namespace ncp {
 
+// Pimpl implementation
+struct License::Impl {
+    // Implementation details
+};
+
 License::License() : crypto_(std::make_unique<Crypto>()) {}
+
 
 License::~License() = default;
 
@@ -265,7 +271,8 @@ bool License::generate_license_file(
         const std::string& hwid,
         const std::string& license_key,
         const std::chrono::system_clock::time_point& expiration_date,
-        const std::string& output_file) {
+                const std::string& output_file,
+        LicenseType type) {
     
     // Format expiry date
     auto time_t_expiry = std::chrono::system_clock::to_time_t(expiration_date);
