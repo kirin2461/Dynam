@@ -33,7 +33,7 @@
 #include <openssl/bio.h>
 #endif
 
-namespace NCP {
+namespace ncp {
 
 // ==================== DoH Provider URLs ====================
 static const std::map<DoHClient::Provider, std::string> DOH_SERVERS = {
@@ -751,4 +751,4 @@ std::string reverse_dns_lookup(const std::string& ip_address) {
     return "";
 }
 
-} // namespace NCP
+} // namespace ncp
