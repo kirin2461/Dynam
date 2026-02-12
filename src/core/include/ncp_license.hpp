@@ -9,7 +9,7 @@
 #include <map>
 #include <functional>
 
-namespace NCP {
+namespace ncp {
 
 class Crypto; // Forward declaration
 
@@ -252,6 +252,6 @@ inline uint8_t operator|(License::AntiTamperFlag a, License::AntiTamperFlag b) {
     return static_cast<uint8_t>(a) | static_cast<uint8_t>(b);
 }
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_LICENSE_HPP
