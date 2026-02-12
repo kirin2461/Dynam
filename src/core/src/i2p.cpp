@@ -7,6 +7,11 @@
 
 namespace ncp {
 
+// Impl definition for unique_ptr completeness
+struct I2PManager::Impl {
+    // Placeholder for future I2P implementation details
+};
+
 I2PManager::I2PManager() : is_initialized_(false) {}
 I2PManager::~I2PManager() {}
 
