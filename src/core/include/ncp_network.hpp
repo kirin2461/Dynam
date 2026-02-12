@@ -10,7 +10,7 @@
 // Forward declaration for pcap_t
 struct pcap_t;
 
-namespace NCP {
+namespace ncp {
 
 // DPI Bypass techniques enumeration
 enum class BypassTechnique {
@@ -20,9 +20,9 @@ enum class BypassTechnique {
     SNI_SPOOFING,
     FAKE_PACKET,
     DISORDER,
-    OBFUSCATION, // Packet obfuscation
-    HTTP_MIMICRY, // Mimic HTTP traffic
-    TLS_MIMICRY   // Mimic TLS traffic
+    OBFUSCATION,
+    HTTP_MIMICRY,
+    TLS_MIMICRY
 };
 
 // Forward declaration of NetworkStats for use outside class
@@ -43,7 +43,7 @@ public:
         std::string dest_ip;
         uint16_t source_port;
         uint16_t dest_port;
-        uint8_t protocol;  // TCP=6, UDP=17
+        uint8_t protocol;
     };
 
     struct InterfaceInfo {
@@ -68,7 +68,7 @@ public:
         bool disorder_enabled = false;
         int disorder_delay_ms = 0;
         bool obfuscation_enabled = false;
-        uint8_t obfuscation_key = 0x55; // XOR key
+        uint8_t obfuscation_key = 0x55;
         bool dns_leak_protection = true;
         bool mimicry_enabled = false;
         std::string mimicry_profile = "HTTP";
@@ -88,7 +88,6 @@ public:
         uint16_t proxy_port = 4444;
     };
 
-    // Callback type for packet capture (data, timestamp)
     using PacketCallback = std::function<void(const std::vector<uint8_t>&, time_t)>;
 
     Network();
@@ -97,21 +96,17 @@ public:
     bool set_tor_config(const TorConfig& config);
     bool is_tor_active() const;
 
-    // Interface management
     std::vector<std::string> get_interfaces();
     InterfaceInfo get_interface_info(const std::string& iface_name);
 
-    // Packet capture
     bool initialize_capture(const std::string& interface_name);
     void start_capture(PacketCallback callback, int timeout_ms = 5000);
     void stop_capture();
 
-    // Raw packet operations
     bool send_raw_packet(
         const std::string& dest_ip,
         const std::vector<uint8_t>& data
     );
-
     bool send_tcp_packet(
         const std::string& dest_ip,
         uint16_t dest_port,
@@ -119,7 +114,6 @@ public:
         uint8_t flags
     );
 
-    // DPI Bypass
     bool enable_bypass(BypassTechnique technique);
     void disable_bypass();
     void apply_bypass_to_packet(std::vector<uint8_t>& packet);
@@ -130,18 +124,15 @@ public:
     );
     void set_tcp_window_size(uint16_t size);
 
-    // DNS operations
     std::string resolve_dns(const std::string& hostname, bool use_doh);
     std::string resolve_dns_over_https(const std::string& hostname);
 
-    // Statistics
     std::string get_network_stats();
     NetworkStats get_stats() const;
     void reset_stats();
     std::string get_last_error() const;
 
 private:
-    // Bypass setup methods
     bool setup_ttl_bypass();
     bool setup_fragmentation_bypass();
     bool setup_sni_spoofing();
@@ -149,5 +140,16 @@ private:
     bool setup_packet_disorder();
     void cleanup_bypass();
 
-    // Member variables
-    void* pcap_handle;  // Type-safe pcap pointer
+    void* pcap_handle;
+    BypassTechnique current_technique_;
+    BypassConfig bypass_config_;
+    TorConfig tor_config_;
+    bool capture_running_;
+    std::thread capture_thread_;
+    NetworkStats stats_;
+    std::string last_error_;
+};
+
+} // namespace ncp
+
+#endif // NCP_NETWORK_HPP
