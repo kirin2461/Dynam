@@ -181,7 +181,7 @@ std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data
     result.insert(result.end(), data.begin(), data.end());
     
     // Random padding
-    std::uniform_int_distribution<uint8_t> byte_dist(0, 255);
+    std::uniform_int_distribution<unsigned int> byte_dist(0, 255);
     for (uint32_t i = 0; i < padding_size; ++i) {
         result.push_back(byte_dist(rng_));
     }
