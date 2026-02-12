@@ -9,6 +9,7 @@
 #include <winsock2.h>
 #include <iphlpapi.h>
 #include <ws2tcpip.h>
+#include <netioapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 #else
@@ -23,7 +24,7 @@
 #include <poll.h>
 #endif
 
-namespace NCP {
+namespace ncp {
 
 NetworkManager::NetworkManager() {
 #ifdef _WIN32
@@ -326,4 +327,4 @@ std::vector<NetworkInterface> NetworkManager::enumerate_interfaces() const {
     return result;
 }
 
-} // namespace NCP
+} // namespace ncp
