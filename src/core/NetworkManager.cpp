@@ -14,9 +14,9 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
-#include <iphlpapi.h>
 #include <ws2tcpip.h>
-#include <netioapi.h>
+#include <windows.h>
+#include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 #else
