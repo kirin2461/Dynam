@@ -250,6 +250,28 @@ struct DPIStats {
     std::atomic<uint64_t> bytes_received{0};
     std::atomic<uint64_t> connections_handled{0};
 
+        DPIStats() = default;
+    DPIStats(const DPIStats& other)
+        : packets_total(other.packets_total.load()),
+          packets_modified(other.packets_modified.load()),
+          packets_fragmented(other.packets_fragmented.load()),
+          fake_packets_sent(other.fake_packets_sent.load()),
+          bytes_sent(other.bytes_sent.load()),
+          bytes_received(other.bytes_received.load()),
+          connections_handled(other.connections_handled.load()) {}
+    DPIStats& operator=(const DPIStats& other) {
+        if (this != &other) {
+            packets_total.store(other.packets_total.load());
+            packets_modified.store(other.packets_modified.load());
+            packets_fragmented.store(other.packets_fragmented.load());
+            fake_packets_sent.store(other.fake_packets_sent.load());
+            bytes_sent.store(other.bytes_sent.load());
+            bytes_received.store(other.bytes_received.load());
+            connections_handled.store(other.connections_handled.load());
+        }
+        return *this;
+    }
+
     void reset() {
         packets_total.store(0);
         packets_modified.store(0);

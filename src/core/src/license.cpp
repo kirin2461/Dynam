@@ -1,4 +1,6 @@
 #include "../include/ncp_crypto.hpp"
+#include <vector>
+#include <array>
 #include "../include/ncp_license.hpp"
 #include <stdexcept>
 #include <fstream>

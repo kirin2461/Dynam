@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <functional>
 #include <thread>
+#include <mutex>
+#include <atomic>
 
 // Forward declaration for pcap_t
 struct pcap_t;
@@ -140,7 +142,7 @@ private:
     bool setup_packet_disorder();
     void cleanup_bypass();
 
-    void* pcap_handle;
+    void* pcap_handle_ = nullptr;
     BypassTechnique current_technique_;
     BypassConfig bypass_config_;
     TorConfig tor_config_;
@@ -148,6 +150,13 @@ private:
     std::thread capture_thread_;
     NetworkStats stats_;
     std::string last_error_;
+
+        // Additional members used in implementation
+    bool is_capturing_ = false;
+    bool bypass_enabled_ = false;
+    std::string current_interface_;
+    std::function<void(const std::vector<uint8_t>&, time_t)> packet_cb_;
+    mutable std::mutex mutex_;
 };
 
 } // namespace ncp

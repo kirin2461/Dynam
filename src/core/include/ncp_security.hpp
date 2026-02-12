@@ -9,6 +9,10 @@
 #include <mutex>
 #include <fstream>
 #include <random>
+#include <map>
+#include <unordered_map>
+#include <memory>
+#include <algorithm>
 
 namespace ncp {
 
