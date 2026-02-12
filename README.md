@@ -1,184 +1,218 @@
-# NCP C++ - Network Control Protocol
+# Dynam (NCP C++) - Network Control Protocol
 
-> Professional C++ implementation of the Network Control Protocol with high-performance cryptography, DPI bypass, and license management.
+> Multi-layered network anonymization and privacy platform with DPI bypass, traffic spoofing, paranoid mode, and advanced cryptography. Written in modern C++17.
 
-## 🚀 Features
+## Features
 
-- **Core Library (libncp_core)**
-  - Modern C++17 implementation
-  - Ed25519, Curve25519, ChaCha20-Poly1305 cryptography
-  - Hardware ID-based offline license validation
-  - SQLite3 + SQLCipher encrypted database
-  - libpcap-based network packet capture and raw socket operations
+### Core Library (libncp_core) - 17 modules
 
-- **CLI Tool**
-  - Command-line interface for automation
-  - Cryptographic operations (keygen, signing, encryption)
-  - License validation and HWID detection
-  - Network interface enumeration
+- **Cryptography** (`ncp_crypto.hpp`) - Ed25519, Curve25519, ChaCha20-Poly1305, X25519 key exchange, AEAD encryption with `constexpr`/`noexcept` optimization
+- **DPI Bypass** (`ncp_dpi.hpp`, `ncp_dpi_advanced.hpp`) - TCP fragmentation, fake packets, disorder mode, SNI splitting, RuNet presets (Soft/Strong)
+- **Network Spoofing** (`ncp_spoofer.hpp`) - IPv4/IPv6/MAC/DNS spoofing with automatic identity rotation
+- **Network Operations** (`ncp_network.hpp`) - libpcap packet capture, raw sockets, typed `unique_ptr` handles, bypass techniques (HTTP/TLS mimicry)
+- **Paranoid Mode** (`ncp_paranoid.hpp`) - 8-layer protection: entry obfuscation, multi-anonymization (VPN->Tor->I2P), traffic morphing, timing protection, metadata stripping, post-quantum crypto, anti-correlation, system-level memory protection
+- **Traffic Mimicry** (`ncp_mimicry.hpp`) - HTTP/TLS/WebSocket protocol emulation for traffic camouflage
+- **TLS Fingerprinting** (`ncp_tls_fingerprint.hpp`) - JA3/JA3S fingerprint randomization and evasion
+- **I2P Integration** (`ncp_i2p.hpp`) - I2P garlic routing, SAM bridge, tunnel management
+- **E2E Encryption** (`ncp_e2e.hpp`) - End-to-end encryption with X448, ECDH_P256, forward secrecy
+- **Secure Memory** (`ncp_secure_memory.hpp`) - Memory-safe containers with automatic zeroing on destruction, `mlock` support
+- **DNS over HTTPS** (`ncp_doh.hpp`) - Encrypted DNS resolution via DoH providers
+- **Security Module** (`ncp_security.hpp`) - System hardening, process protection, anti-forensic measures
+- **Database** (`ncp_db.hpp`) - SQLite3 + SQLCipher encrypted storage
+- **License Management** (`ncp_license.hpp`) - Hardware ID-based offline validation
+- **Logging** (`ncp_logger.hpp`) - Structured logging with severity levels
+- **Configuration** (`ncp_config.hpp`) - Runtime configuration management
 
-- **Extensible Architecture**
-  - Static library for embedding in other projects
-  - Well-defined C++ API
-  - Cross-platform (Windows, Linux, macOS)
-  - CMake-based build system
+### CLI Tool
 
-## 📋 Build Status
+| Command | Description |
+|---------|-------------|
+| `run [iface]` | Start PARANOID mode with all 8 protection layers + spoofing + DPI bypass |
+| `stop` | Stop spoofing and restore original settings |
+| `status` | View current protection status |
+| `rotate` | Rotate all identities (IP/MAC/DNS) |
+| `crypto keygen` | Generate Ed25519 keypair |
+| `crypto random <size>` | Generate cryptographically secure random bytes |
+| `license hwid` | Get system hardware ID |
+| `license info` | Show license status |
+| `network interfaces` | List network interfaces |
+| `network stats` | Show traffic statistics |
+| `dpi [options]` | DPI bypass proxy (--mode proxy/driver/passive, --preset RuNet-Soft/RuNet-Strong) |
+| `i2p <enable/disable/status>` | I2P integration management |
+| `mimic <http/tls/none>` | Set traffic mimicry type |
+| `tor` | Configure Tor proxy (bridges/hops) |
+| `obfuscate` | Toggle advanced traffic obfuscation |
+| `dns-secure` | Toggle DNS leak protection |
+| `help` | Show available commands |
 
-[![NCP C++ CI/CD](https://github.com/kirin2461/ncp-cpp/workflows/NCP%20C%2B%2B%20CI%2FCD/badge.svg)](https://github.com/kirin2461/ncp-cpp/actions)
+### Architecture
 
-| Platform | Status |
-|----------|--------|
-| Linux    | ✅ Building |
-| macOS    | ✅ Building |
-| Windows  | ✅ Building |
+- Modern C++17 with `constexpr`/`noexcept` optimization
+- Static library for embedding
+- Cross-platform: Windows, Linux, macOS
+- CMake + vcpkg/Conan build system
+- Fuzzing tests (LibFuzzer) for crypto, DPI, and packet parser
+- CI/CD via GitHub Actions
 
-## 🛠️ Quick Start
+## Quick Start
 
-### Prerequisites
+### Windows (automated)
 
 ```bash
-# Linux (Ubuntu/Debian)
-sudo apt-get install -y cmake build-essential git python3-pip
-pip3 install conan
-
-# macOS
-brew install cmake conan
-
-# Windows
-# Install Visual Studio 2019+, CMake 3.20+, Python, and Conan
-pip install conan
+# Clone and build
+git clone https://github.com/kirin2461/Dynam.git
+cd Dynam
+build.bat
 ```
 
-### Build
+### Linux / macOS
 
 ```bash
-git clone https://github.com/kirin2461/ncp-cpp.git
-cd ncp-cpp
+# Install dependencies
+sudo apt-get install -y cmake build-essential git libsodium-dev libssl-dev libsqlite3-dev libgtest-dev
 
+# Build
+git clone https://github.com/kirin2461/Dynam.git
+cd Dynam
 mkdir build && cd build
-conan install .. --build=missing
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON
 cmake --build . -j$(nproc)
 ctest --output-on-failure
 ```
 
-See [BUILD.md](docs/BUILD.md) for detailed build instructions.
+### Windows (manual)
 
-## 📦 Usage
+```bash
+# Requires: Visual Studio 2022+, CMake 3.20+, vcpkg
+vcpkg install libsodium:x64-windows openssl:x64-windows sqlite3:x64-windows gtest:x64-windows
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=%VCPKG_DIR%/scripts/buildsystems/vcpkg.cmake -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
+```
 
-### CLI Tool
+See [docs/BUILD.md](docs/BUILD.md) for detailed instructions.
+
+## Usage
+
+### Launch with PARANOID Mode (recommended)
+
+```bash
+# Windows: use the launcher
+run_ncp.bat
+# Then type: run
+
+# Or directly:
+ncp.exe run
+```
+
+The `run` command automatically activates:
+- Full network spoofing (IPv4/IPv6/MAC/DNS)
+- DPI bypass proxy
+- PARANOID mode (TINFOIL_HAT level) with all 8 protection layers
+- Cover traffic generation
+- Kill switch and leak prevention
+
+### Individual Commands
 
 ```bash
 # Generate Ed25519 keypair
-./build/bin/ncp crypto keygen
+ncp crypto keygen
 
-# Get system HWID
-./build/bin/ncp license hwid
+# DPI bypass with RuNet preset
+ncp dpi --mode proxy --port 8080 --target example.com --preset RuNet-Strong
+
+# Enable I2P
+ncp i2p enable
+
+# Enable TLS mimicry
+ncp mimic tls
 
 # List network interfaces
-./build/bin/ncp network interfaces
-
-# Generate random bytes
-./build/bin/ncp crypto random 32
+ncp network interfaces
 ```
 
-### As a Library
-
-```cpp
-#include "ncp_core/ncp_crypto.hpp"
-
-int main() {
-    NCP::Crypto crypto;
-    
-    // Generate keypair
-    auto kp = crypto.generate_keypair();
-    
-    // Sign message
-    std::string message = "Hello, World!";
-    auto signature = crypto.sign_message(message, kp.secret_key);
-    
-    // Verify signature
-    bool valid = crypto.verify_signature(message, signature, kp.public_key);
-    
-    return 0;
-}
-```
-
-## 📂 Project Structure
+## Project Structure
 
 ```
-ncp-cpp/
-├── src/
-│   ├── core/              # Core library (libncp_core)
-│   │   ├── include/       # Public headers
-│   │   └── src/           # Implementation
-│   ├── gui/               # Qt6 GUI (Phase 4)
-│   └── cli/               # CLI tool
-├── tests/                 # Unit tests
-├── docs/                  # Documentation
-├── CMakeLists.txt         # Main CMake configuration
-└── conanfile.txt          # Conan dependencies
+Dynam/
+|-- src/
+|   |-- core/              # Core library (libncp_core)
+|   |   |-- include/       # 17 public headers (ncp_*.hpp)
+|   |   |-- src/           # Implementation files
+|   |   |-- CMakeLists.txt
+|   |-- cli/               # CLI tool (main.cpp)
+|   |-- gui/               # Qt6 GUI (optional, ENABLE_GUI=OFF)
+|-- tests/                 # Unit tests (GoogleTest)
+|   |-- fuzz/              # Fuzzing tests (LibFuzzer)
+|-- docs/                  # Documentation
+|   |-- ARCHITECTURE.md
+|   |-- BUILD.md
+|   |-- CLI_COMMANDS.md
+|   |-- USER_GUIDE.md
+|   |-- SECURITY_FIXES.md
+|   |-- SECURITY_IMPLEMENTATION_GUIDE.md
+|   |-- KNOWN_ISSUES.md
+|-- scripts/               # Build helper scripts
+|-- CMakeLists.txt         # Root CMake config
+|-- build.bat              # Windows automated build
+|-- run_ncp.bat            # Windows launcher with CLI menu
+|-- conanfile.txt          # Conan dependencies
 ```
 
-## 🔧 Development Phases
+## CMake Build Options
 
-### ✅ Phase 1: Infrastructure (Complete)
-- CMake + Conan configuration
-- Project structure
-- Dependency integration
-- Unit test framework
-- CI/CD pipeline (GitHub Actions)
+| Option | Default | Description |
+|--------|---------|-------------|
+| `ENABLE_TESTS` | ON | Build unit tests (GoogleTest) |
+| `ENABLE_CLI` | ON | Build CLI tool |
+| `ENABLE_GUI` | OFF | Build Qt6 GUI application |
+| `ENABLE_FUZZING` | OFF | Build fuzz tests (requires Clang + LibFuzzer) |
+| `ENABLE_LIBOQS` | OFF | Post-quantum cryptography via liboqs |
+| `ENABLE_WEBSOCKETS` | OFF | WebSocket tunneling via libwebsockets |
+| `ENABLE_TOR_PROXY` | OFF | Tor proxy support |
+| `BUILD_SHARED_LIBS` | OFF | Build shared libraries |
 
-### 📊 Phase 2: Core Library (Upcoming)
-- Implement cryptographic functions (Ed25519, ChaCha20, PBKDF2)
-- HWID generation and offline license validation
-- SQLCipher database integration
-- Complete API documentation
+## Security
 
-### 🌐 Phase 3: DPI Bypass Module (Upcoming)
-- Packet capture with libpcap/Npcap
-- Raw socket operations
-- Platform-specific network APIs
-- Integration tests
+- **Cryptography**: libsodium (audited, industry-standard)
+- **AEAD**: ChaCha20-Poly1305 authenticated encryption
+- **Key Exchange**: X25519, X448, ECDH_P256
+- **Secure Memory**: Automatic zeroing, `mlock` protection, `SecureVector`/`SecureString` containers
+- **Database**: SQLite3 + SQLCipher (encrypted at rest)
+- **Code Quality**: `constexpr`/`noexcept` throughout, typed pointers, no raw `void*`
+- **Fuzzing**: LibFuzzer-based tests for crypto, DPI config, and packet parsing
+- **Anti-Forensic**: Memory wiping on exit, secure file deletion (DOD 5220.22-M), encrypted temp files
 
-### 🎨 Phase 4: Qt6 GUI (Upcoming)
-- Qt6 setup and CMake integration
-- Dark theme UI
-- Dashboard, Settings, License Panel
-- libncp_core integration
+## Dependencies
 
-### 💻 Phase 5: CLI Tool (Upcoming)
-- Enhanced command-line interface
-- Automation support
-- Docker containerization
+| Library | Purpose | Required |
+|---------|---------|----------|
+| libsodium | Cryptography (Ed25519, ChaCha20, X25519) | Yes |
+| OpenSSL | TLS operations, DoH | Yes |
+| SQLite3 | Encrypted database | Yes |
+| GoogleTest | Unit testing | For tests |
+| libpcap | Packet capture (Linux/macOS) | Optional |
+| libnetfilter_queue | DPI driver mode (Linux) | Optional |
+| Qt6 | GUI application | Optional |
+| liboqs | Post-quantum crypto | Optional |
+| libwebsockets | WebSocket tunneling | Optional |
 
-### 🔬 Phase 6: Testing & Release (Upcoming)
-- End-to-end testing
-- Multi-platform binary builds
-- Installer creation
-- User documentation
+See [DEPENDENCIES.md](DEPENDENCIES.md) for installation instructions.
 
-## 🔐 Security
+## License
 
-- **Cryptography**: libsodium (industry-standard, audited)
-- **Database**: SQLite3 + SQLCipher (encrypted)
-- **Code**: Modern C++17 with memory safety practices
-- **Compilation**: No exceptions to warnings policy
+MIT License. See [LICENSE](LICENSE) for details.
 
-## 📝 License
-
-This project is proprietary. All rights reserved.
-
-## 🤝 Contributing
+## Contributing
 
 Internal development only. Contact the project maintainer.
 
-## 📞 Support
+## Support
 
-For issues and questions, please open a GitHub issue.
+For issues and questions, please open a [GitHub Issue](https://github.com/kirin2461/Dynam/issues).
 
 ---
 
-**Last Updated**: January 23, 2026
-**Phase**: 1 (Infrastructure) ✅
+**Last Updated**: February 12, 2026  
+**Version**: 1.0.0  
+**Status**: Core library, CLI, DPI bypass, Paranoid Mode - implemented
