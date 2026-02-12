@@ -1,89 +1,141 @@
 # NCP C++ Setup Guide
 
-## Быстрый старт за 10 минут
+Быстрый старт для Dynam (NCP C++).
+
+## Быстрый старт
 
 ### 1. Установка зависимостей
 
 **Linux (Ubuntu/Debian):**
+
 ```bash
 sudo apt-get update
-sudo apt-get install -y cmake build-essential git python3-pip libpcap-dev pkg-config
-pip install conan
+sudo apt-get install -y cmake build-essential git \
+  libsodium-dev libssl-dev libsqlite3-dev libgtest-dev \
+  libpcap-dev pkg-config
 ```
 
 **macOS:**
+
 ```bash
-brew install cmake pcap python@3
-pip install conan
+brew install cmake libsodium openssl sqlite3 googletest libpcap
 ```
 
 **Windows:**
+
 - Установи [CMake](https://cmake.org/download/) (3.20+)
 - Установи [Visual Studio 2022](https://visualstudio.microsoft.com/) (с C++ tools)
-- Установи [Python 3.10+](https://www.python.org/)
-- `pip install conan`
+- Установи [vcpkg](https://github.com/microsoft/vcpkg)
+
+```bash
+vcpkg install libsodium:x64-windows openssl:x64-windows sqlite3:x64-windows gtest:x64-windows
+```
+
+Или используй Conan:
+```bash
+pip install conan
+conan install . --build=missing
+```
 
 ### 2. Сборка проекта
 
+**Linux/macOS:**
+
 ```bash
-git clone https://github.com/kirin2461/ncp-cpp.git
-cd ncp-cpp
-
+git clone https://github.com/kirin2461/Dynam.git
+cd Dynam
 mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON
+cmake --build . -j$(nproc)
+```
 
-# Установка зависимостей
-conan install .. --build=missing
+**Windows (build.bat):**
 
-# Конфигурация CMake
-cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON -DENABLE_CLI=ON
+```bash
+git clone https://github.com/kirin2461/Dynam.git
+cd Dynam
+build.bat
+```
 
-# Сборка
-cmake --build . -j$(nproc)  # Linux/macOS
-# или
-cmake --build . --config Release -j  # Windows
+`build.bat` автоматически устанавливает зависимости через Conan и запускает CMake.
+
+**Windows (ручная сборка):**
+
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=%VCPKG_DIR%/scripts/buildsystems/vcpkg.cmake -G "Visual Studio 17 2022" -A x64
+cmake --build . --config Release
 ```
 
 ### 3. Запуск тестов
 
 ```bash
+cd build
 ctest --output-on-failure
-
-# Или прямой запуск
-./bin/test_crypto  # Linux/macOS
-# или
-.\bin\test_crypto.exe  # Windows
 ```
 
-### 4. Запуск CLI
+### 4. Запуск
+
+**Рекомендуемый способ (PARANOID Mode):**
 
 ```bash
-./bin/ncp-cli
-# Output: NCP CLI v1.0.0
+# Windows
+run_ncp.bat
+
+# Или напрямую
+ncp.exe run
+
+# Linux/macOS
+sudo ./ncp run
 ```
 
-## Структура репо
+Команда `run` автоматически включает PARANOID режим со всеми 8 слоями защиты, спуфингом и DPI bypass.
 
-```
-ncp-cpp/
-├── src/core/        # Core library (libncp_core)
-│   ├── include/     # Public headers
-│   └── src/         # Implementation
-├── src/cli/         # CLI application
-├── src/gui/         # Qt6 GUI (в разработке)
-├── tests/           # Unit tests
-└── CMakeLists.txt   # Build configuration
+**Другие команды:**
+
+```bash
+ncp help          # Показать все команды
+ncp status        # Текущий статус
+ncp crypto keygen # Генерация ключей
+ncp dpi --preset RuNet-Strong  # DPI bypass
 ```
 
-## Первые шаги разработки
+Полный список команд: [docs/CLI_COMMANDS.md](docs/CLI_COMMANDS.md)
 
-### Добавить новый модуль в Core
+---
 
-1. Создать `src/core/include/ncp_mymodule.hpp`
-2. Реализовать `src/core/src/mymodule.cpp`
-3. Добавить в `src/core/CMakeLists.txt` в `add_library()`
-4. Написать тесты в `tests/test_mymodule.cpp`
+## Структура проекта
 
-### Запуск CMake конфигурации с опциями
+```
+Dynam/
+├── src/
+│   ├── core/          # Core library (libncp_core) - 17 модулей
+│   │   ├── include/   # Public headers (ncp_*.hpp)
+│   │   └── src/       # Implementation
+│   ├── cli/           # CLI application (ncp)
+│   └── gui/           # Qt6 GUI (опционально)
+├── tests/             # Unit tests + fuzz tests
+├── docs/              # Documentation
+├── scripts/           # Build/utility scripts
+├── build.bat          # Windows build script
+├── run_ncp.bat        # Windows run script
+├── CMakeLists.txt     # Build configuration
+├── conanfile.txt      # Conan dependencies
+└── DEPENDENCIES.md    # Dependencies guide
+```
+
+---
+
+## CMake опции
+
+| Опция | По умолчанию | Описание |
+|-------|-------------|----------|
+| `ENABLE_TESTS` | ON | Сборка тестов |
+| `ENABLE_CLI` | ON | Сборка CLI приложения |
+| `ENABLE_GUI` | OFF | Сборка GUI (требует Qt6) |
+| `ENABLE_LIBOQS` | ON | Post-quantum криптография |
+| `ENABLE_WEBSOCKETS` | ON | WebSocket tunneling |
+| `ENABLE_TOR_PROXY` | ON | Tor proxy интеграция |
 
 ```bash
 # Без GUI
@@ -96,28 +148,44 @@ cmake .. -DENABLE_CLI=OFF -DENABLE_GUI=OFF -DENABLE_TESTS=ON
 cmake .. -DCMAKE_BUILD_TYPE=Debug
 ```
 
+---
+
 ## Troubleshooting
 
-**Ошибка: libsodium not found**
+**libsodium not found:**
 ```bash
-conan remove '*' -f  # Очистить кэш
+# Conan
+conan remove '*' -f
 conan install .. --build=missing
+
+# Или установи вручную
+sudo apt-get install libsodium-dev
 ```
 
-**CMake error: Could not find Qt6**
+**SQLite3 not found:**
 ```bash
-brew install qt6  # macOS
+sudo apt-get install libsqlite3-dev
+```
+
+**CMake error: Could not find Qt6:**
+```bash
+brew install qt6     # macOS
 sudo apt-get install qt6-base-dev  # Linux
 ```
 
-**Permission denied на Linux**
+**Permission denied на Linux:**
 ```bash
-chmod +x ./bin/ncp-cli
+sudo chmod +x ./bin/ncp
+# Для run требуются права root
+sudo ./ncp run
 ```
+
+---
 
 ## Дальше
 
-- Смотри `README.md` для полного описания
-- Смотри `docs/architecture.md` для архитектуры
-- Смотри `CMakeLists.txt` для конфигурации сборки
-
+- [README.md](README.md) - Полное описание проекта
+- [DEPENDENCIES.md](DEPENDENCIES.md) - Детальный гайд по зависимостям
+- [docs/CLI_COMMANDS.md](docs/CLI_COMMANDS.md) - Справочник CLI команд
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - Архитектура проекта
+- [docs/BUILD.md](docs/BUILD.md) - Детальные инструкции сборки
