@@ -13,7 +13,7 @@
 #include "ncp_dpi.hpp"
 #include "ncp_i2p.hpp"
 
-using namespace NCP;
+using namespace ncp;
 
 // Global spoofer instance for signal handling
 std::atomic<bool> g_running(false);
