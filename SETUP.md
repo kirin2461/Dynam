@@ -11,8 +11,8 @@
 ```bash
 sudo apt-get update
 sudo apt-get install -y cmake build-essential git \
-  libsodium-dev libssl-dev libsqlite3-dev libgtest-dev \
-  libpcap-dev pkg-config
+    libsodium-dev libssl-dev libsqlite3-dev libgtest-dev \
+    libpcap-dev pkg-config
 ```
 
 **macOS:**
@@ -32,6 +32,7 @@ vcpkg install libsodium:x64-windows openssl:x64-windows sqlite3:x64-windows gtes
 ```
 
 Или используй Conan:
+
 ```bash
 pip install conan
 conan install . --build=missing
@@ -81,7 +82,6 @@ ctest --output-on-failure
 ```bash
 # Windows
 run_ncp.bat
-
 # Или напрямую
 ncp.exe run
 
@@ -89,42 +89,39 @@ ncp.exe run
 sudo ./ncp run
 ```
 
-Команда `run` автоматически включает PARANOID режим со всеми 8 слоями защиты, спуфингом и DPI bypass.
+Команда `run` автоматически включает PARANOID режим со всеми 8 слоями защиты, спуфингом (включая HW-идентификаторы) и DPI bypass.
 
 **Другие команды:**
 
 ```bash
-ncp help          # Показать все команды
-ncp status        # Текущий статус
-ncp crypto keygen # Генерация ключей
+ncp help            # Показать все команды
+ncp status          # Текущий статус
+ncp crypto keygen   # Генерация ключей
 ncp dpi --preset RuNet-Strong  # DPI bypass
 ```
 
 Полный список команд: [docs/CLI_COMMANDS.md](docs/CLI_COMMANDS.md)
-
----
 
 ## Структура проекта
 
 ```
 Dynam/
 ├── src/
-│   ├── core/          # Core library (libncp_core) - 17 модулей
-│   │   ├── include/   # Public headers (ncp_*.hpp)
-│   │   └── src/       # Implementation
-│   ├── cli/           # CLI application (ncp)
-│   └── gui/           # Qt6 GUI (опционально)
-├── tests/             # Unit tests + fuzz tests
-├── docs/              # Documentation
-├── scripts/           # Build/utility scripts
-├── build.bat          # Windows build script
-├── run_ncp.bat        # Windows run script
-├── CMakeLists.txt     # Build configuration
-├── conanfile.txt      # Conan dependencies
-└── DEPENDENCIES.md    # Dependencies guide
+│   ├── core/           # Core library (libncp_core) - 18 модулей
+│   │   ├── include/    # Public headers (ncp_*.hpp)
+│   │   └── src/        # Implementation
+│   ├── cli/            # CLI application (ncp)
+│   └── gui/            # Qt6 GUI (опционально)
+├── tests/              # Unit tests + fuzz tests
+│   └── fuzz/           # Fuzzing tests (LibFuzzer)
+├── docs/               # Documentation
+├── scripts/            # Build/utility scripts
+├── build.bat           # Windows build script
+├── run_ncp.bat         # Windows run script
+├── CMakeLists.txt      # Build configuration
+├── conanfile.txt       # Conan dependencies
+└── DEPENDENCIES.md     # Dependencies guide
 ```
-
----
 
 ## CMake опции
 
@@ -143,6 +140,9 @@ Dynam/
 # Без GUI
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_GUI=OFF
 
+# С fuzzing тестами (требует Clang)
+cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_FUZZING=ON
+
 # Только тесты
 cmake .. -DENABLE_CLI=OFF -DENABLE_GUI=OFF -DENABLE_TESTS=ON
 
@@ -150,39 +150,38 @@ cmake .. -DENABLE_CLI=OFF -DENABLE_GUI=OFF -DENABLE_TESTS=ON
 cmake .. -DCMAKE_BUILD_TYPE=Debug
 ```
 
----
-
 ## Troubleshooting
 
 **libsodium not found:**
+
 ```bash
 # Conan
 conan remove '*' -f
 conan install .. --build=missing
-
 # Или установи вручную
 sudo apt-get install libsodium-dev
 ```
 
 **SQLite3 not found:**
+
 ```bash
 sudo apt-get install libsqlite3-dev
 ```
 
 **CMake error: Could not find Qt6:**
+
 ```bash
-brew install qt6     # macOS
+brew install qt6       # macOS
 sudo apt-get install qt6-base-dev  # Linux
 ```
 
 **Permission denied на Linux:**
+
 ```bash
 sudo chmod +x ./bin/ncp
 # Для run требуются права root
 sudo ./ncp run
 ```
-
----
 
 ## Дальше
 
