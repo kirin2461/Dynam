@@ -8,9 +8,14 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <memory>
 
 // Forward declaration for pcap_t
 struct pcap_t;
+
+struct pcap_handle_deleter {
+    void operator()(pcap_t* p) const noexcept;
+};
 
 namespace ncp {
 
@@ -142,7 +147,7 @@ private:
     bool setup_packet_disorder();
     void cleanup_bypass();
 
-    void* pcap_handle_ = nullptr;
+        std::unique_ptr<pcap_t, pcap_handle_deleter> pcap_handle_;
     BypassTechnique current_technique_;
     BypassConfig bypass_config_;
     TorConfig tor_config_;
