@@ -9,8 +9,7 @@
 #include <map>
 #include <chrono>
 
-namespace NCP {
-
+namespace ncp {
 /**
  * @brief DNS-over-HTTPS (DoH) Client Implementation
  * 
@@ -337,6 +336,5 @@ std::string resolve_hostname(const std::string& hostname, bool use_ipv6 = false)
  */
 std::string reverse_dns_lookup(const std::string& ip_address);
 
-} // namespace NCP
-
+} // namespace ncp
 #endif // NCP_DOH_HPP
