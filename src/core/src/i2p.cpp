@@ -26,7 +26,7 @@ std::string I2PManager::get_destination() const {
     return current_dest_;
 }
 
-bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port, const std::string& remote_dest) {
+bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port, const std::string& remote_dest, TunnelType /*type*/) {
     if (!is_active()) return false;
     // Placeholder for tunnel creation via SAM
     return true;
