@@ -1,5 +1,9 @@
 #include "../include/ncp_i2p.hpp"
 #include <iostream>
+#include <array>
+#include <algorithm>
+#include <sstream>
+#include <cstring>
 
 namespace ncp {
 
