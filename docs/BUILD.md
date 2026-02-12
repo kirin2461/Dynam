@@ -31,8 +31,8 @@ brew install cmake conan libsodium openssl
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/kirin2461/ncp-cpp.git
-cd ncp-cpp
+git clone https://github.com/kirin2461/Dynam.git
+cd Dynam
 ```
 
 ### 2. Install dependencies with Conan
