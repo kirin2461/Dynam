@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
+#include <random>
 #include <cctype>
 
 #ifdef _WIN32
@@ -194,7 +195,13 @@ class DPIBypass::Impl {
 public:
     std::atomic<bool> running{false};
     DPIConfig config;
-    DPIStats stats;
+// Thread-local random number generator for secure noise generation
+namespace {
+    thread_local std::mt19937 rng(std::random_device{}());
+    thread_local std::uniform_int_distribution<int> byte_dist(0, 255);
+}
+
+DPIStats stats;
     mutable std::mutex stats_mutex;
     std::thread worker_thread;
     std::function<void(const std::string&)> log_callback;
@@ -438,7 +445,7 @@ public:
                 junk.assign(mask.begin(), mask.end());
             } else {
                 junk.resize(config.noise_size > 0 ? config.noise_size : 64);
-                for(auto& b : junk) b = static_cast<uint8_t>(rand() % 256);
+                for(auto& b : junk) b = static_cast<uint8_t>(byte_dist(rng));
             }
             
             // Send junk with low TTL if fake_packet is enabled, otherwise just as noise
@@ -457,12 +464,15 @@ public:
 
         // Optional fake low‑TTL probe before main ClientHello
         if (is_client_hello && config.enable_fake_packet) {
-            std::vector<uint8_t> fake_data = {0x16, 0x03, 0x01, 0x00, 0x01, 0x01}; // Minimum TLS-like record
             
             // Send multiple fake packets with different characteristics
             for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
-#ifdef IP_TTL
-                int original_ttl = 0;
+            // Randomize fake packet to avoid DPI fingerprinting
+            std::vector<uint8_t> fake_data = {
+                0x16, 0x03, static_cast<uint8_t>(byte_dist(rng) % 4), // TLS record + random version minor
+                static_cast<uint8_t>(byte_dist(rng)), static_cast<uint8_t>(byte_dist(rng)), // Random length
+                0x01 // ClientHello
+            };                int original_ttl = 0;
                 socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
                 bool ttl_changed = false;
                 if (getsockopt(sock, IPPROTO_IP, IP_TTL,
@@ -538,7 +548,7 @@ public:
             size_t offset = 0;
             while (offset < remaining) {
                 // Randomize fragment size slightly for evasion
-                size_t jitter = (rand() % 3); 
+                size_t jitter = (rng() % 3); 
                 size_t current_frag = std::min(base_frag_size + jitter, remaining - offset);
 
                 if (config.enable_disorder && config.disorder_delay_ms > 0) {
