@@ -181,7 +181,7 @@ SecureMemory E2ESession::derive_keys(
         size_t to_derive = std::min(key_length - derived, sizeof(subkey));
         
         if (crypto_kdf_derive_from_key(subkey, to_derive, subkey_id++,
-                                       kdf_context, master_key) != 0) {
+                                       reinterpret_cast<const char*>(kdf_context), master_key) != 0) {
             sodium_memzero(master_key, sizeof(master_key));
             throw std::runtime_error("Failed to derive key");
         }
