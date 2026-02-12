@@ -6,7 +6,7 @@ include(FetchContent)
 FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG        v1.14.0
+        GIT_TAG        v1.15.2
 )
 # Prevent overriding parent project's compiler/linker settings
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -22,8 +22,8 @@ add_executable(ncp_tests
 target_link_libraries(ncp_tests
     PRIVATE
         ncp_core
-        GTest::gtest
-        GTest::gtest_main
+                gtest
+                gtest_main
 )
 
 target_include_directories(ncp_tests PRIVATE
