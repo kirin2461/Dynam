@@ -2,253 +2,179 @@
 
 ## Overview
 
-NCP C++ is built on a three-layer architecture designed for security, performance, and maintainability.
+NCP C++ (Dynam) is a multi-layered network anonymization platform built on a three-layer architecture. All code uses the `ncp::` namespace, modern C++17 with `constexpr`/`noexcept` optimization.
 
 ## Three-Layer Architecture
 
-### Layer 1: Core Library (libncp_core)
+### Layer 1: Core Library (libncp_core) - 17 modules
 
-**Purpose**: All business logic and cryptographic operations
+**Purpose**: All network operations, cryptography, anonymization, and security logic.
 
-**Components**:
-- **Cryptography Module** (`ncp_crypto.hpp`)
-  - Ed25519 key generation and signing
-  - Curve25519 key exchange
-  - ChaCha20-Poly1305 authenticated encryption
-  - Random number generation
-  - Integration with libsodium
+**Modules**:
 
-- **License Management** (`ncp_license.hpp`)
-  - Hardware ID (HWID) generation
-  - Offline license validation
-  - Online license server integration
-  - License file generation and parsing
-  - Expiration checking
-
-- **Network Operations** (`ncp_network.hpp`)
-  - Packet capture (libpcap/Npcap)
-  - Raw socket operations
-  - DPI evasion techniques
-  - Fragmented packet injection
-  - Network interface enumeration
-  - TCP/UDP manipulation
-
-- **Database Layer** (`ncp_db.hpp`)
-  - SQLite3 with SQLCipher encryption
-  - Transaction management
-  - Query execution and data retrieval
-  - Schema management
-  - Prepared statements
+| Module | Header | Purpose |
+|--------|--------|---------|
+| Cryptography | `ncp_crypto.hpp` | Ed25519, Curve25519, ChaCha20-Poly1305, X25519, AEAD |
+| DPI Bypass | `ncp_dpi.hpp` | TCP fragmentation, fake packets, disorder, SNI splitting |
+| DPI Advanced | `ncp_dpi_advanced.hpp` | RuNet presets (Soft/Strong), advanced bypass |
+| Network Spoofing | `ncp_spoofer.hpp` | IPv4/IPv6/MAC/DNS spoofing, identity rotation |
+| Network Operations | `ncp_network.hpp` | libpcap capture, raw sockets, bypass techniques |
+| Paranoid Mode | `ncp_paranoid.hpp` | 8-layer protection system (TINFOIL_HAT level) |
+| Traffic Mimicry | `ncp_mimicry.hpp` | HTTP/TLS/WebSocket protocol emulation |
+| TLS Fingerprinting | `ncp_tls_fingerprint.hpp` | JA3/JA3S fingerprint randomization |
+| I2P Integration | `ncp_i2p.hpp` | Garlic routing, SAM bridge, tunnel management |
+| E2E Encryption | `ncp_e2e.hpp` | X448, ECDH_P256, forward secrecy |
+| Secure Memory | `ncp_secure_memory.hpp` | Memory-safe containers, auto-zeroing, mlock |
+| DNS over HTTPS | `ncp_doh.hpp` | Encrypted DNS via DoH providers |
+| Security | `ncp_security.hpp` | System hardening, process protection, anti-forensics |
+| Database | `ncp_db.hpp` | SQLite3 + SQLCipher encrypted storage |
+| License | `ncp_license.hpp` | Hardware ID-based offline validation |
+| Logging | `ncp_logger.hpp` | Structured logging with severity levels |
+| Configuration | `ncp_config.hpp` | Runtime configuration management |
 
 **Key Features**:
-- Statically linked library for easy distribution
+- Statically linked library
 - Header-only public interface
-- Memory-safe C++17 implementation
-- Zero external binary dependencies (except native libs)
+- Memory-safe C++17 with `constexpr`/`noexcept`
+- `ncp::` namespace throughout
 
-### Layer 2: GUI Application (Qt6)
+### Layer 2: CLI Tool
 
-**Status**: Planned for Phase 4
+**Status**: Implemented
 
-**Purpose**: Cross-platform desktop interface
+**Purpose**: Command-line interface with PARANOID mode auto-activation.
 
-**Components**:
-- Dashboard (monitoring and status)
-- Settings panel (configuration)
-- License management UI
-- Real-time statistics and graphs
+**Key Feature**: The `run` command automatically enables all 8 protection layers:
+1. Entry obfuscation (bridge nodes, guard rotation)
+2. Multi-anonymization (VPN -> Tor -> I2P)
+3. Traffic obfuscation (constant rate, morphing)
+4. Timing protection (random delays, batching)
+5. Metadata stripping
+6. Advanced crypto (post-quantum, forward secrecy)
+7. Anti-correlation (traffic splitting, multi-circuit)
+8. System protection (memory wipe, secure delete)
 
-**Technologies**:
-- Qt6 Widgets (C++)
-- Dark theme UI
-- Cross-platform (Windows/Linux/macOS)
+Plus: network isolation, forensic resistance, traffic analysis resistance.
 
-### Layer 3: CLI Tool
+### Layer 3: GUI Application (Qt6)
 
-**Status**: Phase 1 (basic structure), Phase 5 (full implementation)
+**Status**: Planned
 
-**Purpose**: Command-line automation and scripting
+**Purpose**: Cross-platform desktop interface with dark theme.
 
-**Features**:
-- Cryptographic operations
-- License validation
-- Network interface management
-- System administration tasks
-- Docker/CI/CD integration
+---
+
+## Module Structure
+
+```
+src/core/
+├── CMakeLists.txt
+├── include/
+│   ├── ncp_crypto.hpp
+│   ├── ncp_dpi.hpp
+│   ├── ncp_dpi_advanced.hpp
+│   ├── ncp_spoofer.hpp
+│   ├── ncp_network.hpp
+│   ├── ncp_paranoid.hpp
+│   ├── ncp_mimicry.hpp
+│   ├── ncp_tls_fingerprint.hpp
+│   ├── ncp_i2p.hpp
+│   ├── ncp_e2e.hpp
+│   ├── ncp_secure_memory.hpp
+│   ├── ncp_doh.hpp
+│   ├── ncp_security.hpp
+│   ├── ncp_db.hpp
+│   ├── ncp_license.hpp
+│   ├── ncp_logger.hpp
+│   └── ncp_config.hpp
+└── src/
+    └── (implementations)
+```
+
+---
 
 ## Dependency Hierarchy
 
 ```
 System Libraries (libc, libc++, Kernel APIs)
-        ↓
-External Dependencies (Conan managed)
-    ├─ libsodium (Cryptography)
-    ├─ OpenSSL 3 (Additional crypto, TLS)
-    ├─ SQLite3 (Database)
-    ├─ libpcap (Packet capture)
-    └─ GTest (Unit testing)
-        ↓
-    libncp_core
-    (Static Library)
-        ↓
-    ┌───┴────┬─────────┐
-    ↓        ↓         ↓
-   Qt6      CLI       Custom
-   GUI      Tool      Apps
+    ↓
+External Dependencies
+├─ libsodium     (Core cryptography)
+├─ OpenSSL 3     (TLS, DoH)
+├─ SQLite3       (Encrypted database)
+├─ libpcap       (Packet capture)
+└─ GTest         (Unit testing)
+    ↓
+libncp_core (Static Library) - 17 modules
+    ↓
+┌───┴────┬─────────┐
+↓        ↓         ↓
+CLI     Qt6 GUI  Custom
+Tool    (future)  Apps
 ```
 
 ## Build System
 
-### CMake
-
-- **Version**: 3.20+ (modern, modular CMake)
-- **Structure**:
-  - Root `CMakeLists.txt`: Main configuration, options, subdirectories
-  - `src/core/CMakeLists.txt`: Core library build
-  - `src/cli/CMakeLists.txt`: CLI tool build
-  - `src/gui/CMakeLists.txt`: GUI application build (Phase 4)
-  - `tests/CMakeLists.txt`: Unit tests build
-
-### Conan
-
-- **Version**: 2.x
-- **Purpose**: C++ dependency management
-- **Packages**:
-  ```
-  libsodium/1.0.18        (Cryptography)
-  openssl/3.1.4           (Additional crypto)
-  sqlite3/3.44.0          (Database)
-  libpcap/1.10.3          (Network capture)
-  gtest/1.14.0            (Testing)
-  ```
-
-## Module Organization
-
-### `src/core/` Structure
-
-```
-src/core/
-├── CMakeLists.txt           # Build configuration
-├── include/
-│   ├── ncp_crypto.hpp       # Public crypto API
-│   ├── ncp_license.hpp      # Public license API
-│   ├── ncp_network.hpp      # Public network API
-│   └── ncp_db.hpp           # Public database API
-└── src/
-    ├── crypto.cpp           # Crypto implementation
-    ├── license.cpp          # License management
-    ├── network.cpp          # Network operations
-    └── db.cpp               # Database operations
-```
+- **CMake** 3.20+ with modular structure
+- **Conan** for dependency management
+- Dependencies: libsodium/1.0.18, openssl/3.1.4, sqlite3/3.44.0, gtest/1.14.0
 
 ## API Design
 
-### Public Interface (Header-Only)
+All public APIs use `ncp::` namespace:
 
 ```cpp
-// All public APIs in namespace NCP
-namespace NCP {
-    // Crypto operations
-    class Crypto { /* ... */ };
-    
-    // License management
-    class License { /* ... */ };
-    
-    // Network operations
-    class Network { /* ... */ };
-    
-    // Database access
-    class Database { /* ... */ };
+namespace ncp {
+  class Crypto { /* Ed25519, ChaCha20, etc. */ };
+  class NetworkSpoofer { /* IPv4/IPv6/MAC/DNS spoofing */ };
+  class ParanoidMode { /* 8-layer protection */ };
+  class Network { /* Packet capture, bypass */ };
+  namespace DPI { class DPIBypass { /* TCP fragmentation */ }; }
+  class I2PManager { /* Garlic routing */ };
+  class Database { /* SQLite3 + SQLCipher */ };
+  class License { /* HWID-based validation */ };
 }
 ```
-
-### Usage Pattern
-
-```cpp
-#include "ncp_crypto.hpp"
-#include "ncp_license.hpp"
-
-int main() {
-    try {
-        NCP::Crypto crypto;
-        auto kp = crypto.generate_keypair();
-        
-        NCP::License license;
-        std::string hwid = license.get_hwid();
-        
-        return 0;
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-}
-```
-
-## Testing Strategy
-
-### Unit Tests (Google Test)
-
-- **Location**: `tests/` directory
-- **Framework**: GTest + CMake
-- **Coverage**:
-  - Cryptographic functions
-  - License validation
-  - Database operations
-  - Network operations
-
-### CI/CD Pipeline
-
-- **Platform**: GitHub Actions
-- **Trigger**: Push to main/develop, Pull requests
-- **Matrix**: Ubuntu, macOS, Windows
-- **Steps**:
-  1. Install dependencies
-  2. Install Conan packages
-  3. Configure CMake
-  4. Build project
-  5. Run unit tests
-  6. Archive artifacts
-
-## Performance Considerations
-
-- **Memory**: Stack-based allocation for small data, heap for large buffers
-- **Cryptography**: libsodium (constant-time, side-channel resistant)
-- **Database**: Connection pooling planned for future
-- **Network**: Event-driven, non-blocking I/O for capture operations
 
 ## Security Design
 
+### Paranoid Mode Protection Layers
+
+| Layer | Protection | Implementation |
+|-------|-----------|---------------|
+| 1 | Entry Obfuscation | Bridge nodes, guard rotation (6h) |
+| 2 | Multi-Anonymization | VPN chain -> Tor -> I2P |
+| 3 | Traffic Obfuscation | Constant rate (128 kbps), morphing |
+| 4 | Timing Protection | Random delays (50-500ms), batching |
+| 5 | Metadata Stripping | Header sanitization, fingerprint removal |
+| 6 | Advanced Crypto | Post-quantum (Kyber1024), forward secrecy |
+| 7 | Anti-Correlation | Traffic splitting, 3 simultaneous circuits |
+| 8 | System Protection | Memory wipe, disk cache disable, secure delete |
+
+### Additional Security Features
+
+- **Network Isolation**: Kill switch, IPv6/WebRTC blocking, per-domain isolation
+- **Forensic Resistance**: Encrypted memory, no logs, crash dump prevention
+- **Traffic Analysis Resistance**: Packet padding (1500 bytes), WFP defense
+- **DPI Bypass**: TCP fragmentation, fake packets, SNI splitting, RuNet presets
+
 ### Cryptographic Primitives
-- **Signatures**: Ed25519 (public-key cryptography)
-- **Key Exchange**: Curve25519 (ECDH)
+
+- **Signatures**: Ed25519
+- **Key Exchange**: Curve25519, X25519, X448, ECDH_P256
 - **Encryption**: ChaCha20-Poly1305 (AEAD)
 - **Hashing**: SHA-256 (via OpenSSL)
-- **KDF**: PBKDF2 (key derivation)
+- **Post-quantum**: Kyber1024, Dilithium5 (via liboqs, optional)
+- **Database**: SQLCipher (transparent encryption at rest)
 
-### Database Security
-- **Encryption**: SQLCipher (transparent encryption at rest)
-- **Access**: Session-level encryption keys
-- **Isolation**: Per-connection encryption context
+## Testing
 
-### License Security
-- **HWID Validation**: Hardware fingerprinting
-- **Signature Verification**: Ed25519 offline validation
-- **Expiration Checking**: Secure timestamp comparison
-- **Binding**: License tied to specific hardware
-
-## Future Enhancements
-
-### Phase 2+
-- Obfuscation using LLVM passes
-- Hardware acceleration (AVX-512 crypto)
-- Multi-threaded cryptographic operations
-- Advanced DPI evasion techniques
-- Machine learning-based threat detection
+- **Unit Tests**: GoogleTest in `tests/` directory
+- **Fuzz Tests**: Fuzzing for crypto, network, parser modules in `tests/fuzz/`
+- **CI/CD**: GitHub Actions (Ubuntu, macOS, Windows matrix)
 
 ## Compliance
 
 - **C++ Standard**: C++17
 - **Compiler**: GCC 9+, Clang 10+, MSVC 2019+
 - **Platforms**: Linux, macOS, Windows (x86_64, ARM64)
-- **Code Style**: ClangFormat (configured in .clang-format)
-- **Static Analysis**: clang-tidy, cppcheck
