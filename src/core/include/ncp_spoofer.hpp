@@ -18,6 +18,23 @@ namespace ncp {
  */
 class NetworkSpoofer {
 public:
+    // TCP/IP Fingerprint Profile
+    struct TcpFingerprintProfile {
+        std::string name;
+        uint8_t ttl;
+        uint16_t window_size;
+        uint16_t mss;
+        uint8_t window_scale;
+        bool sack_permitted;
+        bool df_bit;
+        std::string tcp_options_order; // e.g., "MSS,NOP,WS,NOP,NOP,TS,NOP,NOP,SACK"
+        
+        // Presets
+        static TcpFingerprintProfile Windows10();
+        static TcpFingerprintProfile Linux5x();
+        static TcpFingerprintProfile MacOS12();
+    };
+    
     // Configuration for spoofing behavior
     struct SpoofConfig {
         bool spoof_ipv4 = true;
@@ -27,6 +44,30 @@ public:
         bool spoof_hw_info = true;
         bool enable_chaffing = false;
         
+        // ==================== PHASE 1: SMBIOS / DMI Serials ====================
+        bool spoof_smbios = true;              // SMBIOS/DMI spoofing
+        std::string custom_board_serial;       // Empty = random
+        std::string custom_system_serial;      // Empty = random
+        std::string custom_system_uuid;        // Empty = random
+        std::string custom_bios_vendor;        // e.g., "American Megatrends Inc."
+        std::string custom_bios_version;       // e.g., "F20a"
+        
+        // ==================== PHASE 2: Disk Serials ====================
+        bool spoof_disk_serial = true;         // Disk serial number spoofing
+        std::string custom_disk_serial;        // Empty = random
+        
+        // ==================== PHASE 3: DHCP Client ID ====================
+        bool spoof_dhcp_client_id = true;      // DHCP Option 61 spoofing
+        std::string custom_dhcp_client_id;     // Empty = use spoofed MAC
+        
+        // ==================== PHASE 4: TCP/IP Fingerprint ====================
+        bool spoof_tcp_fingerprint = false;    // TCP/IP stack fingerprint
+        TcpFingerprintProfile tcp_profile;     // Default: current OS
+        std::string target_os_fingerprint;     // "Windows10", "Linux", "macOS"
+        
+        bool spoof_mtu = false;                // MTU size spoofing
+        int custom_mtu = 1500;
+        
         // Rotation intervals (0 = no auto-rotation)
         int ipv4_rotation_seconds = 0;
         int ipv6_rotation_seconds = 0;
@@ -34,13 +75,15 @@ public:
         int dns_rotation_seconds = 0;
         int hostname_rotation_seconds = 0;
         int hw_info_rotation_seconds = 0;
+        int smbios_rotation_seconds = 0;      // NEW: SMBIOS auto-rotation
+        int disk_serial_rotation_seconds = 0; // NEW: Disk serial auto-rotation
         
         // Custom values (empty = generate random)
         std::string custom_ipv4;
         std::string custom_ipv6;
         std::string custom_mac;
         std::string custom_hostname;
-        std::string custom_hw_serial;
+        std::string custom_hw_serial;          // Legacy field
         std::vector<std::string> custom_dns_servers;
         
         // Stealth features
@@ -51,32 +94,25 @@ public:
         std::vector<std::string> doh_servers;
         
         // Advanced anti-correlation features
-        bool enable_traffic_padding = false;  // Add random padding to packets
+        bool enable_traffic_padding = false;
         int min_padding_bytes = 0;
         int max_padding_bytes = 256;
         
-        bool enable_timing_randomization = true;  // Randomize rotation timings
-        int timing_variance_percent = 20;  // ±20% variance
+        bool enable_timing_randomization = true;
+        int timing_variance_percent = 20;
         
-        bool coordinated_rotation = true;  // Rotate all identifiers together
-        bool enable_decoy_traffic = false;  // Generate decoy traffic
+        bool coordinated_rotation = true;
+        bool enable_decoy_traffic = false;
         int decoy_packets_per_minute = 10;
         
-        // Browser/OS fingerprint spoofing
-        bool spoof_tcp_fingerprint = false;  // Spoof TCP/IP stack fingerprint
-        std::string target_os_fingerprint;  // "Windows10", "Linux", "macOS", etc.
-        
-        bool spoof_mtu = false;  // Spoof MTU size
-        int custom_mtu = 1500;
-        
         // Advanced network behavior
-        bool enable_multi_path = false;  // Use multiple network paths
-        bool randomize_packet_order = false;  // Randomize outgoing packet order
+        bool enable_multi_path = false;
+        bool randomize_packet_order = false;
         
-        // Anti-tracking features  
-        bool clear_arp_cache = true;  // Clear ARP cache on rotation
-        bool flush_dns_cache = true;  // Flush DNS cache on rotation
-        bool reset_tcp_timestamps = true;  // Reset TCP timestamps
+        // Anti-tracking features 
+        bool clear_arp_cache = true;
+        bool flush_dns_cache = true;
+        bool reset_tcp_timestamps = true;
         
         SpoofConfig() {
             doh_servers = {
@@ -98,6 +134,12 @@ public:
         std::string mac_address;
         std::string hostname;
         std::vector<std::string> dns_servers;
+        
+        // NEW: Original SMBIOS/HW identifiers
+        std::string original_board_serial;
+        std::string original_system_serial;
+        std::string original_system_uuid;
+        std::string original_disk_serial;
     };
     
     // Spoof status
@@ -108,12 +150,20 @@ public:
         bool dns_spoofed = false;
         bool hostname_spoofed = false;
         bool hw_info_spoofed = false;
+        bool smbios_spoofed = false;          // NEW
+        bool disk_serial_spoofed = false;     // NEW
+        bool dhcp_client_id_spoofed = false;  // NEW
+        bool tcp_fingerprint_spoofed = false; // NEW
         
         std::string current_ipv4;
         std::string current_ipv6;
         std::string current_mac;
         std::string current_hostname;
         std::string current_hw_serial;
+        std::string current_board_serial;     // NEW
+        std::string current_system_serial;    // NEW
+        std::string current_disk_serial;      // NEW
+        std::string current_dhcp_client_id;   // NEW
         std::vector<std::string> current_dns;
         
         std::chrono::steady_clock::time_point last_ipv4_rotation;
@@ -122,6 +172,8 @@ public:
         std::chrono::steady_clock::time_point last_dns_rotation;
         std::chrono::steady_clock::time_point last_hostname_rotation;
         std::chrono::steady_clock::time_point last_hw_info_rotation;
+        std::chrono::steady_clock::time_point last_smbios_rotation;      // NEW
+        std::chrono::steady_clock::time_point last_disk_serial_rotation; // NEW
     };
     
     NetworkSpoofer();
@@ -143,6 +195,8 @@ public:
     bool rotate_dns();
     bool rotate_hostname();
     bool rotate_hw_info();
+    bool rotate_smbios();       // NEW
+    bool rotate_disk_serial();  // NEW
     bool rotate_all();
     
     // Set custom values
@@ -152,13 +206,19 @@ public:
     bool set_custom_hostname(const std::string& hostname);
     bool set_custom_hw_serial(const std::string& serial);
     bool set_custom_dns(const std::vector<std::string>& dns_servers);
+    bool set_custom_smbios(const std::string& board_serial, const std::string& system_serial, const std::string& uuid); // NEW
+    bool set_custom_disk_serial(const std::string& disk_serial); // NEW
     
-    // Random value generators (instance methods, not static)
+    // Random value generators
     std::string generate_random_ipv4();
     std::string generate_random_ipv6();
     std::string generate_random_mac();
     std::string generate_random_hostname();
     std::string generate_random_hw_serial();
+    std::string generate_random_board_serial();  // NEW
+    std::string generate_random_system_serial(); // NEW
+    std::string generate_random_uuid();          // NEW
+    std::string generate_random_disk_serial();   // NEW
     
     // Callbacks for rotation events
     using RotationCallback = std::function<void(const std::string& type, const std::string& old_value, const std::string& new_value)>;
@@ -175,6 +235,10 @@ private:
     bool apply_dns(const std::vector<std::string>& dns_servers);
     bool apply_hostname(const std::string& hostname);
     bool apply_hw_info(const std::string& serial);
+    bool apply_smbios(const std::string& board_serial, const std::string& system_serial, const std::string& uuid); // NEW
+    bool apply_disk_serial(const std::string& disk_serial); // NEW
+    bool apply_dhcp_client_id(const std::string& client_id); // NEW
+    bool apply_tcp_fingerprint(const TcpFingerprintProfile& profile); // NEW
     
     // Auto-rotation thread
     void rotation_thread_func();
