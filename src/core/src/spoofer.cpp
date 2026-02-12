@@ -10,9 +10,9 @@
 #include <iostream>
 
 #ifdef _WIN32
-#include <windows.h>
-#include <iphlpapi.h>
 #include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
 #else
