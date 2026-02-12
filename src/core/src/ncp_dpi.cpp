@@ -709,7 +709,7 @@ bool DPIBypass::start() {
     if (impl_->config.mode == DPIMode::DRIVER) {
         if (!impl_->init_nfqueue()) return false;
         impl_->running = true;
-        impl_->worker_thread = std::thread(&Impl::nfqueue_loop, impl.get());
+        impl_->worker_thread = std::thread(&Impl::nfqueue_loop, impl_.get());
         impl_->log("DPI bypass started (driver mode via nfqueue, queue=" +
                   std::to_string(impl_->config.nfqueue_num) + ")");
         return true;
@@ -717,7 +717,7 @@ bool DPIBypass::start() {
 #endif
     if (impl_->config.mode == DPIMode::PROXY) {
         impl_->running = true;
-        impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl.get());
+        impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl_.get());
         impl_->log("DPI bypass started (TCP proxy mode)");
         return true;
     }
