@@ -20,6 +20,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(ENABLE_LIBOQS "Enable post-quantum cryptography via liboqs" OFF)
 option(ENABLE_WEBSOCKETS "Enable WebSocket tunneling" OFF)
 option(ENABLE_TOR_PROXY "Enable Tor proxy support" OFF)
+option(ENABLE_FUZZING "Enable fuzzing tests (requires Clang with LibFuzzer)" OFF)
 
 # Platform-specific settings
 if(WIN32)
@@ -111,6 +112,11 @@ if(ENABLE_TESTS)
     add_subdirectory(tests)
 endif()
 
+# Fuzzing tests (requires Clang with LibFuzzer)
+if(ENABLE_FUZZING)
+    add_subdirectory(tests/fuzz)
+endif()
+
 # Print configuration
 message(STATUS "")
 message(STATUS "==============================")
@@ -122,4 +128,5 @@ message(STATUS "  ENABLE_TESTS:     ${ENABLE_TESTS}")
 message(STATUS "  ENABLE_LIBOQS:    ${ENABLE_LIBOQS}")
 message(STATUS "  ENABLE_WEBSOCKETS:${ENABLE_WEBSOCKETS}")
 message(STATUS "  ENABLE_TOR_PROXY: ${ENABLE_TOR_PROXY}")
+message(STATUS " ENABLE_FUZZING: ${ENABLE_FUZZING}")
 message(STATUS "==============================")
