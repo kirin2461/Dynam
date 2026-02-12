@@ -102,7 +102,7 @@ if not exist "%VCPKG_DIR%" (
 echo     Installing dependencies (this may take a while)...
 "%VCPKG_DIR%\vcpkg.exe" install libsodium:x64-windows
 "%VCPKG_DIR%\vcpkg.exe" install openssl:x64-windows
-"%VCPKG_DIR%\vcpkg.exe" install nlohmann-json:x64-windows
+"%VCPKG_DIR%\vcpkg.exe" install sqlite3:x64-windows
 "%VCPKG_DIR%\vcpkg.exe" install gtest:x64-windows
 
 echo [OK] All dependencies installed.
