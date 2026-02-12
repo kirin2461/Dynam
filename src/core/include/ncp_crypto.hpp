@@ -5,6 +5,8 @@
 #include <vector>
 #include <string>
 #include <cstdint>
+#include <sstream>
+#include <iomanip>
 
 namespace ncp {
 
@@ -66,6 +68,16 @@ public:
         const SecureMemory& signature,
         const std::vector<uint8_t>& public_key
     );
+
+    // Utility: convert SecureMemory to hex string
+    static std::string bytes_to_hex(const SecureMemory& mem) {
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0');
+        for (size_t i = 0; i < mem.size(); ++i) {
+            oss << std::setw(2) << static_cast<int>(mem.data()[i]);
+        }
+        return oss.str();
+    }
     
 private:
     void init_libsodium();
