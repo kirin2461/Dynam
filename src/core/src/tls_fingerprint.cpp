@@ -6,7 +6,7 @@
 #include <random>
 #include <vector>
 
-namespace NCP {
+namespace ncp {
 
 // SecureMemory implementation
 SecureMemory::SecureMemory() : data_(nullptr), size_(0) {}
@@ -268,4 +268,4 @@ namespace SecureOps {
     }
 }
 
-} // namespace NCP
+} // namespace ncp
