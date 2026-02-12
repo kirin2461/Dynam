@@ -10,7 +10,7 @@
 #include <random>
 #include <cstdint>
 
-namespace NCP {
+namespace ncp {
 namespace DPI {
 
 /**

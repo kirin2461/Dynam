@@ -1,7 +1,7 @@
 #include "../include/ncp_i2p.hpp"
 #include <iostream>
 
-namespace NCP {
+namespace ncp {
 
 I2PManager::I2PManager() : is_initialized_(false) {}
 I2PManager::~I2PManager() {}
@@ -32,4 +32,4 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port, con
     return true;
 }
 
-} // namespace NCP
+} // namespace ncp

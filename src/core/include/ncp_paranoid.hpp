@@ -8,7 +8,7 @@
 #include <functional>
 #include <map>
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief Paranoid Mode - Extreme Privacy and Security
@@ -287,6 +287,6 @@ private:
     void destroy_all_evidence();
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_PARANOID_HPP

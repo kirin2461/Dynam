@@ -11,7 +11,7 @@
 #include <random>
 #include <set>
 
-namespace NCP {
+namespace ncp {
 namespace DPI {
 
 // TCPManipulator implementation
@@ -784,4 +784,4 @@ std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
 }
 
 } // namespace DPI
-} // namespace NCP
+} // namespace ncp

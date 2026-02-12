@@ -11,7 +11,7 @@
 #include <chrono>
 #include <map>
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief End-to-End encryption session states

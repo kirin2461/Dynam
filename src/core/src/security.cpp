@@ -10,7 +10,7 @@
 #include <iomanip>
 #include <sstream>
 
-namespace NCP {
+namespace ncp {
 
 // ==================== CertificatePinner ====================
 
@@ -731,4 +731,4 @@ SecurityManager::Config SecurityManager::get_config() const {
     return config_;
 }
 
-} // namespace NCP
+} // namespace ncp

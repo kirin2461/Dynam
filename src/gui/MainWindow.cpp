@@ -26,7 +26,7 @@
 #include <QCloseEvent>
 #include <QApplication>
 
-namespace NCP::GUI {
+namespace ncp::GUI {
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
@@ -35,10 +35,10 @@ MainWindow::MainWindow(QWidget* parent)
     , currentTheme_("dark_pro") {
     
     // Initialize core modules
-    crypto_ = std::make_unique<NCP::Crypto>();
-    license_ = std::make_unique<NCP::License>();
-    database_ = std::make_unique<NCP::Database>();
-    network_ = std::make_unique<NCP::Network>();
+    crypto_ = std::make_unique<ncp::Crypto>();
+    license_ = std::make_unique<ncp::License>();
+    database_ = std::make_unique<ncp::Database>();
+    network_ = std::make_unique<ncp::Network>();
     
     // Setup UI
     setupUI();
@@ -245,7 +245,7 @@ void MainWindow::onQuickConnectClicked() {
 void MainWindow::onBypassToggled(bool enabled) {
     bypassEnabled_ = enabled;
     if (enabled) {
-        network_->enable_bypass(NCP::Network::BypassTechnique::TCP_FRAGMENTATION);
+        network_->enable_bypass(ncp::Network::BypassTechnique::TCP_FRAGMENTATION);
         database_->log_activity("bypass", "DPI bypass enabled");
     } else {
         network_->disable_bypass();
@@ -255,7 +255,7 @@ void MainWindow::onBypassToggled(bool enabled) {
 }
 
 void MainWindow::onBypassTechniqueChanged(int index) {
-    auto technique = static_cast<NCP::Network::BypassTechnique>(index);
+    auto technique = static_cast<ncp::Network::BypassTechnique>(index);
     network_->enable_bypass(technique);
 }
 
@@ -333,4 +333,4 @@ void MainWindow::refreshLicenseStatus() {
     licenseInfo_->updateInfo(info);
 }
 
-} // namespace NCP::GUI
+} // namespace ncp::GUI

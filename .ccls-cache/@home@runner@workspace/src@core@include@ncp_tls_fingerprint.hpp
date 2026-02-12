@@ -7,7 +7,7 @@
 #include <memory>
 #include <map>
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief Secure Memory Management with auto-zeroing
@@ -226,6 +226,6 @@ namespace SecureOps {
     SecureString hash_password(const SecureString& password, const std::vector<uint8_t>& salt);
 }
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_TLS_FINGERPRINT_HPP

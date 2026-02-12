@@ -8,7 +8,7 @@
 #include <map>
 #include <chrono>
 
-namespace NCP {
+namespace ncp {
 
 class I2PManager {
 public:
@@ -166,6 +166,6 @@ private:
     void inject_dummy_message();
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_I2P_HPP

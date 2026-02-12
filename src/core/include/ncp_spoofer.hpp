@@ -10,7 +10,7 @@
 #include <chrono>
 #include <random>
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief Network Identity Spoofer
@@ -194,6 +194,6 @@ private:
     std::uniform_int_distribution<int> dist_{0, 255};
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_SPOOFER_HPP

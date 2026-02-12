@@ -12,7 +12,7 @@
 struct sqlite3;
 #endif
 
-namespace NCP {
+namespace ncp {
 
 class Database {
 public:
@@ -68,6 +68,6 @@ private:
     std::string last_error_;
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_DB_HPP

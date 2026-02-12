@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <mutex>
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief Runtime configuration manager for NCP
@@ -134,4 +134,4 @@ private:
     std::map<std::string, std::string> values_;
 };
 
-} // namespace NCP
+} // namespace ncp

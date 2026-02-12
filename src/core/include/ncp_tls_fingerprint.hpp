@@ -10,7 +10,7 @@
 #include <memory>
 #include <map>
 
-namespace NCP {
+namespace ncp {
 
 // Browser type enum for fingerprint profiles
 enum class BrowserType {
@@ -162,6 +162,6 @@ private:
     void load_browser_profile(BrowserType browser);
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_TLS_FINGERPRINT_HPP

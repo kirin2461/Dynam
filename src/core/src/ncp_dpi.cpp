@@ -31,7 +31,7 @@
     #endif
 #endif
 
-namespace NCP {
+namespace ncp {
 namespace DPI {
 
 namespace {
@@ -750,4 +750,4 @@ void DPIBypass::set_log_callback(std::function<void(const std::string&)> cb) {
 }
 
 } // namespace DPI
-} // namespace NCP
+} // namespace ncp

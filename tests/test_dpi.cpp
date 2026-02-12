@@ -3,10 +3,10 @@
 #include <vector>
 #include <string>
 
-using namespace NCP::DPI;
+using namespace ncp::DPI;
 
 // Forward declaration of internal helper for SNI parsing tests
-namespace NCP::DPI {
+namespace ncp::DPI {
 int find_sni_hostname_offset(const uint8_t* data, size_t len);
 }
 

@@ -44,7 +44,7 @@ TEST_F(IntegrationTest, ApplicationLifecycle) {
         auto network_manager = std::make_unique<ncp::NetworkManager>();
         EXPECT_NE(network_manager, nullptr);
         
-        auto packet_capture = std::make_unique<NCP::PacketCapture>();
+        auto packet_capture = std::make_unique<ncp::PacketCapture>();
         EXPECT_NE(packet_capture, nullptr);
     });
 }
@@ -52,7 +52,7 @@ TEST_F(IntegrationTest, ApplicationLifecycle) {
 // Test: NetworkManager + PacketCapture integration
 TEST_F(IntegrationTest, NetworkManagerPacketCaptureIntegration) {
     ncp::NetworkManager network_manager;
-    NCP::PacketCapture packet_capture;
+    ncp::PacketCapture packet_capture;
     
     // Test stats initialization
     auto stats = network_manager.get_stats();
@@ -126,7 +126,7 @@ TEST_F(IntegrationTest, SignalSlotIntegration) {
 
 // Test: Error handling integration
 TEST_F(IntegrationTest, ErrorHandlingIntegration) {
-    NCP::PacketCapture capture;
+    ncp::PacketCapture capture;
     
     // Test with invalid interface
     EXPECT_FALSE(capture.startCapture("invalid_interface_xyz"));
@@ -137,7 +137,7 @@ TEST_F(IntegrationTest, ErrorHandlingIntegration) {
 TEST_F(IntegrationTest, ResourceCleanup) {
     {
         ncp::NetworkManager nm;
-        NCP::PacketCapture pc;
+        ncp::PacketCapture pc;
         // Objects go out of scope
     }
     // No memory leaks expected (use valgrind for verification)

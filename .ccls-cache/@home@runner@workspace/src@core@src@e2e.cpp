@@ -12,7 +12,7 @@
 #include <oqs/oqs.h>
 #endif
 
-namespace NCP {
+namespace ncp {
 
 // E2ESession::Impl - Private implementation
 struct E2ESession::Impl {
@@ -420,7 +420,7 @@ uint64_t E2ESession::get_messages_received() const {
 }
 
     
-} // namespace NCP
+} // namespace ncp
 
 // E2EManager implementation
 struct E2EManager::Impl {
@@ -504,7 +504,7 @@ bool E2EManager::import_keys(
 }
 
 
-namespace NCP {
+namespace ncp {
 // E2EUtils namespace implementation
 namespace E2EUtils {
 

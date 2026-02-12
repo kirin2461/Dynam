@@ -15,7 +15,7 @@
 #include <sqlite3.h>
 #endif
 
-namespace NCP {
+namespace ncp {
 
 // ==================== Constructor/Destructor ====================
 
@@ -415,4 +415,4 @@ bool Database::remove(const std::string& table_name,
 #endif
 }
 
-} // namespace NCP
+} // namespace ncp

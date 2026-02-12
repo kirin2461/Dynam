@@ -7,7 +7,7 @@
 #include <functional>
 #include <cstdint>
 
-namespace NCP {
+namespace ncp {
 namespace DPI {
 
 /**
@@ -163,4 +163,4 @@ private:
 };
 
 } // namespace DPI
-} // namespace NCP
+} // namespace ncp

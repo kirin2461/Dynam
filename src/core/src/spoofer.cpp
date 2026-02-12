@@ -28,7 +28,7 @@
 #endif
 #endif
 
-namespace NCP {
+namespace ncp {
 
 // ==================== Safe Command Execution ====================
 static const std::set<std::string> ALLOWED_COMMANDS = {
@@ -599,4 +599,4 @@ bool NetworkSpoofer::apply_hw_info(const std::string& serial) {
 #endif
 }
 
-} // namespace NCP
+} // namespace ncp

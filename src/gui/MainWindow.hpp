@@ -7,7 +7,7 @@
 #include <memory>
 
 // Forward declarations
-namespace NCP {
+namespace ncp {
     class Crypto;
     class License;
     class Database;
@@ -23,7 +23,7 @@ class ActivityLog;
 class LicenseInfo;
 class SettingsDialog;
 
-namespace NCP::GUI {
+namespace ncp::GUI {
 
 /**
  * @brief Main application window for Network Control Protocol
@@ -96,10 +96,10 @@ private:
     QString loadStyleSheet(const QString& themeName);
 
     // Core modules
-    std::unique_ptr<NCP::Crypto> crypto_;
-    std::unique_ptr<NCP::License> license_;
-    std::unique_ptr<NCP::Database> database_;
-    std::unique_ptr<NCP::Network> network_;
+    std::unique_ptr<ncp::Crypto> crypto_;
+    std::unique_ptr<ncp::License> license_;
+    std::unique_ptr<ncp::Database> database_;
+    std::unique_ptr<ncp::Network> network_;
 
     // UI Components
     QStackedWidget* stackedWidget_;
@@ -127,4 +127,4 @@ private:
     QString currentTheme_;
 };
 
-} // namespace NCP::GUI
+} // namespace ncp::GUI

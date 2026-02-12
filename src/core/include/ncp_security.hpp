@@ -10,7 +10,7 @@
 #include <fstream>
 #include <random>
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief Security enhancement features for NCP
@@ -483,6 +483,6 @@ private:
     CanaryTokens canary_tokens_;
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_SECURITY_HPP

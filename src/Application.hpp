@@ -15,7 +15,7 @@
 #include "gui/MainWindow.hpp"
 #endif
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief Main application orchestrator for NCP
@@ -41,8 +41,8 @@ public:
 
     // Component access
     NetworkManager* networkManager() const { return network_manager_.get(); }
-    Config& config() { return NCP::Config::instance(); }
-    Logger& logger() { return NCP::Logger::instance(); }
+    Config& config() { return ncp::Config::instance(); }
+    Logger& logger() { return ncp::Logger::instance(); }
 
 #ifdef ENABLE_GUI
     MainWindow* mainWindow() const { return main_window_.get(); }
@@ -81,6 +81,6 @@ private:
     void parseArguments();
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_APPLICATION_HPP

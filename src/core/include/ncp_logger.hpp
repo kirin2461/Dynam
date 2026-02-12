@@ -9,7 +9,7 @@
 #include <iomanip>
 #include <ctime>
 
-namespace NCP {
+namespace ncp {
 
 /**
  * @brief Logging levels for NCP
@@ -140,11 +140,11 @@ private:
 };
 
 // Convenience macros
-#define NCP_LOG_TRACE(msg) NCP::Logger::instance().trace(msg)
-#define NCP_LOG_DEBUG(msg) NCP::Logger::instance().debug(msg)
-#define NCP_LOG_INFO(msg)  NCP::Logger::instance().info(msg)
-#define NCP_LOG_WARN(msg)  NCP::Logger::instance().warn(msg)
-#define NCP_LOG_ERROR(msg) NCP::Logger::instance().error(msg)
-#define NCP_LOG_FATAL(msg) NCP::Logger::instance().fatal(msg)
+#define NCP_LOG_TRACE(msg) ncp::Logger::instance().trace(msg)
+#define NCP_LOG_DEBUG(msg) ncp::Logger::instance().debug(msg)
+#define NCP_LOG_INFO(msg)  ncp::Logger::instance().info(msg)
+#define NCP_LOG_WARN(msg)  ncp::Logger::instance().warn(msg)
+#define NCP_LOG_ERROR(msg) ncp::Logger::instance().error(msg)
+#define NCP_LOG_FATAL(msg) ncp::Logger::instance().fatal(msg)
 
-} // namespace NCP
+} // namespace ncp

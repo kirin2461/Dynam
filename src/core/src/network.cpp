@@ -26,7 +26,7 @@
 #include <pcap/pcap.h>
 #endif
 
-namespace NCP {
+namespace ncp {
 
 // ==================== Constructor/Destructor ====================
 
@@ -456,4 +456,4 @@ std::string Network::get_last_error() const {
     return last_error_;
 }
 
-} // namespace NCP
+} // namespace ncp

@@ -3,7 +3,7 @@
 #include <fstream>
 #include <stdexcept>
 
-namespace NCP {
+namespace ncp {
 
 Application::Application(int& argc, char** argv)
     : initialized_(false)
@@ -46,7 +46,7 @@ int Application::run() {
 
 void Application::loadConfig(const std::string& config_path) {
     config_path_ = config_path;
-    auto& cfg = NCP::Config::instance();
+    auto& cfg = ncp::Config::instance();
     if (!cfg.loadFromFile(config_path)) {
         NCP_LOG_WARN("Config file not found: " + config_path + ", using defaults");
     } else {
@@ -55,7 +55,7 @@ void Application::loadConfig(const std::string& config_path) {
 }
 
 void Application::saveConfig(const std::string& config_path) const {
-    auto& cfg = NCP::Config::instance();
+    auto& cfg = ncp::Config::instance();
     if (cfg.saveToFile(config_path)) {
         NCP_LOG_INFO("Configuration saved to: " + config_path);
     } else {
@@ -102,8 +102,8 @@ void Application::initializeCore() {
 }
 
 void Application::initializeLogging() {
-    auto& log = NCP::Logger::instance();
-    auto& cfg = NCP::Config::instance();
+    auto& log = ncp::Logger::instance();
+    auto& cfg = ncp::Config::instance();
 
     std::string level_str = cfg.get("log.level", "info");
     log.setLevel(Logger::levelFromString(level_str));
@@ -143,4 +143,4 @@ void Application::connectSignals() {
 }
 #endif
 
-} // namespace NCP
+} // namespace ncp

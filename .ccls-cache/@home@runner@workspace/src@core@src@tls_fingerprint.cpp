@@ -3,7 +3,7 @@
 #include <cstring>
 #include <stdexcept>
 
-namespace NCP {
+namespace ncp {
 
 // SecureMemory implementation
 SecureMemory::SecureMemory(size_t size) : data_(nullptr), size_(size) {
@@ -226,4 +226,4 @@ namespace SecureOps {
     }
 }
 
-} // namespace NCP
+} // namespace ncp

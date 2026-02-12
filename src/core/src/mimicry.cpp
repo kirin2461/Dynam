@@ -2,7 +2,7 @@
 #include <sstream>
 #include <algorithm>
 
-namespace NCP {
+namespace ncp {
 
 TrafficMimicry::TrafficMimicry() : rng_(std::random_device{}()) {}
 TrafficMimicry::~TrafficMimicry() {}
@@ -70,4 +70,4 @@ std::vector<uint8_t> TrafficMimicry::create_https_hello_wrapper(const std::vecto
     return result;
 }
 
-} // namespace NCP
+} // namespace ncp
