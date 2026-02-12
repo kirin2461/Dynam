@@ -12,6 +12,10 @@
 #include "ncp_spoofer.hpp"
 #include "ncp_dpi.hpp"
 #include "ncp_i2p.hpp"
+#include "ncp_paranoid.hpp"
+#include "ncp_security.hpp"
+#include "ncp_tls_fingerprint.hpp"
+#include "ncp_secure_memory.hpp"
 
 using namespace ncp;
 
@@ -19,6 +23,7 @@ using namespace ncp;
 std::atomic<bool> g_running(false);
 NetworkSpoofer* g_spoofer = nullptr;
 DPI::DPIBypass* g_dpi_bypass = nullptr;
+ParanoidMode* g_paranoid = nullptr;
 
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
@@ -31,7 +36,7 @@ void print_usage() {
     std::cout << "NCP CLI v1.0.0 - Network Control Protocol\n"
               << "Usage: ncp <command> [options]\n\n"
               << "Commands:\n"
-              << "  run <iface>    - Start full spoofing + DPI bypass\n"
+              << "  run <iface>    - Start PARANOID mode (all protection layers)\n"
               << "  stop           - Stop spoofing and restore\n"
               << "  status         - Show current spoof status\n"
               << "  rotate         - Rotate all identities\n"
@@ -126,6 +131,123 @@ void handle_run(const std::vector<std::string>& args) {
     } else {
         std::cout << "    DPI: FAILED\n";
     }
+
+        // === PARANOID MODE: Enable all protection layers ===
+    static ParanoidMode paranoid;
+    g_paranoid = &paranoid;
+
+    // Set maximum threat level (TINFOIL_HAT = all features enabled)
+    paranoid.set_threat_level(ParanoidMode::ThreatLevel::TINFOIL_HAT);
+
+    // Layer 1-2: Entry obfuscation + Multiple anonymization networks
+    ParanoidMode::LayeredConfig layered;
+    layered.use_bridge_nodes = true;
+    layered.rotate_entry_guards = true;
+    layered.entry_guard_lifetime_hours = 6;
+    layered.enable_tor_over_i2p = true;
+    layered.enable_vpn_chain = true;
+    layered.vpn_chain_count = 2;
+    // Layer 3: Traffic obfuscation
+    layered.enable_constant_rate_traffic = true;
+    layered.cover_traffic_rate_kbps = 128;
+    layered.enable_traffic_morphing = true;
+    layered.randomize_packet_sizes = true;
+    // Layer 4: Timing attacks prevention
+    layered.enable_random_delays = true;
+    layered.min_delay_ms = 50;
+    layered.max_delay_ms = 500;
+    layered.enable_batching = true;
+    layered.batch_size = 10;
+    // Layer 5: Metadata stripping
+    layered.strip_all_metadata = true;
+    layered.sanitize_headers = true;
+    layered.remove_fingerprints = true;
+    // Layer 6: Advanced crypto
+    layered.enable_post_quantum_crypto = true;
+    layered.enable_forward_secrecy = true;
+    layered.enable_deniable_encryption = true;
+    layered.rekeying_interval_minutes = 15;
+    // Layer 7: Anti-correlation
+    layered.enable_traffic_splitting = true;
+    layered.use_multiple_circuits = true;
+    layered.simultaneous_circuits = 3;
+    layered.disable_circuit_reuse = true;
+    // Layer 8: System-level protection
+    layered.enable_memory_wiping = true;
+    layered.disable_disk_cache = true;
+    layered.disable_swap = true;
+    layered.enable_secure_delete = true;
+    paranoid.set_layered_config(layered);
+
+    // Network isolation (prevent all leaks)
+    ParanoidMode::NetworkIsolation net_iso;
+    net_iso.block_ipv6 = true;
+    net_iso.block_webrtc = true;
+    net_iso.block_local_connections = true;
+    net_iso.force_dns_over_anonymizer = true;
+    net_iso.isolate_per_domain = true;
+    net_iso.isolate_per_tab = true;
+    net_iso.prevent_cross_origin_leaks = true;
+    net_iso.enable_kill_switch = true;
+    net_iso.block_on_vpn_drop = true;
+    net_iso.block_on_tor_drop = true;
+    paranoid.set_network_isolation(net_iso);
+
+    // Forensic resistance
+    ParanoidMode::ForensicResistance forensic;
+    forensic.encrypt_memory = true;
+    forensic.clear_memory_on_exit = true;
+    forensic.prevent_memory_dumps = true;
+    forensic.encrypt_temp_files = true;
+    forensic.secure_delete_on_exit = true;
+    forensic.overwrite_passes = 7;
+    forensic.disable_all_logging = true;
+    forensic.encrypt_logs = true;
+    forensic.disable_crash_dumps = true;
+    paranoid.set_forensic_resistance(forensic);
+
+    // Traffic analysis resistance
+    ParanoidMode::TrafficAnalysisResistance tar;
+    tar.enable_packet_padding = true;
+    tar.pad_to_fixed_size = true;
+    tar.fixed_packet_size = 1500;
+    tar.enable_constant_rate = true;
+    tar.enable_burst_suppression = true;
+    tar.enable_traffic_shaping = true;
+    tar.inject_dummy_packets = true;
+    tar.randomize_order = true;
+    tar.split_across_circuits = true;
+    tar.enable_wfp_defense = true;
+    paranoid.set_traffic_analysis_resistance(tar);
+
+    // Advanced features
+    ParanoidMode::AdvancedFeatures adv;
+    adv.use_obfs4 = true;
+    adv.use_meek = true;
+    adv.use_snowflake = true;
+    paranoid.set_advanced_features(adv);
+
+    // Activate paranoid mode
+    if (paranoid.activate()) {
+        std::cout << "\n[+] PARANOID MODE: ACTIVE (TINFOIL_HAT)\n";
+        std::cout << "    Layer 1: Entry obfuscation (bridge nodes + guard rotation)\n";
+        std::cout << "    Layer 2: Multi-anonymization (VPN -> Tor -> I2P)\n";
+        std::cout << "    Layer 3: Traffic obfuscation (constant rate + morphing)\n";
+        std::cout << "    Layer 4: Timing protection (random delays + batching)\n";
+        std::cout << "    Layer 5: Metadata stripping (headers + fingerprints)\n";
+        std::cout << "    Layer 6: Advanced crypto (post-quantum + forward secrecy)\n";
+        std::cout << "    Layer 7: Anti-correlation (traffic splitting + multi-circuit)\n";
+        std::cout << "    Layer 8: System protection (memory wipe + secure delete)\n";
+        std::cout << "    Network isolation: kill switch + leak prevention\n";
+        std::cout << "    Forensic resistance: encrypted memory + no logs\n";
+        std::cout << "    Traffic analysis resistance: padding + WFP defense\n";
+    } else {
+        std::cout << "\n[!] PARANOID MODE: FAILED to activate (some layers may be unavailable)\n";
+    }
+
+    // Start cover traffic and monitoring
+    paranoid.start_cover_traffic();
+    paranoid.enable_constant_rate_shaping(128);
     
     g_running = true;
     int counter = 0;
@@ -136,7 +258,16 @@ void handle_run(const std::vector<std::string>& args) {
             std::cout << "[*] Running for " << counter << " seconds...\n";
         }
     }
-    
+
+        // Stop paranoid mode
+    if (g_paranoid) {
+        g_paranoid->stop_cover_traffic();
+        g_paranoid->clear_all_traces();
+        g_paranoid->deactivate();
+        std::cout << "[+] Paranoid mode deactivated, all traces cleared\n";
+        g_paranoid = nullptr;
+    }
+
 // Stop DPI bypass
     if (g_dpi_bypass) {
         g_dpi_bypass->shutdown();
