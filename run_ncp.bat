@@ -37,7 +37,7 @@ echo ============================================================
 echo   NCP - Network Control Protocol (Windows CLI)
 echo ============================================================
 echo   Commands:
-echo     run      - Launch Maximum Paranoid Protection (Full Spoofing)
+echo   run       - Launch PARANOID Mode (all 8 protection layers)
 echo     status   - View current protection status
 echo     help     - Show list of all available commands
 echo     exit     - Close application
@@ -47,11 +47,12 @@ echo.
 set /p CMD="Enter command: "
 
 if /i "%CMD%"=="run" (
-    echo [*] Activating Maximum Paranoid Mode...
-    :: Launch with full spoofing flags (assuming flags based on spoofer.cpp logic)
-    build\bin\Release\ncp.exe spoof --paranoid --all --hw-serial random --src-ip random
+    echo [*] Activating PARANOID Mode (all 8 protection layers)...
+        :: 'run' command now auto-enables PARANOID mode with all protection layers
+    build\bin\Release\ncp.exe run
     goto MENU
 )
+    
 
 if /i "%CMD%"=="status" (
     build\bin\Release\ncp.exe status
