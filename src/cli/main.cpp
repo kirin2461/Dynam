@@ -308,7 +308,7 @@ void handle_dpi(const std::vector<std::string>& args) {
     std::cout << "  Disorder:     " << (config.enable_disorder ? "enabled" : "disabled") << "\n\n";
     
     DPI::DPIBypass bypass;
-    bypass.set_log_callback([](const std::string& msg) {
+    bypass.set_log_callback([](DPI::LogLevel /*level*/, const std::string& msg) {
         std::cout << "[DPI] " << msg << "\n";
     });
     if (!bypass.initialize(config)) {
