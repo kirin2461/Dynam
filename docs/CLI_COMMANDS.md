@@ -1,15 +1,20 @@
-# NCP-CPP CLI Commands Reference
+# NCP CLI Commands Reference
 
-Полный справочник команд для работы с NCP CLI.
+Полный справочник команд NCP CLI v1.0.0.
 
 ## Содержание
 
 - [Общая информация](#общая-информация)
+- [Команда run (PARANOID Mode)](#команда-run-paranoid-mode)
 - [Спуфинг сети](#спуфинг-сети)
 - [Криптографические операции](#криптографические-операции)
 - [Управление лицензиями](#управление-лицензиями)
 - [Сетевые операции](#сетевые-операции)
 - [Обход DPI](#обход-dpi)
+- [I2P интеграция](#i2p-интеграция)
+- [Маскировка трафика](#маскировка-трафика)
+- [Дополнительные команды](#дополнительные-команды)
+
 ---
 
 ## Общая информация
@@ -19,8 +24,10 @@
 ```bash
 # Windows
 ncp.exe <command> [options]
+
 # Linux/macOS
-./ncp <command> [options]```
+./ncp <command> [options]
+```
 
 ### Получение справки
 
@@ -28,39 +35,59 @@ ncp.exe <command> [options]
 ncp help
 ```
 
-### Список доступных команд
+### Список всех команд
 
 | Команда | Описание |
 |---------|----------|
-| `run <iface>` | Запуск полного спуфинга (IP/MAC/DNS) |
-| `stop` | Остановка спуфинга и восстановление |
-| `status` | Показать текущий статус спуфинга |
-| `rotate` | Ротация всех идентичностей |
-| `crypto` | Криптографические операции |
-| `license` | Управление лицензиями |
-| `network` | Сетевые операции |
+| `run [iface]` | Запуск PARANOID режима со всеми слоями защиты + спуфинг + DPI bypass |
+| `stop` | Остановка спуфинга и восстановление настроек |
+| `status` | Показать текущий статус защиты |
+| `rotate` | Ротация всех идентичностей (IP/MAC/DNS) |
+| `crypto keygen` | Генерация ключевой пары Ed25519 |
+| `crypto random <size>` | Генерация криптографически безопасных случайных байтов |
+| `license hwid` | Получить Hardware ID системы |
+| `license info` | Показать статус лицензии |
+| `network interfaces` | Список сетевых интерфейсов |
+| `network stats` | Статистика трафика |
+| `dpi [options]` | DPI bypass прокси (--mode proxy/driver/passive, --preset RuNet-Soft/RuNet-Strong) |
+| `i2p <enable/disable/status>` | Управление I2P интеграцией |
+| `mimic <http/tls/none>` | Установить тип маскировки трафика |
+| `tor` | Настройка Tor прокси (bridges/hops) |
+| `obfuscate` | Переключить продвинутую обфускацию трафика |
+| `dns-secure` | Переключить защиту от DNS утечек |
 | `help` | Показать справку |
-| `dpi` | Обход DPI (Deep Packet Inspection) |
 
 ---
 
-## Спуфинг сети
-
-> **Примечание:** Команды спуфинга требуют прав администратора/root.
-
-### Запуск спуфинга
+## Команда run (PARANOID Mode)
 
 ```bash
-ncp run <interface>
+ncp run [iface]
 ```
 
-**Описание:** Запускает полный спуфинг сети на указанном интерфейсе:
-- Спуфинг IPv4 адреса
-- Спуфинг IPv6 адреса
-- Спуфинг MAC адреса
-- Спуфинг DNS серверов
+**Описание:** Главная команда. Автоматически активирует **PARANOID режим** (уровень TINFOIL_HAT) со всеми 8 слоями защиты:
+
+| Слой | Название | Описание |
+|------|----------|----------|
+| 1 | Entry Obfuscation | Bridge-ноды, ротация entry guards (каждые 6 часов) |
+| 2 | Multi-Anonymization | VPN chain (2 hop) -> Tor -> I2P |
+| 3 | Traffic Obfuscation | Constant rate traffic (128 kbps), морфинг, рандомизация размеров |
+| 4 | Timing Protection | Случайные задержки (50-500ms), батчинг (по 10 пакетов) |
+| 5 | Metadata Stripping | Удаление всех заголовков, fingerprints |
+| 6 | Advanced Crypto | Post-quantum, forward secrecy, deniable encryption, рекиинг каждые 15 мин |
+| 7 | Anti-Correlation | Разделение трафика, 3 одновременных circuit, запрет переиспользования |
+| 8 | System Protection | Memory wipe, отключение disk cache/swap, secure delete (7 проходов) |
+
+Дополнительно при `run` активируются:
+- **Network Isolation**: kill switch, блокировка IPv6/WebRTC/локальных соединений, изоляция per-domain/per-tab
+- **Forensic Resistance**: шифрование памяти, предотвращение memory dumps, шифрование temp файлов, отключение логов
+- **Traffic Analysis Resistance**: padding до 1500 байт, burst suppression, WFP defense, dummy packets
+- **Advanced Features**: obfs4, meek, snowflake транспорты
+- **Spoofing**: полный спуфинг IPv4/IPv6/MAC/DNS
+- **DPI Bypass**: TCP фрагментация, fake packets, disorder mode
 
 **Пример:**
+
 ```bash
 # Запуск на конкретном интерфейсе
 ncp run eth0
@@ -69,30 +96,11 @@ ncp run eth0
 ncp run
 ```
 
-**Пример вывода:**
-```
-Available network interfaces:
- [0] eth0
- [1] wlan0
+> **Примечание:** Команда `run` требует прав администратора/root. Нажмите `Ctrl+C` для остановки.
 
-Select interface (0-1): 0
+---
 
-==========================================
- NCP Network Spoofer - STARTING
-==========================================
-
-[*] Enabling spoofing on: eth0
-
-[+] Spoofing ACTIVE:
-    IPv4: 192.168.1.100
-    IPv6: fe80::1234:5678
-    MAC: 02:00:00:12:34:56
-    DNS: spoofed
-
-==========================================
- Press Ctrl+C to stop and restore
-==========================================
-```
+## Спуфинг сети
 
 ### Остановка спуфинга
 
@@ -100,33 +108,16 @@ Select interface (0-1): 0
 ncp stop
 ```
 
-**Описание:** Останавливает спуфинг и восстанавливает оригинальные сетевые настройки.
-
-**Пример вывода:**
-```
-[*] Stopping and restoring...
-[+] Original settings restored!
-```
+Останавливает спуфинг, деактивирует PARANOID режим и восстанавливает оригинальные настройки. При остановке:
+- Очистка всех следов (clear_all_traces)
+- Деактивация cover traffic
+- Остановка DPI bypass
+- Восстановление оригинальных IP/MAC/DNS
 
 ### Статус спуфинга
 
 ```bash
 ncp status
-```
-
-**Описание:** Отображает текущий статус спуфинга.
-
-**Пример вывода (активен):**
-```
-Spoofing: ACTIVE
-    IPv4: 192.168.1.100
-    IPv6: fe80::1234:5678
-    MAC: 02:00:00:12:34:56
-```
-
-**Пример вывода (неактивен):**
-```
-Spoofing: INACTIVE
 ```
 
 ### Ротация идентичностей
@@ -135,15 +126,7 @@ Spoofing: INACTIVE
 ncp rotate
 ```
 
-**Описание:** Генерирует новые случайные значения для всех спуфированных параметров.
-
-**Пример вывода:**
-```
-[*] Rotating all identities...
-[+] New identities:
-    IPv4: 10.0.0.55
-    MAC: 02:00:00:ab:cd:ef
-```
+Генерирует новые случайные значения для всех спуфированных параметров.
 
 ---
 
@@ -155,49 +138,27 @@ ncp rotate
 ncp crypto keygen
 ```
 
-**Описание:** Генерирует криптографическую пару ключей Ed25519:
-- Публичный ключ: 32 байта
-- Секретный ключ: 64 байта
-
-**Пример вывода:**
-```
-Public: a1b2c3d4e5f6...
-Secret: 1234567890ab...
-```
-
 ### Генерация случайных байтов
 
 ```bash
 ncp crypto random <size>
 ```
 
-**Параметры:**
-- `<size>` - количество байтов для генерации
-
 **Примеры:**
-```bash
-# Генерация 32 случайных байтов (для ключа шифрования)
-ncp crypto random 32
 
-# Генерация 16 байтов (для IV/nonce)
-ncp crypto random 16
+```bash
+ncp crypto random 32  # для ключа шифрования
+ncp crypto random 16  # для IV/nonce
 ```
 
 ---
 
 ## Управление лицензиями
 
-### Получение Hardware ID (HWID)
+### Получение Hardware ID
 
 ```bash
 ncp license hwid
-```
-
-**Описание:** Возвращает уникальный идентификатор оборудования системы.
-
-**Пример вывода:**
-```
-HWID: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 ```
 
 ### Информация о лицензии
@@ -206,18 +167,7 @@ HWID: a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 ncp license info
 ```
 
-**Описание:** Отображает информацию о текущей лицензии.
-
-**Пример вывода:**
-```
-License: Valid
-```
-
-или
-
-```
-License: Invalid
-```
+Лицензия проверяется офлайн по файлу `license.dat`.
 
 ---
 
@@ -229,92 +179,101 @@ License: Invalid
 ncp network interfaces
 ```
 
-**Описание:** Отображает все доступные сетевые интерфейсы в системе.
-
-**Пример вывода:**
-```
-[0] eth0
-[1] wlan0
-[2] lo
-```
-
 ### Сетевая статистика
 
 ```bash
 ncp network stats
 ```
 
-**Описание:** Отображает статистику сетевого трафика.
-
-**Пример вывода:**
-```
-Sent: 1234567 Recv: 9876543
-```
-
 ---
 
 ## Обход DPI
-
-Модуль обхода Deep Packet Inspection для разблокировки сайтов.
-
-### Запуск обхода DPI (CLI)
 
 ```bash
 ncp dpi [options]
 ```
 
-**Базовые опции:**
-- `--mode <mode>` - Режим работы: `proxy`, `driver` или `passive`
-- `--port <port>` - Порт локального прокси (по умолчанию: 8080)
-- `--target <host>` - Целевой хост (например: `github.com`) для proxy-режима
-- `--target-port <port>` - Целевой порт (по умолчанию: 443)
+**Опции:**
 
-**Параметры фрагментации и обхода:**
-- `--fragment-size <bytes>` / `--fragment <bytes>` - размер фрагмента TCP
-- `--split-position <bytes>` - позиция первого разделения ClientHello
-- `--split-at-sni` / `--no-split-at-sni` - включить/выключить разделение по полю SNI
-- `--enable-fake` / `--disable-fake` - включить/выключить фейковые пакеты с низким TTL
-- `--enable-disorder` / `--disable-disorder` - включить/выключить искусственное «расстройство» порядка пакетов
+| Опция | Описание | По умолчанию |
+|-------|----------|-------------|
+| `--mode` | Режим: `proxy`, `driver`, `passive` | `proxy` |
+| `--port` | Порт прокси | `8080` |
+| `--target` | Целевой хост | - |
+| `--target-port` | Целевой порт | `443` |
+| `--fragment-size` | Размер фрагмента TCP | `2` |
+| `--split-position` | Позиция разделения ClientHello | - |
+| `--split-at-sni` | Разделение по SNI | - |
+| `--enable-fake` / `--disable-fake` | Fake пакеты с низким TTL | включено |
+| `--enable-disorder` / `--disable-disorder` | Disorder порядка пакетов | включено |
+| `--preset` / `--profile` | RuNet-Soft / RuNet-Strong | - |
 
-**Пример:**
+**Примеры:**
+
 ```bash
-# Запуск в режиме прокси для HTTPS‑сайтов
-ncp dpi --mode proxy --port 8080 --target github.com --target-port 443
+# Мягкий RuNet режим
+ncp dpi --mode proxy --port 8080 --target example.com --preset RuNet-Soft
 
-# Базовый режим драйвера (Linux, требует root и NFQUEUE)
+# Агрессивный RuNet режим
+ncp dpi --mode proxy --port 8080 --target example.com --preset RuNet-Strong
+
+# Режим драйвера (Linux, требует root и NFQUEUE)
 ncp dpi --mode driver
 ```
 
-### RuNet‑пресеты
+> При команде `run` DPI bypass запускается автоматически.
 
-Для российских провайдеров добавлены готовые профили:
+---
 
-- `RuNet-Soft` — мягкий профиль: лёгкая фрагментация и разделение по SNI.
-- `RuNet-Strong` — агрессивный профиль: сильная фрагментация + расстройство порядка.
-
-Выбор пресета:
+## I2P интеграция
 
 ```bash
-# Мягкий режим для большинства РУ‑провайдеров
-ncp dpi --mode proxy --port 8080 --target github.com --preset RuNet-Soft
-
-# Агрессивный режим для сильной фильтрации
-ncp dpi --mode proxy --port 8080 --target github.com --preset RuNet-Strong
+ncp i2p enable    # Включить I2P
+ncp i2p disable   # Выключить I2P
+ncp i2p status    # Статус I2P
 ```
 
-### Остановка обхода
+Управление интеграцией с I2P (garlic routing, SAM bridge).
+
+---
+
+## Маскировка трафика
 
 ```bash
-ncp dpi stop
+ncp mimic http    # HTTP маскировка
+ncp mimic tls     # TLS маскировка
+ncp mimic none    # Отключить
 ```
 
-### Статус
+### Tor прокси
 
 ```bash
-ncp dpi status
+ncp tor
 ```
 
-------
+Настройка Tor прокси с поддержкой bridges и выбором количества hops.
+
+---
+
+## Дополнительные команды
+
+### Обфускация трафика
+
+```bash
+ncp obfuscate
+```
+
+Переключает продвинутую обфускацию трафика.
+
+### DNS защита
+
+```bash
+ncp dns-secure
+```
+
+Переключает защиту от DNS утечек (DNS over HTTPS).
+
+---
 
 ## Коды возврата
 
@@ -323,10 +282,9 @@ ncp dpi status
 | 0 | Успешное выполнение |
 | 1 | Неизвестная команда |
 
----
-
 ## Требования
 
-- Права администратора/root для команд спуфинга
-- Установленные зависимости: libsodium, openssl, sqlite3, libpcap
-- Qt6 для GUI приложения (опционально)
+- Права администратора/root для команд спуфинга и `run`
+- Установленные зависимости: libsodium, openssl, sqlite3
+- libpcap (Linux/macOS) для packet capture
+- Qt6 для GUI (опционально)
