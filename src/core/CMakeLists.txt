@@ -85,23 +85,32 @@ add_library(ncp_core STATIC
 )
 
 # ==================== Required: libsodium ====================
-find_library(SODIUM_LIBRARY NAMES sodium libsodium)
-find_path(SODIUM_INCLUDE_DIR NAMES sodium.h)
-
-if(SODIUM_LIBRARY AND SODIUM_INCLUDE_DIR)
-    message(STATUS "Found libsodium: ${SODIUM_LIBRARY}")
-    target_link_libraries(ncp_core PUBLIC ${SODIUM_LIBRARY})
-    target_include_directories(ncp_core PRIVATE ${SODIUM_INCLUDE_DIR})
+# Try vcpkg first (unofficial-sodium)
+find_package(unofficial-sodium CONFIG QUIET)
+if(unofficial-sodium_FOUND)
+    message(STATUS "Found libsodium via vcpkg")
+    target_link_libraries(ncp_core PUBLIC unofficial-sodium::sodium)
     target_compile_definitions(ncp_core PRIVATE HAVE_SODIUM)
 else()
-    message(FATAL_ERROR 
-        "libsodium is REQUIRED but was not found!\n"
-        "Please install libsodium:\n"
-        "  Ubuntu/Debian: sudo apt-get install libsodium-dev\n"
-        "  Fedora/RHEL:   sudo dnf install libsodium-devel\n"
-        "  macOS:         brew install libsodium\n"
-        "  Windows:       vcpkg install libsodium\n"
-    )
+    # Fallback: manual search
+    find_library(SODIUM_LIBRARY NAMES sodium libsodium)
+    find_path(SODIUM_INCLUDE_DIR NAMES sodium.h)
+    if(SODIUM_LIBRARY AND SODIUM_INCLUDE_DIR)
+        message(STATUS "Found libsodium: ${SODIUM_LIBRARY}")
+        target_link_libraries(ncp_core PUBLIC ${SODIUM_LIBRARY})
+        target_include_directories(ncp_core PRIVATE ${SODIUM_INCLUDE_DIR})
+        target_compile_definitions(ncp_core PRIVATE HAVE_SODIUM)
+    else()
+        message(FATAL_ERROR
+            "libsodium is REQUIRED but was not found!\n"
+            "Please install libsodium:\n"
+            "  Ubuntu/Debian: sudo apt-get install libsodium-dev\n"
+            "  Fedora/RHEL:   sudo dnf install libsodium-devel\n"
+            "  macOS:         brew install libsodium\n"
+            "  Windows:       vcpkg install libsodium:x64-windows\n"
+            "  Then pass: -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake\n"
+        )
+    endif()
 endif()
 
 # ==================== Optional: libpcap ====================
