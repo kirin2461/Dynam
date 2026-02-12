@@ -7,6 +7,7 @@
 #include <memory>
 #include <functional>
 #include <map>
+#include <chrono>
 
 namespace NCP {
 
@@ -151,6 +152,8 @@ private:
     std::vector<uint8_t> build_dns_query(const std::string& hostname, RecordType type);
     DNSResult parse_dns_response(const std::vector<uint8_t>& response);
     std::string get_provider_url(Provider provider) const;
+    void update_statistics(const DNSResult& result);
+};
 
 // ===================== DoH3 & Advanced Features =====================
 
@@ -316,11 +319,7 @@ private:
     
     bool is_expired(const CacheEntry& entry) const;
 };
-
-
-    void update_statistics(const DNSResult& result);
-};
-
+    
 /**
  * @brief Helper function for quick DNS resolution
  * 
