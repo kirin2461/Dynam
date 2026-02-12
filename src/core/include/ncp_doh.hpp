@@ -185,9 +185,8 @@ public:
     ~DoH3Client();
     
     // Query methods
-    DNSResult query(const std::string& hostname, RecordType type = RecordType::A);
-    std::vector<DNSResult> batch_query(const std::vector<std::string>& hostnames);
-    
+    DoHClient::DNSResult query(const std::string& hostname, DoHClient::RecordType type = DoHClient::RecordType::A);
+    std::vector<DoHClient::DNSResult> batch_query(const std::vector<std::string>& hostnames);    
     // Configuration
     void set_config(const Config& config);
     Config get_config() const;
@@ -245,9 +244,9 @@ public:
     explicit AntiCensorshipDNS(const Config& config);
     
     // Query methods
-    DNSResult resolve(const std::string& hostname);
-    std::vector<DNSResult> resolve_multiple(const std::vector<std::string>& hostnames);
-    
+    DoHClient::DNSResult resolve(const std::string& hostname);
+    std::vector<DoHClient::DNSResult> resolve_multiple(const std::vector<std::string>& hostnames);
+
     // Provider management
     void add_provider(const std::string& url, const std::string& protocol);
     void remove_provider(const std::string& url);
@@ -265,8 +264,8 @@ private:
     Config config_;
     std::map<std::string, int> provider_latency_;
     
-    DNSResult query_with_fronting(const std::string& hostname);
-    DNSResult parallel_query(const std::string& hostname);
+    DoHClient::DNSResult query_with_fronting(const std::string& hostname);
+    DoHClient::DNSResult parallel_query(const std::string& hostname);
 };
 
 /**
@@ -295,9 +294,9 @@ public:
     
     // Cache operations
     bool has(const std::string& hostname);
-    DNSResult get(const std::string& hostname);
-    void put(const std::string& hostname, const DNSResult& result, int ttl_seconds);
-    void remove(const std::string& hostname);
+    DoHClient::DNSResult get(const std::string& hostname);
+    void put(const std::string& hostname, const DoHClient::DNSResult& result, int ttl_seconds);
+void remove(const std::string& hostname);
     void clear();
     
     // Validation
