@@ -53,7 +53,7 @@ std::string License::get_hwid() {
     hwid_components += get_os_uuid();
     
     // Hash the combined components
-    auto hash = crypto_->hash_sha256(hwid_components);
+        auto hash = crypto_->hash_sha256(std::vector<uint8_t>(hwid_components.begin(), hwid_components.end()));
     
     // Convert to hex string
     std::stringstream ss;
@@ -287,7 +287,7 @@ bool License::generate_license_file(
     
     // Generate signature (using Ed25519)
     auto keypair = crypto_->generate_keypair();
-    auto signature = crypto_->sign_message(data, keypair.secret_key);
+        auto signature = crypto_->sign_ed25519(std::vector<uint8_t>(data.begin(), data.end()), keypair.secret_key);
     
     // Encode signature to base64 (simplified)
     std::stringstream sig_ss;
