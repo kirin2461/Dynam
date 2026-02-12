@@ -6,8 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace NCP {
-
+namespace ncp {
 /**
  * @brief Secure Memory Management with auto-zeroing
  *
@@ -104,6 +103,5 @@ namespace SecureOps {
     );
 }
 
-} // namespace NCP
-
+} // namespace ncp
 #endif // NCP_SECURE_MEMORY_HPP
