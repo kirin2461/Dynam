@@ -19,7 +19,7 @@ public:
     };
     
     Crypto();
-    ~Crypto() = default;
+        ~Crypto() noexcept = default;
     
     // Key generation
     KeyPair generate_keypair();
@@ -69,8 +69,21 @@ public:
         const std::vector<uint8_t>& public_key
     );
 
+    // AEAD encryption (XChaCha20-Poly1305)
+    std::vector<uint8_t> encrypt_aead(
+        const std::vector<uint8_t>& plaintext,
+        const std::vector<uint8_t>& key,
+        const std::vector<uint8_t>& additional_data = {}
+    );
+
+    std::vector<uint8_t> decrypt_aead(
+        const std::vector<uint8_t>& ciphertext,
+        const std::vector<uint8_t>& key,
+        const std::vector<uint8_t>& additional_data = {}
+    );
+
     // Utility: convert SecureMemory to hex string
-    static std::string bytes_to_hex(const SecureMemory& mem) {
+        static std::string bytes_to_hex(const SecureMemory& mem) noexcept {
         std::ostringstream oss;
         oss << std::hex << std::setfill('0');
         for (size_t i = 0; i < mem.size(); ++i) {
