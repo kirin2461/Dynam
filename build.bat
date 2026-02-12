@@ -73,7 +73,7 @@ if not exist "%VSWHERE%" (
     goto :error
 )
 
-for /f "tokens=*" %%i in ('"%VSWHERE%" -latest -property installationPath') do set "VS_PATH=%%i"
+for /f "usebackq tokens=*" %%i in (`"%VSWHERE%" -latest -products * -prerelease -property installationPath`) do set "VS_PATH=%%i"
 if not defined VS_PATH (
     echo [ERROR] Could not find Visual Studio installation path.
     goto :error
