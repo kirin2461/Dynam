@@ -1,60 +1,40 @@
 #include "../include/ncp_e2e.hpp"
+#include "../include/ncp_secure_memory.hpp"
 #include <sodium.h>
-#include <stdexcept>
 #include <sstream>
 #include <iomanip>
-#include <cstring>
 #include <mutex>
-#include <unordered_map>
+#include <cstring>
 
-// Post-quantum cryptography support via liboqs
 #ifdef HAVE_LIBOQS
 #include <oqs/oqs.h>
 #endif
 
-namespace NCP {
+namespace ncp {
 
-// E2ESession::Impl - Private implementation
+// Implementation details
 struct E2ESession::Impl {
     E2EConfig config;
-    E2ESessionState state = E2ESessionState::Uninitialized;
-    
-    // Ratchet state
-    RatchetState ratchet;
-    
-    // Local and remote keys
-    KeyPair local_identity_keys;
-    SecureMemory remote_identity_public_key;
-    KeyPair local_ephemeral_keys;
-    SecureMemory remote_ephemeral_public_key;
-    
-    // Session metadata
+    std::mutex mutex;
     std::string session_id;
-    std::chrono::system_clock::time_point last_activity;
-    uint64_t messages_sent = 0;
-    uint64_t messages_received = 0;
     
-    mutable std::mutex mutex;
-    
-    Impl(const E2EConfig& cfg) : config(cfg) {
-        if (sodium_init() < 0) {
-            throw std::runtime_error("Failed to initialize libsodium");
-        }
-        last_activity = std::chrono::system_clock::now();
+    explicit Impl(const E2EConfig& cfg) : config(cfg) {
         generate_session_id();
     }
     
-    void generate_session_id() {
-        std::vector<uint8_t> random_bytes(16);
-        randombytes_buf(random_bytes.data(), random_bytes.size());
-        
-        std::ostringstream oss;
-        for (auto byte : random_bytes) {
-            oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
-        }
-        session_id = oss.str();
-    }
+    void generate_session_id();
 };
+
+void E2ESession::Impl::generate_session_id() {
+    std::vector<uint8_t> random_bytes(16);
+    randombytes_buf(random_bytes.data(), random_bytes.size());
+    
+    std::ostringstream oss;
+    for (auto byte : random_bytes) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(byte);
+    }
+    session_id = oss.str();
+}
 
 // E2ESession implementation
 E2ESession::E2ESession(const E2EConfig& config)
@@ -78,30 +58,13 @@ KeyPair E2ESession::generate_key_pair() {
             break;
             
         case KeyExchangeProtocol::X448:
-            // X448 key exchange (56-byte keys)
-            // Using Ed448 equivalent via libsodium's scalarmult
-            kp.public_key = SecureMemory(56);
-            kp.private_key = SecureMemory(56);
-            randombytes_buf(kp.private_key.data(), 56);
-            // Clamp private key for X448
-            kp.private_key.data()[0] &= 0xFC;
-            kp.private_key.data()[55] |= 0x80;
-            // Derive public key (simplified - real X448 would use different basepoint)
-            crypto_scalarmult_base(kp.public_key.data(), kp.private_key.data());
-            break;
+            throw std::runtime_error("X448 not supported by libsodium - use X25519 or implement with OpenSSL");
             
         case KeyExchangeProtocol::ECDH_P256:
-            // ECDH P-256 (NIST curve, 32-byte keys)
-            // libsodium doesn't natively support P-256, using X25519 as fallback
-            // Production should use OpenSSL or other library for real P-256
-            kp.public_key = SecureMemory(crypto_box_PUBLICKEYBYTES);
-            kp.private_key = SecureMemory(crypto_box_SECRETKEYBYTES);
-            crypto_box_keypair(kp.public_key.data(), kp.private_key.data());
-            break;
+            throw std::runtime_error("ECDH P-256 not supported by libsodium - use X25519 or implement with OpenSSL");
             
         case KeyExchangeProtocol::Kyber1024:
 #ifdef HAVE_LIBOQS
-            // Real Kyber1024 implementation using liboqs
             {
                 OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_kyber_1024);
                 if (!kem) {
@@ -119,555 +82,183 @@ KeyPair E2ESession::generate_key_pair() {
                 OQS_KEM_free(kem);
             }
 #else
-            // Fallback: placeholder when liboqs not available (NOT SECURE)
-            kp.public_key = SecureMemory(1568);
-            kp.private_key = SecureMemory(3168);
-            randombytes_buf(kp.public_key.data(), kp.public_key.size());
-            randombytes_buf(kp.private_key.data(), kp.private_key.size());
+            throw std::runtime_error("Kyber1024 requires liboqs - recompile with HAVE_LIBOQS");
 #endif
             break;
     }
     
-    return std::move(kp);
+    return kp;
 }
 
-std::vector<uint8_t> E2ESession::create_key_exchange_request(
-    const KeyPair& local_keys
+SecureMemory E2ESession::compute_shared_secret(
+    const KeyPair& local_keypair,
+    const std::vector<uint8_t>& peer_public_key
 ) {
     std::lock_guard<std::mutex> lock(pImpl_->mutex);
     
-    pImpl_->local_identity_keys.protocol = local_keys.protocol;
-    pImpl_->local_identity_keys.created_at = local_keys.created_at;
-    pImpl_->local_identity_keys.expires_at = local_keys.expires_at;
-    pImpl_->local_identity_keys.public_key = SecureMemory(local_keys.public_key.size());
-    std::memcpy(pImpl_->local_identity_keys.public_key.data(), local_keys.public_key.data(), local_keys.public_key.size());
-    pImpl_->local_identity_keys.private_key = SecureMemory(local_keys.private_key.size());
-    std::memcpy(pImpl_->local_identity_keys.private_key.data(), local_keys.private_key.data(), local_keys.private_key.size());
-    pImpl_->state = E2ESessionState::KeyExchangeInitiated;
+    if (local_keypair.protocol != pImpl_->config.key_exchange) {
+        throw std::runtime_error("Key exchange protocol mismatch");
+    }
     
-    // Create request: [protocol][public_key]
-    std::vector<uint8_t> request;
-    request.push_back(static_cast<uint8_t>(local_keys.protocol));
-    request.insert(request.end(),
-                   local_keys.public_key.data(),
-                   local_keys.public_key.data() + local_keys.public_key.size());
+    switch (local_keypair.protocol) {
+        case KeyExchangeProtocol::X25519: {
+            if (peer_public_key.size() != crypto_box_PUBLICKEYBYTES) {
+                throw std::runtime_error("Invalid peer public key size for X25519");
+            }
+            
+            SecureMemory shared_secret(crypto_scalarmult_BYTES);
+            if (crypto_scalarmult(shared_secret.data(), 
+                                 local_keypair.private_key.data(),
+                                 peer_public_key.data()) != 0) {
+                throw std::runtime_error("Failed to compute X25519 shared secret");
+            }
+            return shared_secret;
+        }
+        
+        case KeyExchangeProtocol::X448:
+            throw std::runtime_error("X448 not supported by libsodium");
+            
+        case KeyExchangeProtocol::ECDH_P256:
+            throw std::runtime_error("ECDH P-256 not supported by libsodium");
+            
+        case KeyExchangeProtocol::Kyber1024:
+#ifdef HAVE_LIBOQS
+            {
+                OQS_KEM *kem = OQS_KEM_new(OQS_KEM_alg_kyber_1024);
+                if (!kem) {
+                    throw std::runtime_error("Failed to initialize Kyber1024 KEM");
+                }
+                
+                SecureMemory ciphertext(kem->length_ciphertext);
+                SecureMemory shared_secret(kem->length_shared_secret);
+                
+                if (OQS_KEM_encaps(kem, ciphertext.data(), shared_secret.data(),
+                                   peer_public_key.data()) != OQS_SUCCESS) {
+                    OQS_KEM_free(kem);
+                    throw std::runtime_error("Failed to encapsulate with Kyber1024");
+                }
+                
+                OQS_KEM_free(kem);
+                return shared_secret;
+            }
+#else
+            throw std::runtime_error("Kyber1024 requires liboqs - recompile with HAVE_LIBOQS");
+#endif
+    }
     
-    return request;
+    throw std::runtime_error("Unsupported key exchange protocol");
 }
 
-std::vector<uint8_t> E2ESession::process_key_exchange_request(
-    const std::vector<uint8_t>& request,
-    const KeyPair& local_keys
+SecureMemory E2ESession::derive_keys(
+    const SecureMemory& shared_secret,
+    const std::string& context,
+    size_t key_length
 ) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    
-    if (request.empty()) {
-        throw std::invalid_argument("Empty key exchange request");
+    if (key_length < crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Key length too small");
     }
     
-    // Parse protocol and remote public key
-    KeyExchangeProtocol protocol = static_cast<KeyExchangeProtocol>(request[0]);
+    SecureMemory derived_key(key_length);
     
-    pImpl_->local_identity_keys.protocol = local_keys.protocol;
-    pImpl_->local_identity_keys.created_at = local_keys.created_at;
-    pImpl_->local_identity_keys.expires_at = local_keys.expires_at;
-    pImpl_->local_identity_keys.public_key = SecureMemory(local_keys.public_key.size());
-    std::memcpy(pImpl_->local_identity_keys.public_key.data(), local_keys.public_key.data(), local_keys.public_key.size());
-    pImpl_->local_identity_keys.private_key = SecureMemory(local_keys.private_key.size());
-    std::memcpy(pImpl_->local_identity_keys.private_key.data(), local_keys.private_key.data(), local_keys.private_key.size());
-    pImpl_->remote_identity_public_key = SecureMemory(request.size() - 1);
-    std::memcpy(pImpl_->remote_identity_public_key.data(),
-                request.data() + 1,
-                request.size() - 1);
+    // Context must be exactly 8 bytes for crypto_kdf_derive_from_key
+    uint8_t kdf_context[crypto_kdf_CONTEXTBYTES];
+    std::memset(kdf_context, 0, sizeof(kdf_context));
+    size_t copy_len = std::min(context.size(), sizeof(kdf_context));
+    std::memcpy(kdf_context, context.data(), copy_len);
     
-    pImpl_->state = E2ESessionState::KeyExchangeCompleted;
+    // Master key from shared secret
+    uint8_t master_key[crypto_kdf_KEYBYTES];
+    crypto_generichash(master_key, sizeof(master_key),
+                      shared_secret.data(), shared_secret.size(),
+                      nullptr, 0);
     
-    // Create response with local public key
-    std::vector<uint8_t> response;
-    response.push_back(static_cast<uint8_t>(protocol));
-    response.insert(response.end(),
-                    local_keys.public_key.data(),
-                    local_keys.public_key.data() + local_keys.public_key.size());
+    // Derive subkeys
+    size_t derived = 0;
+    uint64_t subkey_id = 0;
     
-    // Perform Diffie-Hellman and derive shared secret
-    init_ratchet_keys();
-    
-    return response;
-}
-
-bool E2ESession::complete_key_exchange(
-    const std::vector<uint8_t>& response,
-    const KeyPair& local_keys
-) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    
-    if (response.size() <= 1) {
-        return false;
+    while (derived < key_length) {
+        uint8_t subkey[crypto_kdf_BYTES_MAX];
+        size_t to_derive = std::min(key_length - derived, sizeof(subkey));
+        
+        if (crypto_kdf_derive_from_key(subkey, to_derive, subkey_id++,
+                                       kdf_context, master_key) != 0) {
+            sodium_memzero(master_key, sizeof(master_key));
+            throw std::runtime_error("Failed to derive key");
+        }
+        
+        std::memcpy(derived_key.data() + derived, subkey, to_derive);
+        derived += to_derive;
+        sodium_memzero(subkey, sizeof(subkey));
     }
     
-    pImpl_->remote_identity_public_key = SecureMemory(response.size() - 1);
-    std::memcpy(pImpl_->remote_identity_public_key.data(),
-                response.data() + 1,
-                response.size() - 1);
+    sodium_memzero(master_key, sizeof(master_key));
+    sodium_memzero(kdf_context, sizeof(kdf_context));
     
-    init_ratchet_keys();
-    pImpl_->state = E2ESessionState::SessionEstablished;
-    
-    return true;
+    return derived_key;
 }
 
-// Private helper function to initialize ratchet keys
-void E2ESession::init_ratchet_keys() {
-    // Compute shared secret using X25519
-    SecureMemory shared_secret(crypto_scalarmult_BYTES);
-    
-    if (crypto_scalarmult(
-            shared_secret.data(),
-            pImpl_->local_identity_keys.private_key.data(),
-            pImpl_->remote_identity_public_key.data()) != 0) {
-        throw std::runtime_error("Failed to compute shared secret");
-    }
-    
-    // Derive root key and chain key using HKDF
-    pImpl_->ratchet.root_key = SecureMemory(32);
-    pImpl_->ratchet.chain_key = SecureMemory(32);
-    
-    // KDF to derive root and chain keys
-    unsigned char info[] = "NCP_E2E_INIT";
-    crypto_kdf_derive_from_key(
-        pImpl_->ratchet.root_key.data(), 32,
-        1, (const char*)info,
-        shared_secret.data());
-    crypto_kdf_derive_from_key(
-        pImpl_->ratchet.chain_key.data(), 32,
-        2, (const char*)info,
-        shared_secret.data());
-    
-    pImpl_->ratchet.sending_chain_length = 0;
-    pImpl_->ratchet.receiving_chain_length = 0;
-}
-
-EncryptedMessage E2ESession::encrypt(
+EncryptedMessage E2ESession::encrypt_message(
     const std::vector<uint8_t>& plaintext,
-    const std::vector<uint8_t>& associated_data
+    const SecureMemory& encryption_key
 ) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    
-    if (pImpl_->state != E2ESessionState::SessionEstablished) {
-        throw std::runtime_error("Session not established");
+    if (encryption_key.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Invalid encryption key size");
     }
     
     EncryptedMessage msg;
-    msg.header.version = 1;
-    msg.header.message_number = pImpl_->ratchet.sending_chain_length++;
-    msg.header.associated_data = associated_data;
+    msg.nonce.resize(crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+    randombytes_buf(msg.nonce.data(), msg.nonce.size());
     
-    // Generate nonce
-    msg.header.nonce.resize(crypto_aead_chacha20poly1305_ietf_NPUBBYTES);
-    randombytes_buf(msg.header.nonce.data(), msg.header.nonce.size());
+    msg.ciphertext.resize(plaintext.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES);
     
-    // Derive message key from chain key
-    SecureMemory message_key(crypto_aead_chacha20poly1305_ietf_KEYBYTES);
-    unsigned char info[] = "NCP_MSG_KEY";
-    crypto_kdf_derive_from_key(
-        message_key.data(), message_key.size(),
-        msg.header.message_number, (const char*)info,
-        pImpl_->ratchet.chain_key.data());
-    
-    // Encrypt with ChaCha20-Poly1305
-    msg.ciphertext.resize(plaintext.size() + crypto_aead_chacha20poly1305_ietf_ABYTES);
     unsigned long long ciphertext_len;
-    
-    crypto_aead_chacha20poly1305_ietf_encrypt(
-        msg.ciphertext.data(), &ciphertext_len,
-        plaintext.data(), plaintext.size(),
-        associated_data.data(), associated_data.size(),
-        nullptr,
-        msg.header.nonce.data(),
-        message_key.data());
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+            msg.ciphertext.data(), &ciphertext_len,
+            plaintext.data(), plaintext.size(),
+            nullptr, 0,
+            nullptr,
+            msg.nonce.data(),
+            encryption_key.data()) != 0) {
+        throw std::runtime_error("Encryption failed");
+    }
     
     msg.ciphertext.resize(ciphertext_len);
-    pImpl_->messages_sent++;
-    pImpl_->last_activity = std::chrono::system_clock::now();
+    msg.timestamp = std::chrono::system_clock::now();
     
     return msg;
 }
 
-std::optional<std::vector<uint8_t>> E2ESession::decrypt(
-    const EncryptedMessage& encrypted_message
+std::vector<uint8_t> E2ESession::decrypt_message(
+    const EncryptedMessage& message,
+    const SecureMemory& decryption_key
 ) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    
-    if (pImpl_->state != E2ESessionState::SessionEstablished) {
-        return std::nullopt;
+    if (decryption_key.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Invalid decryption key size");
     }
     
-    // Derive message key
-    SecureMemory message_key(crypto_aead_chacha20poly1305_ietf_KEYBYTES);
-    unsigned char info[] = "NCP_MSG_KEY";
-    crypto_kdf_derive_from_key(
-        message_key.data(), message_key.size(),
-        encrypted_message.header.message_number, (const char*)info,
-        pImpl_->ratchet.chain_key.data());
+    if (message.nonce.size() != crypto_aead_xchacha20poly1305_ietf_NPUBBYTES) {
+        throw std::runtime_error("Invalid nonce size");
+    }
     
-    // Decrypt with ChaCha20-Poly1305
-    std::vector<uint8_t> plaintext(
-        encrypted_message.ciphertext.size() - crypto_aead_chacha20poly1305_ietf_ABYTES);
+    std::vector<uint8_t> plaintext(message.ciphertext.size());
     unsigned long long plaintext_len;
     
-    if (crypto_aead_chacha20poly1305_ietf_decrypt(
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(
             plaintext.data(), &plaintext_len,
             nullptr,
-            encrypted_message.ciphertext.data(),
-            encrypted_message.ciphertext.size(),
-            encrypted_message.header.associated_data.data(),
-            encrypted_message.header.associated_data.size(),
-            encrypted_message.header.nonce.data(),
-            message_key.data()) != 0) {
-        return std::nullopt;  // Decryption failed
+            message.ciphertext.data(), message.ciphertext.size(),
+            nullptr, 0,
+            message.nonce.data(),
+            decryption_key.data()) != 0) {
+        throw std::runtime_error("Decryption failed or authentication tag invalid");
     }
     
     plaintext.resize(plaintext_len);
-    pImpl_->messages_received++;
-    pImpl_->last_activity = std::chrono::system_clock::now();
-    
     return plaintext;
 }
 
-void E2ESession::ratchet_sending_chain() {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    
-    SecureMemory new_chain_key(32);
-    unsigned char info[] = "NCP_RATCHET";
-    crypto_kdf_derive_from_key(
-        new_chain_key.data(), 32,
-        pImpl_->ratchet.sending_chain_length, (const char*)info,
-        pImpl_->ratchet.chain_key.data());
-    
-    pImpl_->ratchet.chain_key = std::move(new_chain_key);
-    pImpl_->ratchet.sending_chain_length = 0;
-}
-
-void E2ESession::ratchet_receiving_chain(
-    const std::vector<uint8_t>& remote_public_key
-) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    
-    // Update remote ephemeral key
-    pImpl_->remote_ephemeral_public_key = SecureMemory(remote_public_key.size());
-    std::memcpy(pImpl_->remote_ephemeral_public_key.data(),
-                remote_public_key.data(),
-                remote_public_key.size());
-    
-    // Generate new ephemeral key pair
-    pImpl_->local_ephemeral_keys.public_key = SecureMemory(crypto_box_PUBLICKEYBYTES);
-    pImpl_->local_ephemeral_keys.private_key = SecureMemory(crypto_box_SECRETKEYBYTES);
-    crypto_box_keypair(
-        pImpl_->local_ephemeral_keys.public_key.data(),
-        pImpl_->local_ephemeral_keys.private_key.data());
-    
-    // Compute new shared secret
-    SecureMemory shared_secret(crypto_scalarmult_BYTES);
-    crypto_scalarmult(
-        shared_secret.data(),
-        pImpl_->local_ephemeral_keys.private_key.data(),
-        pImpl_->remote_ephemeral_public_key.data());
-    
-    // Derive new chain key
-    unsigned char info[] = "NCP_RATCHET";
-    crypto_kdf_derive_from_key(
-        pImpl_->ratchet.chain_key.data(), 32,
-        1, (const char*)info,
-        shared_secret.data());
-    
-    pImpl_->ratchet.receiving_chain_length = 0;
-}
-
-// Session management functions
-E2ESessionState E2ESession::get_state() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    return pImpl_->state;
-}
-
-bool E2ESession::is_established() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    return pImpl_->state == E2ESessionState::SessionEstablished;
-}
-
-bool E2ESession::is_expired() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    auto now = std::chrono::system_clock::now();
-    return (now - pImpl_->last_activity) > pImpl_->config.session_timeout;
-}
-
-void E2ESession::rotate_keys() {
-    ratchet_sending_chain();
-}
-
-void E2ESession::revoke_session() {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    pImpl_->state = E2ESessionState::SessionRevoked;
-    pImpl_->ratchet.root_key.zero();
-    pImpl_->ratchet.chain_key.zero();
-}
-
 std::string E2ESession::get_session_id() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
     return pImpl_->session_id;
 }
 
-std::chrono::system_clock::time_point E2ESession::get_last_activity() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    return pImpl_->last_activity;
-}
-
-uint64_t E2ESession::get_messages_sent() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    return pImpl_->messages_sent;
-}
-
-uint64_t E2ESession::get_messages_received() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    return pImpl_->messages_received;
-}
-
-
-// E2EManager implementation
-struct E2EManager::Impl {
-    std::unordered_map<std::string, std::shared_ptr<E2ESession>> sessions;
-    mutable std::mutex mutex;
-};
-
-E2EManager::E2EManager() : pImpl_(std::make_unique<Impl>()) {}
-E2EManager::~E2EManager() = default;
-
-std::shared_ptr<E2ESession> E2EManager::create_session(
-    const std::string& peer_id,
-    const E2EConfig& config
-) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    auto session = std::make_shared<E2ESession>(config);
-    pImpl_->sessions[peer_id] = session;
-    return session;
-}
-
-std::shared_ptr<E2ESession> E2EManager::get_session(const std::string& peer_id) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    auto it = pImpl_->sessions.find(peer_id);
-    return (it != pImpl_->sessions.end()) ? it->second : nullptr;
-}
-
-void E2EManager::remove_session(const std::string& peer_id) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    pImpl_->sessions.erase(peer_id);
-}
-
-void E2EManager::remove_expired_sessions() {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    for (auto it = pImpl_->sessions.begin(); it != pImpl_->sessions.end(); ) {
-        if (it->second->is_expired()) {
-            it = pImpl_->sessions.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-std::vector<std::string> E2EManager::get_active_sessions() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    std::vector<std::string> result;
-    result.reserve(pImpl_->sessions.size());
-    for (const auto& [peer_id, session] : pImpl_->sessions) {
-        if (session->is_established()) {
-            result.push_back(peer_id);
-        }
-    }
-    return result;
-}
-
-size_t E2EManager::get_session_count() const {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    return pImpl_->sessions.size();
-}
-
-void E2EManager::rotate_all_keys() {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    for (auto& [peer_id, session] : pImpl_->sessions) {
-        session->rotate_keys();
-    }
-}
-
-void E2EManager::export_keys(
-    const std::string& filepath,
-    const SecureString& password
-) {
-    // Export encrypted key bundle (not implemented for security)
-    throw std::runtime_error("Key export requires additional security review");
-}
-
-bool E2EManager::import_keys(
-    const std::string& filepath,
-    const SecureString& password
-) {
-    // Import encrypted key bundle (not implemented for security)
-    throw std::runtime_error("Key import requires additional security review");
-}
-
-
-// E2EUtils namespace implementation
-namespace E2EUtils {
-
-SecureMemory derive_key(
-    const SecureMemory& input_key_material,
-    const std::vector<uint8_t>& salt,
-    const std::vector<uint8_t>& info,
-    size_t output_length
-) {
-    SecureMemory output(output_length);
-    
-    // Use HKDF with SHA-256
-    crypto_auth_hmacsha256_state state;
-    unsigned char prk[crypto_auth_hmacsha256_BYTES];
-    
-    // Extract
-    crypto_auth_hmacsha256_init(&state, salt.data(), salt.size());
-    crypto_auth_hmacsha256_update(&state, input_key_material.data(), input_key_material.size());
-    crypto_auth_hmacsha256_final(&state, prk);
-    
-    // Expand
-    size_t done = 0;
-    uint8_t counter = 1;
-    unsigned char prev[crypto_auth_hmacsha256_BYTES] = {0};
-    
-    while (done < output_length) {
-        crypto_auth_hmacsha256_init(&state, prk, sizeof(prk));
-        if (counter > 1) {
-            crypto_auth_hmacsha256_update(&state, prev, sizeof(prev));
-        }
-        crypto_auth_hmacsha256_update(&state, info.data(), info.size());
-        crypto_auth_hmacsha256_update(&state, &counter, 1);
-        crypto_auth_hmacsha256_final(&state, prev);
-        
-        size_t to_copy = std::min(sizeof(prev), output_length - done);
-        std::memcpy(output.data() + done, prev, to_copy);
-        done += to_copy;
-        counter++;
-    }
-    
-    sodium_memzero(prk, sizeof(prk));
-    sodium_memzero(prev, sizeof(prev));
-    
-    return output;
-}
-
-SecureMemory hkdf_expand(
-    const SecureMemory& prk,
-    const std::vector<uint8_t>& info,
-    size_t length
-) {
-    return derive_key(prk, {}, info, length);
-}
-
-std::vector<uint8_t> pad_message(
-    const std::vector<uint8_t>& message,
-    size_t block_size
-) {
-    size_t padding_length = block_size - (message.size() % block_size);
-    if (padding_length == 0) padding_length = block_size;
-    
-    std::vector<uint8_t> padded(message.size() + padding_length);
-    std::memcpy(padded.data(), message.data(), message.size());
-    
-    // PKCS#7 padding
-    std::memset(padded.data() + message.size(),
-                static_cast<uint8_t>(padding_length),
-                padding_length);
-    
-    return padded;
-}
-
-std::optional<std::vector<uint8_t>> unpad_message(
-    const std::vector<uint8_t>& padded_message
-) {
-    if (padded_message.empty()) {
-        return std::nullopt;
-    }
-    
-    uint8_t padding_length = padded_message.back();
-    
-    if (padding_length == 0 || padding_length > padded_message.size()) {
-        return std::nullopt;
-    }
-    
-    // Verify padding
-    for (size_t i = padded_message.size() - padding_length;
-         i < padded_message.size(); ++i) {
-        if (padded_message[i] != padding_length) {
-            return std::nullopt;
-        }
-    }
-    
-    return std::vector<uint8_t>(
-        padded_message.begin(),
-        padded_message.end() - padding_length);
-}
-
-std::vector<uint8_t> serialize_message(const EncryptedMessage& msg) {
-    std::vector<uint8_t> result;
-    
-    // Header
-    result.push_back(msg.header.version);
-    
-    // Message number (4 bytes, big endian)
-    result.push_back((msg.header.message_number >> 24) & 0xFF);
-    result.push_back((msg.header.message_number >> 16) & 0xFF);
-    result.push_back((msg.header.message_number >> 8) & 0xFF);
-    result.push_back(msg.header.message_number & 0xFF);
-    
-    // Nonce length and data
-    result.push_back(static_cast<uint8_t>(msg.header.nonce.size()));
-    result.insert(result.end(), msg.header.nonce.begin(), msg.header.nonce.end());
-    
-    // Ciphertext length (4 bytes) and data
-    uint32_t ct_len = static_cast<uint32_t>(msg.ciphertext.size());
-    result.push_back((ct_len >> 24) & 0xFF);
-    result.push_back((ct_len >> 16) & 0xFF);
-    result.push_back((ct_len >> 8) & 0xFF);
-    result.push_back(ct_len & 0xFF);
-    result.insert(result.end(), msg.ciphertext.begin(), msg.ciphertext.end());
-    
-    return result;
-}
-
-std::optional<EncryptedMessage> deserialize_message(
-    const std::vector<uint8_t>& data
-) {
-    if (data.size() < 10) return std::nullopt;
-    
-    EncryptedMessage msg;
-    size_t pos = 0;
-    
-    msg.header.version = data[pos++];
-    msg.header.message_number = (data[pos] << 24) | (data[pos+1] << 16) |
-                                (data[pos+2] << 8) | data[pos+3];
-    pos += 4;
-    
-    size_t nonce_len = data[pos++];
-    if (pos + nonce_len > data.size()) return std::nullopt;
-    msg.header.nonce.assign(data.begin() + pos, data.begin() + pos + nonce_len);
-    pos += nonce_len;
-    
-    if (pos + 4 > data.size()) return std::nullopt;
-    uint32_t ct_len = (data[pos] << 24) | (data[pos+1] << 16) |
-                      (data[pos+2] << 8) | data[pos+3];
-    pos += 4;
-    
-    if (pos + ct_len > data.size()) return std::nullopt;
-    msg.ciphertext.assign(data.begin() + pos, data.begin() + pos + ct_len);
-    
-    return msg;
-}
-
-}  // namespace E2EUtils
-
-}  // namespace NCP
+} // namespace ncp
