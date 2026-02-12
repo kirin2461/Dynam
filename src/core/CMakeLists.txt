@@ -63,6 +63,8 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_security.hpp
     include/ncp_config.hpp
     include/ncp_logger.hpp
+        include/ncp_paranoid.hpp
+            include/ncp_secure_memory.hpp
 )
 
 # Combine all sources and headers
