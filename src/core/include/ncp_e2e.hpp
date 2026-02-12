@@ -13,7 +13,7 @@
 #include <map>
 #include <cstdint>
 
-namespace NCP {
+namespace ncp {
 
 enum class E2ESessionState {
     Uninitialized,
@@ -188,6 +188,6 @@ namespace E2EUtils {
     );
 }
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_E2E_HPP
