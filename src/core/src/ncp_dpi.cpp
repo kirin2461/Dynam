@@ -691,12 +691,12 @@ const char* preset_to_string(DPIPreset preset) {
     }
 }
 
-DPIBypass::DPIBypass() : impl(std::make_unique<Impl>()) {}
+DPIBypass::DPIBypass() : impl_(std::make_unique<Impl>()) {}
 DPIBypass::~DPIBypass() { shutdown(); }
 
 bool DPIBypass::initialize(const DPIConfig& config) {
-    impl->config = config;
-    impl->log("Initialize DPI (mode=" +
+    impl_->config = config;
+    impl_->log("Initialize DPI (mode=" +
               std::string(config.mode == DPIMode::DRIVER ? "driver" :
                           config.mode == DPIMode::PROXY ? "proxy" : "passive") +
               ", listen_port=" + std::to_string(config.listen_port) +
@@ -706,47 +706,47 @@ bool DPIBypass::initialize(const DPIConfig& config) {
 
 bool DPIBypass::start() {
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
-    if (impl->config.mode == DPIMode::DRIVER) {
-        if (!impl->init_nfqueue()) return false;
-        impl->running = true;
-        impl->worker_thread = std::thread(&Impl::nfqueue_loop, impl.get());
-        impl->log("DPI bypass started (driver mode via nfqueue, queue=" +
-                  std::to_string(impl->config.nfqueue_num) + ")");
+    if (impl_->config.mode == DPIMode::DRIVER) {
+        if (!impl_->init_nfqueue()) return false;
+        impl_->running = true;
+        impl_->worker_thread = std::thread(&Impl::nfqueue_loop, impl.get());
+        impl_->log("DPI bypass started (driver mode via nfqueue, queue=" +
+                  std::to_string(impl_->config.nfqueue_num) + ")");
         return true;
     }
 #endif
-    if (impl->config.mode == DPIMode::PROXY) {
-        impl->running = true;
-        impl->worker_thread = std::thread(&Impl::proxy_listen_loop, impl.get());
-        impl->log("DPI bypass started (TCP proxy mode)");
+    if (impl_->config.mode == DPIMode::PROXY) {
+        impl_->running = true;
+        impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl.get());
+        impl_->log("DPI bypass started (TCP proxy mode)");
         return true;
     }
 
     // Passive fallback mode (no packet/stream modification)
-    impl->running = true;
-    impl->log("DPI bypass started (passive mode - nfqueue/proxy not active)");
+    impl_->running = true;
+    impl_->log("DPI bypass started (passive mode - nfqueue/proxy not active)");
     return true;
 }
 
 void DPIBypass::stop() {
-    impl->running = false;
-    if (impl->worker_thread.joinable()) impl->worker_thread.join();
+    impl_->running = false;
+    if (impl_->worker_thread.joinable()) impl_->worker_thread.join();
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
-    impl->cleanup_nfqueue();
+    impl_->cleanup_nfqueue();
 #endif
-    impl->log("DPI bypass stopped");
+    impl_->log("DPI bypass stopped");
 }
 
 void DPIBypass::shutdown() { stop(); }
-bool DPIBypass::is_running() const { return impl->running; }
+bool DPIBypass::is_running() const { return impl_->running; }
 
 DPIStats DPIBypass::get_stats() const {
-    std::lock_guard<std::mutex> lock(impl->stats_mutex);
-    return impl->stats;
+    std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+    return impl_->stats;
 }
 
-void DPIBypass::set_log_callback(std::function<void(const std::string&)> cb) {
-    impl->log_callback = cb;
+void DPIBypass::set_log_callback(LogCallback cb) {
+    impl_->log_callback = [cb](const std::string& msg) { if (cb) cb(LogLevel::INFO, msg); };
 }
 
 } // namespace DPI
