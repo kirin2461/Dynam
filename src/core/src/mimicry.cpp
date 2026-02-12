@@ -12,7 +12,7 @@ std::vector<uint8_t> TrafficMimicry::wrap_payload(const std::vector<uint8_t>& pa
         case MimicProfile::HTTP_GET:
             return create_http_get_wrapper(payload);
         case MimicProfile::HTTPS_CLIENT_HELLO:
-            return create_https_hello_wrapper(payload);
+            return create_https_client_hello_wrapper(payload);
         default:
             return payload;
     }
@@ -46,7 +46,7 @@ std::vector<uint8_t> TrafficMimicry::create_http_get_wrapper(const std::vector<u
     return result;
 }
 
-std::vector<uint8_t> TrafficMimicry::create_https_hello_wrapper(const std::vector<uint8_t>& payload) {
+std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std::vector<uint8_t>& payload) {
     // Simplified TLS ClientHello structure for mimicry
     std::vector<uint8_t> result = {
         0x16, 0x03, 0x01, // Handshake, TLS 1.0
