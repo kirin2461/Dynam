@@ -133,9 +133,11 @@ Dynam/
 | `ENABLE_TESTS` | ON | Сборка тестов |
 | `ENABLE_CLI` | ON | Сборка CLI приложения |
 | `ENABLE_GUI` | OFF | Сборка GUI (требует Qt6) |
-| `ENABLE_LIBOQS` | ON | Post-quantum криптография |
-| `ENABLE_WEBSOCKETS` | ON | WebSocket tunneling |
-| `ENABLE_TOR_PROXY` | ON | Tor proxy интеграция |
+| `ENABLE_LIBOQS` | OFF | Post-quantum криптография |
+| `ENABLE_WEBSOCKETS` | OFF | WebSocket tunneling |
+| `ENABLE_TOR_PROXY` | OFF | Tor proxy интеграция |
+| `ENABLE_FUZZING` | OFF | Fuzzing тесты (Clang + LibFuzzer) |
+| `BUILD_SHARED_LIBS` | OFF | Сборка разделяемых библиотек |
 
 ```bash
 # Без GUI
