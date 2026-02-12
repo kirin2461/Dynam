@@ -26,7 +26,7 @@ enum class DPIPreset {
     RUNET_STRONG
 };
 
-enum class ValidationError constexpr {
+    enum class ValidationError {
     NONE = 0,
     INVALID_FRAGMENT_SIZE,
     INVALID_FRAGMENT_OFFSET,
@@ -89,7 +89,7 @@ struct DPIConfig {
     bool enable_adaptive_fragmentation = true;  // Adapt fragmentation based on detection
     int max_fragment_retries = 3;  // Max retries before changing strategy
 
-    ValidationError validate() const { noexcept
+    ValidationError validate() const noexcept {
         if (fragment_size < 1 || fragment_size > 1460) return ValidationError::INVALID_FRAGMENT_SIZE;
         if (fragment_offset < 0) return ValidationError::INVALID_FRAGMENT_OFFSET;
         if (split_position < 0) return ValidationError::INVALID_SPLIT_POSITION;
@@ -102,7 +102,7 @@ struct DPIConfig {
         return ValidationError::NONE;
     }
 
-    bool is_valid() const { noexcept
+    bool is_valid() const noexcept {
         return validate() == ValidationError::NONE;
     }
 
@@ -110,7 +110,7 @@ struct DPIConfig {
         *this = DPIConfig{};
     }
 
-    bool operator==(const DPIConfig& other) const { noexcept
+    bool operator==(const DPIConfig& other) const noexcept {
         return mode == other.mode &&
                enable_tcp_split == other.enable_tcp_split &&
                split_position == other.split_position &&
