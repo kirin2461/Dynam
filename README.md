@@ -4,11 +4,11 @@
 
 ## Features
 
-### Core Library (libncp_core) - 17 modules
+### Core Library (libncp_core) - 18 modules
 
 - **Cryptography** (`ncp_crypto.hpp`) - Ed25519, Curve25519, ChaCha20-Poly1305, X25519 key exchange, AEAD encryption with `constexpr`/`noexcept` optimization
 - **DPI Bypass** (`ncp_dpi.hpp`, `ncp_dpi_advanced.hpp`) - TCP fragmentation, fake packets, disorder mode, SNI splitting, RuNet presets (Soft/Strong)
-- **Network Spoofing** (`ncp_spoofer.hpp`) - IPv4/IPv6/MAC/DNS spoofing with automatic identity rotation
+- **Network Spoofing** (`ncp_spoofer.hpp`) - IPv4/IPv6/MAC/DNS spoofing with automatic identity rotation, SMBIOS serial spoofing, disk serial randomization, DHCP client ID spoofing, TCP/IP fingerprint emulation (Windows 10/Linux 5.x/macOS profiles)
 - **Network Operations** (`ncp_network.hpp`) - libpcap packet capture, raw sockets, typed `unique_ptr` handles, bypass techniques (HTTP/TLS mimicry)
 - **Paranoid Mode** (`ncp_paranoid.hpp`) - 8-layer protection: entry obfuscation, multi-anonymization (VPN->Tor->I2P), traffic morphing, timing protection, metadata stripping, post-quantum crypto, anti-correlation, system-level memory protection
 - **Traffic Mimicry** (`ncp_mimicry.hpp`) - HTTP/TLS/WebSocket protocol emulation for traffic camouflage
@@ -16,6 +16,7 @@
 - **I2P Integration** (`ncp_i2p.hpp`) - I2P garlic routing, SAM bridge, tunnel management
 - **E2E Encryption** (`ncp_e2e.hpp`) - End-to-end encryption with X448, ECDH_P256, forward secrecy
 - **Secure Memory** (`ncp_secure_memory.hpp`) - Memory-safe containers with automatic zeroing on destruction, `mlock` support
+- **Secure Buffer** (`ncp_secure_buffer.hpp`) - RAII buffer with `sodium_memzero` wipe, `mlock`/`VirtualLock` page locking, move semantics, custom `SecureDeleter`
 - **DNS over HTTPS** (`ncp_doh.hpp`) - Encrypted DNS resolution via DoH providers
 - **Security Module** (`ncp_security.hpp`) - System hardening, process protection, anti-forensic measures
 - **Database** (`ncp_db.hpp`) - SQLite3 + SQLCipher encrypted storage
@@ -106,7 +107,7 @@ ncp.exe run
 ```
 
 The `run` command automatically activates:
-- Full network spoofing (IPv4/IPv6/MAC/DNS)
+- Full network spoofing (IPv4/IPv6/MAC/DNS + HW identifiers)
 - DPI bypass proxy
 - PARANOID mode (TINFOIL_HAT level) with all 8 protection layers
 - Cover traffic generation
@@ -136,15 +137,15 @@ ncp network interfaces
 ```
 Dynam/
 |-- src/
-|   |-- core/              # Core library (libncp_core)
-|   |   |-- include/       # 17 public headers (ncp_*.hpp)
-|   |   |-- src/           # Implementation files
+|   |-- core/                    # Core library (libncp_core)
+|   |   |-- include/             # 18 public headers (ncp_*.hpp)
+|   |   |-- src/                 # Implementation files
 |   |   |-- CMakeLists.txt
-|   |-- cli/               # CLI tool (main.cpp)
-|   |-- gui/               # Qt6 GUI (optional, ENABLE_GUI=OFF)
-|-- tests/                 # Unit tests (GoogleTest)
-|   |-- fuzz/              # Fuzzing tests (LibFuzzer)
-|-- docs/                  # Documentation
+|   |-- cli/                     # CLI tool (main.cpp)
+|   |-- gui/                     # Qt6 GUI (optional, ENABLE_GUI=OFF)
+|-- tests/                       # Unit tests (GoogleTest)
+|   |-- fuzz/                    # Fuzzing tests (LibFuzzer)
+|-- docs/                        # Documentation
 |   |-- ARCHITECTURE.md
 |   |-- BUILD.md
 |   |-- CLI_COMMANDS.md
@@ -152,11 +153,11 @@ Dynam/
 |   |-- SECURITY_FIXES.md
 |   |-- SECURITY_IMPLEMENTATION_GUIDE.md
 |   |-- KNOWN_ISSUES.md
-|-- scripts/               # Build helper scripts
-|-- CMakeLists.txt         # Root CMake config
-|-- build.bat              # Windows automated build
-|-- run_ncp.bat            # Windows launcher with CLI menu
-|-- conanfile.txt          # Conan dependencies
+|-- scripts/                     # Build helper scripts
+|-- CMakeLists.txt               # Root CMake config
+|-- build.bat                    # Windows automated build
+|-- run_ncp.bat                  # Windows launcher with CLI menu
+|-- conanfile.txt                # Conan dependencies
 ```
 
 ## CMake Build Options
@@ -175,9 +176,10 @@ Dynam/
 ## Security
 
 - **Cryptography**: libsodium (audited, industry-standard)
-- **AEAD**: ChaCha20-Poly1305 authenticated encryption
+- **AEAD**: XChaCha20-Poly1305 authenticated encryption with associated data
 - **Key Exchange**: X25519, X448, ECDH_P256
-- **Secure Memory**: Automatic zeroing, `mlock` protection, `SecureVector`/`SecureString` containers
+- **Secure Memory**: Automatic zeroing via `sodium_memzero`, `mlock`/`VirtualLock` page locking, `SecureVector`/`SecureString`/`SecureBuffer` containers
+- **HW Identity Spoofing**: SMBIOS serials, disk serial numbers, DHCP client ID, TCP/IP fingerprint profiles
 - **Database**: SQLite3 + SQLCipher (encrypted at rest)
 - **Code Quality**: `constexpr`/`noexcept` throughout, typed pointers, no raw `void*`
 - **Fuzzing**: LibFuzzer-based tests for crypto, DPI config, and packet parsing
@@ -187,7 +189,7 @@ Dynam/
 
 | Library | Purpose | Required |
 |---------|---------|----------|
-| libsodium | Cryptography (Ed25519, ChaCha20, X25519) | Yes |
+| libsodium | Cryptography (Ed25519, ChaCha20, X25519, AEAD) | Yes |
 | OpenSSL | TLS operations, DoH | Yes |
 | SQLite3 | Encrypted database | Yes |
 | GoogleTest | Unit testing | For tests |
@@ -213,6 +215,6 @@ For issues and questions, please open a [GitHub Issue](https://github.com/kirin2
 
 ---
 
-**Last Updated**: February 12, 2026  
-**Version**: 1.0.0  
-**Status**: Core library, CLI, DPI bypass, Paranoid Mode - implemented
+**Last Updated**: February 12, 2026
+**Version**: 1.1.0
+**Status**: Core library (18 modules), CLI, DPI bypass, Paranoid Mode, HW spoofing, SecureBuffer - implemented
