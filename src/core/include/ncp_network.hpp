@@ -7,6 +7,9 @@
 #include <functional>
 #include <thread>
 
+// Forward declaration for pcap_t
+struct pcap_t;
+
 namespace NCP {
 
 // DPI Bypass techniques enumeration
@@ -147,48 +150,4 @@ private:
     void cleanup_bypass();
 
     // Member variables
-    void* pcap_handle_;  // Opaque pcap_t pointer
-    bool is_capturing_;
-    bool bypass_enabled_;
-    PacketCallback packet_cb_;
-    NetworkStats stats_;
-    BypassConfig bypass_config_;
-    BypassTechnique current_technique_;
-    std::string last_error_;
-    std::string current_interface_;
-    std::thread capture_thread_;
-    uint16_t tcp_window_size_;
-};
-
-// PacketCapture class for test compatibility
-class PacketCapture {
-public:
-    PacketCapture() : is_capturing_(false) {}
-    ~PacketCapture() { stopCapture(); }
-
-    bool startCapture(const std::string& interface_name) {
-        if (interface_name.empty() || interface_name.find("invalid") != std::string::npos) {
-            return false;
-        }
-        is_capturing_ = true;
-        current_interface_ = interface_name;
-        return true;
-    }
-
-    void stopCapture() {
-        is_capturing_ = false;
-    }
-
-    bool isCapturing() const {
-        return is_capturing_;
-    }
-
-private:
-    bool is_capturing_;
-    std::string current_interface_;
-};
-
-} // namespace NCP
-
-
-#endif // NCP_NETWORK_HPP
+    void* pcap_handle;  // Type-safe pcap pointer
