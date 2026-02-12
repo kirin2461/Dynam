@@ -11,7 +11,7 @@
 #include <sstream>
 #include <optional>
 
-namespace NCP {
+namespace ncp {
 namespace DPI {
 
 enum class DPIMode {
@@ -316,4 +316,4 @@ private:
 };
 
 } // namespace DPI
-} // namespace NCP
+} // namespace ncp
