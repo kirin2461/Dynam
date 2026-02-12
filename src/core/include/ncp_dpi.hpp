@@ -89,7 +89,7 @@ struct DPIConfig {
     bool enable_adaptive_fragmentation = true;  // Adapt fragmentation based on detection
     int max_fragment_retries = 3;  // Max retries before changing strategy
 
-    ValidationError validate() const noexcept {
+    constexpr ValidationError validate() const noexcept {
         if (fragment_size < 1 || fragment_size > 1460) return ValidationError::INVALID_FRAGMENT_SIZE;
         if (fragment_offset < 0) return ValidationError::INVALID_FRAGMENT_OFFSET;
         if (split_position < 0) return ValidationError::INVALID_SPLIT_POSITION;
@@ -106,7 +106,7 @@ struct DPIConfig {
         return validate() == ValidationError::NONE;
     }
 
-    void reset() {
+    void reset() noexcept {
         *this = DPIConfig{};
     }
 
@@ -132,7 +132,7 @@ struct DPIConfig {
                fragment_offset == other.fragment_offset;
     }
 
-    bool operator!=(const DPIConfig& other) const {
+    bool operator!=(const DPIConfig& other) const noexcept {
         return !(*this == other);
     }
 
@@ -272,7 +272,7 @@ struct DPIStats {
         return *this;
     }
 
-    void reset() {
+    void reset() noexcept {
         packets_total.store(0);
         packets_modified.store(0);
         packets_fragmented.store(0);
@@ -282,7 +282,7 @@ struct DPIStats {
         connections_handled.store(0);
     }
 
-    DPIStats snapshot() const {
+    DPIStats snapshot() const noexcept {
         DPIStats s;
         s.packets_total.store(packets_total.load());
         s.packets_modified.store(packets_modified.load());
