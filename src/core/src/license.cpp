@@ -26,7 +26,7 @@
 #endif
 #endif
 
-namespace NCP {
+namespace ncp {
 
 License::License() : crypto_(std::make_unique<Crypto>()) {}
 
@@ -347,4 +347,4 @@ License::LicenseInfo License::get_license_info(const std::string& license_file) 
 bool License::is_expired(const std::chrono::system_clock::time_point& expiry_date) {
     return std::chrono::system_clock::now() > expiry_date;
 }
-} // namespace NCP
+} // namespace ncp
