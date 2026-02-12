@@ -1,3 +1,9 @@
+// Force Windows Vista+ API level for MIB_IF_ROW2 etc.
+#ifdef _WIN32
+    #undef _WIN32_WINNT
+    #define _WIN32_WINNT 0x0600
+#endif
+
 #include "NetworkManager.hpp"
 #include <cstring>
 #include <chrono>
@@ -5,11 +11,6 @@
 #include <set>
 #include <cstdio>
 
-#ifdef _WIN32
-#ifndef _WIN32_WINNT
-#define _WIN32_WINNT 0x0600
-#endif
-#endif
 
 #ifdef _WIN32
 #include <winsock2.h>
