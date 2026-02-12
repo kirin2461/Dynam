@@ -10,7 +10,7 @@
 #include <atomic>
 #include <chrono>
 
-namespace NCP {
+namespace ncp {
 
 struct NetworkInterface {
     std::string name;
@@ -75,6 +75,6 @@ private:
     std::vector<NetworkInterface> enumerate_interfaces() const;
 };
 
-} // namespace NCP
+} // namespace ncp
 
 #endif // NCP_NETWORK_MANAGER_HPP
