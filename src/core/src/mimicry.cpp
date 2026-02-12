@@ -95,6 +95,12 @@ std::vector<uint8_t> TrafficMimicry::wrap_payload(
             (static_cast<double>(stats_.bytes_mimicked) / stats_.bytes_original - 1.0) * 100.0;
     }
     last_packet_time_ = std::chrono::steady_clock::now();
+    
+    // Apply size mimicry padding before return
+    auto padding = generate_random_padding(0, 64);
+    if (!padding.empty()) {
+        result.insert(result.end(), padding.begin(), padding.end());
+    }
     return result;
 }
 
@@ -425,7 +431,25 @@ std::vector<uint8_t> TrafficMimicry::create_dns_query_wrapper(const std::vector<
     result.push_back(0x00); // end QNAME
     result.push_back(0x00); result.push_back(0x01); // QTYPE=A
     result.push_back(0x00); result.push_back(0x01); // QCLASS=IN
-    result.insert(result.end(), payload.begin(), payload.end());
+    // Update ARCOUNT to 1 (indicate Additional record)
+    result[10] = 0x00; result[11] = 0x01;
+
+    // Add payload as TXT record in Additional section (RFC 1035)
+    // NAME: pointer to QNAME (0xC00C points to offset 12)
+    result.push_back(0xC0); result.push_back(0x0C);
+    // TYPE: TXT (0x0010)
+    result.push_back(0x00); result.push_back(0x10);
+    // CLASS: IN (0x0001)
+    result.push_back(0x00); result.push_back(0x01);
+    // TTL: 0 (4 bytes)
+    result.push_back(0x00); result.push_back(0x00);
+    result.push_back(0x00); result.push_back(0x00);
+    // RDLENGTH: payload size + 1 (for length byte)
+    uint16_t rdlen = static_cast<uint16_t>(payload.size() + 1);
+    result.push_back(static_cast<uint8_t>(rdlen >> 8));
+    result.push_back(static_cast<uint8_t>(rdlen & 0xFF));
+    // TXT RDATA: <length byte> <payload data>
+    result.push_back(static_cast<uint8_t>(payload.size()));
     return result;
 }
 
@@ -436,7 +460,35 @@ std::vector<uint8_t> TrafficMimicry::create_dns_response_wrapper(const std::vect
         static_cast<uint8_t>(txn_id >> 8), static_cast<uint8_t>(txn_id & 0xFF),
         0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
     };
-    result.insert(result.end(), payload.begin(), payload.end());
+    // Pick random RU domain for QNAME in Question section
+    std::uniform_int_distribution<int> d(0, static_cast<int>(RU_DNS_LABELS.size()) - 1);
+    const auto& lbl = RU_DNS_LABELS[d(rng_)];
+    
+    // Add Question section
+    result.push_back(lbl.sld_len);
+    result.insert(result.end(), lbl.sld, lbl.sld + lbl.sld_len);
+    result.push_back(lbl.tld_len);
+    result.insert(result.end(), lbl.tld, lbl.tld + lbl.tld_len);
+    result.push_back(0x00); // end QNAME
+    result.push_back(0x00); result.push_back(0x10); // QTYPE=TXT
+    result.push_back(0x00); result.push_back(0x01); // QCLASS=IN
+    
+    // Add Answer section with TXT record (RFC 1035)
+    // NAME: pointer to QNAME (0xC00C points to offset 12)
+    result.push_back(0xC0); result.push_back(0x0C);
+    // TYPE: TXT (0x0010)
+    result.push_back(0x00); result.push_back(0x10);
+    // CLASS: IN (0x0001)
+    result.push_back(0x00); result.push_back(0x01);
+    // TTL: 300 seconds (4 bytes)
+    result.push_back(0x00); result.push_back(0x00);
+    result.push_back(0x01); result.push_back(0x2C);
+    // RDLENGTH: payload size + 1 (for length byte)
+    uint16_t rdlen = static_cast<uint16_t>(payload.size() + 1);
+    result.push_back(static_cast<uint8_t>(rdlen >> 8));
+    result.push_back(static_cast<uint8_t>(rdlen & 0xFF));
+    // TXT RDATA: <length byte> <payload data>
+    result.push_back(static_cast<uint8_t>(payload.size()));
     return result;
 }
 
