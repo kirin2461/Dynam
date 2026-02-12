@@ -66,6 +66,28 @@ struct DPIConfig {
 
     int fragment_size = 2;
     int fragment_offset = 2;
+    
+    // Advanced DPI bypass techniques
+    bool randomize_split_position = false;  // Randomize split position on each packet
+    int split_position_min = 1;
+    int split_position_max = 10;
+    
+    bool enable_pattern_obfuscation = true;  // Obfuscate TLS/HTTP patterns
+    bool randomize_fake_ttl = false;  // Randomize fake packet TTL (1-8)
+    bool enable_tcp_options_randomization = false;  // Randomize TCP options
+    
+    bool enable_timing_jitter = false;  // Add timing jitter to packets
+    int timing_jitter_min_us = 0;  // Min jitter in microseconds
+    int timing_jitter_max_us = 1000;  // Max jitter in microseconds
+    
+    bool enable_multi_layer_split = false;  // Split at multiple positions
+    std::vector<int> split_positions;  // Multiple split positions
+    
+    bool enable_decoy_sni = false;  // Send decoy SNI packets
+    std::vector<std::string> decoy_sni_domains;  // Decoy SNI domains
+    
+    bool enable_adaptive_fragmentation = true;  // Adapt fragmentation based on detection
+    int max_fragment_retries = 3;  // Max retries before changing strategy
 
     ValidationError validate() const { noexcept
         if (fragment_size < 1 || fragment_size > 1460) return ValidationError::INVALID_FRAGMENT_SIZE;
