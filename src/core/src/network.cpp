@@ -26,12 +26,12 @@
 #include <pcap/pcap.h>
 #endif
 
-// pcap_handle_deleter implementation
+namespace ncp {
+
+// pcap_handle_deleter implementation (moved inside namespace ncp)
 void pcap_handle_deleter::operator()(pcap_t* p) const noexcept {
     if (p) pcap_close(p);
 }
-
-namespace ncp {
 
 // ==================== Constructor/Destructor ====================
 
@@ -64,10 +64,9 @@ std::vector<std::string> Network::get_interfaces() {
 #ifdef _WIN32
     PIP_ADAPTER_INFO adapter_info = nullptr;
     ULONG buf_len = 0;
-
     GetAdaptersInfo(adapter_info, &buf_len);
     adapter_info = (IP_ADAPTER_INFO*)malloc(buf_len);
-
+    
     if (GetAdaptersInfo(adapter_info, &buf_len) == NO_ERROR) {
         PIP_ADAPTER_INFO adapter = adapter_info;
         while (adapter) {
@@ -79,6 +78,7 @@ std::vector<std::string> Network::get_interfaces() {
 #else
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_if_t* alldevs;
+    
     if (pcap_findalldevs(&alldevs, errbuf) == 0) {
         for (pcap_if_t* d = alldevs; d != nullptr; d = d->next) {
             if (d->name) {
@@ -139,6 +139,7 @@ Network::InterfaceInfo Network::get_interface_info(const std::string& iface_name
 bool Network::initialize_capture(const std::string& interface_name) {
 #ifndef _WIN32
     char errbuf[PCAP_ERRBUF_SIZE];
+    
     // FIX: Use reset() instead of assignment
     pcap_handle_.reset(pcap_open_live(
         interface_name.c_str(),
@@ -147,11 +148,12 @@ bool Network::initialize_capture(const std::string& interface_name) {
         1000,   // Timeout in ms
         errbuf
     ));
-
+    
     if (!pcap_handle_) {
         last_error_ = errbuf;
         return false;
     }
+    
     current_interface_ = interface_name;
     return true;
 #else
@@ -162,14 +164,15 @@ bool Network::initialize_capture(const std::string& interface_name) {
 
 void Network::start_capture(PacketCallback callback, int timeout_ms) {
     if (!pcap_handle_) return;
-
+    
     packet_cb_ = callback;
     is_capturing_ = true;
-
+    
     capture_thread_ = std::thread([this, timeout_ms]() {
 #ifndef _WIN32
         struct pcap_pkthdr* header;
         const u_char* packet;
+        
         while (is_capturing_) {
             // FIX: Use .get() instead of static_cast
             int res = pcap_next_ex(pcap_handle_.get(), &header, &packet);
@@ -198,7 +201,7 @@ void Network::stop_capture() {
 bool Network::enable_bypass(BypassTechnique technique) {
     current_technique_ = technique;
     bypass_enabled_ = true;
-
+    
     switch (technique) {
         case BypassTechnique::TTL_MODIFICATION:
             return setup_ttl_bypass();
@@ -294,22 +297,23 @@ bool Network::send_raw_packet(
         last_error_ = "Raw sockets require root/admin privileges";
         return false;
     }
-
+    
     int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
     if (sock < 0) {
         last_error_ = "Failed to create raw socket";
         return false;
     }
-
+    
     int one = 1;
     setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
-
+    
     struct sockaddr_in dest;
     dest.sin_family = AF_INET;
     dest.sin_addr.s_addr = inet_addr(dest_ip.c_str());
-
+    
     ssize_t sent = sendto(sock, data.data(), data.size(), 0,
                           (struct sockaddr*)&dest, sizeof(dest));
+    
     close(sock);
     return sent > 0;
 #else
@@ -324,15 +328,15 @@ bool Network::send_tcp_packet(
     uint8_t flags) {
     // Build TCP packet with bypass modifications if enabled
     std::vector<uint8_t> packet;
-
+    
     // IP header (20 bytes)
     packet.resize(20 + 20 + payload.size());  // IP + TCP + payload
-
+    
     // Fill IP header
     packet[0] = 0x45;  // Version + IHL
     packet[8] = bypass_enabled_ ? bypass_config_.ttl_value : 64;  // TTL
     packet[9] = IPPROTO_TCP;  // Protocol
-
+    
     // Source IP spoofing
     if (bypass_enabled_ && bypass_config_.spoof_source_ip && 
         !bypass_config_.custom_source_ip.empty()) {
@@ -341,15 +345,15 @@ bool Network::send_tcp_packet(
             memcpy(&packet[12], &src_addr.s_addr, 4);
         }
     }
-
+    
     // Fill TCP header
     // ... (detailed TCP header construction)
-
+    
     // Apply bypass technique if enabled
     if (bypass_enabled_) {
         apply_bypass_to_packet(packet);
     }
-
+    
     return send_raw_packet(dest_ip, packet);
 }
 
@@ -399,21 +403,22 @@ std::string Network::resolve_dns(const std::string& hostname, bool use_doh) {
     if (use_doh) {
         return resolve_dns_over_https(hostname);
     }
-
+    
     // Standard DNS resolution
     struct addrinfo hints = {};
     struct addrinfo* result = nullptr;
+    
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-
+    
     if (getaddrinfo(hostname.c_str(), nullptr, &hints, &result) != 0) {
         return "";
     }
-
+    
     char ip_str[INET_ADDRSTRLEN];
     struct sockaddr_in* addr = (struct sockaddr_in*)result->ai_addr;
     inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str));
-
+    
     freeaddrinfo(result);
     return std::string(ip_str);
 }
