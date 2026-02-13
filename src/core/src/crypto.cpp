@@ -52,7 +52,7 @@ SecureMemory Crypto::generate_random(size_t size) {
 }
 
 SecureMemory Crypto::encrypt_chacha20(
-    const std::vector<uint8_t>& plaintext,
+    const & plaintext,
     const SecureMemory& key
 ) {
     if (key.size() != crypto_secretbox_KEYBYTES) {
@@ -80,7 +80,7 @@ SecureMemory Crypto::encrypt_chacha20(
     return ciphertext;
 }
 
-std::vector<uint8_t> Crypto::decrypt_chacha20(
+ Crypto::decrypt_chacha20(
     const SecureMemory& ciphertext,
     const SecureMemory& key
 ) {
@@ -98,7 +98,7 @@ std::vector<uint8_t> Crypto::decrypt_chacha20(
     size_t encrypted_len = ciphertext.size() - crypto_secretbox_NONCEBYTES;
     
     // Decrypt
-    std::vector<uint8_t> plaintext(encrypted_len - crypto_secretbox_MACBYTES);
+     plaintext(encrypted_len - crypto_secretbox_MACBYTES);
     
     if (crypto_secretbox_open_easy(
             plaintext.data(),
@@ -110,19 +110,19 @@ std::vector<uint8_t> Crypto::decrypt_chacha20(
     return plaintext;
 }
 
-SecureMemory Crypto::hash_sha256(const std::vector<uint8_t>& data) {
+SecureMemory Crypto::hash_sha256(const & data) {
     SecureMemory hash(crypto_hash_sha256_BYTES);
     crypto_hash_sha256(hash.data(), data.data(), data.size());
     return hash;
 }
 
-SecureMemory Crypto::hash_sha512(const std::vector<uint8_t>& data) {
+SecureMemory Crypto::hash_sha512(const & data) {
     SecureMemory hash(crypto_hash_sha512_BYTES);
     crypto_hash_sha512(hash.data(), data.data(), data.size());
     return hash;
 }
 
-SecureMemory Crypto::hash_blake2b(const std::vector<uint8_t>& data, size_t output_len) {
+SecureMemory Crypto::hash_blake2b(const & data, size_t output_len) {
     if (output_len < crypto_generichash_BYTES_MIN || output_len > crypto_generichash_BYTES_MAX) {
         throw std::runtime_error("Invalid BLAKE2b output length");
     }
@@ -136,7 +136,7 @@ SecureMemory Crypto::hash_blake2b(const std::vector<uint8_t>& data, size_t outpu
 }
 
 SecureMemory Crypto::sign_ed25519(
-    const std::vector<uint8_t>& message,
+    const & message,
     const SecureMemory& secret_key
 ) {
     if (secret_key.size() != crypto_sign_SECRETKEYBYTES) {
@@ -155,9 +155,9 @@ SecureMemory Crypto::sign_ed25519(
 }
 
 bool Crypto::verify_ed25519(
-    const std::vector<uint8_t>& message,
+    const & message,
     const SecureMemory& signature,
-    const std::vector<uint8_t>& public_key
+    const & public_key
 ) {
     if (signature.size() != crypto_sign_BYTES) {
         return false;
@@ -195,7 +195,7 @@ Crypto::KeyPair Crypto::generate_dilithium_keypair() {
 }
 
 SecureMemory Crypto::sign_dilithium(
-    const std::vector<uint8_t>& message,
+    const & message,
     const SecureMemory& secret_key
 ) {
     OQS_SIG* sig = OQS_SIG_new(OQS_SIG_alg_dilithium_5);
@@ -224,9 +224,9 @@ SecureMemory Crypto::sign_dilithium(
 }
 
 bool Crypto::verify_dilithium(
-    const std::vector<uint8_t>& message,
+    const & message,
     const SecureMemory& signature,
-    const std::vector<uint8_t>& public_key
+    const & public_key
 ) {
     OQS_SIG* sig = OQS_SIG_new(OQS_SIG_alg_dilithium_5);
     if (!sig) {
@@ -255,16 +255,16 @@ Crypto::KeyPair Crypto::generate_dilithium_keypair() {
 }
 
 SecureMemory Crypto::sign_dilithium(
-    const std::vector<uint8_t>& /*message*/,
+    const & /*message*/,
     const SecureMemory& /*secret_key*/
 ) {
     throw std::runtime_error("Dilithium not available: liboqs required");
 }
 
 bool Crypto::verify_dilithium(
-    const std::vector<uint8_t>& /*message*/,
+    const & /*message*/,
     const SecureMemory& /*signature*/,
-    const std::vector<uint8_t>& /*public_key*/
+    const & /*public_key*/
 ) {
     throw std::runtime_error("Dilithium not available: liboqs required");
 }
