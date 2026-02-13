@@ -790,7 +790,6 @@ std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
     return result;
 }
 
-} // namespace DPI
 
 // ==================== Preset Configurations ====================
 
@@ -884,5 +883,7 @@ AdvancedDPIConfig create_compatible_preset() {
 }
 
 } // namespace Presets
+
+} // namespace DPI
 
 } // namespace ncp
