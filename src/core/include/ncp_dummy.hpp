@@ -17,16 +17,16 @@ static constexpr uint32_t DUMMY_MARKER = 0xDEADBEEF;
  * @brief Dummy packet injection profile
  */
 struct DummyProfile {
-    double injection_ratio = 0.5;   // 0.0–1.0, dummy-to-real ratio
-    size_t min_size = 64;           // Min dummy packet size
-    size_t max_size = 1400;         // Max dummy packet size
+    double injection_ratio = 0.5;    // 0.0-1.0, dummy-to-real ratio
+    size_t min_size = 64;            // Min dummy packet size
+    size_t max_size = 1400;          // Max dummy packet size
     bool mimic_real_distribution = true; // Match real packet size distribution
 
-    /// Low stealth — few dummies
+    /// Low stealth - few dummies
     static DummyProfile low()      { return {0.3, 64, 800, false}; }
     /// Moderate stealth
     static DummyProfile moderate() { return {0.5, 64, 1200, true}; }
-    /// High stealth — 1:1 dummy:real
+    /// High stealth - 1:1 dummy:real
     static DummyProfile high()     { return {1.0, 64, 1400, true}; }
 };
 
@@ -36,10 +36,6 @@ struct DummyProfile {
 struct DummyStats {
     uint64_t real_packets = 0;
     uint64_t dummy_packets = 0;
-    uint64_t packets_injected = 0;
-    uint64_t total_real = 0;
-    double current_ratio = 0.0;
-    uint64_t packets_filtered = 0;
     uint64_t total_dummy_bytes = 0;
 };
 
@@ -61,10 +57,10 @@ public:
     // Non-copyable
     DummyPacketInjector(const DummyPacketInjector&) = delete;
     DummyPacketInjector& operator=(const DummyPacketInjector&) = delete;
+
     // Move semantics
     DummyPacketInjector(DummyPacketInjector&&) noexcept;
     DummyPacketInjector& operator=(DummyPacketInjector&&) noexcept;
-    DummyPacketInjector& operator=(const DummyPacketInjector&) = delete;
 
     /**
      * @brief Inject dummy packets among real packets.
