@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <memory>
+#include <chrono>
 
 // Forward declaration for pcap_t
 struct pcap;
@@ -34,7 +35,7 @@ enum class BypassTechnique {
     TLS_MIMICRY
 };
 
-// Forward declaration of NetworkStats for use outside class
+// Unified NetworkStats for use across all modules
 struct NetworkStats {
     uint64_t packets_sent = 0;
     uint64_t packets_received = 0;
@@ -42,8 +43,10 @@ struct NetworkStats {
     uint64_t bytes_received = 0;
     uint64_t dns_queries = 0;
     uint64_t doh_queries = 0;
+    double upload_speed = 0.0;
+    double download_speed = 0.0;
+    std::chrono::steady_clock::time_point last_update;
 };
-
 class Network {
 public:
     struct PacketInfo {
