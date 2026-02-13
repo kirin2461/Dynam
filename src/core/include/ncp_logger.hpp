@@ -9,6 +9,11 @@
 #include <iomanip>
 #include <ctime>
 
+// Windows defines ERROR as a macro, which conflicts with enum values
+#ifdef ERROR
+#undef ERROR
+#endif
+
 namespace ncp {
 
 /**
