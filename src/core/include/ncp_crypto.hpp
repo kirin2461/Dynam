@@ -30,57 +30,57 @@ public:
     
     // Digital signatures (Ed25519)
     SecureMemory sign_ed25519(
-        const std::vector<uint8_t>& message,
+        const SecureMemory& message,
         const SecureMemory& secret_key
     );
     
     bool verify_ed25519(
-        const std::vector<uint8_t>& message,
+        const SecureMemory& message,
         const SecureMemory& signature,
-        const std::vector<uint8_t>& public_key
+        const SecureMemory& public_key
     );
     
     // Encryption/Decryption (ChaCha20-Poly1305)
     SecureMemory encrypt_chacha20(
-        const std::vector<uint8_t>& plaintext,
+        const SecureMemory& plaintext,
         const SecureMemory& key
     );
     
-    std::vector<uint8_t> decrypt_chacha20(
+    SecureMemory decrypt_chacha20(
         const SecureMemory& ciphertext,
         const SecureMemory& key
     );
     
     // Hashing functions
-    SecureMemory hash_sha256(const std::vector<uint8_t>& data);
-    SecureMemory hash_sha512(const std::vector<uint8_t>& data);
-    SecureMemory hash_blake2b(const std::vector<uint8_t>& data, size_t output_len = 32);
+    SecureMemory hash_sha256(const SecureMemory& data);
+    SecureMemory hash_sha512(const SecureMemory& data);
+    SecureMemory hash_blake2b(const SecureMemory& data, size_t output_len = 32);
     
     // Post-quantum signatures (Dilithium5) - requires liboqs
     KeyPair generate_dilithium_keypair();
     
     SecureMemory sign_dilithium(
-        const std::vector<uint8_t>& message,
+        const SecureMemory& message,
         const SecureMemory& secret_key
     );
     
     bool verify_dilithium(
-        const std::vector<uint8_t>& message,
+        const SecureMemory& message,
         const SecureMemory& signature,
-        const std::vector<uint8_t>& public_key
+        const SecureMemory& public_key
     );
 
     // AEAD encryption (XChaCha20-Poly1305)
-    std::vector<uint8_t> encrypt_aead(
-        const std::vector<uint8_t>& plaintext,
-        const std::vector<uint8_t>& key,
-        const std::vector<uint8_t>& additional_data = {}
+    SecureMemory encrypt_aead(
+        const SecureMemory& plaintext,
+        const SecureMemory& key,
+        const SecureMemory& additional_data = {}
     );
 
-    std::vector<uint8_t> decrypt_aead(
-        const std::vector<uint8_t>& ciphertext,
-        const std::vector<uint8_t>& key,
-        const std::vector<uint8_t>& additional_data = {}
+    SecureMemory decrypt_aead(
+        const SecureMemory& ciphertext,
+        const SecureMemory& key,
+        const SecureMemory& additional_data = {}
     );
 
     // Utility: convert SecureMemory to hex string
