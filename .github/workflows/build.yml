@@ -25,6 +25,7 @@ jobs:
             libsodium-dev \
             libpcap-dev \
             libnetfilter-queue-dev \
+            libwebsockets-dev \
             pkg-config
 
       - name: Configure CMake
@@ -35,7 +36,7 @@ jobs:
             -DENABLE_CLI=ON \
             -DENABLE_GUI=OFF \
             -DENABLE_LIBOQS=OFF \
-            -DENABLE_WEBSOCKETS=OFF \
+            -DENABLE_WEBSOCKETS=ON \
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
@@ -53,7 +54,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install libsodium cmake
+          brew install libsodium libwebsockets cmake
 
       - name: Configure CMake
         run: |
@@ -63,7 +64,7 @@ jobs:
             -DENABLE_CLI=ON \
             -DENABLE_GUI=OFF \
             -DENABLE_LIBOQS=OFF \
-            -DENABLE_WEBSOCKETS=OFF \
+            -DENABLE_WEBSOCKETS=ON \
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
@@ -83,16 +84,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-libsodium-x64-windows-${{ hashFiles('.github/workflows/build.yml') }}
+          key: vcpkg-libsodium-ws-x64-windows-${{ hashFiles('.github/workflows/build.yml') }}
 
-      - name: Install vcpkg and libsodium
+      - name: Install vcpkg and dependencies
         shell: cmd
         run: |
           if not exist C:\vcpkg\vcpkg.exe (
             git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
             C:\vcpkg\bootstrap-vcpkg.bat
           )
-          C:\vcpkg\vcpkg install libsodium:x64-windows
+          C:\vcpkg\vcpkg install libsodium:x64-windows libwebsockets:x64-windows
 
       - name: Download Npcap SDK
         run: |
@@ -111,7 +112,7 @@ jobs:
 
       - name: Configure CMake
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF -DENABLE_LIBOQS=OFF -DENABLE_WEBSOCKETS=OFF -DENABLE_TOR_PROXY=OFF
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF -DENABLE_LIBOQS=OFF -DENABLE_WEBSOCKETS=ON -DENABLE_TOR_PROXY=OFF
 
       - name: Build
         run: cmake --build build --config Release
