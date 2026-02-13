@@ -37,7 +37,9 @@ Network::Network()
     , current_technique_(BypassTechnique::NONE) {
 #ifdef _WIN32
     WSADATA wsa_data;
-    WSAStartup(MAKEWORD(2, 2), &wsa_data);
+    if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+        throw std::runtime_error("Failed to initialize Winsock");
+    }
 #endif
 }
 
