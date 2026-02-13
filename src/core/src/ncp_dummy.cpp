@@ -37,20 +37,6 @@ static constexpr std::array<uint8_t, 4> ENCRYPTED_MARKER = {
 static constexpr size_t MARKER_OFFSET = 0;
 static constexpr size_t MARKER_SIZE   = ENCRYPTED_MARKER.size();
 
-// --- DummyProfile factory methods --------------------------------------------
-
-DummyProfile DummyProfile::low() {
-    return {0.3, 64, 800, false};
-}
-
-DummyProfile DummyProfile::moderate() {
-    return {0.5, 64, 1200, true};
-}
-
-DummyProfile DummyProfile::high() {
-    return {1.0, 64, 1400, true};
-}
-
 // --- Impl --------------------------------------------------------------------
 
 struct DummyPacketInjector::Impl {
