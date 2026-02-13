@@ -28,6 +28,20 @@ set(NCP_CORE_SRC_SOURCES
     src/tls_fingerprint.cpp
     src/dpi_advanced.cpp
         src/secure_buffer.cpp
+            src/ncp_arp.cpp
+    src/ncp_dummy.cpp
+    src/ncp_timing.cpp
+    src/ncp_identity.cpp
+    src/ncp_entropy_masking.cpp
+    src/ncp_geneva_engine.cpp
+    src/ncp_paranoid.cpp
+    src/ncp_secure_memory.cpp
+        include/ncp_arp.hpp
+    include/ncp_dummy.hpp
+    include/ncp_timing.hpp
+    include/ncp_identity.hpp
+    include/ncp_entropy_masking.hpp
+    include/ncp_geneva_engine.hpp
 )
 
 # Conditionally add sources that depend on optional libraries
