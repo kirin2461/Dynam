@@ -98,7 +98,7 @@ SecureMemory Crypto::encrypt_chacha20(
     size_t encrypted_len = ciphertext.size() - crypto_secretbox_NONCEBYTES;
     
     // Decrypt
-     plaintext(encrypted_len - crypto_secretbox_MACBYTES);
+     SecureMemory plaintext(encrypted_len - crypto_secretbox_MACBYTES);
     
     if (crypto_secretbox_open_easy(
             plaintext.data(),
