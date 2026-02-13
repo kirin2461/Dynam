@@ -170,7 +170,17 @@ endif()
 
 # ==================== Optional: libwebsockets ====================
 if(ENABLE_WEBSOCKETS AND Libwebsockets_FOUND)
-    target_link_libraries(ncp_core PUBLIC websockets)
+    # vcpkg provides websockets_shared, apt provides websockets
+    if(TARGET websockets_shared)
+        target_link_libraries(ncp_core PUBLIC websockets_shared)
+    elseif(TARGET websockets)
+        target_link_libraries(ncp_core PUBLIC websockets)
+    else()
+        find_library(WEBSOCKETS_LIB NAMES websockets)
+        if(WEBSOCKETS_LIB)
+            target_link_libraries(ncp_core PUBLIC ${WEBSOCKETS_LIB})
+        endif()
+    endif()
     target_compile_definitions(ncp_core PRIVATE HAVE_LIBWEBSOCKETS)
 endif()
 
