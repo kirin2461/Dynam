@@ -163,9 +163,9 @@ std::vector<std::vector<uint8_t>> GenevaEngine::action_tamper_seq(
     auto result = packets;
     if (target_idx < result.size() && result[target_idx].size() > 24) {
         // TCP seq number at offset 24 in IP+TCP (assuming 20-byte IP header + offset 4 in TCP)
-        std::uniform_int_distribution<uint8_t> dist(0, 255);
+        std::uniform_int_distribution<unsigned short> dist(0, 255);
         for (int i = 24; i < 28 && i < static_cast<int>(result[target_idx].size()); ++i) {
-            result[target_idx][i] = dist(rng_);
+            result[target_idx][i] = static_cast<uint8_t>(dist(rng_));
         }
         stats_.packets_tampered++;
     }
