@@ -85,7 +85,17 @@ jobs:
 
     - name: Download Npcap SDK
       run: |
-        Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip
+                $maxRetries = 3; $retryDelay = 10
+        for ($i = 1; $i -le $maxRetries; $i++) {
+          try {
+            Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip -TimeoutSec 60
+            break
+          } catch {
+            Write-Host "Attempt $i failed: $_"
+            if ($i -eq $maxRetries) { throw "Failed to download Npcap SDK after $maxRetries attempts" }
+            Start-Sleep -Seconds $retryDelay
+          }
+        }
         Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
 
     - name: Configure CMake
