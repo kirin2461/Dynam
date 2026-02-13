@@ -43,7 +43,8 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          choco install npcap -y
+      Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip -TimeoutSec 60
+      Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
