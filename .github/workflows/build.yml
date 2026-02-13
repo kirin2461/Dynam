@@ -14,106 +14,108 @@ jobs:
         build_type: [Release, Debug]
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          cmake \
-          build-essential \
-          libsodium-dev \
-          libpcap-dev \
-          libnetfilter-queue-dev \
-          pkg-config
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            build-essential \
+            libsodium-dev \
+            libpcap-dev \
+            libnetfilter-queue-dev \
+            pkg-config
 
-    - name: Configure CMake
-      run: |
-        cmake -B build \
-          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-          -DENABLE_TESTS=ON \
-          -DENABLE_CLI=ON \
-          -DENABLE_GUI=OFF \
-          -DENABLE_LIBOQS=OFF \
-          -DENABLE_WEBSOCKETS=OFF \
-          -DENABLE_TOR_PROXY=OFF
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DENABLE_TESTS=ON \
+            -DENABLE_CLI=ON \
+            -DENABLE_GUI=OFF \
+            -DENABLE_LIBOQS=OFF \
+            -DENABLE_WEBSOCKETS=OFF \
+            -DENABLE_TOR_PROXY=OFF
 
-    - name: Build
-      run: cmake --build build --config ${{ matrix.build_type }} -j$(nproc)
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j$(nproc)
 
-    - name: Run tests
-      working-directory: build
-      run: ctest --output-on-failure -C ${{ matrix.build_type }}
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure -C ${{ matrix.build_type }}
 
   build-macos:
     runs-on: macos-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        brew install libsodium cmake
+      - name: Install dependencies
+        run: |
+          brew install libsodium cmake
 
-    - name: Configure CMake
-      run: |
-        cmake -B build \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DENABLE_TESTS=ON \
-          -DENABLE_CLI=ON \
-          -DENABLE_GUI=OFF \
-          -DENABLE_LIBOQS=OFF \
-          -DENABLE_WEBSOCKETS=OFF \
-          -DENABLE_TOR_PROXY=OFF
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=ON \
+            -DENABLE_CLI=ON \
+            -DENABLE_GUI=OFF \
+            -DENABLE_LIBOQS=OFF \
+            -DENABLE_WEBSOCKETS=OFF \
+            -DENABLE_TOR_PROXY=OFF
 
-    - name: Build
-      run: cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+      - name: Build
+        run: cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
-    - name: Run tests
-      working-directory: build
-      run: ctest --output-on-failure -C Release
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure -C Release
 
   build-windows:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Install vcpkg dependencies
-      run: |
-        vcpkg install libsodium:x64-windows
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-libsodium-x64-windows-${{ hashFiles('.github/workflows/build.yml') }}
 
-    - name: Download Npcap SDK
-      run: |
-        $maxRetries = 3; $retryDelay = 10
-        for ($i = 1; $i -le $maxRetries; $i++) {
-          try {
-            Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip -TimeoutSec 60
-            break
-          } catch {
-            Write-Host "Attempt $i failed: $_"
-            if ($i -eq $maxRetries) { throw "Failed to download Npcap SDK after $maxRetries attempts" }
-            Start-Sleep -Seconds $retryDelay
+      - name: Install vcpkg and libsodium
+        shell: cmd
+        run: |
+          if not exist C:\vcpkg\vcpkg.exe (
+            git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+            C:\vcpkg\bootstrap-vcpkg.bat
+          )
+          C:\vcpkg\vcpkg install libsodium:x64-windows
+
+      - name: Download Npcap SDK
+        run: |
+          $maxRetries = 3; $retryDelay = 10
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            try {
+              Invoke-WebRequest -Uri 'https://npcap.com/dist/npcap-sdk-1.13.zip' -OutFile npcap-sdk.zip -TimeoutSec 60
+              break
+            } catch {
+              Write-Host "Attempt $i failed: $_"
+              if ($i -eq $maxRetries) { throw "Failed to download Npcap SDK after $maxRetries attempts" }
+              Start-Sleep -Seconds $retryDelay
+            }
           }
-        }
-        Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
+          Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
 
-    - name: Configure CMake
-      run: |
-        cmake -B build `
-          -DCMAKE_BUILD_TYPE=Release `
-          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
-          -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" `
-          -DENABLE_TESTS=ON `
-          -DENABLE_CLI=ON `
-          -DENABLE_GUI=OFF `
-          -DENABLE_LIBOQS=OFF `
-          -DENABLE_WEBSOCKETS=OFF `
-          -DENABLE_TOR_PROXY=OFF
+      - name: Configure CMake
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF -DENABLE_LIBOQS=OFF -DENABLE_WEBSOCKETS=OFF -DENABLE_TOR_PROXY=OFF
 
-    - name: Build
-      run: cmake --build build --config Release
+      - name: Build
+        run: cmake --build build --config Release
 
-    - name: Run tests
-      working-directory: build
-      run: ctest --output-on-failure -C Release
+      - name: Run tests
+        working-directory: build
+        run: ctest --output-on-failure -C Release
