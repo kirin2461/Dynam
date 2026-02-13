@@ -1,5 +1,0 @@
-[0] eth0
-[1] any
-[2] lo
-[3] nflog
-[4] nfqueue
