@@ -30,6 +30,18 @@ if(WIN32)
         set(CMAKE_CXX_FLAGS_RELEASE "/O2")
         set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi")
     endif()
+
+    # Npcap SDK for packet capture on Windows
+    set(NPCAP_SDK_DIR "${CMAKE_SOURCE_DIR}/npcap-sdk" CACHE PATH "Path to Npcap SDK")
+    if(EXISTS "${NPCAP_SDK_DIR}/Include")
+        message(STATUS "Npcap SDK found at ${NPCAP_SDK_DIR}")
+        include_directories("${NPCAP_SDK_DIR}/Include")
+        link_directories("${NPCAP_SDK_DIR}/Lib/x64")
+    else()
+        message(WARNING "Npcap SDK not found at ${NPCAP_SDK_DIR}. "
+                        "Download from https://npcap.com/#download and extract to ${NPCAP_SDK_DIR}")
+    endif()
+
 elseif(UNIX)
     set(CMAKE_CXX_FLAGS_RELEASE "-O3")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -Wpedantic")
@@ -100,7 +112,6 @@ if(ENABLE_TOR_PROXY)
 endif()
 
 # ==================== Subdirectories ====================
-
 # Always build core library
 add_subdirectory(src/core)
 
@@ -137,7 +148,7 @@ message(STATUS "  ENABLE_TESTS:     ${ENABLE_TESTS}")
 message(STATUS "  ENABLE_LIBOQS:    ${ENABLE_LIBOQS}")
 message(STATUS "  ENABLE_WEBSOCKETS:${ENABLE_WEBSOCKETS}")
 message(STATUS "  ENABLE_TOR_PROXY: ${ENABLE_TOR_PROXY}")
-message(STATUS " ENABLE_FUZZING: ${ENABLE_FUZZING}")
+message(STATUS "  ENABLE_FUZZING:   ${ENABLE_FUZZING}")
 message(STATUS "==============================")
 
 # ==================== Install Targets ====================
