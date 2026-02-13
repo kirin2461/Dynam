@@ -17,6 +17,10 @@ include(GoogleTest)
 # ==================== Unit Tests ====================
 add_executable(ncp_tests
     crypto_test.cpp
+    test_dpi.cpp
+    test_integration.cpp
+    test_license.cpp
+    test_network.cpp
 )
 
 target_link_libraries(ncp_tests
