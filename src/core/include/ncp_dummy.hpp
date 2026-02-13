@@ -36,6 +36,10 @@ struct DummyProfile {
 struct DummyStats {
     uint64_t real_packets = 0;
     uint64_t dummy_packets = 0;
+    uint64_t packets_injected = 0;
+    uint64_t total_real = 0;
+    double current_ratio = 0.0;
+    uint64_t packets_filtered = 0;
     uint64_t total_dummy_bytes = 0;
 };
 
@@ -56,6 +60,10 @@ public:
 
     // Non-copyable
     DummyPacketInjector(const DummyPacketInjector&) = delete;
+    DummyPacketInjector& operator=(const DummyPacketInjector&) = delete;
+    // Move semantics
+    DummyPacketInjector(DummyPacketInjector&&) noexcept;
+    DummyPacketInjector& operator=(DummyPacketInjector&&) noexcept;
     DummyPacketInjector& operator=(const DummyPacketInjector&) = delete;
 
     /**
