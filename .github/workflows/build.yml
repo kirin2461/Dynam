@@ -85,7 +85,7 @@ jobs:
 
     - name: Download Npcap SDK
       run: |
-                $maxRetries = 3; $retryDelay = 10
+        $maxRetries = 3; $retryDelay = 10
         for ($i = 1; $i -le $maxRetries; $i++) {
           try {
             Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip -TimeoutSec 60
