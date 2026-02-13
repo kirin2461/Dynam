@@ -8,6 +8,9 @@
 
 namespace ncp {
 
+// File-scope PRNG seeded once per thread (avoids repeated std::random_device overhead)
+static thread_local std::mt19937 tls_rng(std::random_device{}());
+
 // SecureMemory implementation
 SecureMemory::SecureMemory() : data_(nullptr), size_(0) {}
 
@@ -52,18 +55,22 @@ void SecureMemory::zero() {
 }
 
 void SecureMemory::secure_zero(void* ptr, size_t size) {
-    sodium_memzero(ptr, size);
+    if (ptr && size > 0) {
+        sodium_memzero(ptr, size);
+    }
 }
 
 bool SecureMemory::lock_memory(void* ptr, size_t size) {
+    if (!ptr || size == 0) return false;
     return sodium_mlock(ptr, size) == 0;
 }
 
 bool SecureMemory::unlock_memory(void* ptr, size_t size) {
+    if (!ptr || size == 0) return false;
     return sodium_munlock(ptr, size) == 0;
 }
 
-// SecureString implementation  
+// SecureString implementation 
 SecureString::SecureString() : data_(nullptr), size_(0), capacity_(0) {}
 
 SecureString::SecureString(const std::string& str) 
@@ -80,6 +87,7 @@ SecureString::SecureString(const char* str, size_t len)
     : data_(static_cast<char*>(sodium_malloc(len + 1))),
       size_(len),
       capacity_(len + 1) {
+    if (!str) throw std::invalid_argument("null string pointer");
     if (!data_) throw std::bad_alloc();
     std::memcpy(data_, str, len);
     data_[len] = '\0';
@@ -174,32 +182,32 @@ void TLSFingerprint::randomize_all() {
 
 void TLSFingerprint::randomize_ciphers() {
     auto all_ciphers = get_profile_ciphers(pImpl->profile);
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(all_ciphers.begin(), all_ciphers.end(), g);
-    pImpl->ciphers = all_ciphers;
+    if (all_ciphers.size() > 1) {
+        std::shuffle(all_ciphers.begin(), all_ciphers.end(), tls_rng);
+    }
+    pImpl->ciphers = std::move(all_ciphers);
 }
 
 void TLSFingerprint::randomize_extensions() {
     auto all_exts = get_profile_extensions(pImpl->profile);
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(all_exts.begin(), all_exts.end(), g);
-    pImpl->extensions = all_exts;
+    if (all_exts.size() > 1) {
+        std::shuffle(all_exts.begin(), all_exts.end(), tls_rng);
+    }
+    pImpl->extensions = std::move(all_exts);
 }
 
 void TLSFingerprint::randomize_curves() {
     auto all_curves = get_profile_curves(pImpl->profile);
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(all_curves.begin(), all_curves.end(), g);
-    pImpl->curves = all_curves;
+    if (all_curves.size() > 1) {
+        std::shuffle(all_curves.begin(), all_curves.end(), tls_rng);
+    }
+    pImpl->curves = std::move(all_curves);
 }
 
 void TLSFingerprint::shuffle_order() {
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), g);
+    if (pImpl->ciphers.size() > 1) {
+        std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), tls_rng);
+    }
 }
 
 void TLSFingerprint::enable_esni(const ESNIConfig&) { pImpl->esni_enabled = true; }
@@ -207,7 +215,13 @@ void TLSFingerprint::enable_ech(const std::vector<uint8_t>&) { pImpl->esni_enabl
 void TLSFingerprint::disable_esni_ech() { pImpl->esni_enabled = false; }
 bool TLSFingerprint::is_esni_ech_enabled() const { return pImpl->esni_enabled; }
 
-void TLSFingerprint::set_sni(const std::string& hostname) { pImpl->sni = hostname; }
+void TLSFingerprint::set_sni(const std::string& hostname) {
+    if (hostname.size() > 255) {
+        throw std::invalid_argument("SNI hostname exceeds maximum length");
+    }
+    pImpl->sni = hostname;
+}
+
 std::string TLSFingerprint::get_sni() const { return pImpl->sni; }
 void TLSFingerprint::encrypt_sni(const std::vector<uint8_t>&) {}
 
@@ -227,7 +241,6 @@ std::vector<std::string> TLSFingerprint::get_alpn() const { return pImpl->alpn; 
 
 void TLSFingerprint::protect_session_keys() {}
 void TLSFingerprint::clear_sensitive_data() {}
-
 TLSFingerprint::Statistics TLSFingerprint::get_statistics() const { return pImpl->stats; }
 
 // Private methods
@@ -254,10 +267,12 @@ std::string TLSFingerprint::JA4Fingerprint::hash() const { return "stub"; }
 // SecureOps namespace
 namespace SecureOps {
     bool constant_time_compare(const void* a, const void* b, size_t len) {
+        if (!a || !b) return false;
         return sodium_memcmp(a, b, len) == 0;
     }
 
     std::vector<uint8_t> generate_random(size_t size) {
+        if (size == 0) return {};
         std::vector<uint8_t> result(size);
         randombytes_buf(result.data(), size);
         return result;
