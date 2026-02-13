@@ -161,7 +161,7 @@ SecureMemory E2ESession::derive_keys(
     SecureMemory derived_key(key_length);
     
     // Context must be exactly 8 bytes for crypto_kdf_derive_from_key
-    uint8_t kdf_context[crypto_kdf_CONTEXTBYTES];
+        char kdf_context[crypto_kdf_CONTEXTBYTES];
     std::memset(kdf_context, 0, sizeof(kdf_context));
     size_t copy_len = std::min(context.size(), sizeof(kdf_context));
     std::memcpy(kdf_context, context.data(), copy_len);
@@ -181,7 +181,7 @@ SecureMemory E2ESession::derive_keys(
         size_t to_derive = std::min(key_length - derived, sizeof(subkey));
         
         if (crypto_kdf_derive_from_key(subkey, to_derive, subkey_id++,
-                                       reinterpret_cast<const char*>(kdf_context), master_key) != 0) {
+                                                               kdf_context, master_key) != 0) {
             sodium_memzero(master_key, sizeof(master_key));
             throw std::runtime_error("Failed to derive key");
         }
