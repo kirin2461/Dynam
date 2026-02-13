@@ -171,3 +171,30 @@ set_target_properties(ncp_core PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
 )
+
+# ==================== Required: OpenSSL ====================
+find_package(OpenSSL REQUIRED)
+if(OpenSSL_FOUND)
+    target_link_libraries(ncp_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    target_compile_definitions(ncp_core PRIVATE HAVE_OPENSSL)
+    message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
+else()
+    message(FATAL_ERROR "OpenSSL is REQUIRED but was not found")
+endif()
+
+# ==================== Install targets ====================
+install(TARGETS ncp_core
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+)
+
+install(DIRECTORY include/
+    DESTINATION include/ncp
+    FILES_MATCHING PATTERN "*.hpp"
+)
+
+install(FILES
+    ${NCP_CORE_ROOT_HEADERS}
+    DESTINATION include/ncp
+)
