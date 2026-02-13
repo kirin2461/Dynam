@@ -159,8 +159,7 @@ int main(int argc, char* argv[]) {
     parser.add_command("license", "License management", handle_license, {"<action>"});
     parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
-    parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<typццццццццццццццц
-
+    parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
 // ============================================================================
 // Command Handler Implementations
 // ============================================================================
