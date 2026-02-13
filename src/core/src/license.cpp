@@ -26,6 +26,7 @@
 #ifdef __APPLE__
 #include <IOKit/IOKitLib.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <net/if_dl.h>
 #endif
 #endif
 
@@ -83,6 +84,33 @@ std::string License::get_mac_address() {
         return ss.str();
     }
     return "000000000000";
+#elif defined(__APPLE__)
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr) == -1) {
+        return "000000000000";
+    }
+
+    std::string mac = "000000000000";
+    for (ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr) continue;
+        if (ifa->ifa_addr->sa_family == AF_LINK) {
+            struct sockaddr_dl* sdl = reinterpret_cast<struct sockaddr_dl*>(ifa->ifa_addr);
+            if (sdl->sdl_alen == 6) {
+                unsigned char* hw = reinterpret_cast<unsigned char*>(LLADDR(sdl));
+                std::stringstream ss;
+                for (int i = 0; i < 6; i++) {
+                    ss << std::hex << std::setfill('0') << std::setw(2)
+                       << static_cast<int>(hw[i]);
+                }
+                mac = ss.str();
+                if (mac != "000000000000") {
+                    break;
+                }
+            }
+        }
+    }
+    freeifaddrs(ifaddr);
+    return mac;
 #else
     struct ifaddrs *ifaddr, *ifa;
     if (getifaddrs(&ifaddr) == -1) {
