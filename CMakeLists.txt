@@ -150,14 +150,14 @@ install(TARGETS ncp_core
 
 # Install CLI tool if enabled
 if(ENABLE_CLI)
-    install(TARGETS ncp_cli
+    install(TARGETS ncp-cli
         RUNTIME DESTINATION bin
     )
 endif()
 
 # Install GUI application if enabled
 if(ENABLE_GUI)
-    install(TARGETS ncp_gui
+    install(TARGETS ncp-gui
         RUNTIME DESTINATION bin
     )
 endif()
