@@ -438,6 +438,6 @@ namespace Presets {
 }
 
 }  // namespace DPI
-}  // namespace NCP
+} // namespace ncp
 
 #endif  // NCP_DPI_ADVANCED_HPP
