@@ -83,11 +83,17 @@ jobs:
       run: |
         vcpkg install libsodium:x64-windows
 
+    - name: Download Npcap SDK
+      run: |
+        Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip
+        Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
+
     - name: Configure CMake
       run: |
         cmake -B build `
           -DCMAKE_BUILD_TYPE=Release `
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+          -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" `
           -DENABLE_TESTS=ON `
           -DENABLE_CLI=ON `
           -DENABLE_GUI=OFF `
