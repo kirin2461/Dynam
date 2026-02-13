@@ -1012,10 +1012,10 @@ bool NetworkSpoofer::apply_tcp_fingerprint_impl(const TcpFingerprintProfile& pro
     auto result3 = execute_command_safe("ip", {"link", "set", "dev", "eth0", "mtu", std::to_string(profile.mss + 40)});
     
     // TCP Options (SACKs, Timestamps) - via sysctl
-    if (profile.options.find("sack") != std::string::npos) {
+    if (profile.tcp_options_order.find("sack") != std::string::npos) {
         execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_sack=1"});
     }
-    if (profile.options.find("timestamp") != std::string::npos) {
+    if (profile.tcp_options_order.find("timestamp") != std::string::npos) {
         execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_timestamps=1"});
     }
     
