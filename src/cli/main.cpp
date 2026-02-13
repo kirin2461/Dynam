@@ -181,9 +181,23 @@ void handle_run(const std::vector<std::string>& args) {
 }
 
 void handle_status(const std::vector<std::string>& args) {
-    // TODO: Implement status display
-    std::cout << "[!] Command 'status' - implementation pending\n";
-}
+        std::cout << "=== NCP Status ===\n";
+    std::cout << "System: " << (g_running ? "Running" : "Stopped") << "\n";
+    
+    if (g_spoofer) {
+        std::cout << "Network Spoofer: Active\n";
+    }
+    if (g_dpi_bypass) {
+        std::cout << "DPI Bypass: Active\n";
+    }
+    if (g_paranoid) {
+        std::cout << "Paranoid Mode: Active\n";
+    }
+    
+    if (!g_running && !g_spoofer && !g_dpi_bypass && !g_paranoid) {
+        std::cout << "All systems: Inactive\n";
+        std::cout << "Run 'ncp run' to start protection\n";
+    }
 
 void handle_rotate(const std::vector<std::string>& args) {
     // TODO: Implement identity rotation
