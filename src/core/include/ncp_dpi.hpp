@@ -89,7 +89,7 @@ struct DPIConfig {
     bool enable_adaptive_fragmentation = true;  // Adapt fragmentation based on detection
     int max_fragment_retries = 3;  // Max retries before changing strategy
 
-    constexpr ValidationError validate() const noexcept {
+    ValidationError validate() const noexcept {
         if (fragment_size < 1 || fragment_size > 1460) return ValidationError::INVALID_FRAGMENT_SIZE;
         if (fragment_offset < 0) return ValidationError::INVALID_FRAGMENT_OFFSET;
         if (split_position < 0) return ValidationError::INVALID_SPLIT_POSITION;
