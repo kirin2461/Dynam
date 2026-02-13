@@ -102,7 +102,7 @@ SecureMemory Crypto::encrypt_chacha20(
     
     if (crypto_secretbox_open_easy(
             plaintext.data(),
-                SecureMemory encrypted_data, encrypted_len,
+                encrypted_data, encrypted_len,
             nonce, key.data()) != 0) {
         throw std::runtime_error("Decryption failed or authentication failed");
     }
