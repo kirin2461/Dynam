@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "ncp_network.hpp"
 
-using namespace NCP;
+using namespace ncp;
 
 class NetworkTest : public ::testing::Test {
 protected:
