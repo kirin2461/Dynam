@@ -473,44 +473,45 @@ DPIStats stats;
             
             // Send multiple fake packets with different characteristics
             for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
-            // Randomize fake packet to avoid DPI fingerprinting
-            std::vector<uint8_t> fake_data = {
-                0x16, 0x03, static_cast<uint8_t>(t_byte_dist(t_rng) % 4), // TLS record + random version minor
-                static_cast<uint8_t>(t_byte_dist(t_rng)), static_cast<uint8_t>(t_byte_dist(t_rng)), // Random length
-                0x01 // ClientHello
-#ifdef IP_TTL
-            };                int original_ttl = 0;
-                socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
-                bool ttl_changed = false;
-                if (getsockopt(sock, IPPROTO_IP, IP_TTL,
-                               reinterpret_cast<char*>(&original_ttl),
-                               &optlen) == 0) {
-                    int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
-                    if (setsockopt(sock, IPPROTO_IP, IP_TTL,
-                                   reinterpret_cast<const char*>(&ttl),
-                                   sizeof(ttl)) == 0) {
-                        ttl_changed = true;
+                // Randomize fake packet to avoid DPI fingerprinting
+                std::vector<uint8_t> fake_data = {
+                    0x16, 0x03, static_cast<uint8_t>(t_byte_dist(t_rng) % 4), // TLS record + random version minor
+                    static_cast<uint8_t>(t_byte_dist(t_rng)), static_cast<uint8_t>(t_byte_dist(t_rng)), // Random length
+                    0x01 // ClientHello
+                                };
+    #ifdef IP_TTL
+                                int original_ttl = 0;
+                    socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
+                    bool ttl_changed = false;
+                    if (getsockopt(sock, IPPROTO_IP, IP_TTL,
+                                   reinterpret_cast<char*>(&original_ttl),
+                                   &optlen) == 0) {
+                        int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
+                        if (setsockopt(sock, IPPROTO_IP, IP_TTL,
+                                       reinterpret_cast<const char*>(&ttl),
+                                       sizeof(ttl)) == 0) {
+                            ttl_changed = true;
+                        }
+                    }
+    #endif
+                    send_all(fake_data.data(), fake_data.size());
+                    
+                    {
+                        std::lock_guard<std::mutex> lock(stats_mutex);
+                        stats.fake_packets_sent++;
+                    }
+    
+    #ifdef IP_TTL
+                    if (ttl_changed) {
+                        setsockopt(sock, IPPROTO_IP, IP_TTL,
+                                   reinterpret_cast<const char*>(&original_ttl),
+                                   sizeof(original_ttl));
+                    }
+    #endif
+                    if (config.disorder_delay_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
                     }
                 }
-#endif
-                send_all(fake_data.data(), fake_data.size());
-                
-                {
-                    std::lock_guard<std::mutex> lock(stats_mutex);
-                    stats.fake_packets_sent++;
-                }
-
-#ifdef IP_TTL
-                if (ttl_changed) {
-                    setsockopt(sock, IPPROTO_IP, IP_TTL,
-                               reinterpret_cast<const char*>(&original_ttl),
-                               sizeof(original_ttl));
-                }
-#endif
-                if (config.disorder_delay_ms > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
-                }
-            }
         }
 
         // If this is not a ClientHello or TCP splitting is disabled,
@@ -584,7 +585,7 @@ DPIStats stats;
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     struct nfq_handle* nfq_h = nullptr;
     struct nfq_q_handle* nfq_qh = nullptr;
-    int nfq_fd = -1;
+    int m_m_nfq_fd = -1;
     
     static int nfq_callback(struct nfq_q_handle* qh, struct nfgenmsg*,
                            struct nfq_data* nfa, void* data) {
@@ -621,14 +622,14 @@ DPIStats stats;
             return false;
         }
         nfq_set_mode(nfq_qh, NFQNL_COPY_PACKET, 0xffff);
-        nfq_fd = nfq_fd(nfq_h);
+        m_nfq_fd = nfq_fd(nfq_h);
         return true;
     }
     
     void nfqueue_loop() {
         char buf[65536];
         while (running) {
-            int rv = recv(nfq_fd, buf, sizeof(buf), 0);
+            int rv = recv(m_nfq_fd, buf, sizeof(buf), 0);
             if (rv >= 0) nfq_handle_packet(nfq_h, buf, rv);
         }
     }
@@ -636,7 +637,7 @@ DPIStats stats;
     void cleanup_nfqueue() {
         if (nfq_qh) { nfq_destroy_queue(nfq_qh); nfq_qh = nullptr; }
         if (nfq_h) { nfq_close(nfq_h); nfq_h = nullptr; }
-        nfq_fd = -1;
+        m_nfq_fd = -1;
     }
 #endif
 
