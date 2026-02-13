@@ -61,3 +61,16 @@ __pycache__/
 
 # Generated documentation
 docs/_build/
+
+# C/C++ Language Server cache
+.ccls-cache/
+.ccls
+compile_commands.json
+
+# Replit artifacts
+.replit
+replit.md
+.breakpoints
+
+# clangd
+.cache/
