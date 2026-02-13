@@ -295,6 +295,13 @@ std::vector<uint8_t> TLSManipulator::inject_grease(
     return result;
 }
 
+// TODO (Issue #1): Replace this function with realistic TLS ClientHello implementation
+// Required changes:
+// 1. Add 15 cipher suites (TLS 1.3: 0x1301-0x1303, TLS 1.2: 0xC02C, 0xC02B, 0xC030, etc.)
+// 2. Add 32-byte random session ID (currently empty)
+// 3. Add proper extensions: supported_versions, supported_groups, signature_algorithms
+// 4. Add GREASE values for anti-fingerprinting
+// See dpi_advanced_fixed.cpp for reference implementation
 std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
     const std::string& fake_sni
 ) {
