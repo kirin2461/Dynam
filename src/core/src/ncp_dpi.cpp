@@ -585,7 +585,7 @@ DPIStats stats;
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     struct nfq_handle* nfq_h = nullptr;
     struct nfq_q_handle* nfq_qh = nullptr;
-    int m_m_nfq_fd = -1;
+    int m_nfq_fd = -1;
     
     static int nfq_callback(struct nfq_q_handle* qh, struct nfgenmsg*,
                            struct nfq_data* nfa, void* data) {
