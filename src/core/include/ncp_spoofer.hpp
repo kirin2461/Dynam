@@ -239,6 +239,13 @@ private:
     bool apply_disk_serial(const std::string& disk_serial); // NEW
     bool apply_dhcp_client_id(const std::string& client_id); // NEW
     bool apply_tcp_fingerprint(const TcpFingerprintProfile& profile); // NEW
+    // Overloaded declarations matching .cpp implementations
+    bool apply_smbios(const std::string& bios_vendor, const std::string& bios_version,
+        const std::string& board_manufacturer, const std::string& board_product,
+        const std::string& board_serial, const std::string& system_manufacturer,
+        const std::string& system_product, const std::string& system_serial);
+    bool apply_dhcp_client_id(const std::string& interface_name, const std::string& client_id);
+    bool apply_tcp_fingerprint_impl(const TcpFingerprintProfile& profile);
     
     // Auto-rotation thread
     void rotation_thread_func();
