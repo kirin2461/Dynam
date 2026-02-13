@@ -142,7 +142,7 @@ message(STATUS "==============================")
 
 # ==================== Install Targets ====================
 # Install core library
-install(TARGETS ncp-core
+install(TARGETS ncp_core
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
@@ -150,14 +150,14 @@ install(TARGETS ncp-core
 
 # Install CLI tool if enabled
 if(ENABLE_CLI)
-    install(TARGETS ncp-cli
+    install(TARGETS ncp_cli
         RUNTIME DESTINATION bin
     )
 endif()
 
 # Install GUI application if enabled
 if(ENABLE_GUI)
-    install(TARGETS ncp-gui
+    install(TARGETS ncp_gui
         RUNTIME DESTINATION bin
     )
 endif()
