@@ -271,4 +271,86 @@ bool Crypto::verify_dilithium(
 
 #endif // HAVE_LIBOQS
 
+// ==================== AEAD Encryption (XChaCha20-Poly1305) ====================
+
+SecureMemory Crypto::encrypt_aead(
+    const SecureMemory& plaintext,
+    const SecureMemory& key,
+    const SecureMemory& additional_data
+) {
+    if (key.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Invalid key size for XChaCha20-Poly1305 AEAD");
+    }
+
+    // Generate random nonce
+    SecureMemory nonce(crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+    randombytes_buf(nonce.data(), nonce.size());
+
+    // Ciphertext will be: nonce + encrypted_data + auth_tag
+    size_t ciphertext_len = crypto_aead_xchacha20poly1305_ietf_NPUBBYTES + 
+                            plaintext.size() + 
+                            crypto_aead_xchacha20poly1305_ietf_ABYTES;
+    SecureMemory ciphertext(ciphertext_len);
+
+    // Copy nonce to beginning
+    std::memcpy(ciphertext.data(), nonce.data(), nonce.size());
+
+    // Encrypt with AEAD
+    unsigned long long actual_ciphertext_len;
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+            ciphertext.data() + crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
+            &actual_ciphertext_len,
+            plaintext.data(),
+            plaintext.size(),
+            additional_data.size() > 0 ? additional_data.data() : nullptr,
+            additional_data.size(),
+            nullptr,  // nsec (not used)
+            nonce.data(),
+            key.data()) != 0) {
+        throw std::runtime_error("AEAD encryption failed");
+    }
+
+    return ciphertext;
+}
+
+SecureMemory Crypto::decrypt_aead(
+    const SecureMemory& ciphertext,
+    const SecureMemory& key,
+    const SecureMemory& additional_data
+) {
+    if (key.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Invalid key size for XChaCha20-Poly1305 AEAD");
+    }
+
+    size_t min_size = crypto_aead_xchacha20poly1305_ietf_NPUBBYTES + 
+                      crypto_aead_xchacha20poly1305_ietf_ABYTES;
+    if (ciphertext.size() < min_size) {
+        throw std::runtime_error("Ciphertext too short for AEAD decryption");
+    }
+
+    // Extract nonce from beginning
+    const uint8_t* nonce = ciphertext.data();
+    const uint8_t* encrypted_data = ciphertext.data() + crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+    size_t encrypted_len = ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+
+    // Decrypt
+    SecureMemory plaintext(encrypted_len - crypto_aead_xchacha20poly1305_ietf_ABYTES);
+    unsigned long long actual_plaintext_len;
+
+    if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+            plaintext.data(),
+            &actual_plaintext_len,
+            nullptr,  // nsec (not used)
+            encrypted_data,
+            encrypted_len,
+            additional_data.size() > 0 ? additional_data.data() : nullptr,
+            additional_data.size(),
+            nonce,
+            key.data()) != 0) {
+        throw std::runtime_error("AEAD decryption failed or authentication failed");
+    }
+
+    return plaintext;
+}
+
 } // namespace ncp
