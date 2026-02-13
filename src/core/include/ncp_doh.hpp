@@ -149,6 +149,7 @@ private:
     DNSResult perform_doh_query(const std::string& hostname, RecordType type);
     DNSResult fallback_to_system_dns(const std::string& hostname, RecordType type);
     std::vector<uint8_t> build_dns_query(const std::string& hostname, RecordType type);
+    std::vector<uint8_t> perform_https_doh_request(const std::string& server_url, const std::vector<uint8_t>& dns_query);
     DNSResult parse_dns_response(const std::vector<uint8_t>& response);
     std::string get_provider_url(Provider provider) const;
     void update_statistics(const DNSResult& result);
