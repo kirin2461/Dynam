@@ -27,6 +27,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_dpi.cpp
     src/tls_fingerprint.cpp
     src/dpi_advanced.cpp
+        src/secure_buffer.cpp
 )
 
 # Conditionally add sources that depend on optional libraries
@@ -65,6 +66,7 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_logger.hpp
         include/ncp_paranoid.hpp
             include/ncp_secure_memory.hpp
+                    include/ncp_secure_buffer.hpp
 )
 
 # Combine all sources and headers
