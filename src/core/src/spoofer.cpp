@@ -32,7 +32,8 @@ namespace ncp {
 
 // ==================== Safe Command Execution ====================
 static const std::set<std::string> ALLOWED_COMMANDS = {
-    "ip", "ifconfig", "netsh", "arp", "route", "hostname", "sysctl"
+    "ip", "ifconfig", "netsh", "arp", "route", "hostname", "sysctl",
+    "reg", "mount", "systemctl"
 };
 
 static bool is_command_allowed(const std::string& cmd_name) {
