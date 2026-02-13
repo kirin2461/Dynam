@@ -9,6 +9,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include "include/ncp_network.hpp"
 
 namespace ncp {
 
@@ -23,16 +24,7 @@ struct NetworkInterface {
     bool is_wireless = false;
 };
 
-struct NetworkStats {
-    uint64_t bytes_sent = 0;
-    uint64_t bytes_received = 0;
-    uint64_t packets_sent = 0;
-    uint64_t packets_received = 0;
-    double upload_speed = 0.0;
-    double download_speed = 0.0;
-    std::chrono::steady_clock::time_point last_update;
-};
-
+// NetworkStats is now defined in include/ncp_network.hpp (unified definition)
 class NetworkManager {
 public:
     NetworkManager();
