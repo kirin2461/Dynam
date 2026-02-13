@@ -450,10 +450,12 @@ std::vector<uint8_t> TrafficMimicry::create_dns_query_wrapper(const std::vector<
     result.push_back(static_cast<uint8_t>(rdlen & 0xFF));
     // TXT RDATA: <length byte> <payload data>
     result.push_back(static_cast<uint8_t>(payload.size()));
+        result.insert(result.end(), payload.begin(), payload.end());
     return result;
 }
 
 std::vector<uint8_t> TrafficMimicry::create_dns_response_wrapper(const std::vector<uint8_t>& payload) {
+    
     dns_transaction_id_++;
     uint16_t txn_id = dns_transaction_id_;
     std::vector<uint8_t> result = {
@@ -489,6 +491,7 @@ std::vector<uint8_t> TrafficMimicry::create_dns_response_wrapper(const std::vect
     result.push_back(static_cast<uint8_t>(rdlen & 0xFF));
     // TXT RDATA: <length byte> <payload data>
     result.push_back(static_cast<uint8_t>(payload.size()));
+        result.insert(result.end(), payload.begin(), payload.end());
     return result;
 }
 
