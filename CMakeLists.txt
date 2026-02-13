@@ -1,7 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(ncp-cpp
-    VERSION 1.0.0
-    DESCRIPTION "Network Control Protocol - C++ Implementation"
+    VERSION 1.1.0    DESCRIPTION "Network Control Protocol - C++ Implementation"
     LANGUAGES CXX
 )
 
@@ -52,6 +51,16 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/src)
+
+# ==================== Required Dependencies ====================
+# OpenSSL is always required for cryptographic functions
+find_package(OpenSSL REQUIRED)
+if(OPENSSL_FOUND)
+    message(STATUS "OpenSSL found: ${OPENSSL_VERSION}")
+    include_directories(${OPENSSL_INCLUDE_DIR})
+else()
+    message(FATAL_ERROR "OpenSSL not found. Please install OpenSSL development package.")
+endif()
 
 # ==================== Optional Dependencies ====================
 # These are OFF by default - only searched when explicitly enabled
@@ -130,3 +139,31 @@ message(STATUS "  ENABLE_WEBSOCKETS:${ENABLE_WEBSOCKETS}")
 message(STATUS "  ENABLE_TOR_PROXY: ${ENABLE_TOR_PROXY}")
 message(STATUS " ENABLE_FUZZING: ${ENABLE_FUZZING}")
 message(STATUS "==============================")
+
+# ==================== Install Targets ====================
+# Install core library
+install(TARGETS ncp-core
+    LIBRARY DESTINATION lib
+    ARCHIVE DESTINATION lib
+    RUNTIME DESTINATION bin
+)
+
+# Install CLI tool if enabled
+if(ENABLE_CLI)
+    install(TARGETS ncp-cli
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+# Install GUI application if enabled
+if(ENABLE_GUI)
+    install(TARGETS ncp-gui
+        RUNTIME DESTINATION bin
+    )
+endif()
+
+# Install header files
+install(DIRECTORY src/core/include/
+    DESTINATION include/ncp
+    FILES_MATCHING PATTERN "*.hpp"
+)
