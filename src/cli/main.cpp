@@ -160,6 +160,10 @@ int main(int argc, char* argv[]) {
     parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
+
+    parser.parse_and_execute(argc, argv);
+    return 0;
+}
 // ============================================================================
 // Command Handler Implementations
 // ============================================================================
@@ -198,6 +202,7 @@ void handle_status(const std::vector<std::string>& args) {
         std::cout << "All systems: Inactive\n";
         std::cout << "Run 'ncp run' to start protection\n";
     }
+}
 
 void handle_rotate(const std::vector<std::string>& args) {
     // TODO: Implement identity rotation
