@@ -767,6 +767,50 @@ void DPIBypass::set_log_callback(LogCallback cb) {
     impl_->log_callback = [cb](const std::string& msg) { if (cb) cb(LogLevel::INFO, msg); };
 }
 
+DPIConfig DPIBypass::get_config() const {
+    std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+    return impl_->config;
+}
+
+bool DPIBypass::update_config(const DPIConfig& config) {
+    auto err = config.validate();
+    if (err != ValidationError::NONE) return false;
+    DPIConfig old_cfg;
+    {
+        std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+        old_cfg = impl_->config;
+        impl_->config = config;
+    }
+    notify_config_change(old_cfg, config);
+    return true;
+}
+
+void DPIBypass::reset_stats() {
+    std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+    impl_->stats.reset();
+}
+
+void DPIBypass::set_config_change_callback(ConfigChangeCallback callback) {
+    std::lock_guard<std::mutex> lock(config_cb_mutex_);
+    config_change_callback_ = std::move(callback);
+}
+
+void DPIBypass::log(LogLevel level, const std::string& message) {
+    std::lock_guard<std::mutex> lock(log_mutex_);
+    if (log_callback_) {
+        log_callback_(level, message);
+    } else {
+        impl_->log(message);
+    }
+}
+
+void DPIBypass::notify_config_change(const DPIConfig& old_cfg, const DPIConfig& new_cfg) {
+    std::lock_guard<std::mutex> lock(config_cb_mutex_);
+    if (config_change_callback_) {
+        config_change_callback_(old_cfg, new_cfg);
+    }
+}
+
 } // namespace DPI
 
 } // namespace ncp
