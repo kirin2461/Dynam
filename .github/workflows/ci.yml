@@ -39,6 +39,23 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential pkg-config libpcap-dev libssl-dev libgtest-dev libsodium-dev
 
+      - name: Cache vcpkg
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-libsodium-x64-windows-${{ hashFiles('.github/workflows/ci.yml') }}
+
+      - name: Install vcpkg and libsodium
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          if not exist C:\vcpkg\vcpkg.exe (
+            git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+            C:\vcpkg\bootstrap-vcpkg.bat
+          )
+          C:\vcpkg\vcpkg install libsodium:x64-windows
+
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: powershell
@@ -55,10 +72,18 @@ jobs:
         run: mkdir -p build
         shell: bash
 
-      - name: Configure CMake
+      - name: Configure CMake (Linux)
+        if: runner.os == 'Linux'
         run: |
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
+        shell: bash
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
         shell: bash
 
       - name: Build
