@@ -11,7 +11,8 @@
 #include <memory>
 
 // Forward declaration for pcap_t
-struct pcap_t;
+struct pcap;
+typedef struct pcap pcap_t;
 
 namespace ncp {
 
