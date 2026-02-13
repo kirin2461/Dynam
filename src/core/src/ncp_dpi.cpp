@@ -200,9 +200,6 @@ class DPIBypass::Impl {
 public:
     std::atomic<bool> running{false};
     DPIConfig config;
-// Thread-local random number generator for secure noise generation
-    thread_local std::mt19937 rng(std::random_device{}());
-    thread_local std::uniform_int_distribution<int> byte_dist(0, 255);
 
 DPIStats stats;
     mutable std::mutex stats_mutex;
@@ -481,6 +478,7 @@ DPIStats stats;
                 0x16, 0x03, static_cast<uint8_t>(t_byte_dist(t_rng) % 4), // TLS record + random version minor
                 static_cast<uint8_t>(t_byte_dist(t_rng)), static_cast<uint8_t>(t_byte_dist(t_rng)), // Random length
                 0x01 // ClientHello
+#ifdef IP_TTL
             };                int original_ttl = 0;
                 socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
                 bool ttl_changed = false;
@@ -770,13 +768,5 @@ void DPIBypass::set_log_callback(LogCallback cb) {
 
 } // namespace DPI
 
-  // Thread-local RNG for secure noise generation
-  // Moved outside class to comply with C++ standard
-  thread_local std::mt19937 t_rng(std::random_device{}());
-  thread_local std::uniform_int_distribution<int> t_byte_dist(0, 255);
 } // namespace ncp
 
-  // Thread-local RNG for secure noise generation
-  // Moved outside class to comply with C++ standard
-  thread_local std::mt19937 t_rng(std::random_device{}());
-  thread_local std::uniform_int_distribution<int> t_byte_dist(0, 255);
