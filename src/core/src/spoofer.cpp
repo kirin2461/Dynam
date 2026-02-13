@@ -936,31 +936,6 @@ bool NetworkSpoofer::apply_smbios(const std::string& bios_vendor, const std::str
 #endif
 }
 
-// Phase 2: Disk Serial Number Spoofing
-bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
-#ifdef _WIN32
-    // Windows: Modify HKLM\HARDWARE\DEVICEMAP\Scsi\Scsi Port X\Scsi Bus X\Target Id X\Logical Unit Id X
-    // Also: HKLM\SYSTEM\CurrentControlSet\Enum\SCSI\...\Device Parameters\SerialNumber
-    
-    std::string reg_path = "HKLM\\SYSTEM\\CurrentControlSet\\Enum\\SCSI";
-    // Enumerate all SCSI devices and modify SerialNumber values
-    // This requires admin + potentially kernel-mode driver for deep hooks
-    
-    // Stub: Modify first physical drive serial
-    auto result = execute_command_safe("reg", {"add", reg_path + "\\Disk&Ven_*\\Device Parameters", "/v", "SerialNumber", "/t", "REG_SZ", "/d", disk_serial, "/f"});
-    
-    return result.find("Error") == std::string::npos;
-    
-#else
-    // Linux: Requires kernel module to hook block device ioctls (HDIO_GET_IDENTITY)
-    // Usermode stub: Modify /dev/disk/by-id symlinks (cosmetic only, doesn't affect ioctl responses)
-    
-    // Production approach: Load kernel module that intercepts SCSI/ATA identity commands
-    std::cerr << "[SMBIOS] Linux disk serial spoofing requires kernel module (libata hook)" << std::endl;
-    return false; // Not implemented in usermode
-#endif
-}
-
 // Phase 3: DHCP Client ID (Option 61) Spoofing - FASTEST TO IMPLEMENT
 bool NetworkSpoofer::apply_dhcp_client_id(const std::string& interface_name, const std::string& client_id) {
 #ifdef _WIN32
