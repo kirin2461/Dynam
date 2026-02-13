@@ -235,7 +235,7 @@ enum class LogLevel {
     DEBUG,
     INFO,
     WARNING,
-    ERROR
+    ERR
 };
 
 using LogCallback = std::function<void(LogLevel, const std::string&)>;
