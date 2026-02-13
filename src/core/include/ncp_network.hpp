@@ -13,11 +13,12 @@
 // Forward declaration for pcap_t
 struct pcap_t;
 
+namespace ncp {
+
+// Custom deleter for pcap_handle_ (moved inside namespace to avoid global namespace pollution)
 struct pcap_handle_deleter {
     void operator()(pcap_t* p) const noexcept;
 };
-
-namespace ncp {
 
 // DPI Bypass techniques enumeration
 enum class BypassTechnique {
@@ -114,6 +115,7 @@ public:
         const std::string& dest_ip,
         const std::vector<uint8_t>& data
     );
+
     bool send_tcp_packet(
         const std::string& dest_ip,
         uint16_t dest_port,
@@ -125,10 +127,12 @@ public:
     void disable_bypass();
     void apply_bypass_to_packet(std::vector<uint8_t>& packet);
     void fragment_packet(std::vector<uint8_t>& packet);
+
     bool inject_fragmented_packets(
         const std::vector<std::vector<uint8_t>>& packets,
         int delay_ms
     );
+
     void set_tcp_window_size(uint16_t size);
 
     std::string resolve_dns(const std::string& hostname, bool use_doh);
@@ -137,6 +141,7 @@ public:
     std::string get_network_stats();
     NetworkStats get_stats() const;
     void reset_stats();
+
     std::string get_last_error() const;
 
 private:
@@ -147,7 +152,7 @@ private:
     bool setup_packet_disorder();
     void cleanup_bypass();
 
-        std::unique_ptr<pcap_t, pcap_handle_deleter> pcap_handle_;
+    std::unique_ptr<pcap_t, pcap_handle_deleter> pcap_handle_;
     BypassTechnique current_technique_;
     BypassConfig bypass_config_;
     TorConfig tor_config_;
@@ -156,7 +161,7 @@ private:
     NetworkStats stats_;
     std::string last_error_;
 
-        // Additional members used in implementation
+    // Additional members used in implementation
     bool is_capturing_ = false;
     bool bypass_enabled_ = false;
     std::string current_interface_;
