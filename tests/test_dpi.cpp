@@ -158,7 +158,7 @@ TEST(DPISniParserTest, ParsesSimpleClientHelloWithSni) {
 
     int offset = find_sni_hostname_offset(buf.data(), buf.size());
     ASSERT_GT(offset, 0);
-    ASSERT_LT(static_cast<size_t>(offset) + host.size(), buf.size());
+    ASSERT_LE(static_cast<size_t>(offset) + host.size(), buf.size());
 
     std::string parsed_host(
         reinterpret_cast<const char*>(buf.data() + offset),
