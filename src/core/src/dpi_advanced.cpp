@@ -791,4 +791,98 @@ std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
 }
 
 } // namespace DPI
+
+// ==================== Preset Configurations ====================
+
+namespace Presets {
+
+AdvancedDPIConfig create_tspu_preset() {
+    AdvancedDPIConfig config;
+    config.techniques = {
+        EvasionTechnique::TCP_SEGMENTATION,
+        EvasionTechnique::SNI_SPLIT,
+        EvasionTechnique::FAKE_SNI,
+        EvasionTechnique::TLS_RECORD_SPLIT
+    };
+    config.obfuscation = ObfuscationMode::NONE;
+    return config;
+}
+
+AdvancedDPIConfig create_gfw_preset() {
+    AdvancedDPIConfig config;
+    config.techniques = {
+        EvasionTechnique::TCP_SEGMENTATION,
+        EvasionTechnique::SNI_SPLIT,
+        EvasionTechnique::GREASE_INJECTION,
+        EvasionTechnique::TLS_RECORD_SPLIT,
+        EvasionTechnique::TCP_DISORDER
+    };
+    config.obfuscation = ObfuscationMode::XOR_ROLLING;
+    config.obfuscation_key.resize(32);
+    randombytes_buf(config.obfuscation_key.data(), config.obfuscation_key.size());
+    return config;
+}
+
+AdvancedDPIConfig create_iran_preset() {
+    AdvancedDPIConfig config;
+    config.techniques = {
+        EvasionTechnique::TCP_SEGMENTATION,
+        EvasionTechnique::SNI_SPLIT,
+        EvasionTechnique::FAKE_SNI,
+        EvasionTechnique::TLS_RECORD_SPLIT,
+        EvasionTechnique::GREASE_INJECTION,
+        EvasionTechnique::TCP_OOB_DATA
+    };
+    config.obfuscation = ObfuscationMode::XOR_SIMPLE;
+    config.obfuscation_key.resize(32);
+    randombytes_buf(config.obfuscation_key.data(), config.obfuscation_key.size());
+    return config;
+}
+
+AdvancedDPIConfig create_aggressive_preset() {
+    AdvancedDPIConfig config;
+    config.techniques = {
+        EvasionTechnique::TCP_SEGMENTATION,
+        EvasionTechnique::TCP_OVERLAP,
+        EvasionTechnique::TCP_DISORDER,
+        EvasionTechnique::TCP_OOB_DATA,
+        EvasionTechnique::SNI_SPLIT,
+        EvasionTechnique::FAKE_SNI,
+        EvasionTechnique::TLS_RECORD_SPLIT,
+        EvasionTechnique::TLS_PADDING,
+        EvasionTechnique::GREASE_INJECTION
+    };
+    config.obfuscation = ObfuscationMode::CHACHA20;
+    config.obfuscation_key.resize(32);
+    randombytes_buf(config.obfuscation_key.data(), config.obfuscation_key.size());
+    return config;
+}
+
+AdvancedDPIConfig create_stealth_preset() {
+    AdvancedDPIConfig config;
+    config.techniques = {
+        EvasionTechnique::TCP_SEGMENTATION,
+        EvasionTechnique::SNI_SPLIT,
+        EvasionTechnique::TLS_RECORD_SPLIT,
+        EvasionTechnique::GREASE_INJECTION,
+        EvasionTechnique::TCP_DISORDER
+    };
+    config.obfuscation = ObfuscationMode::CHACHA20;
+    config.obfuscation_key.resize(32);
+    randombytes_buf(config.obfuscation_key.data(), config.obfuscation_key.size());
+    return config;
+}
+
+AdvancedDPIConfig create_compatible_preset() {
+    AdvancedDPIConfig config;
+    config.techniques = {
+        EvasionTechnique::TCP_SEGMENTATION,
+        EvasionTechnique::SNI_SPLIT
+    };
+    config.obfuscation = ObfuscationMode::NONE;
+    return config;
+}
+
+} // namespace Presets
+
 } // namespace ncp
