@@ -196,10 +196,8 @@ public:
     std::atomic<bool> running{false};
     DPIConfig config;
 // Thread-local random number generator for secure noise generation
-namespace {
     thread_local std::mt19937 rng(std::random_device{}());
     thread_local std::uniform_int_distribution<int> byte_dist(0, 255);
-}
 
 DPIStats stats;
     mutable std::mutex stats_mutex;
