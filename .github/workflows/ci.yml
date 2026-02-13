@@ -20,7 +20,7 @@ jobs:
           - os: windows-latest
             c_compiler: cl
             cpp_compiler: cl
-    
+
     steps:
       - uses: actions/checkout@v4
 
@@ -41,10 +41,11 @@ jobs:
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
+        shell: powershell
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-      Invoke-WebRequest -Uri "https://npcap.com/dist/npcap-sdk-1.13.zip" -OutFile npcap-sdk.zip -TimeoutSec 60
-      Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
+          Invoke-WebRequest -Uri 'https://npcap.com/dist/npcap-sdk-1.13.zip' -OutFile npcap-sdk.zip -TimeoutSec 60
+          Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
@@ -63,13 +64,13 @@ jobs:
       - name: Build
         run: |
           cd build
-          cmake --build . 
+          cmake --build .
         shell: bash
 
       - name: Run tests
         run: |
           cd build
-          ctest --output-on-failure 
+          ctest --output-on-failure
         shell: bash
 
       - name: Archive build artifacts
@@ -86,7 +87,7 @@ jobs:
       fail-fast: false
       matrix:
         sanitizer: [asan, tsan, ubsan]
-    
+
     steps:
       - uses: actions/checkout@v4
 
