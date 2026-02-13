@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "ncp_license.hpp"
 
-using namespace NCP;
+using namespace ncp;
 
 class LicenseTest : public ::testing::Test {
 protected:
