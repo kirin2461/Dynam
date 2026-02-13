@@ -140,10 +140,10 @@ void EntropyController::inject_ascii_bytes(
     if (ascii_count >= target_count) return;
 
     // Inject random ASCII-printable bytes
-    std::uniform_int_distribution<uint8_t> ascii_dist(0x20, 0x7E);
+    std::uniform_int_distribution<unsigned short> ascii_dist(0x20, 0x7E);
     size_t to_inject = target_count - ascii_count;
     for (size_t i = 0; i < to_inject; ++i) {
-        data.push_back(ascii_dist(rng_));
+        data.push_back(static_cast<uint8_t>(ascii_dist(rng_)));
     }
 }
 
