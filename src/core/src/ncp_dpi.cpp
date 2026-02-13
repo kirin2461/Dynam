@@ -273,6 +273,12 @@ DPIStats stats;
                 if (!running) break;
                 continue;
             }
+        
+        // FIXME: Thread safety issue - using detach() can cause resource leaks
+        // TODO: Replace with proper thread pool implementation:
+        //   - Fixed-size worker thread pool (e.g., 4-8 threads)
+        //   - Thread-safe task queue with condition variable
+        //   - Proper cleanup on shutdown with join()
 
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
