@@ -46,6 +46,11 @@ std::string to_lower_copy(const std::string& s) {
 
 } // namespace
 
+  // Thread-local RNG for secure noise generation
+  // Moved outside class to comply with C++ standard
+  thread_local std::mt19937 t_rng(std::random_device{}());
+  thread_local std::uniform_int_distribution<int> t_byte_dist(0, 255);
+
 // TLS ClientHello detection
 static bool is_tls_client_hello(const uint8_t* data, size_t len) {
     return len > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01;
@@ -449,7 +454,7 @@ DPIStats stats;
                 junk.assign(mask.begin(), mask.end());
             } else {
                 junk.resize(config.noise_size > 0 ? config.noise_size : 64);
-                for(auto& b : junk) b = static_cast<uint8_t>(byte_dist(rng));
+                for(auto& b : junk) b = static_cast<uint8_t>(t_byte_dist(t_rng));
             }
             
             // Send junk with low TTL if fake_packet is enabled, otherwise just as noise
@@ -473,8 +478,8 @@ DPIStats stats;
             for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
             // Randomize fake packet to avoid DPI fingerprinting
             std::vector<uint8_t> fake_data = {
-                0x16, 0x03, static_cast<uint8_t>(byte_dist(rng) % 4), // TLS record + random version minor
-                static_cast<uint8_t>(byte_dist(rng)), static_cast<uint8_t>(byte_dist(rng)), // Random length
+                0x16, 0x03, static_cast<uint8_t>(t_byte_dist(t_rng) % 4), // TLS record + random version minor
+                static_cast<uint8_t>(t_byte_dist(t_rng)), static_cast<uint8_t>(t_byte_dist(t_rng)), // Random length
                 0x01 // ClientHello
             };                int original_ttl = 0;
                 socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
@@ -552,7 +557,7 @@ DPIStats stats;
             size_t offset = 0;
             while (offset < remaining) {
                 // Randomize fragment size slightly for evasion
-                size_t jitter = (rng() % 3); 
+                size_t jitter = (t_rng() % 3); 
                 size_t current_frag = std::min(base_frag_size + jitter, remaining - offset);
 
                 if (config.enable_disorder && config.disorder_delay_ms > 0) {
@@ -764,4 +769,14 @@ void DPIBypass::set_log_callback(LogCallback cb) {
 }
 
 } // namespace DPI
+
+  // Thread-local RNG for secure noise generation
+  // Moved outside class to comply with C++ standard
+  thread_local std::mt19937 t_rng(std::random_device{}());
+  thread_local std::uniform_int_distribution<int> t_byte_dist(0, 255);
 } // namespace ncp
+
+  // Thread-local RNG for secure noise generation
+  // Moved outside class to comply with C++ standard
+  thread_local std::mt19937 t_rng(std::random_device{}());
+  thread_local std::uniform_int_distribution<int> t_byte_dist(0, 255);
