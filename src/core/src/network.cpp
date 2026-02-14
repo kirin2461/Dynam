@@ -92,7 +92,7 @@ std::vector<std::string> Network::get_interfaces() {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_if_t* alldevs = nullptr;
     if (pcap_findalldevs(&alldevs, errbuf) == 0) {
-        for (pcap_if_t* d = alldevs) d != nullptr; d = d->next) {
+        for (pcap_if_t* d = alldevs; d != nullptr; d = d->next) {
             if (d->name) {
                 interfaces.push_back(d->name);
             }
