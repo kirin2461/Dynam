@@ -3,13 +3,15 @@
 #include <random>
 #include <thread>
 #include <chrono>
+#include <sodium.h>
+#include <fstream>
+#include <cstdlib>
 
 namespace ncp {
 
 // ---- ParanoidMode::Impl (pimpl idiom) ---------------------------------
 
 struct ParanoidMode::Impl {
-    std::mt19937 rng{std::random_device{}()};
     std::vector<std::string> active_circuits;
     std::thread cover_traffic_thread;
     bool cover_traffic_running = false;
