@@ -210,4 +210,166 @@ void Network::stop_capture() {
     pcap_handle_.reset();
 #endif
 }
+
+// ==================== DPI Bypass Techniques ====================
+
+bool Network::enable_bypass(BypassTechnique technique) {
+    current_technique_ = technique;
+    bypass_enabled_ = true;
+    switch (technique) {
+    case BypassTechnique::TTL_MODIFICATION:
+        return setup_ttl_bypass();
+    case BypassTechnique::TCP_FRAGMENTATION:
+        return setup_fragmentation_bypass();
+    case BypassTechnique::SNI_SPOOFING:
+        return setup_sni_spoofing();
+    case BypassTechnique::FAKE_PACKET:
+        return setup_fake_packet();
+    case BypassTechnique::DISORDER:
+        return setup_packet_disorder();
+    case BypassTechnique::OBFUSCATION:
+        bypass_config_.obfuscation_enabled = true;
+        return true;
+    case BypassTechnique::HTTP_MIMICRY:
+        bypass_config_.mimicry_enabled = true;
+        bypass_config_.mimicry_profile = "HTTP";
+        return true;
+    case BypassTechnique::TLS_MIMICRY:
+        bypass_config_.mimicry_enabled = true;
+        bypass_config_.mimicry_profile = "TLS";
+        return true;
+    default:
+        return false;
+    }
+}
+
+bool Network::set_tor_config(const TorConfig& config) {
+    tor_config_ = config;
+    return true;
+}
+
+bool Network::is_tor_active() const {
+    return tor_config_.enabled;
+}
+
+void Network::disable_bypass() {
+    bypass_enabled_ = false;
+    current_technique_ = BypassTechnique::NONE;
+    cleanup_bypass();
+}
+
+bool Network::setup_ttl_bypass() {
+    bypass_config_.ttl_value = 1;
+    bypass_config_.retransmit_ttl = 64;
+    return true;
+}
+
+bool Network::setup_fragmentation_bypass() {
+    bypass_config_.fragment_size = 8;
+    bypass_config_.fragment_offset = 0;
+    return true;
+}
+
+bool Network::setup_sni_spoofing() {
+    bypass_config_.fake_sni = "www.google.com";
+    bypass_config_.split_sni = true;
+    return true;
+}
+
+bool Network::setup_fake_packet() {
+    bypass_config_.use_bad_checksum = true;
+    bypass_config_.fake_seq_number = true;
+    return true;
+}
+
+bool Network::setup_packet_disorder() {
+    bypass_config_.disorder_enabled = true;
+    bypass_config_.disorder_delay_ms = 50;
+    return true;
+}
+
+void Network::cleanup_bypass() {
+    bypass_config_ = BypassConfig();
+}
+
+// ==================== Raw Packet Operations ====================
+
+bool Network::send_raw_packet(const std::string& dest_ip, const std::vector<uint8_t>& data) {
+#ifndef _WIN32
+    if (geteuid() != 0) {
+        last_error_ = "Raw sockets require root privileges";
+        return false;
+    }
+    int sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+    if (sock < 0) {
+        last_error_ = "Failed to create raw socket";
+        return false;
+    }
+    int one = 1;
+    setsockopt(sock, IPPROTO_IP, IP_HDRINCL, &one, sizeof(one));
+    struct sockaddr_in dest;
+    dest.sin_family = AF_INET;
+    dest.sin_addr.s_addr = inet_addr(dest_ip.c_str());
+    ssize_t sent = sendto(sock, data.data(), data.size(), 0, (struct sockaddr*)&dest, sizeof(dest));
+    close(sock);
+    return sent > 0;
+#else
+    return false;
+#endif
+}
+
+bool Network::send_tcp_packet(const std::string& dest_ip, uint16_t dest_port, const std::vector<uint8_t>& payload, uint8_t flags) {
+    return false;
+}
+
+void Network::apply_bypass_to_packet(std::vector<uint8_t>& packet) {}
+
+void Network::fragment_packet(std::vector<uint8_t>& packet) {}
+
+bool Network::inject_fragmented_packets(const std::vector<std::vector<uint8_t>>& packets, int delay_ms) {
+    return false;
+}
+
+void Network::set_tcp_window_size(uint16_t size) {}
+
+// ==================== DNS Operations ====================
+
+std::string Network::resolve_dns(const std::string& hostname, bool use_doh) {
+    if (use_doh) {
+        return resolve_dns_over_https(hostname);
+    }
+    struct addrinfo hints = {}, *result = nullptr;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(hostname.c_str(), nullptr, &hints, &result) != 0) {
+        return "";
+    }
+    char ip_str[INET_ADDRSTRLEN];
+    struct sockaddr_in* addr = (struct sockaddr_in*)result->ai_addr;
+    inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str));
+    freeaddrinfo(result);
+    return std::string(ip_str);
+}
+
+std::string Network::resolve_dns_over_https(const std::string& hostname) {
+    return "";
+}
+
+// ==================== Statistics ====================
+
+std::string Network::get_network_stats() {
+    return "";
+}
+
+NetworkStats Network::get_stats() const {
+    return stats_;
+}
+
+void Network::reset_stats() {
+    stats_ = NetworkStats();
+}
+
+std::string Network::get_last_error() const {
+    return last_error_;
+
 }
