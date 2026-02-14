@@ -61,8 +61,6 @@ jobs:
         shell: powershell
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          Invoke-WebRequest -Uri 'https://npcap.com/dist/npcap-sdk-1.13.zip' -OutFile npcap-sdk.zip -TimeoutSec 60
-          Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
 
       - name: Setup MSVC (Windows)
         if: runner.os == 'Windows'
@@ -83,7 +81,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cd build
-          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF -DENABLE_WEBSOCKETS=ON
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF -DENABLE_WEBSOCKETS=ON
         shell: bash
 
       - name: Build
