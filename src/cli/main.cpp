@@ -327,8 +327,8 @@ void handle_status(const std::vector<std::string>& args) {
         std::cout << "  Threat level: ";
         auto level = g_paranoid->get_threat_level();
         switch(level) {
-            case ParanoidMode::ThreatLevel::LOW: std::cout << "LOW"; break;
-            case ParanoidMode::ThreatLevel::MEDIUM: std::cout << "MEDIUM"; break;
+            case ParanoidMode::ThreatLevel::MODERATE: std::cout << "MODERATE"; break;
+            case ParanoidMode::ThreatLevel::EXTREME: std::cout << "EXTREME"; break;
             case ParanoidMode::ThreatLevel::HIGH: std::cout << "HIGH"; break;
             case ParanoidMode::ThreatLevel::TINFOIL_HAT: std::cout << "TINFOIL_HAT"; break;
             default: std::cout << "UNKNOWN"; break;
