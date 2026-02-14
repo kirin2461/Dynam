@@ -117,8 +117,7 @@ public:
     InterfaceInfo get_interface_info(const std::string& iface_name);
 
     bool initialize_capture(const std::string& interface_name);
-    void InterfaceInfo(PacketCallback callback, int timeout_ms = 5000);
-    void stop_capture();
+    void start_capture(PacketCallback callback, int timeout_ms = 5000);    void stop_capture();
 
     bool send_raw_packet(
         const std::string& dest_ip,
