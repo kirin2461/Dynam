@@ -113,7 +113,7 @@ public:
     bool set_tor_config(const TorConfig& config);
     bool is_tor_active() const;
 
-    116        std::vector<InterfaceInfo> get_interfaces    ();
+        std::vector<InterfaceInfo> get_interfaces();
     InterfaceInfo get_interface_info(const std::string& iface_name);
 
     bool initialize_capture(const std::string& interface_name);
