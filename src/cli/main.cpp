@@ -36,19 +36,8 @@ std::atomic<bool> g_running(false);
 
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
-        std::cout << "\n[!] Shutdown signal received. Restoring...\n";
-        g_running = false;
-        
-        // Cleanup in reverse order
-        if (g_paranoid && g_paranoid->is_active()) {
-            g_paranoid->deactivate();
-        }
-        if (g_dpi_bypass && g_dpi_bypass->is_running()) {
-            g_dpi_bypass->stop();
-        }
-        if (g_spoofer && g_spoofer->is_enabled()) {
-            g_spoofer->disable();
-        }
+        std::cout << "\n[!] Shutdown signal received...\n";
+        g_running = false;  // Only set flag, cleanup happens in main()
     }
 }
 
@@ -84,12 +73,10 @@ public:
         }
 
         std::string cmd = argv[1];
-        
         if (cmd == "help" || cmd == "--help" || cmd == "-h") {
             print_usage();
             return;
         }
-        
         if (cmd == "version" || cmd == "--version" || cmd == "-v") {
             std::cout << prog_name_ << " " << version_ << std::endl;
             return;
@@ -113,7 +100,8 @@ private:
         std::cout << "Commands:\n";
         for (const auto& [name, cmd] : commands_) {
             std::cout << "  " << cmd.name;
-            for (const auto& arg : cmd.args_help) std::cout << " " << arg;
+            for (const auto& arg : cmd.args_help)
+                std::cout << " " << arg;
             std::cout << "\n    " << cmd.description << "\n\n";
         }
         std::cout << "  help\n    Show this help message\n\n";
@@ -146,7 +134,11 @@ static std::string get_option(const std::vector<std::string>& args, const std::s
 static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val = 0) {
     std::string val = get_option(args, option);
     if (val.empty()) return default_val;
-    try { return std::stoi(val); } catch (...) { return default_val; }
+    try {
+        return std::stoi(val);
+    } catch (...) {
+        return default_val;
+    }
 }
 
 // ============================================================================
@@ -173,7 +165,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGTERM, signal_handler);
 
     ArgumentParser parser("ncp", "v1.1.0");
-    
+
     parser.add_command("run", "Start PARANOID mode (all protection layers)", handle_run, {"[<interface>]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
@@ -184,9 +176,9 @@ int main(int argc, char* argv[]) {
     parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
-    
+
     parser.parse_and_execute(argc, argv);
-    
+
     return 0;
 }
 
@@ -195,75 +187,107 @@ int main(int argc, char* argv[]) {
 // ============================================================================
 
 void handle_run(const std::vector<std::string>& args) {
-    std::cout << "[*] Starting PARANOID mode...\n";
-    
-    std::string interface = get_arg(args, 0, "eth0");
-    
-    // Initialize globals
-    g_spoofer = std::make_unique<NetworkSpoofer>();
-    g_dpi_bypass = std::make_unique<DPI::DPIBypass>();
-    g_paranoid = std::make_unique<ParanoidMode>();
-    
-    // Configure and enable spoofer
-    NetworkSpoofer::SpoofConfig spoof_cfg;
-    spoof_cfg.spoof_ipv4 = true;
-    spoof_cfg.spoof_ipv6 = true;
-    spoof_cfg.spoof_mac = true;
-    spoof_cfg.spoof_dns = true;
-    spoof_cfg.coordinated_rotation = true;
-    
-    if (!g_spoofer->enable(interface, spoof_cfg)) {
-        std::cerr << "[!] Failed to enable spoofing\n";
-        return;
-    }
-    std::cout << "[+] Spoofing enabled on " << interface << "\n";
-    
-    // Configure and start DPI bypass
-    DPI::DPIConfig dpi_cfg;
-    dpi_cfg.mode = DPI::DPIMode::PROXY;
-    dpi_cfg.enable_tcp_split = true;
-    dpi_cfg.enable_noise = true;
-    dpi_cfg.enable_disorder = true;
-    
-    if (!g_dpi_bypass->initialize(dpi_cfg) || !g_dpi_bypass->start()) {
-        std::cerr << "[!] Failed to start DPI bypass\n";
-        return;
-    }
-    std::cout << "[+] DPI bypass active\n";
-    
-    // Activate ParanoidMode
-    g_paranoid->set_threat_level(ParanoidMode::ThreatLevel::HIGH);
-    if (!g_paranoid->activate()) {
-        std::cerr << "[!] Failed to activate ParanoidMode\n";
-        return;
-    }
-    std::cout << "[+] ParanoidMode activated\n";
-    
-    std::cout << "[+] All protection layers running. Press Ctrl+C to stop.\n";
-    
-    g_running = true;
-    while (g_running) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+    try {
+        std::cout << "[*] Starting PARANOID mode...\n";
+        
+        std::string interface = get_arg(args, 0);
+        
+        // Initialize globals
+        g_spoofer = std::make_unique<NetworkSpoofer>();
+        g_dpi_bypass = std::make_unique<DPI::DPIBypass>();
+        g_paranoid = std::make_unique<ParanoidMode>();
+        
+        // 1. Configure and enable NetworkSpoofer
+        NetworkSpoofer::SpoofConfig spoof_cfg;
+        spoof_cfg.spoof_ipv4 = true;
+        spoof_cfg.spoof_ipv6 = true;
+        spoof_cfg.spoof_mac = true;
+        spoof_cfg.spoof_dns = true;
+        spoof_cfg.coordinated_rotation = true;
+        
+        if (!g_spoofer->enable(interface.empty() ? "eth0" : interface, spoof_cfg)) {
+            std::cerr << "[!] Failed to enable spoofing\n";
+            return;
+        }
+        std::cout << "[+] Spoofing enabled on " << (interface.empty() ? "eth0" : interface) << "\n";
+        
+        // 2. Configure and start DPI bypass with RUNET_STRONG preset
+        DPI::DPIConfig dpi_cfg;
+        DPI::apply_preset(DPI::DPIPreset::RUNET_STRONG, dpi_cfg);
+        
+        if (!g_dpi_bypass->initialize(dpi_cfg) || !g_dpi_bypass->start()) {
+            std::cerr << "[!] Failed to start DPI bypass\n";
+            return;
+        }
+        std::cout << "[+] DPI bypass active (RuNet-Strong preset)\n";
+        
+        // 3. Activate ParanoidMode with TINFOIL_HAT threat level
+        g_paranoid->set_threat_level(ParanoidMode::ThreatLevel::TINFOIL_HAT);
+        if (!g_paranoid->activate()) {
+            std::cerr << "[!] Failed to activate ParanoidMode\n";
+            return;
+        }
+        std::cout << "[+] ParanoidMode activated (TINFOIL_HAT level)\n";
+        
+        std::cout << "[+] All protection layers running. Press Ctrl+C to stop.\n";
+        
+        g_running = true;
+        
+        // Wait loop
+        while (g_running) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        
+        // Cleanup after loop exit (RAII compliance)
+        std::cout << "\n[*] Shutting down services...\n";
+        
+        if (g_paranoid && g_paranoid->is_active()) {
+            g_paranoid->deactivate();
+            std::cout << "[+] ParanoidMode deactivated\n";
+        }
+        g_paranoid.reset();
+        
+        if (g_dpi_bypass && g_dpi_bypass->is_running()) {
+            g_dpi_bypass->stop();
+            std::cout << "[+] DPI bypass stopped\n";
+        }
+        g_dpi_bypass.reset();
+        
+        if (g_spoofer && g_spoofer->is_enabled()) {
+            g_spoofer->disable();
+            std::cout << "[+] Spoofing disabled, settings restored\n";
+        }
+        g_spoofer.reset();
+        
+        std::cout << "[+] Shutdown complete\n";
+        
+    } catch (const std::exception& e) {
+        std::cerr << "[!] Exception in handle_run: " << e.what() << "\n";
     }
 }
 
 void handle_stop(const std::vector<std::string>& args) {
     std::cout << "[*] Stopping all services and restoring settings...\n";
     
+    g_running = false;
+    
     if (g_paranoid && g_paranoid->is_active()) {
         g_paranoid->deactivate();
         std::cout << "[+] ParanoidMode deactivated\n";
     }
+    g_paranoid.reset();
     
     if (g_dpi_bypass && g_dpi_bypass->is_running()) {
         g_dpi_bypass->stop();
         std::cout << "[+] DPI bypass stopped\n";
     }
+    g_dpi_bypass.reset();
     
     if (g_spoofer && g_spoofer->is_enabled()) {
         g_spoofer->disable();
         std::cout << "[+] Spoofing disabled, original settings restored\n";
     }
+    g_spoofer.reset();
     
     std::cout << "[+] All services stopped\n";
 }
@@ -271,6 +295,7 @@ void handle_stop(const std::vector<std::string>& args) {
 void handle_status(const std::vector<std::string>& args) {
     std::cout << "=== NCP Status ===\n\n";
     
+    // Spoofing status
     if (g_spoofer && g_spoofer->is_enabled()) {
         auto status = g_spoofer->get_status();
         std::cout << "[Spoofing]\n";
@@ -282,6 +307,7 @@ void handle_status(const std::vector<std::string>& args) {
         std::cout << "[Spoofing] Inactive\n";
     }
     
+    // DPI bypass status
     if (g_dpi_bypass && g_dpi_bypass->is_running()) {
         auto stats = g_dpi_bypass->get_stats();
         std::cout << "\n[DPI Bypass]\n";
@@ -292,9 +318,23 @@ void handle_status(const std::vector<std::string>& args) {
         std::cout << "\n[DPI Bypass] Inactive\n";
     }
     
+    // ParanoidMode status
     if (g_paranoid && g_paranoid->is_active()) {
         auto pstats = g_paranoid->get_statistics();
         std::cout << "\n[ParanoidMode]\n";
+        
+        // Show threat level
+        std::cout << "  Threat level: ";
+        auto level = g_paranoid->get_threat_level();
+        switch(level) {
+            case ParanoidMode::ThreatLevel::LOW: std::cout << "LOW"; break;
+            case ParanoidMode::ThreatLevel::MEDIUM: std::cout << "MEDIUM"; break;
+            case ParanoidMode::ThreatLevel::HIGH: std::cout << "HIGH"; break;
+            case ParanoidMode::ThreatLevel::TINFOIL_HAT: std::cout << "TINFOIL_HAT"; break;
+            default: std::cout << "UNKNOWN"; break;
+        }
+        std::cout << "\n";
+        
         std::cout << "  Active circuits: " << pstats.circuits_created << "\n";
         std::cout << "  Cover traffic sent: " << pstats.cover_traffic_sent << " bytes\n";
         std::cout << "  Anonymity set size: " << pstats.anonymity_set_size << "\n";
@@ -320,6 +360,12 @@ void handle_rotate(const std::vector<std::string>& args) {
     } else {
         std::cerr << "[!] Rotation failed\n";
     }
+    
+    // Rotate paranoid circuits if active
+    if (g_paranoid && g_paranoid->is_active()) {
+        g_paranoid->rotate_all_circuits();
+        std::cout << "[+] Paranoid circuits rotated\n";
+    }
 }
 
 void handle_crypto(const std::vector<std::string>& args) {
@@ -327,7 +373,7 @@ void handle_crypto(const std::vector<std::string>& args) {
     
     if (action.empty()) {
         std::cerr << "Usage: ncp crypto <action> [args]\n";
-        std::cerr << "Actions: keygen, sign, verify, encrypt, decrypt, hash\n";
+        std::cerr << "Actions: keygen, random, hash, sign, verify\n";
         return;
     }
     
@@ -339,23 +385,38 @@ void handle_crypto(const std::vector<std::string>& args) {
         std::cout << "Public key: " << Crypto::bytes_to_hex(keypair.public_key) << "\n";
         std::cout << "Secret key: [REDACTED - store securely]\n";
     }
+    else if (action == "random") {
+        size_t size = static_cast<size_t>(get_option_int(args, "-n", 32));
+        auto random_bytes = crypto.generate_random(size);
+        std::cout << "Random bytes (" << size << "): " << Crypto::bytes_to_hex(random_bytes) << "\n";
+    }
     else if (action == "hash") {
         std::string algo = get_arg(args, 1, "sha256");
         std::string data = get_arg(args, 2);
+        
         if (data.empty()) {
             std::cerr << "[!] No data provided\n";
             return;
         }
+        
         SecureMemory msg(reinterpret_cast<const uint8_t*>(data.data()), data.size());
         SecureMemory hash;
-        if (algo == "sha256") hash = crypto.hash_sha256(msg);
-        else if (algo == "sha512") hash = crypto.hash_sha512(msg);
-        else if (algo == "blake2b") hash = crypto.hash_blake2b(msg);
+        
+        if (algo == "sha256")
+            hash = crypto.hash_sha256(msg);
+        else if (algo == "sha512")
+            hash = crypto.hash_sha512(msg);
+        else if (algo == "blake2b")
+            hash = crypto.hash_blake2b(msg);
         else {
             std::cerr << "[!] Unknown hash algorithm: " << algo << "\n";
             return;
         }
+        
         std::cout << "Hash (" << algo << "): " << Crypto::bytes_to_hex(hash) << "\n";
+    }
+    else if (action == "sign" || action == "verify") {
+        std::cerr << "[!] " << action << " not yet implemented\n";
     }
     else {
         std::cerr << "[!] Unknown crypto action: " << action << "\n";
@@ -367,7 +428,7 @@ void handle_network(const std::vector<std::string>& args) {
     
     if (action.empty()) {
         std::cerr << "Usage: ncp network <action>\n";
-        std::cerr << "Actions: interfaces, capture, stats\n";
+        std::cerr << "Actions: interfaces, stats\n";
         return;
     }
     
@@ -400,7 +461,7 @@ void handle_license(const std::vector<std::string>& args) {
     
     if (action.empty()) {
         std::cerr << "Usage: ncp license <action>\n";
-        std::cerr << "Actions: info, activate, validate, hwid\n";
+        std::cerr << "Actions: hwid, info, validate, activate\n";
         return;
     }
     
@@ -433,6 +494,9 @@ void handle_license(const std::vector<std::string>& args) {
             std::cout << "INVALID\n";
         }
     }
+    else if (action == "activate") {
+        std::cerr << "[!] License activation not yet implemented\n";
+    }
     else {
         std::cerr << "[!] Unknown license action: " << action << "\n";
     }
@@ -448,7 +512,6 @@ void handle_dpi(const std::vector<std::string>& args) {
     config.listen_port = get_option_int(args, "--port", 8080);
     config.target_host = get_option(args, "--target", "example.com");
     config.target_port = get_option_int(args, "--target-port", 443);
-    
     config.enable_tcp_split = !has_flag(args, "--no-split");
     config.split_position = get_option_int(args, "--split-pos", 2);
     config.enable_noise = !has_flag(args, "--no-noise");
@@ -487,7 +550,13 @@ void handle_dpi(const std::vector<std::string>& args) {
     std::cout << "[+] Packet disorder: " << (config.enable_disorder ? "enabled" : "disabled") << "\n";
     
     g_dpi_bypass = std::move(dpi);
+    g_running = true;
+    
     std::cout << "\nPress Ctrl+C to stop\n";
+    
+    while (g_running) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
 }
 
 void handle_i2p(const std::vector<std::string>& args) {
@@ -495,7 +564,7 @@ void handle_i2p(const std::vector<std::string>& args) {
     
     if (action.empty()) {
         std::cerr << "Usage: ncp i2p <action>\n";
-        std::cerr << "Actions: start, stop, status, create-tunnel\n";
+        std::cerr << "Actions: start, stop, status\n";
         return;
     }
     
@@ -503,7 +572,6 @@ void handle_i2p(const std::vector<std::string>& args) {
     
     if (action == "start") {
         std::cout << "[*] Starting I2P manager...\n";
-        
         i2p_mgr = std::make_unique<I2PManager>();
         
         I2PManager::Config cfg;
@@ -563,14 +631,22 @@ void handle_mimic(const std::vector<std::string>& args) {
     
     TrafficMimicry::MimicProfile profile;
     
-    if (type == "http") profile = TrafficMimicry::MimicProfile::HTTP_GET;
-    else if (type == "https") profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
-    else if (type == "dns") profile = TrafficMimicry::MimicProfile::DNS_QUERY;
-    else if (type == "quic") profile = TrafficMimicry::MimicProfile::QUIC_INITIAL;
-    else if (type == "websocket") profile = TrafficMimicry::MimicProfile::WEBSOCKET;
-    else if (type == "bittorrent") profile = TrafficMimicry::MimicProfile::BITTORRENT;
-    else if (type == "skype") profile = TrafficMimicry::MimicProfile::SKYPE;
-    else if (type == "zoom") profile = TrafficMimicry::MimicProfile::ZOOM;
+    if (type == "http")
+        profile = TrafficMimicry::MimicProfile::HTTP_GET;
+    else if (type == "https")
+        profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
+    else if (type == "dns")
+        profile = TrafficMimicry::MimicProfile::DNS_QUERY;
+    else if (type == "quic")
+        profile = TrafficMimicry::MimicProfile::QUIC_INITIAL;
+    else if (type == "websocket")
+        profile = TrafficMimicry::MimicProfile::WEBSOCKET;
+    else if (type == "bittorrent")
+        profile = TrafficMimicry::MimicProfile::BITTORRENT;
+    else if (type == "skype")
+        profile = TrafficMimicry::MimicProfile::SKYPE;
+    else if (type == "zoom")
+        profile = TrafficMimicry::MimicProfile::ZOOM;
     else {
         std::cerr << "[!] Unknown mimicry type: " << type << "\n";
         return;
