@@ -1,6 +1,39 @@
 # Dynam (NCP C++) - Network Control Protocol
 
 > Multi-layered network anonymization and privacy platform with DPI bypass, traffic spoofing, paranoid mode, and advanced cryptography. Written in modern C++17.
+>
+> ## Current Status
+
+**Version**: 1.1.0 (Active Development)
+
+### Implementation Progress
+
+**Core Library (libncp_core)**:
+- ✅ **Fully Implemented** (80-90%): Cryptography, DPI Bypass, Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration
+- ⚠️ **Partial Implementation** (40-60%): Paranoid Mode (core features work, some advanced methods pending), E2E Encryption (X25519 done, X448/ECDH_P256 in progress)
+- 🚧 **Stub/Minimal** (10-30%): I2P Integration (API defined, SAM bridge implementation in progress), Traffic Mimicry (basic structure, full protocol emulation pending)
+
+**CLI Tool**:
+- ✅ **Working Commands**: `status`, `help`
+- 🚧 **In Active Development**: `run`, `stop`, `rotate`, `crypto`, `license`, `network`, `dpi`, `i2p`, `mimic`
+- ⚠️ **Note**: CLI handlers currently being refactored from stubs to full implementations (see [CLAUDE_ACTION_PLAN.md](CLAUDE_ACTION_PLAN.md))
+
+**Testing**:
+- ✅ Basic unit tests for core modules (crypto, DPI, networking)
+- 🚧 Expanded test coverage in progress (E2E, Paranoid Mode, Secure Memory, I2P)
+
+**Known Limitations**:
+- I2P integration requires external I2P router with SAM bridge enabled
+- Paranoid Mode advanced features (memory protection, kill switch, traffic morphing) are platform-specific and may require elevated privileges
+- Some CLI commands shown in documentation are not yet functional (marked above)
+
+**Roadmap** (See [CLAUDE_ACTION_PLAN.md](CLAUDE_ACTION_PLAN.md) for detailed tasks):
+1. 🔴 **Phase 1** (Critical): CLI command handlers completion + RAII refactoring
+2. 🟠 **Phase 2** (High): I2P SAM implementation + Paranoid Mode advanced methods
+3. 🟠 **Phase 3** (High): Security fixes (thread pool, CSPRNG migration)
+4. 🟡 **Phase 4-6** (Medium): Code quality, testing, CI/CD
+
+
 
 ## Features
 
