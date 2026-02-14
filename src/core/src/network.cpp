@@ -70,19 +70,20 @@ Network::~Network() {
 
 // ==================== Interface Management ====================
 
-std::vector<std::string> Network::get_interfaces() {
-    std::vector<std::string> interfaces;
+std::vector<Network::InterfaceInfo> Network::get_interfaces() {
+    std::vector<InterfaceInfo> interfaces;
 
 #ifdef _WIN32
     PIP_ADAPTER_INFO adapter_info = nullptr;
     ULONG buf_len = 0;
     GetAdaptersInfo(adapter_info, &buf_len);
     adapter_info = (IP_ADAPTER_INFO*)malloc(buf_len);
-
+   
     if (GetAdaptersInfo(adapter_info, &buf_len) == NO_ERROR) {
         PIP_ADAPTER_INFO adapter = adapter_info;
         while (adapter) {
-            interfaces.push_back(adapter->AdapterName);
+            InterfaceInfo info = get_interface_info(adapter->AdapterName);
+            interfaces.push_back(info);
             adapter = adapter->Next;
         }
     }
@@ -92,14 +93,16 @@ std::vector<std::string> Network::get_interfaces() {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_if_t* alldevs = nullptr;
     int rc = pcap_findalldevs(&alldevs, errbuf);
-        if (rc == 0 && alldevs != nullptr) {
+   
+    if (rc == 0 && alldevs != nullptr) {
         for (pcap_if_t* d = alldevs; d != nullptr; d = d->next) {
             if (d->name) {
-                interfaces.push_back(d->name);
+                InterfaceInfo info = get_interface_info(d->name);
+                interfaces.push_back(info);
             }
         }
-                pcap_freealldevs(alldevs);
-            }
+        pcap_freealldevs(alldevs);
+    }
 #endif
 #endif
 
