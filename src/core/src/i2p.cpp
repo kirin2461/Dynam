@@ -55,6 +55,7 @@ struct I2PManager::Impl {
             sam_socket = -1;
         }
         sam_connected = false;
+            }
     
 };
 
