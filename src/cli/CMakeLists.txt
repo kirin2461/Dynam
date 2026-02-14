@@ -16,4 +16,9 @@ set_target_properties(ncp-cli PROPERTIES
     OUTPUT_NAME ncp
 )
 
+# Suppress unused parameter warnings in CLI command handlers
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(ncp-cli PRIVATE -Wno-unused-parameter)
+endif()
+
 install(TARGETS ncp-cli DESTINATION bin)
