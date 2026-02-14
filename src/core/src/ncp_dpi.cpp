@@ -1,4 +1,5 @@
 #include "ncp_dpi.hpp"
+#include "ncp_thread_pool.hpp"
 #include <thread>
 #include <mutex>
 #include <cstring>
@@ -205,7 +206,12 @@ DPIStats stats;
     mutable std::mutex stats_mutex;
     std::thread worker_thread;
     std::function<void(const std::string&)> log_callback;
-    
+
+
+    // === Thread pool for connection handling (Task 3.1) ===
+    std::unique_ptr<ncp::ThreadPool> thread_pool_;
+    std::atomic<int> active_connections_{0};
+    static constexpr int MAX_CONNECTIONS = 256;
     // === Proxy mode state ===
     void proxy_listen_loop() {
 #ifdef _WIN32
@@ -258,6 +264,9 @@ DPIStats stats;
             return;
         }
 
+                // Initialize thread pool (Task 3.1)
+        size_t num_threads = std::min<size_t>(std::thread::hardware_concurrency(), 8);
+        thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
         log("DPI proxy listening on 127.0.0.1:" + std::to_string(config.listen_port));
 
         while (running) {
@@ -276,18 +285,13 @@ DPIStats stats;
                 continue;
             }
         
-        // FIXME: Thread safety issue - using detach() can cause resource leaks
-        // TODO: Replace with proper thread pool implementation:
-        //   - Fixed-size worker thread pool (e.g., 4-8 threads)
-        //   - Thread-safe task queue with condition variable
-        //   - Proper cleanup on shutdown with join()
-
+                    // Thread pool implementation (Task 3.1) - replaces detach() for proper resource management
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
                 stats.connections_handled++;
             }
 
-            std::thread(&Impl::handle_proxy_connection, this, client_sock).detach();
+                        thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
         }
 
         CLOSE_SOCKET(listen_sock);
