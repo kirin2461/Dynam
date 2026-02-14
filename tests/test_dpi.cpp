@@ -109,6 +109,7 @@ TEST(DPISniParserTest, ParsesSimpleClientHelloWithSni) {
     buf.push_back(0x00);
     buf.push_back(0x00);
     // Extension data length placeholder
+        (void)ext_start;  // Suppress unused variable warning
     const size_t ext_data_len_pos = buf.size();
     buf.push_back(0x00);
     buf.push_back(0x00);
