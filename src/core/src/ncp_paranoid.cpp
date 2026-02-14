@@ -208,9 +208,9 @@ void ParanoidMode::remove_browser_fingerprints() {
 
 void ParanoidMode::add_random_delay() {
     if (layered_config_.enable_random_delays) {
-        std::uniform_int_distribution<int> dist(layered_config_.min_delay_ms,
-                                                 layered_config_.max_delay_ms);
-        auto delay_ms = dist(impl_->rng);
+                auto delay_ms = layered_config_.min_delay_ms +
+            static_cast<int>(randombytes_uniform(
+                static_cast<uint32_t>(layered_config_.max_delay_ms - layered_config_.min_delay_ms + 1)));
         std::this_thread::sleep_for(std::chrono::milliseconds(delay_ms));
     }
 }
@@ -222,9 +222,10 @@ void ParanoidMode::enable_request_batching(int batch_size, int max_delay_ms) {
 }
 
 std::chrono::milliseconds ParanoidMode::calculate_safe_delay() {
-    std::uniform_int_distribution<int> dist(layered_config_.min_delay_ms,
-                                            layered_config_.max_delay_ms);
-    return std::chrono::milliseconds(dist(impl_->rng));
+        auto delay = layered_config_.min_delay_ms +
+        static_cast<int>(randombytes_uniform(
+            static_cast<uint32_t>(layered_config_.max_delay_ms - layered_config_.min_delay_ms + 1)));
+    return std::chrono::milliseconds(delay);
 }
 
 // ---- Forensic protection -----------------------------------------------
