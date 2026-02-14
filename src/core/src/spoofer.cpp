@@ -15,6 +15,8 @@
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
 #else
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -127,7 +129,7 @@ static std::string execute_command_safe(const std::string& command, const std::v
 
 // ==================== Constructor/Destructor ====================
 NetworkSpoofer::NetworkSpoofer()
-    : rng_(std::random_device{}()) {
+ {
 }
 
 NetworkSpoofer::~NetworkSpoofer() {
@@ -255,7 +257,7 @@ bool NetworkSpoofer::rotate_mac() {
 bool NetworkSpoofer::rotate_dns() {
     if (!enabled_ || !config_.spoof_dns) return false;
     std::vector<std::string> providers = {"1.1.1.1","8.8.8.8","9.9.9.9","1.0.0.1","8.8.4.4"};
-    std::shuffle(providers.begin(), providers.end(), rng_);
+    for (size_t i = providers.size()-1; i > 0; --i) std::swap(providers[i], providers[csprng_uniform(static_cast<uint32_t>(i+1))]);
     std::vector<std::string> selected = {providers[0], providers[1]};
     if (apply_dns(selected)) {
         status_.current_dns = selected;
@@ -305,7 +307,7 @@ bool NetworkSpoofer::rotate_all() {
 // ==================== Generators ====================
 std::string NetworkSpoofer::generate_random_ipv4() {
     std::ostringstream oss;
-    oss << "10." << dist_(rng_) << "." << dist_(rng_) << "." << (1 + dist_(rng_) % 254);
+    oss << "10." << csprng_byte() << "." << csprng_byte() << "." << (1 + csprng_byte() % 254);
     return oss.str();
 }
 
@@ -313,29 +315,29 @@ std::string NetworkSpoofer::generate_random_ipv6() {
     std::ostringstream oss;
     oss << "fd" << std::hex << std::setfill('0');
     for (int i = 0; i < 7; ++i)
-        oss << ":" << std::setw(4) << (dist_(rng_) << 8 | dist_(rng_));
+        oss << ":" << std::setw(4) << (csprng_byte() << 8 | csprng_byte());
     return oss.str();
 }
 
 std::string NetworkSpoofer::generate_random_mac() {
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
-    oss << std::setw(2) << ((dist_(rng_) & 0xFC) | 0x02);
+    oss << std::setw(2) << ((csprng_byte() & 0xFC) | 0x02);
     for (int i = 0; i < 5; ++i)
-        oss << ":" << std::setw(2) << dist_(rng_);
+        oss << ":" << std::setw(2) << csprng_byte();
     return oss.str();
 }
 
 std::string NetworkSpoofer::generate_random_hostname() {
     std::vector<std::string> prefixes = {"PC-","WORK-","HOME-","LAPTOP-","NODE-"};
-    return prefixes[dist_(rng_) % prefixes.size()] + std::to_string(1000 + dist_(rng_) % 9000);
+    return prefixes[csprng_byte() % prefixes.size()] + std::to_string(1000 + csprng_byte() % 9000);
 }
 
 std::string NetworkSpoofer::generate_random_hw_serial() {
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string serial;
     for (int i = 0; i < 12; ++i)
-        serial += chars[rng_() % chars.length()];
+        serial += chars[csprng_byte() % chars.length()];
     return serial;
 }
 
@@ -646,7 +648,7 @@ std::string NetworkSpoofer::generate_random_board_serial() {
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string serial = "PF"; // Dell-style prefix
     for (int i = 0; i < 8; ++i)
-        serial += chars[rng_() % chars.length()];
+        serial += chars[csprng_byte() % chars.length()];
     return serial;
 }
 
@@ -655,7 +657,7 @@ std::string NetworkSpoofer::generate_random_system_serial() {
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string serial;
     for (int i = 0; i < 10; ++i)
-        serial += chars[rng_() % chars.length()];
+        serial += chars[csprng_byte() % chars.length()];
     return serial;
 }
 
@@ -663,11 +665,11 @@ std::string NetworkSpoofer::generate_random_uuid() {
     // Format: RFC 4122 UUID (e.g., 550e8400-e29b-41d4-a716-446655440000)
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
-    oss << std::setw(8) << (rng_() & 0xFFFFFFFF) << "-";
-    oss << std::setw(4) << (rng_() & 0xFFFF) << "-";
-    oss << std::setw(4) << ((rng_() & 0x0FFF) | 0x4000) << "-"; // Version 4
-    oss << std::setw(4) << ((rng_() & 0x3FFF) | 0x8000) << "-"; // Variant
-    oss << std::setw(12) << ((static_cast<uint64_t>(rng_()) << 32) | rng_());
+    oss << std::setw(8) << ((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0xFFFFFFFF) << "-";
+    oss << std::setw(4) << ((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0xFFFF) << "-";
+    oss << std::setw(4) << (((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0x0FFF) | 0x4000) << "-"; // Version 4
+    oss << std::setw(4) << (((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0x3FFF) | 0x8000) << "-"; // Variant
+    oss << std::setw(12) << ((static_cast<uint64_t>((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte())) << 32) | (static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()));
     return oss.str();
 }
 
@@ -676,7 +678,7 @@ std::string NetworkSpoofer::generate_random_disk_serial() {
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string serial = "WD-WMAYP";
     for (int i = 0; i < 7; ++i)
-        serial += chars[rng_() % chars.length()];
+        serial += chars[csprng_byte() % chars.length()];
     return serial;
 }
 
@@ -1025,5 +1027,31 @@ bool NetworkSpoofer::apply_tcp_fingerprint_impl(const TcpFingerprintProfile& pro
 }
 
 
+
+// ==================== CSPRNG Implementation ====================
+uint8_t NetworkSpoofer::csprng_byte() {
+#ifdef _WIN32
+    uint8_t val;
+    BCryptGenRandom(nullptr, &val, sizeof(val), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return val;
+#else
+    uint8_t val;
+    std::ifstream urandom("/dev/urandom", std::ios::binary);
+    urandom.read(reinterpret_cast<char*>(&val), sizeof(val));
+    return val;
+#endif
+}
+
+uint32_t NetworkSpoofer::csprng_uniform(uint32_t upper_bound) {
+    if (upper_bound <= 1) return 0;
+    uint32_t val;
+#ifdef _WIN32
+    BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&val), sizeof(val), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+#else
+    std::ifstream urandom("/dev/urandom", std::ios::binary);
+    urandom.read(reinterpret_cast<char*>(&val), sizeof(val));
+#endif
+    return val % upper_bound;
+}
 
 } // namespace ncp
