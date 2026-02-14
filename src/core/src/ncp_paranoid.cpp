@@ -162,8 +162,16 @@ void ParanoidMode::enable_constant_rate_shaping(size_t rate_kbps) {
 // ---- Circuit management ------------------------------------------------
 
 std::string ParanoidMode::create_isolated_circuit(const std::string& destination) {
-    std::string circuit_id = "circuit_" + std::to_string(impl_->active_circuits.size());
-    impl_->active_circuits.push_back(circuit_id);
+    // Generate cryptographically secure random circuit ID (Task 3.2)
+    uint8_t id_bytes[16];
+    randombytes_buf(id_bytes, sizeof(id_bytes));
+    static const char hex_chars[] = "0123456789abcdef";
+    std::string circuit_id;
+    circuit_id.reserve(32);
+    for (size_t i = 0; i < 16; ++i) {
+        circuit_id += hex_chars[(id_bytes[i] >> 4) & 0x0F];
+        circuit_id += hex_chars[id_bytes[i] & 0x0F];
+    }    impl_->active_circuits.push_back(circuit_id);
     (void)destination;
     return circuit_id;
 }
