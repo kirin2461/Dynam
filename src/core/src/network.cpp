@@ -97,8 +97,8 @@ std::vector<std::string> Network::get_interfaces() {
                 interfaces.push_back(d->name);
             }
         }
-        pcap_freealldevs(alldevs);
-    }
+        if (alldevs) pcap_freealldevs(alldevs);
+            }
 #endif
 #endif
 
