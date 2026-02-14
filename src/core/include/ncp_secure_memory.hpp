@@ -18,6 +18,7 @@ class SecureMemory {
 public:
     SecureMemory();
     explicit SecureMemory(size_t size);
+    SecureMemory(const uint8_t* data, size_t size);
     ~SecureMemory();
 
     // Disable copy - prevent accidental key duplication
