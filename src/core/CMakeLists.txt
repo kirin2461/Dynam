@@ -29,6 +29,7 @@ set(NCP_CORE_SRC_SOURCES
     src/dpi_advanced.cpp
         src/secure_buffer.cpp
             src/ncp_arp.cpp
+                    src/ncp_thread_pool.cpp
     src/ncp_dummy.cpp
     src/ncp_timing.cpp
     src/ncp_identity.cpp
