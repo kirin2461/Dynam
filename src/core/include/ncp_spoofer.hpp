@@ -260,9 +260,9 @@ private:
     
     RotationCallback rotation_callback_;
     
-    // Random number generator
-    std::mt19937 rng_;
-    std::uniform_int_distribution<int> dist_{0, 255};
+    // CSPRNG helpers (replaces insecure mt19937)
+    static uint8_t csprng_byte();
+    static uint32_t csprng_uniform(uint32_t upper_bound);
 };
 
 } // namespace ncp
