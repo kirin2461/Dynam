@@ -1,4 +1,5 @@
 #include "../include/ncp_tls_fingerprint.hpp"
+#include "../include/ncp_secure_memory.hpp"
 #include <sodium.h>
 #include <cstring>
 #include <stdexcept>
@@ -11,127 +12,8 @@ namespace ncp {
 // File-scope PRNG seeded once per thread (avoids repeated std::random_device overhead)
 static thread_local std::mt19937 tls_rng(std::random_device{}());
 
-// SecureMemory implementation
-SecureMemory::SecureMemory() : data_(nullptr), size_(0) {}
-
-SecureMemory::SecureMemory(size_t size) : data_(nullptr), size_(size) {
-    if (size == 0) return;
-    data_ = static_cast<uint8_t*>(sodium_malloc(size));
-    if (!data_) throw std::bad_alloc();
-    sodium_mlock(data_, size_);
-}
-
-SecureMemory::~SecureMemory() {
-    if (data_) {
-        sodium_munlock(data_, size_);
-        sodium_free(data_);
-    }
-}
-
-SecureMemory::SecureMemory(SecureMemory&& other) noexcept
-    : data_(other.data_), size_(other.size_) {
-    other.data_ = nullptr;
-    other.size_ = 0;
-}
-
-SecureMemory& SecureMemory::operator=(SecureMemory&& other) noexcept {
-    if (this != &other) {
-        if (data_) {
-            sodium_munlock(data_, size_);
-            sodium_free(data_);
-        }
-        data_ = other.data_;
-        size_ = other.size_;
-        other.data_ = nullptr;
-        other.size_ = 0;
-    }
-    return *this;
-}
-
-void SecureMemory::zero() {
-    if (data_ && size_ > 0) {
-        sodium_memzero(data_, size_);
-    }
-}
-
-void SecureMemory::secure_zero(void* ptr, size_t size) {
-    if (ptr && size > 0) {
-        sodium_memzero(ptr, size);
-    }
-}
-
-bool SecureMemory::lock_memory(void* ptr, size_t size) {
-    if (!ptr || size == 0) return false;
-    return sodium_mlock(ptr, size) == 0;
-}
-
-bool SecureMemory::unlock_memory(void* ptr, size_t size) {
-    if (!ptr || size == 0) return false;
-    return sodium_munlock(ptr, size) == 0;
-}
-
-// SecureString implementation 
-SecureString::SecureString() : data_(nullptr), size_(0), capacity_(0) {}
-
-SecureString::SecureString(const std::string& str) 
-    : data_(static_cast<char*>(sodium_malloc(str.size() + 1))),
-      size_(str.size()),
-      capacity_(str.size() + 1) {
-    if (!data_) throw std::bad_alloc();
-    std::memcpy(data_, str.c_str(), str.size());
-    data_[str.size()] = '\0';
-    sodium_mlock(data_, capacity_);
-}
-
-SecureString::SecureString(const char* str, size_t len)
-    : data_(static_cast<char*>(sodium_malloc(len + 1))),
-      size_(len),
-      capacity_(len + 1) {
-    if (!str) throw std::invalid_argument("null string pointer");
-    if (!data_) throw std::bad_alloc();
-    std::memcpy(data_, str, len);
-    data_[len] = '\0';
-    sodium_mlock(data_, capacity_);
-}
-
-SecureString::~SecureString() {
-    if (data_) {
-        sodium_memzero(data_, capacity_);
-        sodium_munlock(data_, capacity_);
-        sodium_free(data_);
-    }
-}
-
-SecureString::SecureString(SecureString&& other) noexcept
-    : data_(other.data_), size_(other.size_), capacity_(other.capacity_) {
-    other.data_ = nullptr;
-    other.size_ = 0;
-    other.capacity_ = 0;
-}
-
-SecureString& SecureString::operator=(SecureString&& other) noexcept {
-    if (this != &other) {
-        if (data_) {
-            sodium_memzero(data_, capacity_);
-            sodium_munlock(data_, capacity_);
-            sodium_free(data_);
-        }
-        data_ = other.data_;
-        size_ = other.size_;
-        capacity_ = other.capacity_;
-        other.data_ = nullptr;
-        other.size_ = 0;
-        other.capacity_ = 0;
-    }
-    return *this;
-}
-
-void SecureString::clear() {
-    if (data_) {
-        sodium_memzero(data_, capacity_);
-        size_ = 0;
-    }
-}
+// NOTE: SecureMemory, SecureString, and SecureOps implementations are in ncp_secure_memory.cpp
+// Do NOT duplicate them here to avoid ODR violations (LNK4006 on MSVC)
 
 // TLSFingerprint::Impl stub
 struct TLSFingerprint::Impl {
@@ -148,28 +30,20 @@ struct TLSFingerprint::Impl {
 
 // TLSFingerprint implementation
 TLSFingerprint::TLSFingerprint() : pImpl(std::make_unique<Impl>()) {}
-
 TLSFingerprint::TLSFingerprint(FingerprintProfile profile) : pImpl(std::make_unique<Impl>()) {
     pImpl->profile = profile;
 }
-
 TLSFingerprint::~TLSFingerprint() = default;
 
 void TLSFingerprint::set_profile(FingerprintProfile profile) { pImpl->profile = profile; }
 TLSFingerprint::FingerprintProfile TLSFingerprint::get_profile() const { return pImpl->profile; }
 
-TLSFingerprint::JA3Fingerprint TLSFingerprint::generate_ja3() const {
-    return {};
-}
-
+TLSFingerprint::JA3Fingerprint TLSFingerprint::generate_ja3() const { return {}; }
 void TLSFingerprint::apply_ja3(const JA3Fingerprint&) {}
 std::string TLSFingerprint::get_ja3_string() const { return "stub"; }
 std::string TLSFingerprint::get_ja3_hash() const { return "stub"; }
 
-TLSFingerprint::JA4Fingerprint TLSFingerprint::generate_ja4() const {
-    return {};
-}
-
+TLSFingerprint::JA4Fingerprint TLSFingerprint::generate_ja4() const { return {}; }
 void TLSFingerprint::apply_ja4(const JA4Fingerprint&) {}
 std::string TLSFingerprint::get_ja4_string() const { return "stub"; }
 
@@ -241,21 +115,19 @@ std::vector<std::string> TLSFingerprint::get_alpn() const { return pImpl->alpn; 
 
 void TLSFingerprint::protect_session_keys() {}
 void TLSFingerprint::clear_sensitive_data() {}
+
 TLSFingerprint::Statistics TLSFingerprint::get_statistics() const { return pImpl->stats; }
 
 // Private methods
 std::vector<uint16_t> TLSFingerprint::get_profile_ciphers(FingerprintProfile) const {
     return {0x1301, 0x1302, 0x1303};
 }
-
 std::vector<uint16_t> TLSFingerprint::get_profile_extensions(FingerprintProfile) const {
     return {0, 10, 13, 16, 43};
 }
-
 std::vector<uint16_t> TLSFingerprint::get_profile_curves(FingerprintProfile) const {
     return {0x001d, 0x0017};
 }
-
 void TLSFingerprint::load_browser_profile(BrowserType) {}
 
 // JA3/JA4 methods
@@ -263,24 +135,5 @@ std::string TLSFingerprint::JA3Fingerprint::to_string() const { return "stub"; }
 std::string TLSFingerprint::JA3Fingerprint::hash() const { return "stub"; }
 std::string TLSFingerprint::JA4Fingerprint::to_string() const { return "stub"; }
 std::string TLSFingerprint::JA4Fingerprint::hash() const { return "stub"; }
-
-// SecureOps namespace
-namespace SecureOps {
-    bool constant_time_compare(const void* a, const void* b, size_t len) {
-        if (!a || !b) return false;
-        return sodium_memcmp(a, b, len) == 0;
-    }
-
-    std::vector<uint8_t> generate_random(size_t size) {
-        if (size == 0) return {};
-        std::vector<uint8_t> result(size);
-        randombytes_buf(result.data(), size);
-        return result;
-    }
-
-    SecureString hash_password(const SecureString& password, const std::vector<uint8_t>&) {
-        return SecureString(password.c_str(), password.length());
-    }
-}
 
 } // namespace ncp
