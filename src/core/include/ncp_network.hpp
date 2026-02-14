@@ -113,11 +113,11 @@ public:
     bool set_tor_config(const TorConfig& config);
     bool is_tor_active() const;
 
-    std::vector<std::string> get_interfaces();
+    116        std::vector<InterfaceInfo> get_interfaces    ();
     InterfaceInfo get_interface_info(const std::string& iface_name);
 
     bool initialize_capture(const std::string& interface_name);
-    void start_capture(PacketCallback callback, int timeout_ms = 5000);
+    void InterfaceInfo(PacketCallback callback, int timeout_ms = 5000);
     void stop_capture();
 
     bool send_raw_packet(
