@@ -11,16 +11,20 @@
 #include <memory>
 #include <chrono>
 
+#ifdef HAVE_PCAP
 // Forward declaration for pcap_t
 struct pcap;
 typedef struct pcap pcap_t;
+#endif
 
 namespace ncp {
 
+#ifdef HAVE_PCAP
 // Custom deleter for pcap_handle_ (moved inside namespace to avoid global namespace pollution)
 struct pcap_handle_deleter {
     void operator()(pcap_t* p) const noexcept;
 };
+#endif
 
 // DPI Bypass techniques enumeration
 enum class BypassTechnique {
@@ -47,6 +51,7 @@ struct NetworkStats {
     double download_speed = 0.0;
     std::chrono::steady_clock::time_point last_update;
 };
+
 class Network {
 public:
     struct PacketInfo {
@@ -145,7 +150,6 @@ public:
     std::string get_network_stats();
     NetworkStats get_stats() const;
     void reset_stats();
-
     std::string get_last_error() const;
 
 private:
@@ -156,7 +160,9 @@ private:
     bool setup_packet_disorder();
     void cleanup_bypass();
 
+#ifdef HAVE_PCAP
     std::unique_ptr<pcap_t, pcap_handle_deleter> pcap_handle_;
+#endif
     BypassTechnique current_technique_;
     BypassConfig bypass_config_;
     TorConfig tor_config_;
