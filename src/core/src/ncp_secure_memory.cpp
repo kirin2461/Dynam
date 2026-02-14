@@ -24,6 +24,15 @@ SecureMemory::SecureMemory(size_t size)
     }
 }
 
+SecureMemory::SecureMemory(const uint8_t* data, size_t size)
+    : size_(size)
+{
+    if (size > 0 && data) {
+        data_ = new uint8_t[size];
+        std::memcpy(data_, data, size);
+    }
+}
+
 SecureMemory::~SecureMemory() {
     if (data_) {
         zero();
