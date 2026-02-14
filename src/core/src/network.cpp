@@ -373,3 +373,5 @@ std::string Network::get_last_error() const {
     return last_error_;
 
 }
+
+}  // namespace ncp
