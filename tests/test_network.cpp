@@ -9,7 +9,7 @@ protected:
 };
 
 TEST_F(NetworkTest, GetInterfaces) {
-#if NCP_HAS_PCAP
+#ifdef HAVE_PCAP
     try {
         auto interfaces = network.get_interfaces();
         // On CI without root permissions, list may be empty - that's OK
