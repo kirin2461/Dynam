@@ -36,6 +36,8 @@ TEST_F(IntegrationTest, ApplicationLifecycle) {
     // Test that application can initialize and shutdown cleanly
     int argc = 1;
     char* argv[] = {const_cast<char*>("ncp_test")};
+        (void)argc;  // Suppress unused parameter warning
+    (void)argv;  // Suppress unused parameter warning
 
     EXPECT_NO_THROW({
         // Note: Full app test requires Qt event loop
