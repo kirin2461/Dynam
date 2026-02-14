@@ -230,4 +230,27 @@ SecureString hash_password(
 
 } // namespace SecureOps
 
+// ==================== Simple getter implementations ====================
+// (Moved from header to avoid LNK4006 duplicate symbol warnings)
+
+// SecureMemory getters
+uint8_t* SecureMemory::data() { return data_; }
+const uint8_t* SecureMemory::data() const { return data_; }
+size_t SecureMemory::size() const { return size_; }
+bool SecureMemory::empty() const { return size_ == 0 || data_ == nullptr; }
+
+// SecureMemory iterators
+uint8_t* SecureMemory::begin() { return data_; }
+uint8_t* SecureMemory::end() { return data_ + size_; }
+const uint8_t* SecureMemory::begin() const { return data_; }
+const uint8_t* SecureMemory::end() const { return data_ + size_; }
+
+// SecureString getters
+const char* SecureString::c_str() const { return data_ ? data_ : ""; }
+const char* SecureString::data() const { return data_ ? data_ : ""; }
+size_t SecureString::size() const { return size_; }
+size_t SecureString::length() const { return size_; }
+bool SecureString::empty() const { return size_ == 0; }
+
+
 } // namespace ncp
