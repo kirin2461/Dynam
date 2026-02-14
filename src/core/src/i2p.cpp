@@ -287,10 +287,9 @@ I2PManager::Statistics I2PManager::get_statistics() const {
 }
 
 // Stub implementations for remaining methods
-std::string I2PManager::import_destination(const std::string& private_keys) {
+bool I2PManager::import_destination(const std::string& private_keys) {
     impl_->destination_keys = private_keys;
-    return "imported";
-}
+    return true;}
 
 std::string I2PManager::export_destination() const {
     return impl_->destination_keys;
