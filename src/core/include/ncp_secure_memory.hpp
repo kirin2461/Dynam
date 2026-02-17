@@ -29,16 +29,17 @@ public:
     SecureMemory(SecureMemory&& other) noexcept;
     SecureMemory& operator=(SecureMemory&& other) noexcept;
 
-    uint8_t* data();
-    const uint8_t* data() const;
-    size_t size() const;
-    bool empty() const;
+    // Getters marked noexcept for performance
+    uint8_t* data() noexcept;
+    const uint8_t* data() const noexcept;
+    size_t size() const noexcept;
+    bool empty() const noexcept;
 
     // Iterator support for range-based for loops
-    uint8_t* begin();
-    uint8_t* end();
-    const uint8_t* begin() const;
-    const uint8_t* end() const;
+    uint8_t* begin() noexcept;
+    uint8_t* end() noexcept;
+    const uint8_t* begin() const noexcept;
+    const uint8_t* end() const noexcept;
 
     // Securely zero the memory contents
     void zero();
@@ -79,11 +80,12 @@ public:
     SecureString(SecureString&& other) noexcept;
     SecureString& operator=(SecureString&& other) noexcept;
 
-    const char* c_str() const;
-    const char* data() const;
-    size_t size() const;
-    size_t length() const;
-    bool empty() const;
+    // Getters marked noexcept
+    const char* c_str() const noexcept;
+    const char* data() const noexcept;
+    size_t size() const noexcept;
+    size_t length() const noexcept;
+    bool empty() const noexcept;
 
     void clear();
 

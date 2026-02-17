@@ -25,6 +25,7 @@ add_executable(ncp_tests
     test_paranoid.cpp
     test_secure_memory.cpp
     test_i2p.cpp
+    test_critical_fixes.cpp  # NEW: Critical security fixes tests (Issue #17)
 )
 
 target_link_libraries(ncp_tests

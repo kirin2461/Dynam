@@ -19,12 +19,11 @@ public:
         SecureMemory secret_key;
 
         // Destructor ensures secret key material is wiped
-        ~KeyPair() { wipe(); }
+        ~KeyPair() noexcept { wipe_impl(); }
 
-        // Explicitly wipe key material (calls SecureMemory destructors)
-        void wipe() noexcept {
-            secret_key = SecureMemory{};
-            public_key = SecureMemory{};
+        // Public accessor to check validity
+        bool is_valid() const noexcept {
+            return !secret_key.empty() && !public_key.empty();
         }
 
         // Prevent accidental copies of key material
@@ -33,10 +32,17 @@ public:
         KeyPair& operator=(const KeyPair&) = delete;
         KeyPair(KeyPair&&) noexcept = default;
         KeyPair& operator=(KeyPair&&) noexcept = default;
+
+    private:
+        // Private wipe implementation (called only by destructor)
+        void wipe_impl() noexcept {
+            secret_key = SecureMemory{};
+            public_key = SecureMemory{};
+        }
     };
     
     Crypto();
-        ~Crypto() noexcept = default;
+    ~Crypto() noexcept = default;
     
     // Key generation
     KeyPair generate_keypair();
@@ -100,7 +106,13 @@ public:
     );
 
     // Utility: convert SecureMemory to hex string
-        static std::string bytes_to_hex(const SecureMemory& mem) noexcept {
+    // FIXED: Added null pointer and empty checks to prevent UB
+    static std::string bytes_to_hex(const SecureMemory& mem) noexcept {
+        // Validate input before accessing memory
+        if (mem.empty() || !mem.data()) {
+            return "";
+        }
+        
         std::ostringstream oss;
         oss << std::hex << std::setfill('0');
         for (size_t i = 0; i < mem.size(); ++i) {
