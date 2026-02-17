@@ -39,7 +39,7 @@ protected:
 TEST_F(I2PManagerTest, InitializeWithDefaultConfig) {
     // Should initialize successfully even without real I2P router
     // (will fail to connect but initialization itself should succeed)
-    bool result = manager_.initialize(config_);
+    [[maybe_unused]] bool result = manager_.initialize(config_);
     EXPECT_TRUE(result);
 }
 
@@ -88,7 +88,8 @@ TEST_F(I2PManagerTest, CreateTunnelWhenActive) {
     manager_.initialize(config_);
     
     // Try to create a tunnel
-    bool result = manager_.create_tunnel(
+    // FIX C4189: Mark variable as [[maybe_unused]] since we test for crashes, not return value
+    [[maybe_unused]] bool result = manager_.create_tunnel(
         "test_tunnel",
         12345,
         "test.b32.i2p",
@@ -244,7 +245,8 @@ TEST_F(I2PManagerTest, CreateServerTunnelBasic) {
     manager_.initialize(config_);
     
     // Try to create a server tunnel
-    bool result = manager_.create_server_tunnel("test_server", 8080);
+    // FIX C4189: Mark as [[maybe_unused]] - we're testing for crashes, not return value
+    [[maybe_unused]] bool result = manager_.create_server_tunnel("test_server", 8080);
     
     // Result depends on SAM availability
     // In unit test, this verifies the method doesn't crash
