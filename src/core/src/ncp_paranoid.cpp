@@ -131,7 +131,7 @@ bool ParanoidMode::is_active() const {
 
 // ---- Multi-hop configuration -------------------------------------------
 
-bool ParanoidMode::configure_hop_chain(const HopChain& chain) {
+bool ParanoidMode::configure_hop_chain(const HopChain& /*chain*/) {
     // Store hop chain configuration
     // In real implementation: configure VPN/Tor/I2P routing
     return true;
@@ -160,9 +160,11 @@ void ParanoidMode::start_cover_traffic() {
 void ParanoidMode::stop_cover_traffic() {
     impl_->cover_traffic_running = false;
     if (impl_->cover_traffic_thread.joinable()) {
-        impl_->
+        impl_->cover_traffic_thread.join();
+    }
+}
             
-            // PHASE 2 IMPLEMENTATION: inject_dummy_traffic with real cover traffic
+// PHASE 2 IMPLEMENTATION: inject_dummy_traffic with real cover traffic
 void ParanoidMode::inject_dummy_traffic(size_t bytes_per_second) {
     if (bytes_per_second == 0) return;
     
@@ -213,7 +215,7 @@ void ParanoidMode::rotate_all_circuits() {
 }
 
 void ParanoidMode::configure_circuit_isolation(bool per_domain, bool per_identity) {
-        (void)per_domain;
+    (void)per_domain;
     (void)per_identity;
 }
 
