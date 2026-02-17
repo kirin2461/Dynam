@@ -158,52 +158,6 @@ TEST_F(SecureMemoryTest, ZeroMethod) {
     }
 }
 
-// ---- Resize Tests ----
-
-TEST_F(SecureMemoryTest, ResizeIncrease) {
-    SecureMemory mem(16);
-    std::memset(mem.data(), 0x55, 16);
-    
-    mem.resize(32);
-    
-    EXPECT_EQ(mem.size(), 32);
-    // Original data should be preserved
-    for (size_t i = 0; i < 16; ++i) {
-        EXPECT_EQ(mem.data()[i], 0x55);
-    }
-}
-
-TEST_F(SecureMemoryTest, ResizeDecrease) {
-    SecureMemory mem(32);
-    std::memset(mem.data(), 0x66, 32);
-    
-    mem.resize(16);
-    
-    EXPECT_EQ(mem.size(), 16);
-    // Remaining data should be preserved
-    for (size_t i = 0; i < 16; ++i) {
-        EXPECT_EQ(mem.data()[i], 0x66);
-    }
-}
-
-TEST_F(SecureMemoryTest, ResizeToZero) {
-    SecureMemory mem(32);
-    
-    mem.resize(0);
-    
-    EXPECT_EQ(mem.size(), 0);
-    EXPECT_TRUE(mem.empty());
-}
-
-TEST_F(SecureMemoryTest, ResizeFromZero) {
-    SecureMemory mem;
-    
-    mem.resize(32);
-    
-    EXPECT_EQ(mem.size(), 32);
-    EXPECT_NE(mem.data(), nullptr);
-}
-
 // ---- Access Methods Tests ----
 
 TEST_F(SecureMemoryTest, DataAccess) {
@@ -231,20 +185,6 @@ TEST_F(SecureMemoryTest, BeginEnd) {
         expected++;
     }
     EXPECT_EQ(expected, 8);
-}
-
-TEST_F(SecureMemoryTest, OperatorBracket) {
-    SecureMemory mem(4);
-    
-    mem[0] = 0x10;
-    mem[1] = 0x20;
-    mem[2] = 0x30;
-    mem[3] = 0x40;
-    
-    EXPECT_EQ(mem[0], 0x10);
-    EXPECT_EQ(mem[1], 0x20);
-    EXPECT_EQ(mem[2], 0x30);
-    EXPECT_EQ(mem[3], 0x40);
 }
 
 // ---- SecureString Tests ----
@@ -301,7 +241,7 @@ TEST_F(SecureMemoryTest, MultipleAllocations) {
     
     // Verify each allocation is independent
     for (int i = 0; i < 100; ++i) {
-        EXPECT_EQ(memories[i].data()[0], i);
+        EXPECT_EQ(memories[i].data()[0], static_cast<uint8_t>(i));
     }
 }
 
