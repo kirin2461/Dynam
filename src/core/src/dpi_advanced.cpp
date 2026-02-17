@@ -1015,7 +1015,7 @@ AdvancedDPIConfig create_iran_preset() {
     config.techniques = {
         EvasionTechnique::SNI_SPLIT,
         EvasionTechnique::TLS_GREASE,
-        EvasionTechnique::HTTP_CAMOUFLAGE
+        EvasionTechnique::HTTP_HEADER_SPLIT
     };
     
     config.obfuscation = ObfuscationMode::HTTP_CAMOUFLAGE;
