@@ -8,7 +8,6 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
-#include <random>
 #include <set>
 
 namespace ncp {
@@ -16,7 +15,8 @@ namespace DPI {
 
 // TCPManipulator implementation
 struct TCPManipulator::Impl {
-    std::mt19937 rng{std::random_device{}()};
+    // Removed: std::mt19937 rng{std::random_device{}()};
+    // Now using libsodium CSPRNG via randombytes_uniform()
 };
 
 TCPManipulator::TCPManipulator() : impl_(std::make_unique<Impl>()) {}
@@ -96,23 +96,26 @@ std::vector<uint8_t> TCPManipulator::add_oob_marker(
     return result;
 }
 
+// Fixed: Remove conditional swap (rng() % 2) for proper Fisher-Yates shuffle
+// Fixed: Remove mt19937& parameter - now using CSPRNG directly
 void TCPManipulator::shuffle_segments(
     std::vector<std::vector<uint8_t>>& segments,
-    std::mt19937& rng
+    std::mt19937& /* unused - kept for API compatibility */
 ) {
     if (segments.size() <= 1) return;
+    
+    // Proper Fisher-Yates shuffle with CSPRNG
     for (size_t i = segments.size() - 1; i > 0; --i) {
-        std::uniform_int_distribution<size_t> dist(0, i);  // Proper uniform distribution
-            size_t j = dist(rng);
-        if (j != i && (rng() % 2 == 0)) {
-            std::swap(segments[i], segments[j]);
-        }
+        // Use CSPRNG instead of mt19937
+        uint32_t j = randombytes_uniform(static_cast<uint32_t>(i + 1));
+        // Unconditional swap for uniform distribution
+        std::swap(segments[i], segments[j]);
     }
 }
 
 // TLSManipulator implementation
 struct TLSManipulator::Impl {
-    std::mt19937 rng{std::random_device{}()};
+    // Removed: std::mt19937 rng{std::random_device{}()};
     
     static constexpr uint16_t GREASE_VALUES[] = {
         0x0a0a, 0x1a1a, 0x2a2a, 0x3a3a, 0x4a4a,
@@ -255,8 +258,8 @@ std::vector<uint8_t> TLSManipulator::inject_grease(
     if (pos + 2 > len) return result;
     size_t ext_len_pos = pos;
     
-    // Select random GREASE value
-    uint16_t grease = impl_->GREASE_VALUES[impl_->rng() % 16];
+    // Select random GREASE value using CSPRNG
+    uint16_t grease = impl_->GREASE_VALUES[randombytes_uniform(16)];
     
     // Create GREASE extension (empty data)
     std::vector<uint8_t> grease_ext;
@@ -324,9 +327,10 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
     hello.push_back(0x03);
     hello.push_back(0x03);
     
-    for (int i = 0; i < 32; ++i) {
-        hello.push_back(impl_->rng() & 0xFF);
-    }
+    // Fixed: Use CSPRNG for random bytes instead of mt19937
+    uint8_t random_bytes[32];
+    randombytes_buf(random_bytes, sizeof(random_bytes));
+    hello.insert(hello.end(), random_bytes, random_bytes + 32);
     
     hello.push_back(0x00);
     
@@ -385,7 +389,7 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
 struct TrafficObfuscator::Impl {
     ObfuscationMode mode;
     std::vector<uint8_t> key;
-    std::mt19937 rng{std::random_device{}()};
+    // Removed: std::mt19937 rng{std::random_device{}()};
     size_t xor_offset = 0;
     
     Impl(ObfuscationMode m, const std::vector<uint8_t>& k)
@@ -408,16 +412,18 @@ std::vector<uint8_t> TrafficObfuscator::obfuscate(
 ) {
     if (!data || len == 0) return {};
     
-    std::vector<uint8_t> result(len);
+    std::vector<uint8_t> result;
     
     switch (impl_->mode) {
         case ObfuscationMode::XOR_SIMPLE:
+            result.resize(len);
             for (size_t i = 0; i < len; ++i) {
                 result[i] = data[i] ^ impl_->key[i % impl_->key.size()];
             }
             break;
             
         case ObfuscationMode::XOR_ROLLING:
+            result.resize(len);
             for (size_t i = 0; i < len; ++i) {
                 size_t key_idx = (impl_->xor_offset + i) % impl_->key.size();
                 result[i] = data[i] ^ impl_->key[key_idx];
@@ -427,20 +433,24 @@ std::vector<uint8_t> TrafficObfuscator::obfuscate(
             
         case ObfuscationMode::CHACHA20:
             if (impl_->key.size() >= crypto_stream_chacha20_KEYBYTES) {
-                uint8_t nonce[crypto_stream_chacha20_NONCEBYTES] = {0};
-                for (size_t i = 0; i < sizeof(nonce); ++i) {
-                    nonce[i] = impl_->key[(i + 16) % impl_->key.size()];
-                }
-                crypto_stream_chacha20_xor(result.data(), data, len,
+                // Fixed: Generate unique nonce for each call instead of deriving from key
+                uint8_t nonce[crypto_stream_chacha20_NONCEBYTES];
+                randombytes_buf(nonce, sizeof(nonce));
+                
+                // Prepend nonce to result (nonce + ciphertext)
+                result.resize(sizeof(nonce) + len);
+                std::copy(nonce, nonce + sizeof(nonce), result.begin());
+                
+                crypto_stream_chacha20_xor(result.data() + sizeof(nonce), data, len,
                                           nonce, impl_->key.data());
             } else {
-                std::copy(data, data + len, result.begin());
+                result.assign(data, data + len);
             }
             break;
             
         case ObfuscationMode::NONE:
         default:
-            std::copy(data, data + len, result.begin());
+            result.assign(data, data + len);
             break;
     }
     
@@ -451,7 +461,29 @@ std::vector<uint8_t> TrafficObfuscator::deobfuscate(
     const uint8_t* data,
     size_t len
 ) {
-    return obfuscate(data, len);
+    if (!data || len == 0) return {};
+    
+    switch (impl_->mode) {
+        case ObfuscationMode::CHACHA20:
+            if (impl_->key.size() >= crypto_stream_chacha20_KEYBYTES &&
+                len > crypto_stream_chacha20_NONCEBYTES) {
+                
+                // Extract nonce from beginning
+                const uint8_t* nonce = data;
+                const uint8_t* ciphertext = data + crypto_stream_chacha20_NONCEBYTES;
+                size_t ciphertext_len = len - crypto_stream_chacha20_NONCEBYTES;
+                
+                std::vector<uint8_t> result(ciphertext_len);
+                crypto_stream_chacha20_xor(result.data(), ciphertext, ciphertext_len,
+                                          nonce, impl_->key.data());
+                return result;
+            }
+            return std::vector<uint8_t>(data, data + len);
+            
+        default:
+            // XOR modes are symmetric
+            return obfuscate(data, len);
+    }
 }
 
 ObfuscationMode TrafficObfuscator::get_mode() const {
@@ -475,7 +507,7 @@ struct AdvancedDPIBypass::Impl {
     std::unique_ptr<TrafficObfuscator> obfuscator;
     
     std::function<void(const std::string&)> log_callback;
-    std::mt19937 rng{std::random_device{}()};
+    // Removed: std::mt19937 rng{std::random_device{}()};
     std::set<EvasionTechnique> active_techniques;
     
     void log(const std::string& msg) {
@@ -604,10 +636,11 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
     
-    // Apply TCP disorder
+    // Apply TCP disorder - Fixed: pass dummy rng (not used anymore)
     if (impl_->is_technique_active(EvasionTechnique::TCP_DISORDER) && 
         result.size() > 1) {
-        impl_->tcp_manip->shuffle_segments(result, impl_->rng);
+        std::mt19937 dummy_rng; // Kept for API compatibility, not used
+        impl_->tcp_manip->shuffle_segments(result, dummy_rng);
     }
     
     return result;
@@ -751,7 +784,93 @@ std::vector<uint8_t> DPIEvasion::apply_ech(
 
 // ==================== Domain Fronting ====================
 
-// Apply domain fronting by manipulating SNI and Host headers
+// Helper function to find SNI hostname offset (borrowed from ncp_dpi.cpp logic)
+static int find_sni_hostname_offset_internal(const uint8_t* data, size_t len) {
+    if (!data || len < 5 + 4) return -1;
+    
+    if (data[0] != 0x16 || data[1] != 0x03) return -1;
+    
+    size_t pos = 5;
+    if (pos + 4 > len) return -1;
+    
+    uint8_t handshake_type = data[pos];
+    if (handshake_type != 0x01) return -1;
+    
+    uint32_t hs_len = (static_cast<uint32_t>(data[pos + 1]) << 16) |
+                      (static_cast<uint32_t>(data[pos + 2]) << 8) |
+                      static_cast<uint32_t>(data[pos + 3]);
+    (void)hs_len;
+    pos += 4;
+    
+    if (pos + 2 + 32 + 1 > len) return -1;
+    pos += 2;  // client_version
+    pos += 32; // random
+    
+    uint8_t session_id_len = data[pos];
+    pos += 1;
+    if (pos + session_id_len > len) return -1;
+    pos += session_id_len;
+    
+    if (pos + 2 > len) return -1;
+    uint16_t cipher_suites_len = (static_cast<uint16_t>(data[pos]) << 8) |
+                                 static_cast<uint16_t>(data[pos + 1]);
+    pos += 2;
+    if (pos + cipher_suites_len > len) return -1;
+    pos += cipher_suites_len;
+    
+    if (pos + 1 > len) return -1;
+    uint8_t compression_methods_len = data[pos];
+    pos += 1;
+    if (pos + compression_methods_len > len) return -1;
+    pos += compression_methods_len;
+    
+    if (pos + 2 > len) return -1;
+    uint16_t extensions_len = (static_cast<uint16_t>(data[pos]) << 8) |
+                              static_cast<uint16_t>(data[pos + 1]);
+    pos += 2;
+    
+    size_t exts_end = pos + extensions_len;
+    if (exts_end > len) exts_end = len;
+    
+    while (pos + 4 <= exts_end) {
+        uint16_t ext_type = (static_cast<uint16_t>(data[pos]) << 8) |
+                            static_cast<uint16_t>(data[pos + 1]);
+        uint16_t ext_data_len = (static_cast<uint16_t>(data[pos + 2]) << 8) |
+                                static_cast<uint16_t>(data[pos + 3]);
+        pos += 4;
+        
+        if (pos + ext_data_len > exts_end) break;
+        
+        if (ext_type == 0x0000) { // server_name extension
+            size_t sni_pos = pos;
+            if (sni_pos + 2 > exts_end) return -1;
+            
+            uint16_t list_len = (static_cast<uint16_t>(data[sni_pos]) << 8) |
+                                static_cast<uint16_t>(data[sni_pos + 1]);
+            sni_pos += 2;
+            if (sni_pos + list_len > exts_end || list_len < 3) return -1;
+            
+            uint8_t name_type = data[sni_pos];
+            (void)name_type;
+            sni_pos += 1;
+            if (sni_pos + 2 > exts_end) return -1;
+            
+            uint16_t host_len = (static_cast<uint16_t>(data[sni_pos]) << 8) |
+                                static_cast<uint16_t>(data[sni_pos + 1]);
+            sni_pos += 2;
+            
+            if (sni_pos + host_len > exts_end) return -1;
+            
+            return static_cast<int>(sni_pos);
+        }
+        
+        pos += ext_data_len;
+    }
+    
+    return -1;
+}
+
+// Fixed: Apply domain fronting using robust SNI parser
 std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
     const std::vector<uint8_t>& data,
     const std::string& front_domain,
@@ -759,43 +878,81 @@ std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
 ) {
     std::vector<uint8_t> result = data;
     
-    // Replace SNI in TLS ClientHello
-    // SNI is in TLS extensions (type 0x0000)
-    for (size_t i = 0; i < result.size() - 5; i++) {
-        // Look for SNI extension pattern
-        if (result[i] == 0x00 && result[i+1] == 0x00) {
-            // Found potential SNI extension
-            uint16_t ext_len = (result[i+2] << 8) | result[i+3];
-            
-            if (i + 4 + ext_len <= result.size()) {
-                // Replace SNI hostname with front domain
-                // SNI structure: type(2) + length(2) + list_length(2) + type(1) + hostname_length(2) + hostname
-                size_t hostname_offset = i + 9;
-                
-                if (hostname_offset < result.size()) {
-                    // Replace hostname with front domain
-                    std::vector<uint8_t> new_sni(front_domain.begin(), front_domain.end());
-                    
-                    // Update lengths
-                    uint16_t new_hostname_len = new_sni.size();
-                    uint16_t new_list_len = new_hostname_len + 3;
-                    uint16_t new_ext_len = new_list_len + 2;
-                    
-                    result[i+2] = new_ext_len >> 8;
-                    result[i+3] = new_ext_len & 0xFF;
-                    result[i+4] = new_list_len >> 8;
-                    result[i+5] = new_list_len & 0xFF;
-                    result[i+7] = new_hostname_len >> 8;
-                    result[i+8] = new_hostname_len & 0xFF;
-                    
-                    // Replace hostname
-                    result.erase(result.begin() + hostname_offset, result.begin() + hostname_offset + ext_len - 5);
-                    result.insert(result.begin() + hostname_offset, new_sni.begin(), new_sni.end());
-                    
-                    break;
-                }
-            }
-        }
+    if (result.empty() || front_domain.empty()) {
+        return result;
+    }
+    
+    // Use proper SNI parser instead of naive byte scan
+    int sni_offset = find_sni_hostname_offset_internal(result.data(), result.size());
+    
+    if (sni_offset < 0) {
+        // SNI not found - return unmodified
+        return result;
+    }
+    
+    size_t hostname_pos = static_cast<size_t>(sni_offset);
+    
+    // Get current hostname length
+    if (hostname_pos < 2) return result;
+    size_t hostname_len_pos = hostname_pos - 2;
+    uint16_t old_hostname_len = (static_cast<uint16_t>(result[hostname_len_pos]) << 8) |
+                                static_cast<uint16_t>(result[hostname_len_pos + 1]);
+    
+    // Validate bounds
+    if (hostname_pos + old_hostname_len > result.size()) {
+        return result;
+    }
+    
+    // Replace hostname with front domain
+    std::vector<uint8_t> new_hostname(front_domain.begin(), front_domain.end());
+    uint16_t new_hostname_len = static_cast<uint16_t>(new_hostname.size());
+    
+    // Erase old hostname
+    result.erase(result.begin() + hostname_pos, 
+                 result.begin() + hostname_pos + old_hostname_len);
+    
+    // Insert new hostname
+    result.insert(result.begin() + hostname_pos,
+                  new_hostname.begin(), new_hostname.end());
+    
+    // Update hostname length field
+    result[hostname_len_pos] = (new_hostname_len >> 8) & 0xFF;
+    result[hostname_len_pos + 1] = new_hostname_len & 0xFF;
+    
+    // Update SNI extension length (hostname_len + 3 for type + length)
+    if (hostname_len_pos >= 5) {
+        size_t sni_ext_len_pos = hostname_len_pos - 3;
+        uint16_t new_list_len = new_hostname_len + 3;
+        result[sni_ext_len_pos] = (new_list_len >> 8) & 0xFF;
+        result[sni_ext_len_pos + 1] = new_list_len & 0xFF;
+        
+        // Update extension data length
+        size_t ext_len_pos = sni_ext_len_pos - 2;
+        uint16_t new_ext_len = new_list_len + 2;
+        result[ext_len_pos] = (new_ext_len >> 8) & 0xFF;
+        result[ext_len_pos + 1] = new_ext_len & 0xFF;
+    }
+    
+    // Update TLS record and handshake lengths
+    int len_delta = static_cast<int>(new_hostname_len) - static_cast<int>(old_hostname_len);
+    
+    // Update TLS record length (position 3-4)
+    if (result.size() > 4) {
+        uint16_t rec_len = (static_cast<uint16_t>(result[3]) << 8) | result[4];
+        rec_len += len_delta;
+        result[3] = (rec_len >> 8) & 0xFF;
+        result[4] = rec_len & 0xFF;
+    }
+    
+    // Update handshake length (position 6-8)
+    if (result.size() > 8) {
+        uint32_t hs_len = (static_cast<uint32_t>(result[6]) << 16) |
+                          (static_cast<uint32_t>(result[7]) << 8) |
+                          static_cast<uint32_t>(result[8]);
+        hs_len += len_delta;
+        result[6] = (hs_len >> 16) & 0xFF;
+        result[7] = (hs_len >> 8) & 0xFF;
+        result[8] = hs_len & 0xFF;
     }
     
     return result;
