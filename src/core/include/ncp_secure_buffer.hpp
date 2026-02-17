@@ -14,6 +14,11 @@
 
 namespace ncp {
 
+// TODO: Consolidate SecureBuffer and SecureMemory (ncp_secure_memory.hpp) into a single class.
+// Both provide identical functionality (sodium_memzero + mlock + RAII + no-copy/move-only).
+// SecureBuffer uses unique_ptr<uint8_t[], SecureDeleter>, SecureMemory uses raw pointer.
+// Prefer SecureMemory as the primary API; deprecate SecureBuffer in a future release.
+
 /**
  * @brief SecureBuffer - класс для безопасного хранения криптографических данных
  * 
