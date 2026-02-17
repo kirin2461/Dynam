@@ -129,10 +129,23 @@ struct DPIConfig {
                target_port == other.target_port &&
                nfqueue_num == other.nfqueue_num &&
                fragment_size == other.fragment_size &&
-               fragment_offset == other.fragment_offset;
-    }
-
-    bool operator!=(const DPIConfig& other) const noexcept {
+                                    fragment_offset == other.fragment_offset &&
+                // Advanced DPI bypass fields
+                randomize_split_position == other.randomize_split_position &&
+                split_position_min == other.split_position_min &&
+                split_position_max == other.split_position_max &&
+                enable_pattern_obfuscation == other.enable_pattern_obfuscation &&
+                randomize_fake_ttl == other.randomize_fake_ttl &&
+                enable_tcp_options_randomization == other.enable_tcp_options_randomization &&
+                enable_timing_jitter == other.enable_timing_jitter &&
+                timing_jitter_min_us == other.timing_jitter_min_us &&
+                timing_jitter_max_us == other.timing_jitter_max_us &&
+                enable_multi_layer_split == other.enable_multi_layer_split &&
+                split_positions == other.split_positions &&
+                enable_decoy_sni == other.enable_decoy_sni &&
+                decoy_sni_domains == other.decoy_sni_domains &&
+                enable_adaptive_fragmentation == other.enable_adaptive_fragmentation &&
+                max_fragment_retries == other.max_fragment_retries;
         return !(*this == other);
     }
 
@@ -158,6 +171,20 @@ struct DPIConfig {
             << "  nfqueue_num: " << nfqueue_num << ",\n"
             << "  fragment_size: " << fragment_size << ",\n"
             << "  fragment_offset: " << fragment_offset << "\n"
+                        << "  // Advanced DPI bypass fields\n"
+            << "  randomize_split_position: " << randomize_split_position << ",\n"
+            << "  split_position_min: " << split_position_min << ",\n"
+            << "  split_position_max: " << split_position_max << ",\n"
+            << "  enable_pattern_obfuscation: " << enable_pattern_obfuscation << ",\n"
+            << "  randomize_fake_ttl: " << randomize_fake_ttl << ",\n"
+            << "  enable_tcp_options_randomization: " << enable_tcp_options_randomization << ",\n"
+            << "  enable_timing_jitter: " << enable_timing_jitter << ",\n"
+            << "  timing_jitter_min_us: " << timing_jitter_min_us << ",\n"
+            << "  timing_jitter_max_us: " << timing_jitter_max_us << ",\n"
+            << "  enable_multi_layer_split: " << enable_multi_layer_split << ",\n"
+            << "  enable_decoy_sni: " << enable_decoy_sni << ",\n"
+            << "  enable_adaptive_fragmentation: " << enable_adaptive_fragmentation << ",\n"
+            << "  max_fragment_retries: " << max_fragment_retries << "\n"
             << "}";
         return oss.str();
     }
@@ -170,7 +197,15 @@ struct DPIConfig {
             << fake_host << "|" << enable_fake_packet << "|" << fake_ttl << "|"
             << enable_disorder << "|" << enable_oob_data << "|" << disorder_delay_ms << "|"
             << listen_port << "|" << target_host << "|" << target_port << "|"
-            << nfqueue_num << "|" << fragment_size << "|" << fragment_offset;
+                            << nfqueue_num << "|" << fragment_size << "|" << fragment_offset
+                // Advanced fields
+                << "|" << randomize_split_position << "|" << split_position_min << "|" << split_position_max
+                << "|" << enable_pattern_obfuscation << "|" << randomize_fake_ttl
+                << "|" << enable_tcp_options_randomization
+                << "|" << enable_timing_jitter << "|" << timing_jitter_min_us << "|" << timing_jitter_max_us
+                << "|" << enable_multi_layer_split
+                << "|" << enable_decoy_sni
+                << "|" << enable_adaptive_fragmentation << "|" << max_fragment_retries;
         return oss.str();
     }
 
@@ -217,7 +252,35 @@ struct DPIConfig {
             cfg.fragment_size = std::stoi(token);
             if (!std::getline(iss, token, '|')) return std::nullopt;
             cfg.fragment_offset = std::stoi(token);
-        } catch (...) {
+            // Advanced fields (optional - backward compatible)
+            if (std::getline(iss, token, '|')) {
+                cfg.randomize_split_position = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg; // return partial
+                cfg.split_position_min = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.split_position_max = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.enable_pattern_obfuscation = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.randomize_fake_ttl = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.enable_tcp_options_randomization = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.enable_timing_jitter = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.timing_jitter_min_us = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.timing_jitter_max_us = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.enable_multi_layer_split = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.enable_decoy_sni = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.enable_adaptive_fragmentation = std::stoi(token);
+                if (!std::getline(iss, token, '|')) return cfg;
+                cfg.max_fragment_retries = std::stoi(token);
+            }
+                    } catch (...) {
             return std::nullopt;
         }
         if (!cfg.is_valid()) return std::nullopt;
