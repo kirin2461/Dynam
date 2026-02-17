@@ -41,7 +41,7 @@ static const std::vector<uint16_t> GREASE_VALUES = {
 };
 
 inline uint16_t get_random_grease() {
-    return GREASE_VALUES[secure_random(GREASE_VALUES.size())];
+    return GREASE_VALUES[secure_random(static_cast<uint32_t>(GREASE_VALUES.size()))];
 }
 
 } // anonymous namespace
@@ -306,7 +306,7 @@ std::vector<uint8_t> TLSManipulator::inject_grease(
     
     // Inject GREASE values at random positions in extensions
     // (Simplified: just modify a few bytes to add randomness)
-    size_t inject_pos = 5 + secure_random(std::min<uint32_t>(20, len - 5));
+    size_t inject_pos = 5 + secure_random(std::min(static_cast<uint32_t>(20), static_cast<uint32_t>(len - 5)));
     if (inject_pos + 2 < result.size()) {
         uint16_t grease = get_random_grease();
         result[inject_pos] = (grease >> 8) & 0xFF;
@@ -369,32 +369,32 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
     hello.push_back(0x00);
     
     size_t sni_ext_len = 5 + fake_sni.length();
-    hello.push_back((sni_ext_len >> 8) & 0xFF);
-    hello.push_back(sni_ext_len & 0xFF);
+    hello.push_back(static_cast<uint8_t>((sni_ext_len >> 8) & 0xFF));
+    hello.push_back(static_cast<uint8_t>(sni_ext_len & 0xFF));
     
     // SNI list length
-    hello.push_back(((sni_ext_len - 2) >> 8) & 0xFF);
-    hello.push_back((sni_ext_len - 2) & 0xFF);
+    hello.push_back(static_cast<uint8_t>(((sni_ext_len - 2) >> 8) & 0xFF));
+    hello.push_back(static_cast<uint8_t>((sni_ext_len - 2) & 0xFF));
     
     // SNI entry
     hello.push_back(0x00); // hostname type
-    hello.push_back((fake_sni.length() >> 8) & 0xFF);
-    hello.push_back(fake_sni.length() & 0xFF);
+    hello.push_back(static_cast<uint8_t>((fake_sni.length() >> 8) & 0xFF));
+    hello.push_back(static_cast<uint8_t>(fake_sni.length() & 0xFF));
     hello.insert(hello.end(), fake_sni.begin(), fake_sni.end());
     
     // Fill in lengths
-    uint16_t total_len = hello.size() - 5;
-    hello[length_pos] = (total_len >> 8) & 0xFF;
-    hello[length_pos + 1] = total_len & 0xFF;
+    uint16_t total_len = static_cast<uint16_t>(hello.size() - 5);
+    hello[length_pos] = static_cast<uint8_t>((total_len >> 8) & 0xFF);
+    hello[length_pos + 1] = static_cast<uint8_t>(total_len & 0xFF);
     
-    uint32_t handshake_len = hello.size() - 9;
-    hello[6] = (handshake_len >> 16) & 0xFF;
-    hello[7] = (handshake_len >> 8) & 0xFF;
-    hello[8] = handshake_len & 0xFF;
+    uint32_t handshake_len = static_cast<uint32_t>(hello.size() - 9);
+    hello[6] = static_cast<uint8_t>((handshake_len >> 16) & 0xFF);
+    hello[7] = static_cast<uint8_t>((handshake_len >> 8) & 0xFF);
+    hello[8] = static_cast<uint8_t>(handshake_len & 0xFF);
     
-    uint16_t ext_len = hello.size() - ext_length_pos - 2;
-    hello[ext_length_pos] = (ext_len >> 8) & 0xFF;
-    hello[ext_length_pos + 1] = ext_len & 0xFF;
+    uint16_t ext_len = static_cast<uint16_t>(hello.size() - ext_length_pos - 2);
+    hello[ext_length_pos] = static_cast<uint8_t>((ext_len >> 8) & 0xFF);
+    hello[ext_length_pos + 1] = static_cast<uint8_t>(ext_len & 0xFF);
     
     return hello;
 }
@@ -688,14 +688,23 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
     
-    // Apply multi-layer split
+    // Apply multi-layer split - Fix C2664: convert vector<int> to vector<size_t>
     if (cfg.base_config.enable_multi_layer_split && is_client_hello &&
         !cfg.base_config.split_positions.empty()) {
+        
+        // Convert vector<int> to vector<size_t>
+        std::vector<size_t> split_positions_size_t;
+        split_positions_size_t.reserve(cfg.base_config.split_positions.size());
+        for (int pos : cfg.base_config.split_positions) {
+            if (pos >= 0) {
+                split_positions_size_t.push_back(static_cast<size_t>(pos));
+            }
+        }
         
         auto segments = impl_->tcp_manip->split_segments(
             working_data.data(),
             working_data.size(),
-            cfg.base_config.split_positions
+            split_positions_size_t
         );
         
         result.insert(result.end(), segments.begin(), segments.end());
@@ -712,12 +721,13 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         if (!split_points.empty()) {
             // Apply randomization if enabled
             if (cfg.base_config.randomize_split_position) {
-                int jitter = secure_random(cfg.base_config.split_position_max - 
-                                          cfg.base_config.split_position_min + 1);
+                int jitter = static_cast<int>(secure_random(static_cast<uint32_t>(
+                    cfg.base_config.split_position_max - cfg.base_config.split_position_min + 1
+                )));
                 jitter += cfg.base_config.split_position_min;
                 
                 for (auto& pt : split_points) {
-                    pt = std::min(pt + jitter, working_data.size() - 1);
+                    pt = std::min(pt + static_cast<size_t>(jitter), working_data.size() - 1);
                 }
             }
             
@@ -742,8 +752,9 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     if (cfg.padding.enabled && cfg.padding.max_padding > 0) {
         for (auto& segment : result) {
             size_t padding_size = cfg.padding.random_padding
-                ? secure_random(cfg.padding.max_padding - cfg.padding.min_padding + 1) + 
-                  cfg.padding.min_padding
+                ? secure_random(static_cast<uint32_t>(
+                    cfg.padding.max_padding - cfg.padding.min_padding + 1
+                  )) + cfg.padding.min_padding
                 : cfg.padding.max_padding;
             
             segment = impl_->tls_manip->add_tls_padding(
@@ -922,7 +933,7 @@ namespace Presets {
 AdvancedDPIConfig create_tspu_preset() {
     AdvancedDPIConfig config;
     
-    // Base config for Russian TSPU (РКНРОСРКН)
+    // Base config for Russian TSPU (ТСПУ РКНРОСРКН)
     config.base_config.mode = DPIMode::PROXY;
     config.base_config.enable_tcp_split = true;
     config.base_config.split_at_sni = true;
