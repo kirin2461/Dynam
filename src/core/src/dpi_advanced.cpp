@@ -656,7 +656,7 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     std::vector<uint8_t> working_data(data, data + len);
     
     const auto& cfg = impl_->config;
-    const auto& techniques = cfg.techniques;
+    // Note: removed unused 'techniques' variable (was line 659 - C4189 warning)
     
     // Check if this is TLS ClientHello
     bool is_client_hello = (len > 5 && data[0] == 0x16 && 
@@ -933,7 +933,7 @@ namespace Presets {
 AdvancedDPIConfig create_tspu_preset() {
     AdvancedDPIConfig config;
     
-    // Base config for Russian TSPU (ТСПУ РКНРОСРКН)
+    // Base config for Russian TSPU (ТСПУ РКН)
     config.base_config.mode = DPIMode::PROXY;
     config.base_config.enable_tcp_split = true;
     config.base_config.split_at_sni = true;
