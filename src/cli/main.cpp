@@ -36,8 +36,8 @@ std::atomic<bool> g_running(false);
 
 void signal_handler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
-        std::cout << "\n[!] Shutdown signal received...\n";
-        g_running = false;  // Only set flag, cleanup happens in main()
+                // SAFETY: Only async-signal-safe operations in signal handler (no std::cout)
+                g_running.store(false, std::memory_order_relaxed);
     }
 }
 
@@ -141,6 +141,17 @@ static int get_option_int(const std::vector<std::string>& args, const std::strin
     }
 }
 
+
+static std::string detect_default_interface() {
+    Network net;
+    auto ifaces = net.get_interfaces();
+    for (const auto& iface : ifaces) {
+        if (iface.is_up && iface.name != "lo" && iface.name != "localhost") {
+            return iface.name;
+        }
+    }
+    return "eth0"; // fallback if no active interface found
+}
 // ============================================================================
 // Forward declarations
 // ============================================================================
@@ -164,7 +175,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.1.0");
+    ArgumentParser parser("ncp", "v1.2.0");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers)", handle_run, {"[<interface>]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
@@ -205,11 +216,11 @@ void handle_run(const std::vector<std::string>& args) {
         spoof_cfg.spoof_dns = true;
         spoof_cfg.coordinated_rotation = true;
         
-        if (!g_spoofer->enable(interface.empty() ? "eth0" : interface, spoof_cfg)) {
+        if (!g_spoofer->enable(interface.empty() ? detect_default_interface() : interface, spoof_cfg)) {
             std::cerr << "[!] Failed to enable spoofing\n";
             return;
         }
-        std::cout << "[+] Spoofing enabled on " << (interface.empty() ? "eth0" : interface) << "\n";
+        std::cout << "[+] Spoofing enabled on " << (interface.empty() ? detect_default_interface() : interface) << "\n";
         
         // 2. Configure and start DPI bypass with RUNET_STRONG preset
         DPI::DPIConfig dpi_cfg;
