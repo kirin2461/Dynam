@@ -44,6 +44,9 @@ if(OPENSSL_VERSION VERSION_GREATER_EQUAL "3.2")
 else()
     message(STATUS "ECH unavailable (requires OpenSSL 3.2+, found ${OPENSSL_VERSION})")
 endif()
+# ==================== Compilation Fixes ====================
+# Allow insecure ECH stub (TEMPORARY - should implement real ECH or remove)
+add_definitions(-DNCP_ALLOW_INSECURE_ECH_STUB)
 
 # ==================== Platform-specific Settings ====================
 if(WIN32)
