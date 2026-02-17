@@ -320,6 +320,10 @@ std::string ARPController::mac_to_string(const MACAddress& mac) {
 
 MACAddress ARPController::string_to_mac(const std::string& str) {
     MACAddress mac{};
+    #ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4996)
+#endif
     unsigned int b[6] = {};
     if (std::sscanf(str.c_str(), "%02X:%02X:%02X:%02X:%02X:%02X",
                     &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) == 6) {
@@ -327,6 +331,9 @@ MACAddress ARPController::string_to_mac(const std::string& str) {
             mac[i] = static_cast<uint8_t>(b[i]);
         }
     }
+    #ifdef _MSC_VER
+#pragma warning(pop)
+#endif
     return mac;
 }
 

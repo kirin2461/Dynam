@@ -77,7 +77,7 @@ std::string License::get_mac_address() {
     if (GetAdaptersInfo(adapter_info, &buf_len) == ERROR_SUCCESS) {
         PIP_ADAPTER_INFO adapter = adapter_info;
         std::stringstream ss;
-        for (int i = 0; i < adapter->AddressLength; i++) {
+        for (UINT i = 0; i < adapter->AddressLength; i++) {
             ss << std::hex << std::setfill('0') << std::setw(2)
                << static_cast<int>(adapter->Address[i]);
         }
@@ -289,9 +289,14 @@ bool License::generate_license_file(
     const std::chrono::system_clock::time_point& expiration_date,
     const std::string& output_file,
     LicenseType type) {
-    // Format expiry date
-    auto time_t_expiry = std::chrono::system_clock::to_time_t(expiration_date);
+        auto time_t_expiry = std::chrono::system_clock::to_time_t(expiration_date);
+        #ifdef _WIN32
+    std::tm tm_buf;
+    localtime_s(&tm_buf, &time_t_expiry);
+    std::tm* tm = &tm_buf;
+#else
     std::tm* tm = std::localtime(&time_t_expiry);
+#endif
     std::stringstream date_ss;
     date_ss << std::put_time(tm, "%Y-%m-%d");
     std::string expiry_str = date_ss.str();

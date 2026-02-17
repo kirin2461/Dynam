@@ -755,7 +755,7 @@ bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
     // Set BaseBoardSerialNumber
     if (!board_serial.empty()) {
         result = RegSetValueExA(hKey, "BaseBoardSerialNumber", 0, REG_SZ, 
-                                (const BYTE*)board_serial.c_str(), board_serial.length() + 1);
+                                (const BYTE*)board_serial.c_str(), static_cast<DWORD>(board_serial.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     

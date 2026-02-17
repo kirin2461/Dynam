@@ -11,6 +11,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+using ssize_t = ptrdiff_t;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -79,7 +80,7 @@ bool I2PManager::initialize(const Config& config) {
 #endif
     
     // Connect to SAM Bridge
-    impl_->sam_socket = socket(AF_INET, SOCK_STREAM, 0);
+    impl_->sam_socket = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
     if (impl_->sam_socket < 0) {
         return false;
     }

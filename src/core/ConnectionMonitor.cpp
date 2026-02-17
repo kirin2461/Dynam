@@ -125,7 +125,7 @@ int ConnectionMonitor::measure_latency(const std::string& host) {
 #endif
     
     auto end = std::chrono::high_resolution_clock::now();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count());
 }
 
 void ConnectionMonitor::monitor_thread_func() {

@@ -334,7 +334,7 @@ void ParanoidMode::set_panic_callback(std::function<void()> callback) {
 
 // ---- Monitoring and alerts ---------------------------------------------
 
-std::vector<std::string> ParanoidMode::get_security_alerts() const {
+std::vector<ParanoidMode::SecurityAlert> ParanoidMode::get_security_alerts() const {
     return security_alerts_;
 }
 

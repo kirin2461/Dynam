@@ -109,7 +109,7 @@ LatencyMonitor::LatencyStats LatencyMonitor::get_stats(const std::string& provid
     }
     
     const auto& history = it->second;
-    stats.sample_count = history.size();
+    stats.sample_count = static_cast<uint32_t>(history.size());
     stats.min_ms = *std::min_element(history.begin(), history.end());
     stats.max_ms = *std::max_element(history.begin(), history.end());
     stats.avg_ms = std::accumulate(history.begin(), history.end(), 0ULL) / history.size();
@@ -183,7 +183,7 @@ std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data
     // Random padding
     std::uniform_int_distribution<unsigned int> byte_dist(0, 255);
     for (uint32_t i = 0; i < padding_size; ++i) {
-        result.push_back(byte_dist(rng_));
+                    result.push_back(static_cast<uint8_t>(byte_dist(rng_)));
     }
     
     return result;
@@ -281,7 +281,13 @@ void ForensicLogger::write_entry(const LogEntry& entry) {
         entry.timestamp.time_since_epoch()) % 1000;
     
     std::ostringstream oss;
+    #ifdef _WIN32
+    std::tm tm_buf;
+    gmtime_s(&tm_buf, &time_t);
+    oss << std::put_time(&tm_buf, "%Y-%m-%dT%H:%M:%S");
+#else
     oss << std::put_time(std::gmtime(&time_t), "%Y-%m-%dT%H:%M:%S");
+#endif
     oss << '.' << std::setfill('0') << std::setw(3) << ms.count() << "Z";
     
     // Write JSON-like format

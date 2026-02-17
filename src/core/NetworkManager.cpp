@@ -267,7 +267,7 @@ std::vector<NetworkInterface> NetworkManager::enumerate_interfaces() const {
         for (PIP_ADAPTER_ADDRESSES addr = addresses; addr != nullptr; addr = addr->Next) {
             NetworkInterface iface;
             char name[256];
-            wcstombs(name, addr->FriendlyName, sizeof(name));
+            size_t converted; wcstombs_s(&converted, name, sizeof(name), addr->FriendlyName, _TRUNCATE);
             iface.name = addr->AdapterName;
             iface.display_name = name;
 

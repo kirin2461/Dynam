@@ -109,7 +109,7 @@ void InterfaceSelector::enumerate_interfaces() {
             InterfaceInfo info;
             
             char name[256];
-            wcstombs(name, addr->FriendlyName, sizeof(name));
+            size_t converted; wcstombs_s(&converted, name, sizeof(name), addr->FriendlyName, _TRUNCATE);
             info.name = addr->AdapterName;
             info.display_name = name;
             

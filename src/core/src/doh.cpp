@@ -360,7 +360,6 @@ std::vector<uint8_t> DoHClient::perform_https_doh_request(
     // Base64url encode the DNS query for GET request
     std::string encoded_query;
     static const char* base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    size_t i = 0;
     uint32_t val = 0;
     int bits = 0;
     for (uint8_t byte : dns_query) {
@@ -415,7 +414,7 @@ std::vector<uint8_t> DoHClient::perform_https_doh_request(
     request += "Connection: close\r\n\r\n";
     
     // Send request
-    BIO_write(bio, request.c_str(), request.size());
+        BIO_write(bio, request.c_str(), static_cast<int>(request.size()));
     
     // Read response
     char buffer[4096];
@@ -470,8 +469,8 @@ DoHClient::DNSResult DoHClient::perform_doh_query(const std::string& hostname, R
 #endif
         // Calculate response time
         auto end_time = std::chrono::steady_clock::now();
-        result.response_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            end_time - start_time).count();
+            result.response_time_ms = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            end_time - start_time).count());
             
     } catch (const std::exception& e) {
         result.error_message = e.what();
@@ -667,8 +666,8 @@ void DoHClient::update_statistics(const DNSResult& result) {
     if (!result.from_cache) {
         uint64_t total = pImpl->stats.successful_queries + pImpl->stats.failed_queries;
         if (total > 0) {
-            pImpl->stats.average_response_time_ms = 
-                (pImpl->stats.average_response_time_ms * (total - 1) + result.response_time_ms) / total;
+                        pImpl->stats.average_response_time_ms = static_cast<uint32_t>(
+                    (pImpl->stats.average_response_time_ms * (total - 1) + result.response_time_ms) / total);
         }
     }
 }
