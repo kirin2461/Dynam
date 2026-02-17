@@ -48,7 +48,6 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -76,7 +75,6 @@ jobs:
 
   build-windows:
     runs-on: windows-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -117,6 +115,19 @@ jobs:
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Copy vcpkg DLLs for tests
+        shell: pwsh
+        run: |
+          $vcpkgBin = "C:/vcpkg/installed/x64-windows/bin"
+          $testBin  = (Resolve-Path "build/bin/Release" -ErrorAction SilentlyContinue)
+          if (-not $testBin) { $testBin = "build/bin/Release"; New-Item -ItemType Directory -Path $testBin -Force | Out-Null }
+          if (Test-Path $vcpkgBin) {
+            Copy-Item "$vcpkgBin\*.dll" $testBin -Force
+            Write-Host "Copied DLLs from $vcpkgBin to $testBin"
+          } else {
+            Write-Host "vcpkg bin dir not found at $vcpkgBin"
+          }
+
       - name: Run tests
         working-directory: build
-        run: ctest --output-on-failure -C Release
+        run: ctest -C Release --output-on-failure
