@@ -258,7 +258,4 @@ TEST_F(ParanoidModeTest, StripMetadataEmptyData) {
     EXPECT_NO_THROW(paranoid->strip_metadata(empty_data));
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// NOTE: main() removed - tests use gtest_main from CMakeLists linkage
