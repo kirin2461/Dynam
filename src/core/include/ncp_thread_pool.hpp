@@ -30,11 +30,11 @@ public:
     /// Graceful shutdown
     void shutdown();
 
-    // Metrics
-    size_t pending_tasks() const;
-    size_t active_threads() const;
-    size_t total_threads() const;
-    bool is_running() const;
+    // Metrics (now marked noexcept for performance)
+    size_t pending_tasks() const noexcept;
+    size_t active_threads() const noexcept;
+    size_t total_threads() const noexcept;
+    bool is_running() const noexcept;
 
 private:
     std::vector<std::thread>              workers_;
@@ -56,8 +56,8 @@ auto ThreadPool::submit(F&& f, Args&&... args)
         std::bind(std::forward<F>(f), std::forward<Args>(args)...)
     );
 
-    std::future<return_type> result = task->get_future();
-
+    // FIXED: Enqueue task BEFORE getting future to ensure exception safety
+    // If tasks_.emplace() throws, we haven't created a dangling future yet
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         if (stop_) {
@@ -66,6 +66,8 @@ auto ThreadPool::submit(F&& f, Args&&... args)
         tasks_.emplace([task]() { (*task)(); });
     }
 
+    // Get future only after successful enqueue
+    std::future<return_type> result = task->get_future();
     condition_.notify_one();
     return result;
 }
