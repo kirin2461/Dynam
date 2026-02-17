@@ -38,6 +38,10 @@ option(ENABLE_WEBSOCKETS "Enable WebSocket tunneling" OFF)
 option(ENABLE_TOR_PROXY "Enable Tor proxy support" OFF)
 option(ENABLE_FUZZING "Enable fuzzing tests (requires Clang with LibFuzzer)" OFF)
 
+# ==================== Compilation Fixes ====================
+# Allow insecure ECH stub (TEMPORARY - should implement real ECH or remove)
+add_definitions(-DNCP_ALLOW_INSECURE_ECH_STUB)
+
 # ==================== Platform-specific Settings ====================
 if(WIN32)
     add_definitions(-DWIN32_LEAN_AND_MEAN)
