@@ -51,20 +51,20 @@ void ThreadPool::shutdown() {
     }
 }
 
-size_t ThreadPool::pending_tasks() const {
+size_t ThreadPool::pending_tasks() const noexcept {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     return tasks_.size();
 }
 
-size_t ThreadPool::active_threads() const {
+size_t ThreadPool::active_threads() const noexcept {
     return active_.load();
 }
 
-size_t ThreadPool::total_threads() const {
+size_t ThreadPool::total_threads() const noexcept {
     return workers_.size();
 }
 
-bool ThreadPool::is_running() const {
+bool ThreadPool::is_running() const noexcept {
     return !stop_.load();
 }
 
