@@ -12,7 +12,8 @@
 #include <atomic>
 #include <chrono>
 #include <mutex>
-#include <random>
+#include <sodium.h>
+#include <random>  // for std::shuffle, std::mt19937
 #include <thread>
 
 namespace ncp {
@@ -57,23 +58,19 @@ DeviceIdentity DeviceIdentity::linux_desktop() {
 }
 
 DeviceIdentity DeviceIdentity::random_device() {
-    static std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<int> byte_dist(0x00, 0xFF);
+    // Using libsodium CSPRNG instead of mt19937
 
     DeviceIdentity id;
     // Generate random MAC with locally-administered bit set
     for (auto& b : id.mac) {
-        b = static_cast<uint8_t>(byte_dist(rng));
-    }
+            b = static_cast<uint8_t>(randombytes_uniform(256));
     id.mac[0] = (id.mac[0] & 0xFC) | 0x02;  // locally administered, unicast
 
     // Random hostname
     static const char* prefixes[] = {"PC", "Device", "Host", "Node", "Station"};
-    std::uniform_int_distribution<int> prefix_dist(0, 4);
-    std::uniform_int_distribution<int> num_dist(1000, 9999);
-    id.hostname = std::string(prefixes[prefix_dist(rng)]) + "-" + std::to_string(num_dist(rng));
-    id.vendor   = "Generic";
-    id.dhcp_options = {1, 3, 6, 15};
+    id.hostname = std::string(prefixes[randombytes_uniform(5)]) + "-" + std::to_string(randombytes_uniform(9000) + 1000);
+    id.vendor = "Generic";
+            id.dhcp_options = {1, 3, 6, 15};
 
     return id;
 }
@@ -90,9 +87,8 @@ struct IdentityRotation::Impl {
     mutable std::mutex                   mu;
     std::atomic<bool>                    running{false};
     std::thread                          worker;
-    std::mt19937                         rng;
 
-    Impl() : rng(std::random_device{}()) {}
+    Impl() {}
 
     // ── Worker thread ───────────────────────────────────────────────────────
     void worker_loop() {
@@ -123,11 +119,10 @@ struct IdentityRotation::Impl {
 
         // Optionally randomize the last 3 bytes of MAC
         if (config.rotate_mac) {
-            std::uniform_int_distribution<int> byte_dist(0x00, 0xFF);
             if (config.keep_vendor) {
                 // Keep OUI prefix (first 3 bytes), randomize rest
                 for (size_t i = 3; i < 6; ++i) {
-                    next.mac[i] = static_cast<uint8_t>(byte_dist(rng));
+                    next.mac[i] = static_cast<uint8_t>(randombytes_uniform(256));
                 }
             }
             stats.mac_changes++;
@@ -242,7 +237,7 @@ void IdentityRotation::generate_pool(size_t count) {
     }
 
     // Shuffle pool
-    std::shuffle(impl_->pool.begin(), impl_->pool.end(), impl_->rng);
+    std::shuffle(impl_->pool.begin(), impl_->pool.end(), std::mt19937{std::random_device{}()});
     impl_->current_index = 0;
 }
 
