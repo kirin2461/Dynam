@@ -13,10 +13,26 @@ namespace ncp {
 
 class Crypto {
 public:
-    // Key pair structure with SecureMemory
+    // Key pair structure with SecureMemory and secure wiping
     struct KeyPair {
         SecureMemory public_key;
         SecureMemory secret_key;
+
+        // Destructor ensures secret key material is wiped
+        ~KeyPair() { wipe(); }
+
+        // Explicitly wipe key material (calls SecureMemory destructors)
+        void wipe() noexcept {
+            secret_key = SecureMemory{};
+            public_key = SecureMemory{};
+        }
+
+        // Prevent accidental copies of key material
+        KeyPair() = default;
+        KeyPair(const KeyPair&) = delete;
+        KeyPair& operator=(const KeyPair&) = delete;
+        KeyPair(KeyPair&&) noexcept = default;
+        KeyPair& operator=(KeyPair&&) noexcept = default;
     };
     
     Crypto();
