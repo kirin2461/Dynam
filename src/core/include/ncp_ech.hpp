@@ -72,7 +72,7 @@ struct HPKECipherSuite {
  * @brief ECH configuration (simplified ECHConfig structure)
  */
 struct ECHConfig {
-    uint8_t version = 0xfe0d;  // ECH version (draft)
+    uint16_t version = 0xfe0d;  // ECH version (draft) - changed from uint8_t to uint16_t
     uint8_t config_id = 0;
     std::vector<uint8_t> public_key;  // Server's HPKE public key
     std::vector<HPKECipherSuite> cipher_suites;
