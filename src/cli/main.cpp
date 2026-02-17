@@ -21,13 +21,21 @@
 using namespace ncp;
 
 // ============================================================================
-// Global instances (RAII via unique_ptr)
+// Application state (encapsulated globals for better testability)
 // ============================================================================
+struct AppState {
+    std::unique_ptr<NetworkSpoofer> spoofer;
+    std::unique_ptr<DPI::DPIBypass> dpi_bypass;
+    std::unique_ptr<ParanoidMode> paranoid;
 
-std::unique_ptr<NetworkSpoofer> g_spoofer;
-std::unique_ptr<DPI::DPIBypass> g_dpi_bypass;
-std::unique_ptr<ParanoidMode> g_paranoid;
+    void reset() {
+        paranoid.reset();
+        dpi_bypass.reset();
+        spoofer.reset();
+    }
+};
 
+AppState g_app;
 std::atomic<bool> g_running(false);
 
 // ============================================================================
@@ -204,9 +212,9 @@ void handle_run(const std::vector<std::string>& args) {
         std::string interface = get_arg(args, 0);
         
         // Initialize globals
-        g_spoofer = std::make_unique<NetworkSpoofer>();
-        g_dpi_bypass = std::make_unique<DPI::DPIBypass>();
-        g_paranoid = std::make_unique<ParanoidMode>();
+        g_app.spoofer = std::make_unique<NetworkSpoofer>();
+        g_app.dpi_bypass = std::make_unique<DPI::DPIBypass>();
+        g_app.paranoid = std::make_unique<ParanoidMode>();
         
         // 1. Configure and enable NetworkSpoofer
         NetworkSpoofer::SpoofConfig spoof_cfg;
@@ -216,7 +224,7 @@ void handle_run(const std::vector<std::string>& args) {
         spoof_cfg.spoof_dns = true;
         spoof_cfg.coordinated_rotation = true;
         
-        if (!g_spoofer->enable(interface.empty() ? detect_default_interface() : interface, spoof_cfg)) {
+        if (!g_app.spoofer->enable(interface.empty() ? detect_default_interface() : interface, spoof_cfg)) {
             std::cerr << "[!] Failed to enable spoofing\n";
             return;
         }
@@ -226,15 +234,15 @@ void handle_run(const std::vector<std::string>& args) {
         DPI::DPIConfig dpi_cfg;
         DPI::apply_preset(DPI::DPIPreset::RUNET_STRONG, dpi_cfg);
         
-        if (!g_dpi_bypass->initialize(dpi_cfg) || !g_dpi_bypass->start()) {
+        if (!g_app.dpi_bypass->initialize(dpi_cfg) || !g_app.dpi_bypass->start()) {
             std::cerr << "[!] Failed to start DPI bypass\n";
             return;
         }
         std::cout << "[+] DPI bypass active (RuNet-Strong preset)\n";
         
         // 3. Activate ParanoidMode with TINFOIL_HAT threat level
-        g_paranoid->set_threat_level(ParanoidMode::ThreatLevel::TINFOIL_HAT);
-        if (!g_paranoid->activate()) {
+        g_app.paranoid->set_threat_level(ParanoidMode::ThreatLevel::TINFOIL_HAT);
+        if (!g_app.paranoid->activate()) {
             std::cerr << "[!] Failed to activate ParanoidMode\n";
             return;
         }
@@ -252,23 +260,23 @@ void handle_run(const std::vector<std::string>& args) {
         // Cleanup after loop exit (RAII compliance)
         std::cout << "\n[*] Shutting down services...\n";
         
-        if (g_paranoid && g_paranoid->is_active()) {
-            g_paranoid->deactivate();
+        if (g_app.paranoid && g_app.paranoid->is_active()) {
+            g_app.paranoid->deactivate();
             std::cout << "[+] ParanoidMode deactivated\n";
         }
-        g_paranoid.reset();
+        g_app.paranoid.reset();
         
-        if (g_dpi_bypass && g_dpi_bypass->is_running()) {
-            g_dpi_bypass->stop();
+        if (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) {
+            g_app.dpi_bypass->stop();
             std::cout << "[+] DPI bypass stopped\n";
         }
-        g_dpi_bypass.reset();
+        g_app.dpi_bypass.reset();
         
-        if (g_spoofer && g_spoofer->is_enabled()) {
-            g_spoofer->disable();
+        if (g_app.spoofer && g_app.spoofer->is_enabled()) {
+            g_app.spoofer->disable();
             std::cout << "[+] Spoofing disabled, settings restored\n";
         }
-        g_spoofer.reset();
+        g_app.spoofer.reset();
         
         std::cout << "[+] Shutdown complete\n";
         
@@ -282,23 +290,23 @@ void handle_stop(const std::vector<std::string>& args) {
     
     g_running = false;
     
-    if (g_paranoid && g_paranoid->is_active()) {
-        g_paranoid->deactivate();
+    if (g_app.paranoid && g_app.paranoid->is_active()) {
+        g_app.paranoid->deactivate();
         std::cout << "[+] ParanoidMode deactivated\n";
     }
-    g_paranoid.reset();
+    g_app.paranoid.reset();
     
-    if (g_dpi_bypass && g_dpi_bypass->is_running()) {
-        g_dpi_bypass->stop();
+    if (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) {
+        g_app.dpi_bypass->stop();
         std::cout << "[+] DPI bypass stopped\n";
     }
-    g_dpi_bypass.reset();
+    g_app.dpi_bypass.reset();
     
-    if (g_spoofer && g_spoofer->is_enabled()) {
-        g_spoofer->disable();
+    if (g_app.spoofer && g_app.spoofer->is_enabled()) {
+        g_app.spoofer->disable();
         std::cout << "[+] Spoofing disabled, original settings restored\n";
     }
-    g_spoofer.reset();
+    g_app.spoofer.reset();
     
     std::cout << "[+] All services stopped\n";
 }
@@ -307,8 +315,8 @@ void handle_status(const std::vector<std::string>& args) {
     std::cout << "=== NCP Status ===\n\n";
     
     // Spoofing status
-    if (g_spoofer && g_spoofer->is_enabled()) {
-        auto status = g_spoofer->get_status();
+    if (g_app.spoofer && g_app.spoofer->is_enabled()) {
+        auto status = g_app.spoofer->get_status();
         std::cout << "[Spoofing]\n";
         std::cout << "  IPv4: " << (status.ipv4_spoofed ? status.current_ipv4 : "Not spoofed") << "\n";
         std::cout << "  IPv6: " << (status.ipv6_spoofed ? status.current_ipv6 : "Not spoofed") << "\n";
@@ -319,8 +327,8 @@ void handle_status(const std::vector<std::string>& args) {
     }
     
     // DPI bypass status
-    if (g_dpi_bypass && g_dpi_bypass->is_running()) {
-        auto stats = g_dpi_bypass->get_stats();
+    if (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) {
+        auto stats = g_app.dpi_bypass->get_stats();
         std::cout << "\n[DPI Bypass]\n";
         std::cout << "  Packets processed: " << stats.packets_total.load() << "\n";
         std::cout << "  Packets modified: " << stats.packets_modified.load() << "\n";
@@ -330,13 +338,13 @@ void handle_status(const std::vector<std::string>& args) {
     }
     
     // ParanoidMode status
-    if (g_paranoid && g_paranoid->is_active()) {
-        auto pstats = g_paranoid->get_statistics();
+    if (g_app.paranoid && g_app.paranoid->is_active()) {
+        auto pstats = g_app.paranoid->get_statistics();
         std::cout << "\n[ParanoidMode]\n";
         
         // Show threat level
         std::cout << "  Threat level: ";
-        auto level = g_paranoid->get_threat_level();
+        auto level = g_app.paranoid->get_threat_level();
         switch(level) {
             case ParanoidMode::ThreatLevel::MODERATE: std::cout << "MODERATE"; break;
             case ParanoidMode::ThreatLevel::EXTREME: std::cout << "EXTREME"; break;
@@ -355,15 +363,15 @@ void handle_status(const std::vector<std::string>& args) {
 }
 
 void handle_rotate(const std::vector<std::string>& args) {
-    if (!g_spoofer || !g_spoofer->is_enabled()) {
+    if (!g_app.spoofer || !g_app.spoofer->is_enabled()) {
         std::cerr << "[!] Spoofing not active\n";
         return;
     }
     
     std::cout << "[*] Rotating all identities...\n";
     
-    if (g_spoofer->rotate_all()) {
-        auto status = g_spoofer->get_status();
+    if (g_app.spoofer->rotate_all()) {
+        auto status = g_app.spoofer->get_status();
         std::cout << "[+] Identity rotation complete:\n";
         std::cout << "  New IPv4: " << status.current_ipv4 << "\n";
         std::cout << "  New IPv6: " << status.current_ipv6 << "\n";
@@ -373,8 +381,8 @@ void handle_rotate(const std::vector<std::string>& args) {
     }
     
     // Rotate paranoid circuits if active
-    if (g_paranoid && g_paranoid->is_active()) {
-        g_paranoid->rotate_all_circuits();
+    if (g_app.paranoid && g_app.paranoid->is_active()) {
+        g_app.paranoid->rotate_all_circuits();
         std::cout << "[+] Paranoid circuits rotated\n";
     }
 }
@@ -560,7 +568,7 @@ void handle_dpi(const std::vector<std::string>& args) {
     std::cout << "[+] Noise injection: " << (config.enable_noise ? "enabled" : "disabled") << "\n";
     std::cout << "[+] Packet disorder: " << (config.enable_disorder ? "enabled" : "disabled") << "\n";
     
-    g_dpi_bypass = std::move(dpi);
+    g_app.dpi_bypass = std::move(dpi);
     g_running = true;
     
     std::cout << "\nPress Ctrl+C to stop\n";
