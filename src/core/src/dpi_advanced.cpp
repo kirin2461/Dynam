@@ -701,6 +701,17 @@ std::vector<uint8_t> DPIEvasion::apply_ech(
     const std::vector<uint8_t>& ech_config
 ) {
     std::vector<uint8_t> result = client_hello;
+
+        // WARNING: This ECH implementation is a STUB and provides NO REAL SECURITY!
+    // ECH requires HPKE encryption (RFC 9180) which is NOT implemented here.
+    // Using this function gives FALSE sense of security. Either:
+    // 1. Implement proper HPKE-based ECH encryption
+    // 2. Or remove this function entirely
+    // TODO: Issue #XX - Implement real ECH or remove stub
+    #ifndef NCP_ALLOW_INSECURE_ECH_STUB
+    #error "ECH stub is insecure! Define NCP_ALLOW_INSECURE_ECH_STUB to compile anyway"
+    #endif
+
     
 #ifdef HAVE_OPENSSL
     // ECH implementation using OpenSSL (TLS 1.3)
