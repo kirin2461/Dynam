@@ -63,14 +63,15 @@ DeviceIdentity DeviceIdentity::random_device() {
     DeviceIdentity id;
     // Generate random MAC with locally-administered bit set
     for (auto& b : id.mac) {
-            b = static_cast<uint8_t>(randombytes_uniform(256));
+        b = static_cast<uint8_t>(randombytes_uniform(256));
+    }
     id.mac[0] = (id.mac[0] & 0xFC) | 0x02;  // locally administered, unicast
 
     // Random hostname
     static const char* prefixes[] = {"PC", "Device", "Host", "Node", "Station"};
     id.hostname = std::string(prefixes[randombytes_uniform(5)]) + "-" + std::to_string(randombytes_uniform(9000) + 1000);
     id.vendor = "Generic";
-            id.dhcp_options = {1, 3, 6, 15};
+    id.dhcp_options = {1, 3, 6, 15};
 
     return id;
 }
