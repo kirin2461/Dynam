@@ -261,6 +261,8 @@ License::ValidationResult License::validate_online(
     const std::string& hwid,
     const std::string& license_key,
     const std::string& server_url) {
+    (void)hwid;  // Suppress unused parameter warning - used in production implementation
+    
     // In production: HTTPS request to validation server
     // For now: simulate validation
     if (license_key.empty()) {
@@ -289,8 +291,11 @@ bool License::generate_license_file(
     const std::chrono::system_clock::time_point& expiration_date,
     const std::string& output_file,
     LicenseType type) {
-        auto time_t_expiry = std::chrono::system_clock::to_time_t(expiration_date);
-        #ifdef _WIN32
+    (void)license_key;  // Suppress unused parameter warning - reserved for future use
+    (void)type;         // Suppress unused parameter warning - reserved for future use
+    
+    auto time_t_expiry = std::chrono::system_clock::to_time_t(expiration_date);
+    #ifdef _WIN32
     std::tm tm_buf;
     localtime_s(&tm_buf, &time_t_expiry);
     std::tm* tm = &tm_buf;
