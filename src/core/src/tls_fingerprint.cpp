@@ -4,13 +4,19 @@
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
-#include <random>
 #include <vector>
 
 namespace ncp {
 
-// File-scope PRNG seeded once per thread (avoids repeated std::random_device overhead)
-static thread_local std::mt19937 tls_rng(std::random_device{}());
+// Cryptographically secure shuffle using libsodium's randombytes_uniform (Fisher-Yates)
+template<typename RandomIt>
+static void secure_shuffle(RandomIt first, RandomIt last) {
+    auto n = std::distance(first, last);
+    for (auto i = n - 1; i > 0; --i) {
+        auto j = static_cast<decltype(i)>(randombytes_uniform(static_cast<uint32_t>(i + 1)));
+        std::swap(*(first + i), *(first + j));
+    }
+}
 
 // NOTE: SecureMemory, SecureString, and SecureOps implementations are in ncp_secure_memory.cpp
 // Do NOT duplicate them here to avoid ODR violations (LNK4006 on MSVC)
@@ -57,7 +63,7 @@ void TLSFingerprint::randomize_all() {
 void TLSFingerprint::randomize_ciphers() {
     auto all_ciphers = get_profile_ciphers(pImpl->profile);
     if (all_ciphers.size() > 1) {
-        std::shuffle(all_ciphers.begin(), all_ciphers.end(), tls_rng);
+        secure_shuffle(all_ciphers.begin(), all_ciphers.end());
     }
     pImpl->ciphers = std::move(all_ciphers);
 }
@@ -65,7 +71,7 @@ void TLSFingerprint::randomize_ciphers() {
 void TLSFingerprint::randomize_extensions() {
     auto all_exts = get_profile_extensions(pImpl->profile);
     if (all_exts.size() > 1) {
-        std::shuffle(all_exts.begin(), all_exts.end(), tls_rng);
+        secure_shuffle(all_exts.begin(), all_exts.end());
     }
     pImpl->extensions = std::move(all_exts);
 }
@@ -73,14 +79,14 @@ void TLSFingerprint::randomize_extensions() {
 void TLSFingerprint::randomize_curves() {
     auto all_curves = get_profile_curves(pImpl->profile);
     if (all_curves.size() > 1) {
-        std::shuffle(all_curves.begin(), all_curves.end(), tls_rng);
+        secure_shuffle(all_curves.begin(), all_curves.end());
     }
     pImpl->curves = std::move(all_curves);
 }
 
 void TLSFingerprint::shuffle_order() {
     if (pImpl->ciphers.size() > 1) {
-        std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), tls_rng);
+        secure_shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end());
     }
 }
 
