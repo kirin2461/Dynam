@@ -12,8 +12,7 @@
 #include <chrono>
 #include <thread>
 #include <mutex>
-#include <random>
-
+#include <sodium.h>
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -158,12 +157,8 @@ std::vector<uint8_t> DoHClient::build_dns_query(const std::string& hostname, Rec
     // DNS Header
     DNSHeader header = {};
     
-    // Random query ID
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint16_t> dis(1, 65535);
-    header.id = htons(dis(gen));
-    
+    // Random query ID - using libsodium CSPRNG
+    header.id = htons(static_cast<uint16_t>(randombytes_uniform(65535) + 1));
     // Standard query with recursion desired
     header.flags = htons(0x0100);  // RD=1
     header.qdcount = htons(1);     // One question
