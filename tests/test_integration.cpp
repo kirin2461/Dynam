@@ -36,7 +36,7 @@ TEST_F(IntegrationTest, ApplicationLifecycle) {
     // Test that application can initialize and shutdown cleanly
     int argc = 1;
     char* argv[] = {const_cast<char*>("ncp_test")};
-        (void)argc;  // Suppress unused parameter warning
+    (void)argc;  // Suppress unused parameter warning
     (void)argv;  // Suppress unused parameter warning
 
     EXPECT_NO_THROW({
@@ -145,9 +145,4 @@ TEST_F(IntegrationTest, ResourceCleanup) {
     }
     // No memory leaks expected (use valgrind for verification)
     EXPECT_TRUE(true);
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
