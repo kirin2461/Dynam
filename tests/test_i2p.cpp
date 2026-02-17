@@ -96,6 +96,9 @@ TEST_F(I2PManagerTest, CreateTunnelWhenActive) {
         I2PManager::TunnelType::CLIENT
     );
     
+    // FIX C4189: Mark unreferenced variable
+    (void)result;
+    
     // Result depends on SAM availability
     // In unit test without real I2P, this will likely fail
     // but the important thing is it doesn't crash
@@ -247,6 +250,9 @@ TEST_F(I2PManagerTest, CreateServerTunnelBasic) {
     // Try to create a server tunnel
     // FIX C4189: Mark as [[maybe_unused]] - we're testing for crashes, not return value
     [[maybe_unused]] bool result = manager_.create_server_tunnel("test_server", 8080);
+    
+    // FIX C4189: Mark unreferenced variable
+    (void)result;
     
     // Result depends on SAM availability
     // In unit test, this verifies the method doesn't crash

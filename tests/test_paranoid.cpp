@@ -258,4 +258,5 @@ TEST_F(ParanoidModeTest, StripMetadataEmptyData) {
     EXPECT_NO_THROW(paranoid->strip_metadata(empty_data));
 }
 
+// NOTE: main() removed - tests use gtest_main from CMakeLists linkage
 // Note: main() is NOT defined here - GTest provides it when linking with gtest_main

@@ -537,6 +537,9 @@ void handle_dpi(const std::vector<std::string>& args) {
     
     // Parse options
     config.mode = DPI::DPIMode::PROXY;
+    // FIX C4244: Explicit cast for int to uint16_t conversion
+    config.listen_port = static_cast<uint16_t>(get_option_int(args, "--port", 8080));
+    config.target_host = get_option(args, "--target", "example.com");
     // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
     config.listen_port = static_cast<uint16_t>(get_option_int(args, "--port", 8080));
     config.target_host = get_option(args, "--target", "example.com");
@@ -607,6 +610,7 @@ void handle_i2p(const std::vector<std::string>& args) {
         I2PManager::Config cfg;
         cfg.enabled = true;
         cfg.sam_host = get_option(args, "--sam-host", "127.0.0.1");
+        // FIX C4244: Explicit cast for int to uint16_t conversion
         // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
         cfg.sam_port = static_cast<uint16_t>(get_option_int(args, "--sam-port", 7656));
         cfg.enable_garlic_routing = true;

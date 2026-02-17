@@ -262,4 +262,5 @@ TEST_F(SecureMemoryTest, CompareMemory) {
     EXPECT_NE(std::memcmp(mem1.data(), mem2.data(), 16), 0);
 }
 
+// NOTE: main() removed - tests use gtest_main from CMakeLists linkage
 // Note: main() is NOT defined here - GTest provides it when linking
