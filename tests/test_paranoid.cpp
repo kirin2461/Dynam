@@ -259,3 +259,4 @@ TEST_F(ParanoidModeTest, StripMetadataEmptyData) {
 }
 
 // NOTE: main() removed - tests use gtest_main from CMakeLists linkage
+// Note: main() is NOT defined here - GTest provides it when linking with gtest_main

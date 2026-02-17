@@ -540,6 +540,10 @@ void handle_dpi(const std::vector<std::string>& args) {
     // FIX C4244: Explicit cast for int to uint16_t conversion
     config.listen_port = static_cast<uint16_t>(get_option_int(args, "--port", 8080));
     config.target_host = get_option(args, "--target", "example.com");
+    // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
+    config.listen_port = static_cast<uint16_t>(get_option_int(args, "--port", 8080));
+    config.target_host = get_option(args, "--target", "example.com");
+    // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
     config.target_port = static_cast<uint16_t>(get_option_int(args, "--target-port", 443));
     config.enable_tcp_split = !has_flag(args, "--no-split");
     config.split_position = get_option_int(args, "--split-pos", 2);
@@ -607,6 +611,7 @@ void handle_i2p(const std::vector<std::string>& args) {
         cfg.enabled = true;
         cfg.sam_host = get_option(args, "--sam-host", "127.0.0.1");
         // FIX C4244: Explicit cast for int to uint16_t conversion
+        // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
         cfg.sam_port = static_cast<uint16_t>(get_option_int(args, "--sam-port", 7656));
         cfg.enable_garlic_routing = true;
         cfg.tunnel_length = get_option_int(args, "--tunnel-length", 3);

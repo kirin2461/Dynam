@@ -34,7 +34,8 @@ struct I2PManager::Impl {
         if (sam_socket < 0) return false;
         
         std::string full_cmd = cmd + "\n";
-        ssize_t sent = send(sam_socket, full_cmd.c_str(), full_cmd.length(), 0);
+        // FIX C4267: Explicit cast to avoid size_t to int conversion warning
+        ssize_t sent = send(sam_socket, full_cmd.c_str(), static_cast<int>(full_cmd.length()), 0);
         if (sent <= 0) return false;
         
         char buffer[4096];
@@ -133,6 +134,9 @@ std::string I2PManager::get_destination() const {
 // HIGH PRIORITY: Create tunnel via SAM
 bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
                                const std::string& remote_dest, TunnelType type) {
+    // FIX C4100: Mark unreferenced parameter
+    (void)local_port;
+    
     if (!is_active()) return false;
     
     std::string style = (type == TunnelType::CLIENT) ? "STREAM" : "STREAM";
@@ -298,6 +302,9 @@ std::string I2PManager::export_destination() const {
 
 std::vector<uint8_t> I2PManager::create_garlic_message(
     const std::vector<GarlicClove>& cloves, const std::string& dest_public_key) {
+    // FIX C4100: Mark unreferenced parameter
+    (void)dest_public_key;
+    
     // TODO: Implement garlic encryption using libsodium
     std::vector<uint8_t> result;
     for (const auto& clove : cloves) {
@@ -308,12 +315,20 @@ std::vector<uint8_t> I2PManager::create_garlic_message(
 
 bool I2PManager::send_garlic_message(const std::string& destination,
                                      const std::vector<uint8_t>& message) {
+    // FIX C4100: Mark unreferenced parameters
+    (void)destination;
+    (void)message;
+    
     if (!impl_->sam_connected) return false;
     // TODO: Send via SAM STREAM
     return true;
 }
 
 bool I2PManager::publish_leaseset(bool encrypted, bool blinded) {
+    // FIX C4100: Mark unreferenced parameters
+    (void)encrypted;
+    (void)blinded;
+    
     // TODO: Implement leaseset publishing
     return true;
 }
