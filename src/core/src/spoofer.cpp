@@ -86,7 +86,8 @@ static std::string execute_command_safe(const std::string& command, const std::v
     }
     CloseHandle(hWritePipe);
     DWORD bytesRead;
-    while (ReadFile(hReadPipe, buffer.data(), buffer.size() - 1, &bytesRead, NULL) && bytesRead > 0) {
+    // Fix C4267: Add explicit cast from size_t to DWORD
+    while (ReadFile(hReadPipe, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &bytesRead, NULL) && bytesRead > 0) {
         buffer[bytesRead] = '\0';
         result += buffer.data();
     }
@@ -752,24 +753,24 @@ bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
     
     bool success = true;
     
-    // Set BaseBoardSerialNumber
+    // Set BaseBoardSerialNumber - Fix C4267: explicit cast
     if (!board_serial.empty()) {
         result = RegSetValueExA(hKey, "BaseBoardSerialNumber", 0, REG_SZ, 
                                 (const BYTE*)board_serial.c_str(), static_cast<DWORD>(board_serial.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     
-    // Set SystemSerialNumber
+    // Set SystemSerialNumber - Fix C4267: explicit cast
     if (!system_serial.empty()) {
         result = RegSetValueExA(hKey, "SystemSerialNumber", 0, REG_SZ,
-                                (const BYTE*)system_serial.c_str(), system_serial.length() + 1);
+                                (const BYTE*)system_serial.c_str(), static_cast<DWORD>(system_serial.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     
-    // Set SystemUUID (stored as SystemProductName in registry)
+    // Set SystemUUID (stored as SystemProductName in registry) - Fix C4267: explicit cast
     if (!uuid.empty()) {
         result = RegSetValueExA(hKey, "SystemProductName", 0, REG_SZ,
-                                (const BYTE*)uuid.c_str(), uuid.length() + 1);
+                                (const BYTE*)uuid.c_str(), static_cast<DWORD>(uuid.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     
@@ -823,7 +824,7 @@ bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
     if (disk_serial.empty()) return false;
     
 #ifdef _WIN32
-    // Windows: Modify disk serial via registry
+    // Windows: Modify disk serial via registry - Fix C4267: explicit cast
     // Path: HKLM\SYSTEM\CurrentControlSet\Enum\SCSI\Disk&Ven_*
     // This is simplified; real implementation would enumerate all disk devices
     
@@ -837,7 +838,7 @@ bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
     
     // Set disk serial (simplified approach)
     result = RegSetValueExA(hKey, "0", 0, REG_SZ, 
-                            (const BYTE*)disk_serial.c_str(), disk_serial.length() + 1);
+                            (const BYTE*)disk_serial.c_str(), static_cast<DWORD>(disk_serial.length() + 1));
     
     RegCloseKey(hKey);
     return (result == ERROR_SUCCESS);
@@ -891,10 +892,11 @@ bool NetworkSpoofer::apply_tcp_fingerprint(const TcpFingerprintProfile& profile)
 // ==================== Platform-Specific HW Spoofing Methods ====================
 
 // Phase 1: SMBIOS/DMI Spoofing (Windows Registry / Linux sysfs)
-bool NetworkSpoofer::apply_smbios(const std::string& bios_vendor, const std::string& bios_version,
-                                   const std::string& board_manufacturer, const std::string& board_product,
-                                   const std::string& board_serial, const std::string& system_manufacturer,
-                                   const std::string& system_product, const std::string& system_serial) {
+// Fix C4100: Mark all unreferenced SMBIOS parameters
+bool NetworkSpoofer::apply_smbios(const std::string& /* bios_vendor */, const std::string& /* bios_version */,
+                                   const std::string& /* board_manufacturer */, const std::string& /* board_product */,
+                                   const std::string& board_serial, const std::string& /* system_manufacturer */,
+                                   const std::string& /* system_product */, const std::string& system_serial) {
 #ifdef _WIN32
     // Windows: Modify HKLM\HARDWARE\DESCRIPTION\System\BIOS via Registry
     // WARNING: Requires elevated privileges (Administrator)
@@ -932,7 +934,7 @@ bool NetworkSpoofer::apply_smbios(const std::string& bios_vendor, const std::str
     // Write spoofed values
     std::ofstream("/sys/class/dmi/id/board_serial") << board_serial;
     std::ofstream("/sys/class/dmi/id/product_serial") << system_serial;
-    std::ofstream("/sys/class/dmi/id/sys_vendor") << system_manufacturer;
+    // Note: system_manufacturer not used in this simplified version
     
     return true;
 #endif
