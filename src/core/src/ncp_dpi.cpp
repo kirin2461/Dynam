@@ -7,9 +7,8 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
-#include <random>
+#include <sodium.h>
 #include <cctype>
-
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
@@ -47,17 +46,8 @@ std::string to_lower_copy(const std::string& s) {
 
 } // namespace
 
-  // Thread-local RNG for secure noise generation
-    // Wrapped in inline functions to fix MSVC /Zi compilation issue (Issue #14)
-    // Function-local thread_local is well-supported across all compilers
-    inline std::mt19937& get_thread_rng() {
-        thread_local std::mt19937 rng(std::random_device{}());
-        return rng;
-    }
-    inline std::uniform_int_distribution<int>& get_thread_byte_dist() {
-        thread_local std::uniform_int_distribution<int> dist(0, 255);
-        return dist;
-    }
+   // Using libsodium CSPRNG (randombytes_uniform) instead of mt19937
+ // Replaced insecure std::mt19937 + std::uniform_int_distribution with randombytes_uniform()
 
 // TLS ClientHello detection
 static bool is_tls_client_hello(const uint8_t* data, size_t len) {
@@ -462,7 +452,7 @@ DPIStats stats;
                 junk.assign(mask.begin(), mask.end());
             } else {
                 junk.resize(config.noise_size > 0 ? config.noise_size : 64);
-                for(auto& b : junk) b = static_cast<uint8_t>(get_thread_byte_dist()(get_thread_rng()));
+                for(auto& b : junk) b = static_cast<uint8_t>(randombytes_uniform(256));
             }
             
             // Send junk with low TTL if fake_packet is enabled, otherwise just as noise
@@ -486,8 +476,8 @@ DPIStats stats;
             for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
                 // Randomize fake packet to avoid DPI fingerprinting
                 std::vector<uint8_t> fake_data = {
-                    0x16, 0x03, static_cast<uint8_t>(get_thread_byte_dist()(get_thread_rng()) % 4), // TLS record + random version minor
-                    static_cast<uint8_t>(get_thread_byte_dist()(get_thread_rng())), static_cast<uint8_t>(get_thread_byte_dist()(get_thread_rng())), // Random length
+                    0x16, 0x03, static_cast<uint8_t>(randombytes_uniform(256) % 4), // TLS record + random version minor
+                    static_cast<uint8_t>(randombytes_uniform(256)), static_cast<uint8_t>(randombytes_uniform(256)), // Random length
                     0x01 // ClientHello
                                 };
     #ifdef IP_TTL
@@ -567,7 +557,7 @@ DPIStats stats;
             size_t offset = 0;
             while (offset < remaining) {
                 // Randomize fragment size slightly for evasion
-                size_t jitter = (get_thread_rng()() % 3); 
+                size_t jitter = randombytes_uniform(3); 
                 size_t current_frag = std::min(base_frag_size + jitter, remaining - offset);
 
                 if (config.enable_disorder && config.disorder_delay_ms > 0) {
