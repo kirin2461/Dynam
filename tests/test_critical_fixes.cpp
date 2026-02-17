@@ -364,7 +364,7 @@ TEST_F(CriticalFixesTest, SecureMemoryInVector) {
     EXPECT_EQ(vec.size(), 10);
     for (int i = 0; i < 10; ++i) {
         EXPECT_EQ(vec[i].size(), 16);
-        EXPECT_EQ(vec[i].data()[0], i);
+        EXPECT_EQ(vec[i].data()[0], static_cast<uint8_t>(i));
     }
     
     // Force reallocation (should use noexcept move)
@@ -373,7 +373,7 @@ TEST_F(CriticalFixesTest, SecureMemoryInVector) {
     // Data should still be valid after reallocation
     for (int i = 0; i < 10; ++i) {
         EXPECT_EQ(vec[i].size(), 16);
-        EXPECT_EQ(vec[i].data()[0], i);
+        EXPECT_EQ(vec[i].data()[0], static_cast<uint8_t>(i));
     }
 }
 
@@ -407,9 +407,4 @@ TEST_F(CriticalFixesTest, NoexceptGetters) {
         [[maybe_unused]] auto begin = mem.begin();
         [[maybe_unused]] auto end = mem.end();
     });
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
 }
