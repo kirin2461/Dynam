@@ -101,7 +101,7 @@ void LatencyMonitor::record_latency(const std::string& provider, uint32_t latenc
 
 LatencyMonitor::LatencyStats LatencyMonitor::get_latency_stats(const std::string& provider) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    LatencyStats stats;
+    LatencyStats stats{}; // Initialize with zeros
     
     auto it = latency_history_.find(provider);
     if (it == latency_history_.end() || it->second.empty()) {
@@ -109,24 +109,23 @@ LatencyMonitor::LatencyStats LatencyMonitor::get_latency_stats(const std::string
     }
     
     const auto& history = it->second;
-    stats.sample_count = static_cast<uint32_t>(history.size());
+    stats.sample_count = static_cast<uint64_t>(history.size());
     
-    // Calculate average - fix C4267 warning
-    stats.avg_ms = static_cast<uint32_t>(
-        std::accumulate(history.begin(), history.end(), 0ULL) / history.size()
-    );
+    // Calculate average - fix by providing all 3 required arguments
+    uint64_t sum = std::accumulate(history.begin(), history.end(), 0ULL);
+    stats.avg_ms = static_cast<uint32_t>(sum / history.size());
     
-    // Min and max
+    // Min and max - fix by providing both begin and end iterators
     stats.min_ms = *std::min_element(history.begin(), history.end());
     stats.max_ms = *std::max_element(history.begin(), history.end());
     
     // Standard deviation
     double variance = 0.0;
     for (auto val : history) {
-        double diff = static_cast<double>(val) - stats.avg_ms;
+        double diff = static_cast<double>(val) - static_cast<double>(stats.avg_ms);
         variance += diff * diff;
     }
-    variance /= history.size();
+    variance /= static_cast<double>(history.size());
     stats.std_dev_ms = static_cast<uint32_t>(std::sqrt(variance));
     
     // Percentiles (simple implementation)
