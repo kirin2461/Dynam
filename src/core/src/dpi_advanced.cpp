@@ -1012,12 +1012,15 @@ AdvancedDPIConfig create_iran_preset() {
     config.base_config.enable_fake_packet = true;
     config.base_config.enable_pattern_obfuscation = true;
     
+    // Use valid EvasionTechnique enum values
     config.techniques = {
         EvasionTechnique::SNI_SPLIT,
         EvasionTechnique::TLS_GREASE,
-        EvasionTechnique::HTTP_CAMOUFLAGE
+        EvasionTechnique::HTTP_HEADER_SPLIT,  // Fixed: was HTTP_CAMOUFLAGE
+        EvasionTechnique::HTTP_CASE_VARIATION
     };
     
+    // HTTP_CAMOUFLAGE is set as obfuscation mode, not as a technique
     config.obfuscation = ObfuscationMode::HTTP_CAMOUFLAGE;
     
     return config;
