@@ -86,7 +86,7 @@ static std::string execute_command_safe(const std::string& command, const std::v
     }
     CloseHandle(hWritePipe);
     DWORD bytesRead;
-    while (ReadFile(hReadPipe, buffer.data(), buffer.size() - 1, &bytesRead, NULL) && bytesRead > 0) {
+    while (ReadFile(hReadPipe, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &bytesRead, NULL) && bytesRead > 0) {
         buffer[bytesRead] = '\0';
         result += buffer.data();
     }
@@ -762,14 +762,14 @@ bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
     // Set SystemSerialNumber
     if (!system_serial.empty()) {
         result = RegSetValueExA(hKey, "SystemSerialNumber", 0, REG_SZ,
-                                (const BYTE*)system_serial.c_str(), system_serial.length() + 1);
+                                (const BYTE*)system_serial.c_str(), static_cast<DWORD>(system_serial.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     
     // Set SystemUUID (stored as SystemProductName in registry)
     if (!uuid.empty()) {
         result = RegSetValueExA(hKey, "SystemProductName", 0, REG_SZ,
-                                (const BYTE*)uuid.c_str(), uuid.length() + 1);
+                                (const BYTE*)uuid.c_str(), static_cast<DWORD>(uuid.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     
@@ -837,7 +837,7 @@ bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
     
     // Set disk serial (simplified approach)
     result = RegSetValueExA(hKey, "0", 0, REG_SZ, 
-                            (const BYTE*)disk_serial.c_str(), disk_serial.length() + 1);
+                            (const BYTE*)disk_serial.c_str(), static_cast<DWORD>(disk_serial.length() + 1));
     
     RegCloseKey(hKey);
     return (result == ERROR_SUCCESS);
@@ -895,6 +895,14 @@ bool NetworkSpoofer::apply_smbios(const std::string& bios_vendor, const std::str
                                    const std::string& board_manufacturer, const std::string& board_product,
                                    const std::string& board_serial, const std::string& system_manufacturer,
                                    const std::string& system_product, const std::string& system_serial) {
+    (void)bios_vendor;          // Suppress unused parameter warning - stub function
+    (void)bios_version;         // Suppress unused parameter warning - stub function
+    (void)board_manufacturer;   // Suppress unused parameter warning - stub function
+    (void)board_product;        // Suppress unused parameter warning - stub function
+    (void)system_manufacturer;  // Suppress unused parameter warning - stub function
+    (void)system_product;       // Suppress unused parameter warning - stub function
+    (void)system_serial;        // Suppress unused parameter warning - stub function
+    
 #ifdef _WIN32
     // Windows: Modify HKLM\HARDWARE\DESCRIPTION\System\BIOS via Registry
     // WARNING: Requires elevated privileges (Administrator)
