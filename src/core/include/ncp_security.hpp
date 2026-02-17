@@ -81,7 +81,10 @@ public:
         uint32_t min_ms;
         uint32_t max_ms;
         uint32_t avg_ms;
-        uint32_t stddev_ms;
+        uint32_t std_dev_ms;  // Standard deviation
+        uint32_t p50_ms;      // 50th percentile (median)
+        uint32_t p95_ms;      // 95th percentile
+        uint32_t p99_ms;      // 99th percentile
         uint64_t sample_count;
         std::chrono::system_clock::time_point last_update;
     };
@@ -103,7 +106,7 @@ public:
     void record_latency(const std::string& provider, uint32_t latency_ms);
     
     // Get statistics for a provider
-    LatencyStats get_stats(const std::string& provider) const;
+    LatencyStats get_latency_stats(const std::string& provider) const;
     
     // Set alert threshold
     void set_threshold(uint32_t threshold_ms);
@@ -115,13 +118,65 @@ public:
     // Check if latency is anomalous
     bool is_anomalous(const std::string& provider, uint32_t latency_ms) const;
     
-    // Reset statistics
-    void reset_stats();
+    // Clear history
+    void clear_history();
+    
+    // Get list of monitored providers
+    std::vector<std::string> get_monitored_providers() const;
 
 private:
     uint32_t threshold_ms_;
     std::map<std::string, std::vector<uint32_t>> latency_history_;
     AlertCallback alert_callback_;
+    mutable std::mutex mutex_;
+};
+
+// ==================== Connection Monitoring ====================
+
+/**
+ * @brief Monitor connection attempts and track statistics
+ */
+class ConnectionMonitor {
+public:
+    struct ConnectionInfo {
+        std::string host;
+        uint16_t port;
+        std::chrono::system_clock::time_point timestamp;
+        bool successful;
+        uint32_t duration_ms;
+    };
+
+    struct HostStats {
+        uint32_t total_attempts = 0;
+        uint32_t successful_attempts = 0;
+        uint32_t failed_attempts = 0;
+        uint64_t total_duration_ms = 0;
+        std::chrono::system_clock::time_point last_attempt;
+    };
+
+    ConnectionMonitor();
+    ~ConnectionMonitor();
+
+    // Record a connection attempt
+    void record_connection(
+        const std::string& host,
+        uint16_t port,
+        bool successful,
+        uint32_t duration_ms
+    );
+
+    // Get statistics for a host
+    HostStats get_host_stats(const std::string& host) const;
+
+    // Get recent connections
+    std::vector<ConnectionInfo> get_recent_connections(size_t count = 100) const;
+
+    // Clear history
+    void clear_history();
+
+private:
+    std::vector<ConnectionInfo> connection_history_;
+    std::map<std::string, HostStats> connection_stats_;
     mutable std::mutex mutex_;
 };
 
@@ -380,6 +435,13 @@ public:
 
 private:
     Config config_;
+    CertificatePinner cert_pinner_;
+    LatencyMonitor latency_monitor_;
+    TrafficPadder traffic_padder_;
+    ForensicLogger forensic_logger_;
+    AutoRouteSwitch auto_route_switch_;
+    CanaryTokens canary_tokens_;
+};
 
 // ===================== Anti-Forensics & Advanced Security =====================
 
@@ -481,15 +543,6 @@ public:
 private:
     Config config_;
     std::string original_name_;
-};
-
-
-    CertificatePinner cert_pinner_;
-    LatencyMonitor latency_monitor_;
-    TrafficPadder traffic_padder_;
-    ForensicLogger forensic_logger_;
-    AutoRouteSwitch auto_route_switch_;
-    CanaryTokens canary_tokens_;
 };
 
 } // namespace ncp
