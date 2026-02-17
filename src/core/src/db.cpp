@@ -59,6 +59,7 @@ bool Database::open(const std::string& db_path, const std::string& password) {
     }
 return true;
 #else
+    (void)password;  // Suppress unused parameter warning in fallback mode
     // Fallback: use file-based storage
     db_path_ = db_path;
     is_connected_ = true;
@@ -110,6 +111,7 @@ bool Database::execute(const std::string& sql) {
     }
     std::ofstream log(db_path_ + ".log", std::ios::app);
     log << sql << std::endl;
+    (void)sql;  // Parameter used in log, but mark as intentionally unused for warning suppression
     return true;
 #endif
 }
@@ -158,6 +160,7 @@ Database::QueryResult Database::query(const std::string& sql) {
 
     result.success = true;
 #else
+    (void)sql;  // Suppress unused parameter warning in fallback mode
     // Fallback: return empty result
     if (!is_connected_) {
         last_error_ = "Database not connected";
@@ -221,6 +224,7 @@ bool Database::table_exists(const std::string& table_name) {
     sqlite3_finalize(stmt);
     return exists;
 #else
+    (void)table_name;  // Suppress unused parameter warning in fallback mode
     return true; // Assume exists in fallback mode
 #endif
     }
@@ -285,6 +289,8 @@ bool Database::insert(const std::string& table_name,
     
     return true;
 #else
+    (void)table_name;  // Suppress unused parameter warning in fallback mode
+    (void)data;        // Suppress unused parameter warning in fallback mode
     // Fallback: log to file
     if (!is_connected_) {
         last_error_ = "Database not connected";
@@ -354,6 +360,10 @@ bool Database::update(const std::string& table_name,
     
     return true;
 #else
+    (void)table_name;    // Suppress unused parameter warning in fallback mode
+    (void)data;          // Suppress unused parameter warning in fallback mode
+    (void)where_column;  // Suppress unused parameter warning in fallback mode
+    (void)where_value;   // Suppress unused parameter warning in fallback mode
     if (!is_connected_) {
         last_error_ = "Database not connected";
         return false;
@@ -407,6 +417,9 @@ bool Database::remove(const std::string& table_name,
     
     return true;
 #else
+    (void)table_name;    // Suppress unused parameter warning in fallback mode
+    (void)where_column;  // Suppress unused parameter warning in fallback mode
+    (void)where_value;   // Suppress unused parameter warning in fallback mode
     if (!is_connected_) {
         last_error_ = "Database not connected";
         return false;
