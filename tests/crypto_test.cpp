@@ -25,7 +25,7 @@ class CryptoTest : public ::testing::Test {
 protected:
     void SetUp() override {
 #ifdef HAVE_SODIUM
-        ASSERT_EQ(sodium_init(), 0) << "Failed to initialize libsodium";
+        ASSERT_GE(sodium_init(), 0) << "Failed to initialize libsodium";
 #endif
     }
 };
