@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <thread>
 #include <atomic>
-
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -51,7 +50,8 @@ Network::Network()
     : is_capturing_(false)
 #endif
     , bypass_enabled_(false)
-    , current_technique_(BypassTechnique::NONE) {
+    , current_technique_(BypassTechnique::NONE)
+{
 #ifdef _WIN32
     WSADATA wsa_data;
     if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
@@ -78,7 +78,7 @@ std::vector<Network::InterfaceInfo> Network::get_interfaces() {
     ULONG buf_len = 0;
     GetAdaptersInfo(adapter_info, &buf_len);
     adapter_info = (IP_ADAPTER_INFO*)malloc(buf_len);
-   
+
     if (GetAdaptersInfo(adapter_info, &buf_len) == NO_ERROR) {
         PIP_ADAPTER_INFO adapter = adapter_info;
         while (adapter) {
@@ -93,7 +93,6 @@ std::vector<Network::InterfaceInfo> Network::get_interfaces() {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_if_t* alldevs = nullptr;
     int rc = pcap_findalldevs(&alldevs, errbuf);
-   
     if (rc == 0 && alldevs != nullptr) {
         for (pcap_if_t* d = alldevs; d != nullptr; d = d->next) {
             if (d->name) {
@@ -123,22 +122,22 @@ Network::InterfaceInfo Network::get_interface_info([[maybe_unused]] const std::s
         if (!adapter_info) {
             return info;
         }
+
         if (GetAdaptersInfo(adapter_info, &buf_len) == NO_ERROR) {
             for (PIP_ADAPTER_INFO adapter = adapter_info; adapter; adapter = adapter->Next) {
                 if (interface_name == adapter->AdapterName) {
                     if (adapter->IpAddressList.IpAddress.String[0] != '\0') {
-                        info.ipv4 = adapter->IpAddressList.IpAddress.String;
-                    }
-                    if (adapter->IpAddressList.IpMask.String[0] != '\0') {
-                        info.netmask = adapter->IpAddressList.IpMask.String;
+                        info.ip_address = adapter->IpAddressList.IpAddress.String;
                     }
 
                     if (adapter->AddressLength >= 6) {
                         char mac_buf[32];
-                        snprintf(mac_buf, sizeof(mac_buf), "%02X:%02X:%02X:%02X:%02X:%02X",
-                                 adapter->Address[0], adapter->Address[1], adapter->Address[2],
-                                 adapter->Address[3], adapter->Address[4], adapter->Address[5]);
-                        info.mac = mac_buf;
+                        snprintf(mac_buf, sizeof(mac_buf),
+                                "%02X:%02X:%02X:%02X:%02X:%02X",
+                                adapter->Address[0], adapter->Address[1],
+                                adapter->Address[2], adapter->Address[3],
+                                adapter->Address[4], adapter->Address[5]);
+                        info.mac_address = mac_buf;
                     }
 
                     info.is_up = (adapter->Type != MIB_IF_TYPE_LOOPBACK);
@@ -162,17 +161,12 @@ Network::InterfaceInfo Network::get_interface_info([[maybe_unused]] const std::s
 
             if (ifa->ifa_addr->sa_family == AF_INET) {
                 char addr[INET_ADDRSTRLEN];
-                char mask[INET_ADDRSTRLEN];
-
                 auto* sa = (struct sockaddr_in*)ifa->ifa_addr;
-                auto* nm = (struct sockaddr_in*)ifa->ifa_netmask;
 
                 if (inet_ntop(AF_INET, &sa->sin_addr, addr, sizeof(addr))) {
-                    info.ipv4 = addr;
+                    info.ip_address = addr;
                 }
-                if (inet_ntop(AF_INET, &nm->sin_addr, mask, sizeof(mask))) {
-                    info.netmask = mask;
-                }
+
             }
         }
         freeifaddrs(ifaddr);
@@ -191,9 +185,9 @@ bool Network::initialize_capture(const std::string& interface_name) {
     char errbuf[PCAP_ERRBUF_SIZE];
     pcap_handle_.reset(pcap_open_live(
         interface_name.c_str(),
-        65535,  // Snapshot length
-        1,      // Promiscuous mode
-        1000,   // Timeout in ms
+        65535,   // Snapshot length
+        1,       // Promiscuous mode
+        1000,    // Timeout in ms
         errbuf
     ));
 
@@ -226,6 +220,7 @@ void Network::start_capture(PacketCallback callback, int timeout_ms) {
 #ifndef _WIN32
         struct pcap_pkthdr* header;
         const u_char* packet;
+
         while (is_capturing_) {
             int res = pcap_next_ex(pcap_handle_.get(), &header, &packet);
             if (res == 1 && packet_cb_) {
@@ -258,30 +253,31 @@ void Network::stop_capture() {
 bool Network::enable_bypass(BypassTechnique technique) {
     current_technique_ = technique;
     bypass_enabled_ = true;
+
     switch (technique) {
-    case BypassTechnique::TTL_MODIFICATION:
-        return setup_ttl_bypass();
-    case BypassTechnique::TCP_FRAGMENTATION:
-        return setup_fragmentation_bypass();
-    case BypassTechnique::SNI_SPOOFING:
-        return setup_sni_spoofing();
-    case BypassTechnique::FAKE_PACKET:
-        return setup_fake_packet();
-    case BypassTechnique::DISORDER:
-        return setup_packet_disorder();
-    case BypassTechnique::OBFUSCATION:
-        bypass_config_.obfuscation_enabled = true;
-        return true;
-    case BypassTechnique::HTTP_MIMICRY:
-        bypass_config_.mimicry_enabled = true;
-        bypass_config_.mimicry_profile = "HTTP";
-        return true;
-    case BypassTechnique::TLS_MIMICRY:
-        bypass_config_.mimicry_enabled = true;
-        bypass_config_.mimicry_profile = "TLS";
-        return true;
-    default:
-        return false;
+        case BypassTechnique::TTL_MODIFICATION:
+            return setup_ttl_bypass();
+        case BypassTechnique::TCP_FRAGMENTATION:
+            return setup_fragmentation_bypass();
+        case BypassTechnique::SNI_SPOOFING:
+            return setup_sni_spoofing();
+        case BypassTechnique::FAKE_PACKET:
+            return setup_fake_packet();
+        case BypassTechnique::DISORDER:
+            return setup_packet_disorder();
+        case BypassTechnique::OBFUSCATION:
+            bypass_config_.obfuscation_enabled = true;
+            return true;
+        case BypassTechnique::HTTP_MIMICRY:
+            bypass_config_.mimicry_enabled = true;
+            bypass_config_.mimicry_profile = "HTTP";
+            return true;
+        case BypassTechnique::TLS_MIMICRY:
+            bypass_config_.mimicry_enabled = true;
+            bypass_config_.mimicry_profile = "TLS";
+            return true;
+        default:
+            return false;
     }
 }
 
@@ -337,9 +333,8 @@ void Network::cleanup_bypass() {
 // ==================== Raw Packet Operations ====================
 
 bool Network::send_raw_packet(const std::string& dest_ip, const std::vector<uint8_t>& data) {
-    (void)dest_ip; // suppress MSVC C4100 (unreferenced parameter)
-    (void)data;    // suppress MSVC C4100 (unreferenced parameter)
-
+    (void)dest_ip;  // suppress MSVC C4100 (unreferenced parameter)
+    (void)data;     // suppress MSVC C4100 (unreferenced parameter)
 #ifndef _WIN32
     if (geteuid() != 0) {
         last_error_ = "Raw sockets require root privileges";
@@ -358,34 +353,32 @@ bool Network::send_tcp_packet(
     const std::vector<uint8_t>& payload,
     uint8_t flags
 ) {
-    (void)dest_ip;  // suppress MSVC C4100 (unreferenced parameter)
-    (void)dest_port; // suppress MSVC C4100 (unreferenced parameter)
-    (void)payload;  // suppress MSVC C4100 (unreferenced parameter)
-    (void)flags;    // suppress MSVC C4100 (unreferenced parameter)
-
+    (void)dest_ip;    // suppress MSVC C4100 (unreferenced parameter)
+    (void)dest_port;  // suppress MSVC C4100 (unreferenced parameter)
+    (void)payload;    // suppress MSVC C4100 (unreferenced parameter)
+    (void)flags;      // suppress MSVC C4100 (unreferenced parameter)
     return false;
 }
 
 void Network::apply_bypass_to_packet(std::vector<uint8_t>& packet) {
-    (void)packet; // suppress MSVC C4100 (unreferenced parameter)
+    (void)packet;  // suppress MSVC C4100 (unreferenced parameter)
 }
 
 void Network::fragment_packet(std::vector<uint8_t>& packet) {
-    (void)packet; // suppress MSVC C4100 (unreferenced parameter)
+    (void)packet;  // suppress MSVC C4100 (unreferenced parameter)
 }
 
 bool Network::inject_fragmented_packets(
     const std::vector<std::vector<uint8_t>>& packets,
     int delay_ms
 ) {
-    (void)packets;  // suppress MSVC C4100 (unreferenced parameter)
-    (void)delay_ms; // suppress MSVC C4100 (unreferenced parameter)
-
+    (void)packets;   // suppress MSVC C4100 (unreferenced parameter)
+    (void)delay_ms;  // suppress MSVC C4100 (unreferenced parameter)
     return false;
 }
 
 void Network::set_tcp_window_size(uint16_t size) {
-    (void)size; // suppress MSVC C4100 (unreferenced parameter)
+    (void)size;  // suppress MSVC C4100 (unreferenced parameter)
 }
 
 // ==================== DNS Operations ====================
@@ -394,22 +387,25 @@ std::string Network::resolve_dns(const std::string& hostname, bool use_doh) {
     if (use_doh) {
         return resolve_dns_over_https(hostname);
     }
+
     struct addrinfo hints = {}, *result = nullptr;
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
+
     if (getaddrinfo(hostname.c_str(), nullptr, &hints, &result) != 0) {
         return "";
     }
+
     char ip_str[INET_ADDRSTRLEN];
     struct sockaddr_in* addr = (struct sockaddr_in*)result->ai_addr;
     inet_ntop(AF_INET, &addr->sin_addr, ip_str, sizeof(ip_str));
     freeaddrinfo(result);
+
     return std::string(ip_str);
 }
 
 std::string Network::resolve_dns_over_https(const std::string& hostname) {
-    (void)hostname; // suppress MSVC C4100 (unreferenced parameter)
-
+    (void)hostname;  // suppress MSVC C4100 (unreferenced parameter)
     return "";
 }
 
@@ -429,7 +425,6 @@ void Network::reset_stats() {
 
 std::string Network::get_last_error() const {
     return last_error_;
-
 }
 
-}  // namespace ncp
+} // namespace ncp
