@@ -109,15 +109,75 @@ std::vector<Network::InterfaceInfo> Network::get_interfaces() {
     return interfaces;
 }
 
-Network::InterfaceInfo Network::get_interface_info(const std::string& interface_name) {
-    (void)interface_name; // suppress MSVC C4100 (unreferenced parameter)
-
+Network::InterfaceInfo Network::get_interface_info([[maybe_unused]] const std::string& interface_name) {
     InterfaceInfo info;
     info.is_up = false;
     info.is_loopback = false;
 
-#ifndef _WIN32
-    // TODO: Implement interface info retrieval
+#ifdef _WIN32
+    PIP_ADAPTER_INFO adapter_info = nullptr;
+    ULONG buf_len = 0;
+
+    if (GetAdaptersInfo(adapter_info, &buf_len) == ERROR_BUFFER_OVERFLOW) {
+        adapter_info = (IP_ADAPTER_INFO*)malloc(buf_len);
+        if (!adapter_info) {
+            return info;
+        }
+        if (GetAdaptersInfo(adapter_info, &buf_len) == NO_ERROR) {
+            for (PIP_ADAPTER_INFO adapter = adapter_info; adapter; adapter = adapter->Next) {
+                if (interface_name == adapter->AdapterName) {
+                    if (adapter->IpAddressList.IpAddress.String[0] != '\0') {
+                        info.ipv4 = adapter->IpAddressList.IpAddress.String;
+                    }
+                    if (adapter->IpAddressList.IpMask.String[0] != '\0') {
+                        info.netmask = adapter->IpAddressList.IpMask.String;
+                    }
+
+                    if (adapter->AddressLength >= 6) {
+                        char mac_buf[32];
+                        snprintf(mac_buf, sizeof(mac_buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                                 adapter->Address[0], adapter->Address[1], adapter->Address[2],
+                                 adapter->Address[3], adapter->Address[4], adapter->Address[5]);
+                        info.mac = mac_buf;
+                    }
+
+                    info.is_up = (adapter->Type != MIB_IF_TYPE_LOOPBACK);
+                    info.is_loopback = (adapter->Type == MIB_IF_TYPE_LOOPBACK);
+                    break;
+                }
+            }
+        }
+        free(adapter_info);
+    }
+#else
+#ifdef HAVE_PCAP
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) == 0) {
+        for (struct ifaddrs* ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_name || !ifa->ifa_addr) continue;
+            if (interface_name != ifa->ifa_name) continue;
+
+            info.is_up = (ifa->ifa_flags & IFF_UP) != 0;
+            info.is_loopback = (ifa->ifa_flags & IFF_LOOPBACK) != 0;
+
+            if (ifa->ifa_addr->sa_family == AF_INET) {
+                char addr[INET_ADDRSTRLEN];
+                char mask[INET_ADDRSTRLEN];
+
+                auto* sa = (struct sockaddr_in*)ifa->ifa_addr;
+                auto* nm = (struct sockaddr_in*)ifa->ifa_netmask;
+
+                if (inet_ntop(AF_INET, &sa->sin_addr, addr, sizeof(addr))) {
+                    info.ipv4 = addr;
+                }
+                if (inet_ntop(AF_INET, &nm->sin_addr, mask, sizeof(mask))) {
+                    info.netmask = mask;
+                }
+            }
+        }
+        freeifaddrs(ifaddr);
+    }
+#endif
 #endif
 
     return info;
