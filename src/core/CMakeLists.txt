@@ -27,9 +27,9 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_dpi.cpp
     src/tls_fingerprint.cpp
     src/dpi_advanced.cpp
-        src/secure_buffer.cpp
-            src/ncp_arp.cpp
-                    src/ncp_thread_pool.cpp
+    src/secure_buffer.cpp
+    src/ncp_arp.cpp
+    src/ncp_thread_pool.cpp
     src/ncp_dummy.cpp
     src/ncp_timing.cpp
     src/ncp_identity.cpp
@@ -37,7 +37,18 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_geneva_engine.cpp
     src/ncp_paranoid.cpp
     src/ncp_secure_memory.cpp
-        include/ncp_arp.hpp
+    # Hybrid network backend sources
+    src/network_raw_socket.cpp
+    src/dhcp_spoofer.cpp
+    src/smbios_hook.cpp
+    # ECH (Encrypted Client Hello) sources
+    src/ncp_ech.cpp
+    src/ncp_ech_cache.cpp
+    src/ncp_ech_fetch.cpp
+    src/ncp_ech_retry.cpp
+    src/ncp_mimicry.cpp
+    # Headers bundled with src
+    include/ncp_arp.hpp
     include/ncp_dummy.hpp
     include/ncp_timing.hpp
     include/ncp_identity.hpp
@@ -65,6 +76,7 @@ list(APPEND NCP_CORE_SRC_SOURCES
 # Header files in include/ subdirectory
 set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_crypto.hpp
+    include/ncp_crypto_constants.hpp
     include/ncp_doh.hpp
     include/ncp_db.hpp
     include/ncp_license.hpp
@@ -79,9 +91,18 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_security.hpp
     include/ncp_config.hpp
     include/ncp_logger.hpp
-        include/ncp_paranoid.hpp
-            include/ncp_secure_memory.hpp
-                    include/ncp_secure_buffer.hpp
+    include/ncp_paranoid.hpp
+    include/ncp_secure_memory.hpp
+    include/ncp_secure_buffer.hpp
+    # Hybrid network backend headers
+    include/ncp_network_backend.hpp
+    include/ncp_winsock_raii.hpp
+    src/ncp_dhcp_spoofer.hpp
+    # ECH headers
+    include/ncp_ech.hpp
+    include/ncp_ech_cache.hpp
+    include/ncp_ech_fetch.hpp
+    include/ncp_ech_retry.hpp
 )
 
 # Combine all sources and headers
@@ -149,6 +170,7 @@ if(UNIX)
     if(Threads_FOUND)
         target_link_libraries(ncp_core PUBLIC Threads::Threads)
     endif()
+
 elseif(WIN32)
     # Windows: use Npcap SDK if available
     if(DEFINED NPCAP_SDK_DIR AND EXISTS "${NPCAP_SDK_DIR}/Include")
@@ -162,8 +184,11 @@ elseif(WIN32)
         target_compile_definitions(ncp_core PUBLIC HAVE_PCAP)
         message(STATUS "Found Npcap SDK at ${NPCAP_SDK_DIR}")
     else()
-        message(STATUS "Npcap SDK not found - packet capture disabled on Windows")
+        message(STATUS "Npcap SDK not found - using raw socket fallback on Windows")
     endif()
+
+    # Windows networking libraries for hybrid backend (always needed)
+    target_link_libraries(ncp_core PUBLIC ws2_32 iphlpapi)
 endif()
 
 # ==================== Optional: libnetfilter_queue ====================
@@ -201,10 +226,11 @@ if(ENABLE_WEBSOCKETS AND Libwebsockets_FOUND)
 endif()
 
 # Include directories
-target_include_directories(ncp_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
+target_include_directories(ncp_core
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src
 )
 
 # Set target properties
@@ -236,7 +262,6 @@ install(DIRECTORY include/
     FILES_MATCHING PATTERN "*.hpp"
 )
 
-install(FILES
-    ${NCP_CORE_ROOT_HEADERS}
+install(FILES ${NCP_CORE_ROOT_HEADERS}
     DESTINATION include/ncp
 )
