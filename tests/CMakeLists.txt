@@ -12,8 +12,6 @@ FetchContent_Declare(
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-include(GoogleTest)
-
 # ==================== Unit Tests ====================
 
 add_executable(ncp_tests
@@ -48,8 +46,8 @@ set_target_properties(ncp_tests PROPERTIES
 )
 
 # ==================== Windows DLL Copy ====================
-# Copy vcpkg DLLs next to ncp_tests.exe so gtest_discover_tests
-# (and ctest) can find them at runtime (fixes 0xC0000135 on CI).
+# Copy vcpkg DLLs next to ncp_tests.exe so ctest can find them
+# at runtime (fixes 0xC0000135 on CI).
 if (WIN32)
     # Determine vcpkg bin directory
     if (DEFINED VCPKG_INSTALLED_DIR)
@@ -69,8 +67,16 @@ if (WIN32)
     endif()
 endif()
 
-# ==================== Test Discovery ====================
-gtest_discover_tests(ncp_tests
-    WORKING_DIRECTORY $<TARGET_FILE_DIR:ncp_tests>
-    DISCOVERY_TIMEOUT 10
-)
+# ==================== Test Registration ====================
+# NOTE: gtest_discover_tests is intentionally NOT used here.
+# It runs the test binary at CMake/MSBuild time (before DLLs are
+# available on PATH), which causes exit code 0xC0000135 on Windows CI.
+# Tests are run via ctest after the build, when DLLs are already present.
+#
+# include(GoogleTest)
+# gtest_discover_tests(ncp_tests
+#     WORKING_DIRECTORY $<TARGET_FILE_DIR:ncp_tests>
+#     DISCOVERY_TIMEOUT 10
+# )
+
+add_test(NAME ncp_tests COMMAND ncp_tests)

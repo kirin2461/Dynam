@@ -130,4 +130,6 @@ jobs:
 
       - name: Run tests
         working-directory: build
+        env:
+          PATH: C:/vcpkg/installed/x64-windows/bin;${{ env.PATH }}
         run: ctest -C Release --output-on-failure
