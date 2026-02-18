@@ -109,7 +109,9 @@ std::vector<Network::InterfaceInfo> Network::get_interfaces() {
     return interfaces;
 }
 
-Network::InterfaceInfo Network::get_interface_info(const std::string& /* interface_name */) {
+Network::InterfaceInfo Network::get_interface_info(const std::string& interface_name) {
+    (void)interface_name; // suppress MSVC C4100 (unreferenced parameter)
+
     InterfaceInfo info;
     info.is_up = false;
     info.is_loopback = false;
@@ -274,7 +276,10 @@ void Network::cleanup_bypass() {
 
 // ==================== Raw Packet Operations ====================
 
-bool Network::send_raw_packet(const std::string& /* dest_ip */, const std::vector<uint8_t>& /* data */) {
+bool Network::send_raw_packet(const std::string& dest_ip, const std::vector<uint8_t>& data) {
+    (void)dest_ip; // suppress MSVC C4100 (unreferenced parameter)
+    (void)data;    // suppress MSVC C4100 (unreferenced parameter)
+
 #ifndef _WIN32
     if (geteuid() != 0) {
         last_error_ = "Raw sockets require root privileges";
@@ -288,26 +293,40 @@ bool Network::send_raw_packet(const std::string& /* dest_ip */, const std::vecto
 }
 
 bool Network::send_tcp_packet(
-    const std::string& /* dest_ip */,
-    uint16_t /* dest_port */,
-    const std::vector<uint8_t>& /* payload */,
-    uint8_t /* flags */
+    const std::string& dest_ip,
+    uint16_t dest_port,
+    const std::vector<uint8_t>& payload,
+    uint8_t flags
 ) {
+    (void)dest_ip;  // suppress MSVC C4100 (unreferenced parameter)
+    (void)dest_port; // suppress MSVC C4100 (unreferenced parameter)
+    (void)payload;  // suppress MSVC C4100 (unreferenced parameter)
+    (void)flags;    // suppress MSVC C4100 (unreferenced parameter)
+
     return false;
 }
 
-void Network::apply_bypass_to_packet(std::vector<uint8_t>& /* packet */) {}
+void Network::apply_bypass_to_packet(std::vector<uint8_t>& packet) {
+    (void)packet; // suppress MSVC C4100 (unreferenced parameter)
+}
 
-void Network::fragment_packet(std::vector<uint8_t>& /* packet */) {}
+void Network::fragment_packet(std::vector<uint8_t>& packet) {
+    (void)packet; // suppress MSVC C4100 (unreferenced parameter)
+}
 
 bool Network::inject_fragmented_packets(
-    const std::vector<std::vector<uint8_t>>& /* packets */,
-    int /* delay_ms */
+    const std::vector<std::vector<uint8_t>>& packets,
+    int delay_ms
 ) {
+    (void)packets;  // suppress MSVC C4100 (unreferenced parameter)
+    (void)delay_ms; // suppress MSVC C4100 (unreferenced parameter)
+
     return false;
 }
 
-void Network::set_tcp_window_size(uint16_t /* size */) {}
+void Network::set_tcp_window_size(uint16_t size) {
+    (void)size; // suppress MSVC C4100 (unreferenced parameter)
+}
 
 // ==================== DNS Operations ====================
 
@@ -328,7 +347,9 @@ std::string Network::resolve_dns(const std::string& hostname, bool use_doh) {
     return std::string(ip_str);
 }
 
-std::string Network::resolve_dns_over_https(const std::string& /* hostname */) {
+std::string Network::resolve_dns_over_https(const std::string& hostname) {
+    (void)hostname; // suppress MSVC C4100 (unreferenced parameter)
+
     return "";
 }
 
