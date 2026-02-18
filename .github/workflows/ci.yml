@@ -68,56 +68,42 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       # ============================================================
-      # Npcap runtime — нужен для pcap-тестов на Windows
+      # Npcap SDK — заголовки + import libs для компиляции на Windows
+      # Runtime pcap-тесты выполняются только на Linux
       # ============================================================
-      - name: Install Npcap runtime (silent)
+      - name: Install Npcap SDK (headers + libs)
         if: runner.os == 'Windows'
         shell: pwsh
-        timeout-minutes: 3
+        timeout-minutes: 2
         run: |
-          $npcapUrl = "https://npcap.com/dist/npcap-1.80.exe"
-          $installer = "$env:TEMP\npcap-installer.exe"
+          $sdkUrl = "https://npcap.com/dist/npcap-sdk-1.13.zip"
+          $sdkZip = "$env:TEMP\npcap-sdk.zip"
+          $sdkDir = "$env:GITHUB_WORKSPACE\npcap-sdk"
 
-          # Скачивание с retry
           $retries = 2
           for ($i = 0; $i -le $retries; $i++) {
             try {
-              Invoke-WebRequest -Uri $npcapUrl -OutFile $installer -TimeoutSec 120
-              Write-Host "Npcap downloaded successfully"
+              Invoke-WebRequest -Uri $sdkUrl -OutFile $sdkZip -TimeoutSec 60
+              Write-Host "Npcap SDK downloaded successfully"
               break
             } catch {
               if ($i -eq $retries) {
-                Write-Warning "Download failed after $($retries + 1) attempts: $_"
-                exit 0  # soft-fail — тесты скипнутся
+                Write-Warning "SDK download failed: $_"
+                exit 0
               }
-              Write-Host "Download attempt $($i + 1) failed, retrying in 5s..."
-              Start-Sleep -Seconds 5
+              Start-Sleep -Seconds 3
             }
           }
 
-          # Запуск инсталлятора с таймаутом
-          $process = Start-Process -FilePath $installer `
-            -ArgumentList "/S", "/winpcap_mode=yes", "/loopback_support=no" -PassThru
+          Expand-Archive -Path $sdkZip -DestinationPath $sdkDir -Force
 
-          if (-not $process.WaitForExit(120000)) {
-            Write-Warning "Npcap installation timed out, killing process tree"
-            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            Get-Process -Name "NPFInstall" -ErrorAction SilentlyContinue | Stop-Process -Force
-          }
-
-          # Проверка exit code
-          if ($process.ExitCode -ne 0 -and $null -ne $process.ExitCode) {
-            Write-Warning "Npcap exited with code $($process.ExitCode)"
-          }
-
-          # Верификация и добавление в PATH
-          $npcapDir = "C:\Windows\System32\Npcap"
-          if (Test-Path $npcapDir) {
-            Write-Host "Npcap installed successfully. DLLs:"
-            Get-ChildItem "$npcapDir\*.dll" | ForEach-Object { Write-Host "  $($_.Name)" }
-            echo "$npcapDir" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          if (Test-Path "$sdkDir\Include\pcap.h") {
+            Write-Host "Npcap SDK ready at $sdkDir"
+            Write-Host "Headers: $(Get-ChildItem "$sdkDir\Include\*.h" | Measure-Object | Select-Object -Expand Count) files"
+            Write-Host "Libs: $(Get-ChildItem "$sdkDir\Lib\x64\*.lib" | Measure-Object | Select-Object -Expand Count) files"
           } else {
-            Write-Warning "Npcap directory not found — pcap tests will be skipped"
+            Write-Warning "pcap.h not found — checking structure:"
+            Get-ChildItem $sdkDir -Recurse -Depth 2 | Select-Object FullName
           }
 
       - name: Create build directory
@@ -139,6 +125,7 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake \
+            -DNPCAP_SDK_DIR=$GITHUB_WORKSPACE/npcap-sdk \
             -DENABLE_TESTS=ON -DENABLE_CLI=ON \
             -DENABLE_GUI=OFF -DENABLE_WEBSOCKETS=ON
         shell: bash
