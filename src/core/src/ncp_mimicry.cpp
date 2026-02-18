@@ -3,7 +3,7 @@
 #include <sstream>
 #include <iomanip>
 #include <ctime>
-
+#include <array> 
 namespace ncp {
 
 // ---- Constructor / Destructor ----------------------------------------

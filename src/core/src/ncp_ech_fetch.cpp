@@ -4,7 +4,7 @@
  */
 
 #include "../include/ncp_ech_fetch.hpp"
-#include "../include/doh.hpp"  // Existing DoH implementation
+#include "../include/ncp_doh.hpp"  // Existing DoH implementation
 #include <algorithm>
 #include <sstream>
 
