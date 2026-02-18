@@ -1,7 +1,7 @@
-#include "../include/ncp_dhcp_spoofer.hpp"
+#include "ncp_dhcp_spoofer.hpp"
 #include <sstream>
 #include <fstream>
-#include string>
+#include <string>
 #include <random>
 #include <iomanip>
 #include <iostream>
