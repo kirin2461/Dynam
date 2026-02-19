@@ -7,7 +7,6 @@
 #include <memory>
 #include <functional>
 #include <chrono>
-#include <random>
 #include <cstdint>
 
 namespace ncp {
@@ -230,9 +229,10 @@ public:
     );
     
     // Reorder segments for disorder effect
+    // Phase 0: unused_param kept for API compatibility (libsodium used internally)
     void shuffle_segments(
         std::vector<std::vector<uint8_t>>& segments,
-        std::mt19937& rng
+        void* unused_param = nullptr
     );
 
 private:

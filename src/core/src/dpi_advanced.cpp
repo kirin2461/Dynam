@@ -12,7 +12,6 @@
 #include <iomanip>
 #include <set>
 #include <chrono>
-#include <random>
 
 namespace ncp {
 namespace DPI {
@@ -135,7 +134,7 @@ std::vector<uint8_t> TCPManipulator::add_oob_marker(
 
 void TCPManipulator::shuffle_segments(
     std::vector<std::vector<uint8_t>>& segments,
-    std::mt19937& /* unused - kept for API compatibility */
+    void* /* unused_param - kept for API compatibility */
 ) {
     if (segments.size() <= 1) return;
     
