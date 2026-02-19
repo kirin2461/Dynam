@@ -304,6 +304,25 @@ enum class LogLevel {
 using LogCallback = std::function<void(LogLevel, const std::string&)>;
 using ConfigChangeCallback = std::function<void(const DPIConfig&, const DPIConfig&)>;
 
+/**
+ * @brief Callback for advanced DPI transform pipeline integration.
+ *
+ * When set, the proxy send path delegates packet transformation to the
+ * callback instead of using the built-in send_with_fragmentation logic.
+ *
+ * Parameters:
+ *   - data:            raw packet bytes
+ *   - len:             byte count
+ *   - is_client_hello: true when the packet is a TLS ClientHello
+ *
+ * Returns: ordered list of segments to send over the wire.
+ *          Each segment is transmitted as a separate send() call,
+ *          with optional timing jitter applied between them.
+ */
+using TransformCallback = std::function<
+    std::vector<std::vector<uint8_t>>(const uint8_t* data, size_t len, bool is_client_hello)
+>;
+
 struct DPIStats {
     std::atomic<uint64_t> packets_total{0};
     std::atomic<uint64_t> packets_modified{0};
@@ -381,6 +400,21 @@ public:
     void set_log_callback(LogCallback callback);
     void set_config_change_callback(ConfigChangeCallback callback);
 
+    /**
+     * @brief Register an advanced transform pipeline for outgoing packets.
+     *
+     * When a non-null callback is installed the proxy send path will call it
+     * instead of the built-in send_with_fragmentation routine, allowing
+     * AdvancedDPIBypass::process_outgoing (or any external transform chain)
+     * to control segmentation, obfuscation and timing of each connection.
+     *
+     * Pass nullptr to revert to the default built-in fragmentation logic.
+     *
+     * Thread-safe: the callback is guarded by an internal mutex and may be
+     * changed while the proxy is running.
+     */
+    void set_transform_callback(TransformCallback callback);
+
 private:
     void log(LogLevel level, const std::string& message);
     void notify_config_change(const DPIConfig& old_cfg, const DPIConfig& new_cfg);
@@ -396,6 +430,9 @@ private:
 
     mutable std::mutex config_cb_mutex_;
     ConfigChangeCallback config_change_callback_;
+
+    mutable std::mutex transform_cb_mutex_;
+    TransformCallback transform_callback_;
 
     DPIStats stats_;
 };

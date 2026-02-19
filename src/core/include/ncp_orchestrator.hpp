@@ -9,6 +9,8 @@
  *   Phase 2: FlowShaper          — flow-level timing/size shaping
  *   Phase 3: ProbeResist          — server-side active probe defense
  *   +        TrafficMimicry       — protocol wrapping (HTTPS/DNS/QUIC)
+ *   +        AdvancedDPIBypass     — technique-driven DPI evasion pipeline
+ *   +        TLSFingerprint        — JA3/JA4 fingerprint spoofing
  *
  * into a single send()/receive() API with automatic strategy selection.
  */
@@ -17,6 +19,8 @@
 #include "ncp_flow_shaper.hpp"
 #include "ncp_probe_resist.hpp"
 #include "ncp_mimicry.hpp"
+#include "ncp_dpi_advanced.hpp"
+#include "ncp_tls_fingerprint.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -85,6 +89,19 @@ struct OrchestratorStrategy {
     bool enable_mimicry = true;
     TrafficMimicry::MimicProfile mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // ── Advanced DPI bypass (Step 2A) ──────────────────────────────
+    bool enable_advanced_dpi = true;
+    AdvancedDPIBypass::BypassPreset advanced_dpi_preset =
+        AdvancedDPIBypass::BypassPreset::MODERATE;
+
+    /// Per-strategy technique overrides applied *on top* of the preset.
+    /// Empty = use preset defaults only.
+    std::vector<EvasionTechnique> extra_techniques;
+
+    // ── TLS Fingerprint spoofing (Step 2A) ─────────────────────────
+    bool enable_tls_fingerprint = true;
+    ncp::BrowserType tls_browser_profile = ncp::BrowserType::CHROME;
+
     // Presets
     static OrchestratorStrategy stealth();       // max protection, higher overhead
     static OrchestratorStrategy balanced();      // good protection, moderate overhead
@@ -114,6 +131,14 @@ struct OrchestratorConfig {
 
     // Health check interval
     int health_check_interval_sec = 30;
+
+    // ── Advanced DPI full config (Step 2A) ─────────────────────────
+    /// When set, overrides the preset from strategy.advanced_dpi_preset.
+    /// Leave default-constructed to let the preset fill it in.
+    AdvancedDPIConfig advanced_dpi_config;
+
+    // ── TLS Fingerprint default profile (Step 2A) ──────────────────
+    ncp::BrowserType tls_browser_profile = ncp::BrowserType::CHROME;
 
     // Callback when strategy changes
     using StrategyChangeCallback = std::function<void(
@@ -208,7 +233,8 @@ public:
     // ===== Client Pipeline =====
 
     /// Full client send pipeline:
-    /// payload → adversarial_pad → mimicry_wrap → auth_prepend → flow_shape
+    /// payload → tls_fingerprint → advanced_dpi → adversarial_pad
+    ///         → mimicry_wrap → auth_prepend → flow_shape
     /// Returns shaped packets ready for the wire.
     std::vector<OrchestratedPacket> send(const std::vector<uint8_t>& payload);
 
@@ -265,6 +291,14 @@ public:
     const ProbeResist& probe_resist() const;
     const TrafficMimicry& mimicry() const;
 
+    /// Access the advanced DPI bypass component (may be nullptr if disabled).
+    AdvancedDPIBypass* advanced_dpi();
+    const AdvancedDPIBypass* advanced_dpi() const;
+
+    /// Access the TLS fingerprint component (may be nullptr if disabled).
+    ncp::TLSFingerprint* tls_fingerprint();
+    const ncp::TLSFingerprint* tls_fingerprint() const;
+
     // ===== Config & Stats =====
 
     void set_config(const OrchestratorConfig& config);
@@ -281,16 +315,26 @@ private:
     void health_monitor_func();
     void update_overhead_stats();
 
+    /// Initialize / reconfigure the advanced DPI bypass from current strategy.
+    void init_advanced_dpi();
+
+    /// Apply TLS browser profile to the fingerprint component.
+    void apply_tls_profile(ncp::BrowserType profile);
+
     OrchestratorConfig config_;
     OrchestratorStats stats_;
     OrchestratorStrategy current_strategy_;
     ThreatLevel threat_level_ = ThreatLevel::NONE;
 
-    // Components
+    // Core components
     AdversarialPadding adversarial_;
     FlowShaper flow_shaper_;
     ProbeResist probe_resist_;
     TrafficMimicry mimicry_;
+
+    // Advanced DPI components (Step 2A)
+    std::unique_ptr<AdvancedDPIBypass> advanced_dpi_;
+    std::unique_ptr<ncp::TLSFingerprint> tls_fingerprint_;
 
     // Adaptive state
     int consecutive_failures_ = 0;

@@ -199,16 +199,47 @@ public:
     std::atomic<bool> running{false};
     DPIConfig config;
 
-DPIStats stats;
+    DPIStats stats;
     mutable std::mutex stats_mutex;
     std::thread worker_thread;
     std::function<void(const std::string&)> log_callback;
 
+    // === Transform callback for advanced DPI integration (Step 1A/1B) ===
+    mutable std::mutex transform_cb_mutex_;
+    TransformCallback transform_callback_;
 
     // === Thread pool for connection handling (Task 3.1) ===
     std::unique_ptr<ncp::ThreadPool> thread_pool_;
     std::atomic<int> active_connections_{0};
     static constexpr int MAX_CONNECTIONS = 256;
+
+    // ------------------------------------------------------------------
+    // Reusable send helper: pushes all bytes to socket, returns count sent
+    // ------------------------------------------------------------------
+    size_t send_all(SOCKET sock, const uint8_t* d, size_t l) {
+        size_t total_sent = 0;
+        while (total_sent < l) {
+            int to_send = static_cast<int>(std::min<size_t>(l - total_sent, 1460));
+            int sent = send(sock,
+                            reinterpret_cast<const char*>(d + total_sent),
+                            to_send,
+                            0);
+            if (sent <= 0) {
+                break;
+            }
+            total_sent += static_cast<size_t>(sent);
+        }
+        return total_sent;
+    }
+
+    // ------------------------------------------------------------------
+    // Snapshot the current transform callback (lock-free on hot path)
+    // ------------------------------------------------------------------
+    TransformCallback get_transform_callback() {
+        std::lock_guard<std::mutex> lock(transform_cb_mutex_);
+        return transform_callback_;
+    }
+
     // === Proxy mode state ===
     void proxy_listen_loop() {
 #ifdef _WIN32
@@ -234,6 +265,20 @@ DPIStats stats;
         int opt = 1;
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR,
                    reinterpret_cast<const char*>(&opt), sizeof(opt));
+
+        // Step 1C: Set accept() timeout so the loop can check `running`
+        // periodically and shut down cleanly instead of blocking forever.
+#ifdef _WIN32
+        DWORD accept_timeout_ms = 1000;
+        setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&accept_timeout_ms),
+                   sizeof(accept_timeout_ms));
+#else
+        struct timeval accept_tv{1, 0}; // 1 second
+        setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&accept_tv),
+                   sizeof(accept_tv));
+#endif
 
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
@@ -261,7 +306,7 @@ DPIStats stats;
             return;
         }
 
-                // Initialize thread pool (Task 3.1)
+        // Initialize thread pool (Task 3.1)
         size_t num_threads = std::min<size_t>(std::thread::hardware_concurrency(), 8);
         thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
         log("DPI proxy listening on 127.0.0.1:" + std::to_string(config.listen_port));
@@ -278,17 +323,17 @@ DPIStats stats;
                                         reinterpret_cast<sockaddr*>(&client_addr),
                                         &addr_len);
             if (client_sock == INVALID_SOCKET) {
-                if (!running) break;
+                // accept() timed out or was interrupted — recheck running flag
                 continue;
             }
         
-                    // Thread pool implementation (Task 3.1) - replaces detach() for proper resource management
+            // Thread pool implementation (Task 3.1) - replaces detach() for proper resource management
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
                 stats.connections_handled++;
             }
 
-                        thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
+            thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
         }
 
         CLOSE_SOCKET(listen_sock);
@@ -353,9 +398,15 @@ DPIStats stats;
         CLOSE_SOCKET(server_sock);
     }
 
+    // ------------------------------------------------------------------
+    // Client -> Server path: advanced transform callback OR built-in
+    // ------------------------------------------------------------------
     void pipe_client_to_server(SOCKET client_sock, SOCKET server_sock) {
         std::vector<uint8_t> buffer(8192);
         bool client_hello_processed = false;
+
+        // Snapshot callback once per connection (avoids lock on every packet)
+        TransformCallback transform_cb = get_transform_callback();
 
         while (running) {
             int received = recv(client_sock,
@@ -372,20 +423,60 @@ DPIStats stats;
                 stats.packets_total++;
             }
 
-            bool is_client_hello = false;
+            bool is_ch = false;
             if (!client_hello_processed &&
                 is_tls_client_hello(buffer.data(),
                                     static_cast<size_t>(received))) {
-                is_client_hello = true;
+                is_ch = true;
                 client_hello_processed = true;
             }
 
-            send_with_fragmentation(
-                server_sock,
-                buffer.data(),
-                static_cast<size_t>(received),
-                is_client_hello
-            );
+            // === Advanced transform path (Step 1B) ===
+            if (transform_cb) {
+                auto segments = transform_cb(
+                    buffer.data(),
+                    static_cast<size_t>(received),
+                    is_ch
+                );
+
+                size_t total_sent = 0;
+                for (size_t i = 0; i < segments.size(); ++i) {
+                    const auto& seg = segments[i];
+                    if (seg.empty()) continue;
+
+                    // Apply timing jitter between segments (not before first)
+                    if (i > 0 && config.enable_timing_jitter) {
+                        int range = config.timing_jitter_max_us - config.timing_jitter_min_us;
+                        int jitter_us = config.timing_jitter_min_us;
+                        if (range > 0) {
+                            jitter_us += static_cast<int>(randombytes_uniform(
+                                static_cast<uint32_t>(range)));
+                        }
+                        if (jitter_us > 0) {
+                            std::this_thread::sleep_for(
+                                std::chrono::microseconds(jitter_us));
+                        }
+                    }
+
+                    total_sent += send_all(server_sock, seg.data(), seg.size());
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.bytes_sent += static_cast<uint64_t>(total_sent);
+                    if (segments.size() > 1) {
+                        stats.packets_fragmented++;
+                    }
+                }
+            } else {
+                // === Built-in fragmentation path (original behavior) ===
+                send_with_fragmentation(
+                    server_sock,
+                    buffer.data(),
+                    static_cast<size_t>(received),
+                    is_ch
+                );
+            }
         }
     }
 
@@ -408,12 +499,12 @@ DPIStats stats;
             }
 
             // No fragmentation for server->client path
-            send_with_fragmentation(
-                client_sock,
-                buffer.data(),
-                static_cast<size_t>(received),
-                false
-            );
+            size_t sent = send_all(client_sock, buffer.data(),
+                                   static_cast<size_t>(received));
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                stats.bytes_sent += static_cast<uint64_t>(sent);
+            }
         }
     }
 
@@ -426,22 +517,6 @@ DPIStats stats;
         if (!data || len == 0) {
             return;
         }
-
-        auto send_all = [&](const uint8_t* d, size_t l) -> size_t {
-            size_t total_sent = 0;
-            while (total_sent < l) {
-                int to_send = static_cast<int>(std::min<size_t>(l - total_sent, 1460));
-                int sent = send(sock,
-                                reinterpret_cast<const char*>(d + total_sent),
-                                to_send,
-                                0);
-                if (sent <= 0) {
-                    break;
-                }
-                total_sent += static_cast<size_t>(sent);
-            }
-            return total_sent;
-        };
 
         // Add Noise/Junk data before the actual ClientHello
         if (is_client_hello && config.enable_noise) {
@@ -462,14 +537,14 @@ DPIStats stats;
             getsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<char*>(&original_ttl), &optlen);
             int low_ttl = 2; 
             setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&low_ttl), sizeof(low_ttl));
-            send_all(junk.data(), junk.size());
+            send_all(sock, junk.data(), junk.size());
             setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&original_ttl), sizeof(original_ttl));
 #else
-            send_all(junk.data(), junk.size());
+            send_all(sock, junk.data(), junk.size());
 #endif
         }
 
-        // Optional fake low‑TTL probe before main ClientHello
+        // Optional fake low-TTL probe before main ClientHello
         if (is_client_hello && config.enable_fake_packet) {
             
             // Send multiple fake packets with different characteristics
@@ -479,46 +554,69 @@ DPIStats stats;
                     0x16, 0x03, static_cast<uint8_t>(randombytes_uniform(256) % 4), // TLS record + random version minor
                     static_cast<uint8_t>(randombytes_uniform(256)), static_cast<uint8_t>(randombytes_uniform(256)), // Random length
                     0x01 // ClientHello
-                                };
+                };
+
+                // Step 1C: Set TCP_NODELAY before sending fake packet to force
+                // immediate flush — prevents Nagle from coalescing fake+real
+                // data into one TCP segment, which would defeat the purpose.
+                int nodelay_on = 1;
+                int prev_nodelay = 0;
+#ifdef _WIN32
+                int nd_len = static_cast<int>(sizeof(prev_nodelay));
+#else
+                socklen_t nd_len = static_cast<socklen_t>(sizeof(prev_nodelay));
+#endif
+                getsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                           reinterpret_cast<char*>(&prev_nodelay), &nd_len);
+                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                           reinterpret_cast<const char*>(&nodelay_on),
+                           sizeof(nodelay_on));
+
     #ifdef IP_TTL
-                                int original_ttl = 0;
-                    socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
-                    bool ttl_changed = false;
-                    if (getsockopt(sock, IPPROTO_IP, IP_TTL,
-                                   reinterpret_cast<char*>(&original_ttl),
-                                   &optlen) == 0) {
-                        int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
-                        if (setsockopt(sock, IPPROTO_IP, IP_TTL,
-                                       reinterpret_cast<const char*>(&ttl),
-                                       sizeof(ttl)) == 0) {
-                            ttl_changed = true;
-                        }
-                    }
-    #endif
-                    send_all(fake_data.data(), fake_data.size());
-                    
-                    {
-                        std::lock_guard<std::mutex> lock(stats_mutex);
-                        stats.fake_packets_sent++;
-                    }
-    
-    #ifdef IP_TTL
-                    if (ttl_changed) {
-                        setsockopt(sock, IPPROTO_IP, IP_TTL,
-                                   reinterpret_cast<const char*>(&original_ttl),
-                                   sizeof(original_ttl));
-                    }
-    #endif
-                    if (config.disorder_delay_ms > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
+                int original_ttl = 0;
+                socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
+                bool ttl_changed = false;
+                if (getsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<char*>(&original_ttl),
+                               &optlen) == 0) {
+                    int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
+                    if (setsockopt(sock, IPPROTO_IP, IP_TTL,
+                                   reinterpret_cast<const char*>(&ttl),
+                                   sizeof(ttl)) == 0) {
+                        ttl_changed = true;
                     }
                 }
+    #endif
+                send_all(sock, fake_data.data(), fake_data.size());
+                
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.fake_packets_sent++;
+                }
+    
+    #ifdef IP_TTL
+                if (ttl_changed) {
+                    setsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<const char*>(&original_ttl),
+                               sizeof(original_ttl));
+                }
+    #endif
+
+                // Restore original TCP_NODELAY value
+                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                           reinterpret_cast<const char*>(&prev_nodelay),
+                           sizeof(prev_nodelay));
+
+                if (config.disorder_delay_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
+                }
+            }
         }
 
         // If this is not a ClientHello or TCP splitting is disabled,
         // just send as-is (potentially chunked by MTU size).
         if (!is_client_hello || !config.enable_tcp_split) {
-            size_t sent = send_all(data, len);
+            size_t sent = send_all(sock, data, len);
             std::lock_guard<std::mutex> lock(stats_mutex);
             stats.bytes_sent += static_cast<uint64_t>(sent);
             return;
@@ -543,7 +641,7 @@ DPIStats stats;
         }
 
         size_t sent_total = 0;
-        size_t sent_first = send_all(data, first_len);
+        size_t sent_first = send_all(sock, data, first_len);
         sent_total += sent_first;
 
         size_t remaining = (sent_first < len) ? (len - sent_first) : 0;
@@ -565,7 +663,7 @@ DPIStats stats;
                         std::chrono::milliseconds(config.disorder_delay_ms));
                 }
 
-                size_t sent = send_all(data + sent_first + offset, current_frag);
+                size_t sent = send_all(sock, data + sent_first + offset, current_frag);
                 sent_total += sent;
                 if (sent == 0) {
                     break;
@@ -768,6 +866,11 @@ void DPIBypass::set_log_callback(LogCallback cb) {
     impl_->log_callback = [cb](const std::string& msg) { if (cb) cb(LogLevel::INFO, msg); };
 }
 
+void DPIBypass::set_transform_callback(TransformCallback callback) {
+    std::lock_guard<std::mutex> lock(impl_->transform_cb_mutex_);
+    impl_->transform_callback_ = std::move(callback);
+}
+
 DPIConfig DPIBypass::get_config() const {
     std::lock_guard<std::mutex> lock(impl_->stats_mutex);
     return impl_->config;
@@ -815,4 +918,3 @@ void DPIBypass::notify_config_change(const DPIConfig& old_cfg, const DPIConfig& 
 } // namespace DPI
 
 } // namespace ncp
-

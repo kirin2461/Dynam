@@ -27,6 +27,16 @@ ThreatLevel threat_level_from_int(int level) noexcept {
     return ThreatLevel::CRITICAL;
 }
 
+// ===== Helper: detect TLS ClientHello =====
+
+namespace {
+
+bool looks_like_client_hello(const uint8_t* data, size_t len) {
+    return len > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01;
+}
+
+} // anonymous namespace
+
 // ===== Strategy Presets =====
 
 OrchestratorStrategy OrchestratorStrategy::stealth() {
@@ -48,6 +58,17 @@ OrchestratorStrategy OrchestratorStrategy::stealth() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // Step 2A/2B: Advanced DPI — STEALTH preset with fingerprint rotation
+    s.enable_advanced_dpi = true;
+    s.advanced_dpi_preset = AdvancedDPIBypass::BypassPreset::STEALTH;
+    s.extra_techniques = {
+        EvasionTechnique::TCP_DISORDER,
+        EvasionTechnique::TLS_PADDING
+    };
+
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::RANDOM;
+
     return s;
 }
 
@@ -68,6 +89,13 @@ OrchestratorStrategy OrchestratorStrategy::balanced() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // Step 2A/2B: Advanced DPI — MODERATE preset
+    s.enable_advanced_dpi = true;
+    s.advanced_dpi_preset = AdvancedDPIBypass::BypassPreset::MODERATE;
+
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+
     return s;
 }
 
@@ -87,6 +115,12 @@ OrchestratorStrategy OrchestratorStrategy::performance() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // Step 2A/2B: Advanced DPI — MINIMAL preset, no TLS fingerprint
+    s.enable_advanced_dpi = true;
+    s.advanced_dpi_preset = AdvancedDPIBypass::BypassPreset::MINIMAL;
+
+    s.enable_tls_fingerprint = false;
+
     return s;
 }
 
@@ -104,6 +138,10 @@ OrchestratorStrategy OrchestratorStrategy::max_compat() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // Step 2A/2B: No advanced DPI, no TLS fingerprint
+    s.enable_advanced_dpi = false;
+    s.enable_tls_fingerprint = false;
+
     return s;
 }
 
@@ -114,6 +152,7 @@ OrchestratorConfig OrchestratorConfig::client_default() {
     c.is_server = false;
     c.adaptive = true;
     c.strategy = OrchestratorStrategy::balanced();
+    c.tls_browser_profile = ncp::BrowserType::CHROME;
     return c;
 }
 
@@ -122,6 +161,9 @@ OrchestratorConfig OrchestratorConfig::server_default() {
     c.is_server = true;
     c.adaptive = false;
     c.strategy = OrchestratorStrategy::balanced();
+    // Servers don't need TLS fingerprint or advanced DPI (they receive)
+    c.strategy.enable_advanced_dpi = false;
+    c.strategy.enable_tls_fingerprint = false;
     return c;
 }
 
@@ -181,6 +223,12 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
 void ProtocolOrchestrator::stop() {
     running_.store(false);
     flow_shaper_.stop();
+
+    // Step 2B: Stop advanced DPI if running
+    if (advanced_dpi_ && advanced_dpi_->is_running()) {
+        advanced_dpi_->stop();
+    }
+
     if (health_thread_.joinable()) {
         health_thread_.join();
     }
@@ -188,6 +236,51 @@ void ProtocolOrchestrator::stop() {
 
 bool ProtocolOrchestrator::is_running() const {
     return running_.load();
+}
+
+// ===== Step 2B: init_advanced_dpi =====
+
+void ProtocolOrchestrator::init_advanced_dpi() {
+    // Stop existing instance if any
+    if (advanced_dpi_ && advanced_dpi_->is_running()) {
+        advanced_dpi_->stop();
+    }
+
+    advanced_dpi_ = std::make_unique<AdvancedDPIBypass>();
+
+    // Check if caller provided a full custom config
+    bool has_custom = !config_.advanced_dpi_config.techniques.empty() ||
+                      config_.advanced_dpi_config.obfuscation != ObfuscationMode::NONE;
+
+    if (has_custom) {
+        // Use full custom config from OrchestratorConfig
+        advanced_dpi_->initialize(config_.advanced_dpi_config);
+    } else {
+        // Use preset from strategy, then apply extra techniques
+        AdvancedDPIConfig adv_cfg;
+        adv_cfg.base_config = config_.advanced_dpi_config.base_config;
+        advanced_dpi_->initialize(adv_cfg);
+        advanced_dpi_->apply_preset(current_strategy_.advanced_dpi_preset);
+    }
+
+    // Add per-strategy extra techniques on top
+    for (auto t : current_strategy_.extra_techniques) {
+        advanced_dpi_->set_technique_enabled(t, true);
+    }
+
+    // Start the advanced bypass (this wires its process_outgoing
+    // as TransformCallback on the internal DPIBypass via Step 1F)
+    advanced_dpi_->start();
+}
+
+// ===== Step 2B: apply_tls_profile =====
+
+void ProtocolOrchestrator::apply_tls_profile(ncp::BrowserType profile) {
+    if (!tls_fingerprint_) {
+        tls_fingerprint_ = std::make_unique<ncp::TLSFingerprint>(profile);
+    } else {
+        tls_fingerprint_->set_profile(profile);
+    }
 }
 
 // ===== Client Pipeline: send =====
@@ -205,6 +298,77 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
     stats_.bytes_original.fetch_add(payload.size());
 
     std::vector<uint8_t> data = payload;
+
+    // ------------------------------------------------------------------
+    // Step 0a (2B): TLS Fingerprint — randomize ClientHello fingerprint
+    // ------------------------------------------------------------------
+    bool is_ch = looks_like_client_hello(data.data(), data.size());
+
+    if (is_ch && current_strategy_.enable_tls_fingerprint && tls_fingerprint_) {
+        tls_fingerprint_->randomize_all();
+        // Note: actual ClientHello bytes are modified by the TLS stack;
+        // here we ensure the fingerprint state is ready for the next
+        // handshake.  If the payload IS a raw ClientHello being proxied,
+        // advanced DPI's process_outgoing handles splitting/mutation.
+    }
+
+    // ------------------------------------------------------------------
+    // Step 0b (2B): Advanced DPI — technique-driven evasion pipeline
+    // ------------------------------------------------------------------
+    if (current_strategy_.enable_advanced_dpi &&
+        advanced_dpi_ && advanced_dpi_->is_running()) {
+
+        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+
+        // If advanced DPI produced multiple segments, each one becomes
+        // an independent packet through the rest of the pipeline.
+        if (segments.size() > 1) {
+            std::vector<OrchestratedPacket> all_results;
+
+            for (auto& seg : segments) {
+                std::vector<uint8_t> seg_data = std::move(seg);
+
+                // Step 1: Adversarial Padding
+                if (current_strategy_.enable_adversarial) {
+                    seg_data = adversarial_.pad(seg_data);
+                }
+                // Step 2: Protocol Mimicry
+                if (current_strategy_.enable_mimicry) {
+                    seg_data = mimicry_.wrap_payload(seg_data, current_strategy_.mimic_profile);
+                }
+                // Step 3: Auth token
+                if (current_strategy_.enable_probe_resist && !config_.is_server) {
+                    auto token = probe_resist_.generate_client_auth();
+                    seg_data.insert(seg_data.begin(), token.begin(), token.end());
+                }
+                // Step 4: Flow Shaping
+                if (current_strategy_.enable_flow_shaping) {
+                    auto shaped = flow_shaper_.shape_sync(seg_data, true);
+                    for (auto& sp : shaped) {
+                        OrchestratedPacket op;
+                        op.data = std::move(sp.data);
+                        op.delay = sp.delay_before_send;
+                        op.is_dummy = sp.is_dummy;
+                        stats_.bytes_on_wire.fetch_add(op.data.size());
+                        all_results.push_back(std::move(op));
+                    }
+                } else {
+                    OrchestratedPacket op;
+                    stats_.bytes_on_wire.fetch_add(seg_data.size());
+                    op.data = std::move(seg_data);
+                    all_results.push_back(std::move(op));
+                }
+            }
+
+            update_overhead_stats();
+            return all_results;
+        }
+
+        // Single segment — replace data and continue normal path
+        if (!segments.empty()) {
+            data = std::move(segments[0]);
+        }
+    }
 
     // Step 1: Adversarial Padding (Phase 1)
     if (current_strategy_.enable_adversarial) {
@@ -253,6 +417,50 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
     stats_.bytes_original.fetch_add(payload.size());
 
     std::vector<uint8_t> data = payload;
+
+    // Step 0a (2B): TLS Fingerprint
+    bool is_ch = looks_like_client_hello(data.data(), data.size());
+    if (is_ch && current_strategy_.enable_tls_fingerprint && tls_fingerprint_) {
+        tls_fingerprint_->randomize_all();
+    }
+
+    // Step 0b (2B): Advanced DPI
+    if (current_strategy_.enable_advanced_dpi &&
+        advanced_dpi_ && advanced_dpi_->is_running()) {
+
+        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+
+        if (segments.size() > 1) {
+            // Multi-segment: process each through rest of pipeline and send
+            for (auto& seg : segments) {
+                std::vector<uint8_t> seg_data = std::move(seg);
+
+                if (current_strategy_.enable_adversarial) {
+                    seg_data = adversarial_.pad(seg_data);
+                }
+                if (current_strategy_.enable_mimicry) {
+                    seg_data = mimicry_.wrap_payload(seg_data, current_strategy_.mimic_profile);
+                }
+                if (current_strategy_.enable_probe_resist && !config_.is_server) {
+                    auto token = probe_resist_.generate_client_auth();
+                    seg_data.insert(seg_data.begin(), token.begin(), token.end());
+                }
+
+                if (current_strategy_.enable_flow_shaping && flow_shaper_.is_running()) {
+                    flow_shaper_.enqueue(seg_data, true);
+                } else if (send_callback_) {
+                    OrchestratedPacket op;
+                    op.data = std::move(seg_data);
+                    send_callback_(op);
+                }
+            }
+            return;
+        }
+
+        if (!segments.empty()) {
+            data = std::move(segments[0]);
+        }
+    }
 
     // Steps 1-3 synchronous
     if (current_strategy_.enable_adversarial) {
@@ -337,6 +545,12 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
     // Step 5: Adversarial unpad
     if (current_strategy_.enable_adversarial) {
         data = adversarial_.unpad(data);
+    }
+
+    // Step 6 (2B): Reverse advanced DPI obfuscation (if applicable)
+    if (current_strategy_.enable_advanced_dpi &&
+        advanced_dpi_ && advanced_dpi_->is_running()) {
+        data = advanced_dpi_->process_incoming(data.data(), data.size());
     }
 
     return data;
@@ -497,7 +711,7 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
     }
 
-    // Apply to components
+    // Apply to core components
     if (strategy.enable_adversarial) {
         adversarial_.set_config(strategy.adversarial_config);
     }
@@ -511,6 +725,24 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
         TrafficMimicry::MimicConfig mc;
         mc.profile = strategy.mimic_profile;
         mimicry_.set_config(mc);
+    }
+
+    // Step 2B: Advanced DPI component
+    if (strategy.enable_advanced_dpi) {
+        init_advanced_dpi();
+    } else {
+        // Disable: stop and release
+        if (advanced_dpi_ && advanced_dpi_->is_running()) {
+            advanced_dpi_->stop();
+        }
+        advanced_dpi_.reset();
+    }
+
+    // Step 2B: TLS Fingerprint component
+    if (strategy.enable_tls_fingerprint) {
+        apply_tls_profile(strategy.tls_browser_profile);
+    } else {
+        tls_fingerprint_.reset();
     }
 }
 
@@ -543,6 +775,21 @@ const FlowShaper& ProtocolOrchestrator::flow_shaper() const { return flow_shaper
 const ProbeResist& ProtocolOrchestrator::probe_resist() const { return probe_resist_; }
 const TrafficMimicry& ProtocolOrchestrator::mimicry() const { return mimicry_; }
 
+// Step 2B: New component accessors
+AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() {
+    return advanced_dpi_.get();
+}
+const AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() const {
+    return advanced_dpi_.get();
+}
+
+ncp::TLSFingerprint* ProtocolOrchestrator::tls_fingerprint() {
+    return tls_fingerprint_.get();
+}
+const ncp::TLSFingerprint* ProtocolOrchestrator::tls_fingerprint() const {
+    return tls_fingerprint_.get();
+}
+
 // ===== Config & Stats =====
 
 void ProtocolOrchestrator::set_config(const OrchestratorConfig& config) {
@@ -567,6 +814,8 @@ void ProtocolOrchestrator::reset_stats() {
     flow_shaper_.reset_stats();
     probe_resist_.reset_stats();
     mimicry_.reset_stats();
+    // Step 2B: reset advanced DPI stats via get_stats (no dedicated reset)
+    // AdvancedDPIBypass doesn't have reset_stats() — stats are in Impl
 }
 
 void ProtocolOrchestrator::update_overhead_stats() {
