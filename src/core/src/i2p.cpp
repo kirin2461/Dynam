@@ -297,12 +297,95 @@ std::string I2PManager::create_ephemeral_destination() {
 }
 
 void I2PManager::rotate_tunnels() {
-    // Rotate implementation
+    if (!is_active()) return;
+
+    // Snapshot current tunnel IDs (avoid modifying map while iterating)
+    std::vector<std::string> old_ids;
+    old_ids.reserve(tunnels_.size());
+    for (const auto& pair : tunnels_) {
+        old_ids.push_back(pair.first);
+    }
+
+    if (old_ids.empty()) return;
+
+    // Generate a fresh ephemeral destination for new tunnels.
+    // This gives us new cryptographic keys — the core purpose of rotation.
+    std::string new_dest = create_ephemeral_destination();
+    if (new_dest.empty()) return;
+
+    // Rebuild each tunnel with the new destination
+    for (const auto& tid : old_ids) {
+        auto it = tunnels_.find(tid);
+        if (it == tunnels_.end()) continue;
+
+        TunnelInfo old_info = it->second;
+
+        // Create replacement session via SAM with a temporary rotated ID.
+        // SAM requires unique session IDs, so we use "<id>_rot" while the
+        // old session is still technically alive on the router side.
+        std::ostringstream cmd;
+        cmd << "SESSION CREATE STYLE=STREAM"
+            << " ID=" << tid << "_rot"
+            << " DESTINATION="
+            << (old_info.type == TunnelType::SERVER ? new_dest : "TRANSIENT")
+            << " inbound.length=" << config_.tunnel_length
+            << " outbound.length=" << config_.tunnel_length
+            << " inbound.quantity=" << config_.tunnel_quantity
+            << " outbound.quantity=" << config_.tunnel_quantity;
+
+        std::string response;
+        if (!impl_->send_sam_command(cmd.str(), response)) {
+            continue;  // Keep old tunnel if rotation fails
+        }
+
+        if (response.find("SESSION STATUS RESULT=OK") == std::string::npos) {
+            continue;  // SAM rejected — keep existing tunnel
+        }
+
+        // Remove old tunnel entry, insert the rotated replacement
+        tunnels_.erase(it);
+
+        TunnelInfo new_info;
+        new_info.tunnel_id = tid;
+        new_info.type = old_info.type;
+        new_info.local_dest = new_dest;
+        new_info.remote_dest = old_info.remote_dest;
+        new_info.created = std::chrono::system_clock::now();
+        new_info.expires = new_info.created + std::chrono::hours(
+            config_.destination_expiration_hours);
+        new_info.is_backup = old_info.is_backup;
+        tunnels_[tid] = new_info;
+    }
+
+    // Update current destination to the freshly generated one
+    current_dest_ = new_dest;
 }
 
-void I2PManager::enable_traffic_mixing(bool enable, uint32_t interval_ms) {
-    (void)enable;
-    (void)interval_ms;
+void I2PManager::enable_traffic_mixing(bool enable, int delay_ms) {
+    config_.obfuscate_tunnel_messages = enable;
+    if (delay_ms > 0) {
+        config_.mix_delay_ms = delay_ms;
+    }
+
+    if (!enable) {
+        // Disable dummy traffic along with mixing
+        config_.enable_dummy_traffic = false;
+        return;
+    }
+
+    // Enable cover traffic to mask real packet timing.
+    // DPI correlates inter-packet arrival times to fingerprint tunneled
+    // protocols. Dummy traffic adds noise to defeat timing analysis.
+    config_.enable_dummy_traffic = true;
+
+    // If we have active tunnels, inject an initial dummy burst to
+    // establish a baseline traffic pattern for the DPI to latch onto.
+    // Subsequent real packets blend into this established pattern.
+    if (is_active() && !tunnels_.empty()) {
+        for (int i = 0; i < 3; ++i) {
+            inject_dummy_message();
+        }
+    }
 }
 
 std::vector<uint8_t> I2PManager::pad_message(const std::vector<uint8_t>& message, size_t block_size) {
