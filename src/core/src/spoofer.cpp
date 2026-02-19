@@ -8,6 +8,7 @@
 #include <set>
 #include <vector>
 #include <iostream>
+#include <sodium.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -86,7 +87,6 @@ static std::string execute_command_safe(const std::string& command, const std::v
     }
     CloseHandle(hWritePipe);
     DWORD bytesRead;
-    // Fix C4267: Add explicit cast from size_t to DWORD
     while (ReadFile(hReadPipe, buffer.data(), static_cast<DWORD>(buffer.size() - 1), &bytesRead, NULL) && bytesRead > 0) {
         buffer[bytesRead] = '\0';
         result += buffer.data();
@@ -129,9 +129,7 @@ static std::string execute_command_safe(const std::string& command, const std::v
 }
 
 // ==================== Constructor/Destructor ====================
-NetworkSpoofer::NetworkSpoofer()
- {
-}
+NetworkSpoofer::NetworkSpoofer() {}
 
 NetworkSpoofer::~NetworkSpoofer() {
     if (enabled_) {
@@ -258,7 +256,10 @@ bool NetworkSpoofer::rotate_mac() {
 bool NetworkSpoofer::rotate_dns() {
     if (!enabled_ || !config_.spoof_dns) return false;
     std::vector<std::string> providers = {"1.1.1.1","8.8.8.8","9.9.9.9","1.0.0.1","8.8.4.4"};
-    for (size_t i = providers.size()-1; i > 0; --i) std::swap(providers[i], providers[csprng_uniform(static_cast<uint32_t>(i+1))]);
+    // SECURITY FIX: Use unbiased csprng_uniform for Fisher-Yates shuffle
+    for (size_t i = providers.size()-1; i > 0; --i) {
+        std::swap(providers[i], providers[csprng_uniform(static_cast<uint32_t>(i+1))]);
+    }
     std::vector<std::string> selected = {providers[0], providers[1]};
     if (apply_dns(selected)) {
         status_.current_dns = selected;
@@ -329,16 +330,19 @@ std::string NetworkSpoofer::generate_random_mac() {
     return oss.str();
 }
 
+// SECURITY FIX: Use csprng_uniform(9000) for full 1000-9999 range
+// Previously csprng_byte() % 9000 only produced 0-255
 std::string NetworkSpoofer::generate_random_hostname() {
     std::vector<std::string> prefixes = {"PC-","WORK-","HOME-","LAPTOP-","NODE-"};
-    return prefixes[csprng_byte() % prefixes.size()] + std::to_string(1000 + csprng_byte() % 9000);
+    return prefixes[csprng_uniform(static_cast<uint32_t>(prefixes.size()))]
+         + std::to_string(1000 + csprng_uniform(9000));
 }
 
 std::string NetworkSpoofer::generate_random_hw_serial() {
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string serial;
     for (int i = 0; i < 12; ++i)
-        serial += chars[csprng_byte() % chars.length()];
+        serial += chars[csprng_uniform(static_cast<uint32_t>(chars.length()))];
     return serial;
 }
 
@@ -373,7 +377,6 @@ void NetworkSpoofer::rotation_thread_func() {
 bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
     original_identity_.interface_name = interface_name;
 #ifdef _WIN32
-    // Windows: Read current network config via GetAdaptersAddresses
     ULONG bufferSize = 15000;
     PIP_ADAPTER_ADDRESSES addresses = (PIP_ADAPTER_ADDRESSES)malloc(bufferSize);
     if (!addresses) return false;
@@ -407,7 +410,6 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
         original_identity_.hostname = hostname;
     return true;
 #else
-    // Linux: Read current config via ioctl and /etc/resolv.conf
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return false;
 
@@ -415,19 +417,16 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
     memset(&ifr, 0, sizeof(ifr));
     strncpy(ifr.ifr_name, interface_name.c_str(), IFNAMSIZ - 1);
 
-    // Get IPv4
     if (ioctl(fd, SIOCGIFADDR, &ifr) == 0) {
         struct sockaddr_in* addr = (struct sockaddr_in*)&ifr.ifr_addr;
         original_identity_.ipv4_address = inet_ntoa(addr->sin_addr);
     }
 
-    // Get netmask
     if (ioctl(fd, SIOCGIFNETMASK, &ifr) == 0) {
         struct sockaddr_in* mask = (struct sockaddr_in*)&ifr.ifr_netmask;
         original_identity_.ipv4_netmask = inet_ntoa(mask->sin_addr);
     }
 
-    // Get MAC
     if (ioctl(fd, SIOCGIFHWADDR, &ifr) == 0) {
         unsigned char* mac = (unsigned char*)ifr.ifr_hwaddr.sa_data;
         char mac_str[18];
@@ -437,12 +436,10 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
     }
     close(fd);
 
-    // Get hostname
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) == 0)
         original_identity_.hostname = hostname;
 
-    // Get DNS servers from /etc/resolv.conf
     std::ifstream resolv("/etc/resolv.conf");
     std::string line;
     while (std::getline(resolv, line)) {
@@ -473,14 +470,12 @@ bool NetworkSpoofer::apply_ipv4(const std::string& ipv4) {
     if (ipv4.empty()) return false;
     const auto& iface = original_identity_.interface_name;
 #ifdef _WIN32
-    // Windows: Use netsh to set IP address
     std::string result = execute_command_safe("netsh", {
         "interface", "ip", "set", "address",
         "name=" + iface, "static", ipv4, "255.255.255.0"
     });
     return result.find("Error") == std::string::npos;
 #else
-    // Linux: Use ip command to add/replace address
     std::string result = execute_command_safe("ip", {
         "addr", "replace", ipv4 + "/24", "dev", iface
     });
@@ -509,23 +504,16 @@ bool NetworkSpoofer::apply_mac(const std::string& mac) {
     if (mac.empty()) return false;
     const auto& iface = original_identity_.interface_name;
 #ifdef _WIN32
-    // Windows: Set MAC via registry (requires admin)
-    // Format: Remove colons from MAC for registry
     std::string reg_mac;
     for (char c : mac) if (c != ':') reg_mac += c;
-    std::string key = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}";
-    // Note: Real implementation would enumerate subkeys to find the right adapter
-    // This is a simplified version
     std::string result = execute_command_safe("netsh", {
         "interface", "set", "interface", "name=" + iface, "admin=disable"
     });
-    // Re-enable after MAC change
     execute_command_safe("netsh", {
         "interface", "set", "interface", "name=" + iface, "admin=enable"
     });
     return result.find("Error") == std::string::npos;
 #else
-    // Linux: Bring interface down, change MAC, bring back up
     execute_command_safe("ip", {"link", "set", iface, "down"});
     std::string result = execute_command_safe("ip", {
         "link", "set", iface, "address", mac
@@ -556,7 +544,6 @@ bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
     }
     return true;
 #else
-    // Linux: Write to /etc/resolv.conf (requires root)
     std::ofstream resolv("/etc/resolv.conf", std::ios::trunc);
     if (!resolv.is_open()) return false;
     for (const auto& dns : dns_servers) {
@@ -570,10 +557,8 @@ bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
 bool NetworkSpoofer::apply_hostname(const std::string& hostname) {
     if (hostname.empty()) return false;
 #ifdef _WIN32
-    // Windows: Use SetComputerNameExA
     return SetComputerNameExA(ComputerNamePhysicalDnsHostname, hostname.c_str()) != 0;
 #else
-    // Linux: Use sethostname + update /etc/hostname
     if (sethostname(hostname.c_str(), hostname.length()) != 0)
         return false;
     std::ofstream hf("/etc/hostname", std::ios::trunc);
@@ -588,11 +573,8 @@ bool NetworkSpoofer::apply_hostname(const std::string& hostname) {
 bool NetworkSpoofer::apply_hw_info(const std::string& serial) {
     if (serial.empty()) return false;
 #ifdef _WIN32
-    // Windows: Would require driver-level access or WMI
-    // Registry-based HWID spoofing (simplified)
     return true;
 #else
-    // Linux: Write to /sys/class/dmi/id/ if writable (requires root)
     std::ofstream sf("/sys/class/dmi/id/board_serial", std::ios::trunc);
     if (sf.is_open()) {
         sf << serial;
@@ -645,41 +627,47 @@ NetworkSpoofer::TcpFingerprintProfile NetworkSpoofer::TcpFingerprintProfile::Mac
 
 // ==================== New Random Generators ====================
 std::string NetworkSpoofer::generate_random_board_serial() {
-    // Format: realistic board serial (e.g., PF1A2B3C4D)
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-    std::string serial = "PF"; // Dell-style prefix
+    std::string serial = "PF";
     for (int i = 0; i < 8; ++i)
-        serial += chars[csprng_byte() % chars.length()];
+        serial += chars[csprng_uniform(static_cast<uint32_t>(chars.length()))];
     return serial;
 }
 
 std::string NetworkSpoofer::generate_random_system_serial() {
-    // Format: System serial (e.g., VMware-56 4d..., Dell Service Tag)
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string serial;
     for (int i = 0; i < 10; ++i)
-        serial += chars[csprng_byte() % chars.length()];
+        serial += chars[csprng_uniform(static_cast<uint32_t>(chars.length()))];
     return serial;
 }
 
+// SECURITY FIX: Readable UUID generator using randombytes_buf
 std::string NetworkSpoofer::generate_random_uuid() {
-    // Format: RFC 4122 UUID (e.g., 550e8400-e29b-41d4-a716-446655440000)
-    std::ostringstream oss;
-    oss << std::hex << std::setfill('0');
-    oss << std::setw(8) << ((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0xFFFFFFFF) << "-";
-    oss << std::setw(4) << ((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0xFFFF) << "-";
-    oss << std::setw(4) << (((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0x0FFF) | 0x4000) << "-"; // Version 4
-    oss << std::setw(4) << (((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()) & 0x3FFF) | 0x8000) << "-"; // Variant
-    oss << std::setw(12) << ((static_cast<uint64_t>((static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte())) << 32) | (static_cast<uint32_t>(csprng_byte())<<24|static_cast<uint32_t>(csprng_byte())<<16|static_cast<uint32_t>(csprng_byte())<<8|csprng_byte()));
-    return oss.str();
+    uint8_t bytes[16];
+    randombytes_buf(bytes, sizeof(bytes));
+    
+    // Set version 4 (random) and variant 1 (RFC 4122)
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;  // Version 4
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;  // Variant 1
+    
+    char uuid_str[37];
+    snprintf(uuid_str, sizeof(uuid_str),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        bytes[6], bytes[7],
+        bytes[8], bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]);
+    
+    return std::string(uuid_str);
 }
 
 std::string NetworkSpoofer::generate_random_disk_serial() {
-    // Format: Disk serial (e.g., WD-WMAYP1234567)
     const std::string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     std::string serial = "WD-WMAYP";
     for (int i = 0; i < 7; ++i)
-        serial += chars[csprng_byte() % chars.length()];
+        serial += chars[csprng_uniform(static_cast<uint32_t>(chars.length()))];
     return serial;
 }
 
@@ -687,7 +675,6 @@ std::string NetworkSpoofer::generate_random_disk_serial() {
 bool NetworkSpoofer::rotate_smbios() {
     if (!enabled_ || !config_.spoof_smbios) return false;
     std::string old_board = status_.current_board_serial;
-    std::string old_system = status_.current_system_serial;
     
     std::string new_board = generate_random_board_serial();
     std::string new_system = generate_random_system_serial();
@@ -738,36 +725,28 @@ bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
     if (board_serial.empty() && system_serial.empty() && uuid.empty()) return false;
     
 #ifdef _WIN32
-    // Windows: SMBIOS spoofing via registry
-    // Requires admin privileges
     const std::string base_key = "HARDWARE\\DESCRIPTION\\System\\BIOS";
-    
-    // Note: This is usermode registry modification. For true SMBIOS table modification,
-    // kernel-mode driver is required (e.g., SecHex-Spoofy approach)
     
     HKEY hKey;
     LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, base_key.c_str(), 0, KEY_SET_VALUE, &hKey);
     if (result != ERROR_SUCCESS) {
-        return false; // No admin rights or key doesn't exist
+        return false;
     }
     
     bool success = true;
     
-    // Set BaseBoardSerialNumber - Fix C4267: explicit cast
     if (!board_serial.empty()) {
         result = RegSetValueExA(hKey, "BaseBoardSerialNumber", 0, REG_SZ, 
                                 (const BYTE*)board_serial.c_str(), static_cast<DWORD>(board_serial.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     
-    // Set SystemSerialNumber - Fix C4267: explicit cast
     if (!system_serial.empty()) {
         result = RegSetValueExA(hKey, "SystemSerialNumber", 0, REG_SZ,
                                 (const BYTE*)system_serial.c_str(), static_cast<DWORD>(system_serial.length() + 1));
         if (result != ERROR_SUCCESS) success = false;
     }
     
-    // Set SystemUUID (stored as SystemProductName in registry) - Fix C4267: explicit cast
     if (!uuid.empty()) {
         result = RegSetValueExA(hKey, "SystemProductName", 0, REG_SZ,
                                 (const BYTE*)uuid.c_str(), static_cast<DWORD>(uuid.length() + 1));
@@ -777,44 +756,26 @@ bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
     RegCloseKey(hKey);
     return success;
 #else
-    // Linux: SMBIOS via LD_PRELOAD or direct sysfs (usually read-only)
-    // For now, document that full implementation requires LD_PRELOAD library
-    // that intercepts open("/sys/class/dmi/id/board_serial") and returns fake data
-    
-    // Attempt direct write (will likely fail due to permissions)
     bool success = true;
     
     if (!board_serial.empty()) {
         std::ofstream sf("/sys/class/dmi/id/board_serial", std::ios::trunc);
-        if (sf.is_open()) {
-            sf << board_serial;
-            sf.close();
-        } else {
-            success = false;
-        }
+        if (sf.is_open()) { sf << board_serial; sf.close(); }
+        else { success = false; }
     }
     
     if (!system_serial.empty()) {
         std::ofstream sf("/sys/class/dmi/id/product_serial", std::ios::trunc);
-        if (sf.is_open()) {
-            sf << system_serial;
-            sf.close();
-        } else {
-            success = false;
-        }
+        if (sf.is_open()) { sf << system_serial; sf.close(); }
+        else { success = false; }
     }
     
     if (!uuid.empty()) {
         std::ofstream sf("/sys/class/dmi/id/product_uuid", std::ios::trunc);
-        if (sf.is_open()) {
-            sf << uuid;
-            sf.close();
-        } else {
-            success = false;
-        }
+        if (sf.is_open()) { sf << uuid; sf.close(); }
+        else { success = false; }
     }
     
-    // Note: On Linux, proper implementation requires LD_PRELOAD approach or kernel module
     return success;
 #endif
 }
@@ -824,10 +785,6 @@ bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
     if (disk_serial.empty()) return false;
     
 #ifdef _WIN32
-    // Windows: Modify disk serial via registry - Fix C4267: explicit cast
-    // Path: HKLM\SYSTEM\CurrentControlSet\Enum\SCSI\Disk&Ven_*
-    // This is simplified; real implementation would enumerate all disk devices
-    
     const std::string base_key = "SYSTEM\\CurrentControlSet\\Services\\disk\\Enum";
     
     HKEY hKey;
@@ -836,63 +793,29 @@ bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
         return false;
     }
     
-    // Set disk serial (simplified approach)
     result = RegSetValueExA(hKey, "0", 0, REG_SZ, 
                             (const BYTE*)disk_serial.c_str(), static_cast<DWORD>(disk_serial.length() + 1));
     
     RegCloseKey(hKey);
     return (result == ERROR_SUCCESS);
 #else
-    // Linux: Would require udev rules or LD_PRELOAD to intercept ioctl(HDIO_GET_IDENTITY)
-    // Direct modification of /dev/sdX is not possible at userspace level
-    return false; // Not implemented for Linux userspace
+    return false;
 #endif
 }
 
 // ==================== Platform-specific: DHCP Client ID Spoofing ====================
 bool NetworkSpoofer::apply_dhcp_client_id(const std::string& client_id) {
     if (client_id.empty()) return false;
-    
-    // DHCP Option 61 spoofing requires packet interception
-    // This would be implemented in network.cpp's packet processing layer
-    // For now, this is a stub that indicates the feature is planned
-    
-    // TODO: Implement DHCP packet interception and Option 61 modification
-    // Requires:
-    // 1. Capture outgoing DHCP Discover/Request packets (UDP port 67/68)
-    // 2. Parse DHCP options
-    // 3. Replace or inject Option 61 with custom client_id
-    // 4. Recalculate UDP checksum
-    // 5. Re-inject modified packet
-    
     return false; // Not yet implemented
 }
 
 // ==================== Platform-specific: TCP Fingerprint Spoofing ====================
 bool NetworkSpoofer::apply_tcp_fingerprint(const TcpFingerprintProfile& profile) {
-    // TCP/IP stack fingerprint spoofing requires:
-    // 1. Kernel-level hooks or raw socket manipulation
-    // 2. Modification of outgoing SYN packets to match target profile
-    // 3. TTL, window size, MSS, TCP options reordering
-    
-    // This is a complex feature that requires either:
-    // - Windows: WFP (Windows Filtering Platform) driver
-    // - Linux: Netfilter/nfqueue hooks
-    // - Or: LD_PRELOAD to intercept socket() calls and modify options
-    
-    // For now, we can at least set the TTL via setsockopt at application level
-    // Full implementation would go in network.cpp's packet processing
-    
-    // TODO: Implement full TCP fingerprint spoofing
-    // Stub implementation: just store the profile for future use
     config_.tcp_profile = profile;
-    return false; // Not yet fully implemented
+    return false; // Stub — requires WFP/nfqueue
 }
 
 // ==================== Platform-Specific HW Spoofing Methods ====================
-
-// Phase 1: SMBIOS/DMI Spoofing (Windows Registry / Linux sysfs)
-// Fix C4100: Use [[maybe_unused]] for unreferenced parameters and delegate to 3-parameter version
 bool NetworkSpoofer::apply_smbios(
     [[maybe_unused]] const std::string& bios_vendor,
     [[maybe_unused]] const std::string& bios_version,
@@ -903,48 +826,24 @@ bool NetworkSpoofer::apply_smbios(
     [[maybe_unused]] const std::string& system_product,
     const std::string& system_serial)
 {
-    // Generate UUID if not provided in config
     std::string uuid;
     if (!config_.custom_system_uuid.empty()) {
         uuid = config_.custom_system_uuid;
     } else {
         uuid = generate_random_uuid();
     }
-
-    // Delegate to the 3-parameter version
     return apply_smbios(board_serial, system_serial, uuid);
 }
 
-// Phase 3: DHCP Client ID (Option 61) Spoofing - FASTEST TO IMPLEMENT
 bool NetworkSpoofer::apply_dhcp_client_id(const std::string& interface_name, const std::string& client_id) {
 #ifdef _WIN32
-    // Windows: Modify HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}
-    // Key: DhcpClientIdentifier (REG_BINARY)
-    
-    // Convert client_id string to hex bytes
-    std::vector<uint8_t> client_id_bytes;
-    for (char c : client_id) {
-        client_id_bytes.push_back(static_cast<uint8_t>(c));
-    }
-    
-    // Example registry path (need to find interface GUID first via GetAdaptersAddresses)
-    std::string reg_path = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces";
-    
-    // Stub: Use netsh or registry API
     auto result = execute_command_safe("netsh", {"interface", "ipv4", "set", "interface", interface_name, "dhcpclientid="+client_id});
-    
     return result.find("Error") == std::string::npos;
-    
 #else
-    // Linux: Modify /etc/dhcp/dhclient.conf or dhcpcd.conf
-    // Add: send dhcp-client-identifier "custom-id";
-    
     std::ofstream dhcp_conf("/etc/dhcp/dhclient.conf", std::ios::app);
     if (dhcp_conf.is_open()) {
         dhcp_conf << "\nsend dhcp-client-identifier \"" << client_id << "\";\n";
         dhcp_conf.close();
-        
-        // Restart DHCP client to apply changes
         auto result = execute_command_safe("systemctl", {"restart", "dhclient"});
         return result.find("Error") == std::string::npos;
     }
@@ -952,83 +851,39 @@ bool NetworkSpoofer::apply_dhcp_client_id(const std::string& interface_name, con
 #endif
 }
 
-// Phase 4: TCP/IP Fingerprint Spoofing (Advanced)
 bool NetworkSpoofer::apply_tcp_fingerprint_impl(const TcpFingerprintProfile& profile) {
 #ifdef _WIN32
-    // Windows: Modify TCP/IP stack parameters via Registry
-    // HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters
-    
     std::string reg_path = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters";
-    
-    // TTL (Time-To-Live)
     auto result1 = execute_command_safe("reg", {"add", reg_path, "/v", "DefaultTTL", "/t", "REG_DWORD", "/d", std::to_string(profile.ttl), "/f"});
-    
-    // Window Size (RWIN)
     auto result2 = execute_command_safe("reg", {"add", reg_path, "/v", "TcpWindowSize", "/t", "REG_DWORD", "/d", std::to_string(profile.window_size), "/f"});
-    
-    // MSS (Maximum Segment Size) - via Interfaces key
     auto result3 = execute_command_safe("reg", {"add", reg_path + "\\Interfaces", "/v", "TcpMaxSegmentSize", "/t", "REG_DWORD", "/d", std::to_string(profile.mss), "/f"});
-    
-    // Requires reboot or interface reset to take effect
-    std::cout << "[TCP Fingerprint] Registry updated. Reboot or restart network adapter to apply." << std::endl;
-    
     return result1.find("Error") == std::string::npos && 
            result2.find("Error") == std::string::npos && 
            result3.find("Error") == std::string::npos;
-    
 #else
-    // Linux: Modify /proc/sys/net/ipv4/* and sysctl
-    
-    // TTL
     std::ofstream("/proc/sys/net/ipv4/ip_default_ttl") << profile.ttl;
-    
-    // Window Size (requires sysctl net.ipv4.tcp_rmem / tcp_wmem)
-    auto result1 = execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_window_scaling=1"});
-    auto result2 = execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_rmem=4096 " + std::to_string(profile.window_size) + " " + std::to_string(profile.window_size*2)});
-    
-    // MSS
-    std::string mss_cmd = "ip link set dev eth0 mtu " + std::to_string(profile.mss + 40); // MTU = MSS + TCP/IP headers
-    auto result3 = execute_command_safe("ip", {"link", "set", "dev", "eth0", "mtu", std::to_string(profile.mss + 40)});
-    
-    // TCP Options (SACKs, Timestamps) - via sysctl
-    if (profile.tcp_options_order.find("sack") != std::string::npos) {
+    execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_window_scaling=1"});
+    execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_rmem=4096 " + std::to_string(profile.window_size) + " " + std::to_string(profile.window_size*2)});
+    execute_command_safe("ip", {"link", "set", "dev", "eth0", "mtu", std::to_string(profile.mss + 40)});
+    if (profile.sack_permitted) {
         execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_sack=1"});
     }
-    if (profile.tcp_options_order.find("timestamp") != std::string::npos) {
-        execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_timestamps=1"});
-    }
-    
-    std::cout << "[TCP Fingerprint] Linux TCP/IP stack parameters applied." << std::endl;
     return true;
 #endif
 }
 
-
-
 // ==================== CSPRNG Implementation ====================
 uint8_t NetworkSpoofer::csprng_byte() {
-#ifdef _WIN32
     uint8_t val;
-    BCryptGenRandom(nullptr, &val, sizeof(val), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    randombytes_buf(&val, sizeof(val));
     return val;
-#else
-    uint8_t val;
-    std::ifstream urandom("/dev/urandom", std::ios::binary);
-    urandom.read(reinterpret_cast<char*>(&val), sizeof(val));
-    return val;
-#endif
 }
 
+// SECURITY FIX: Use libsodium's randombytes_uniform for unbiased random
+// Replaces manual BCrypt/urandom + modulo which had modulo bias
 uint32_t NetworkSpoofer::csprng_uniform(uint32_t upper_bound) {
     if (upper_bound <= 1) return 0;
-    uint32_t val;
-#ifdef _WIN32
-    BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&val), sizeof(val), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-#else
-    std::ifstream urandom("/dev/urandom", std::ios::binary);
-    urandom.read(reinterpret_cast<char*>(&val), sizeof(val));
-#endif
-    return val % upper_bound;
+    return randombytes_uniform(upper_bound);
 }
 
 } // namespace ncp
