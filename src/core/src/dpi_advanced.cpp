@@ -111,14 +111,196 @@ void TCPManipulator::shuffle_segments(
 // ==================== TLSManipulator Implementation ====================
 
 struct TLSManipulator::Impl {
-    // Phase 2: TLSFingerprint instance for realistic ClientHello generation
+    // Internal default fingerprint (used when no external fp is set)
     ncp::TLSFingerprint tls_fp_;
+    // External fingerprint pointer (not owned, caller keeps alive)
+    ncp::TLSFingerprint* external_fp_ = nullptr;
+
     Impl() : tls_fp_(ncp::BrowserType::CHROME) {}
+
+    // Returns the active fingerprint: external if set, otherwise internal
+    ncp::TLSFingerprint& active_fp() {
+        return external_fp_ ? *external_fp_ : tls_fp_;
+    }
+
     static int find_sni_offset(const uint8_t* data, size_t len);
 };
 
 TLSManipulator::TLSManipulator() : impl_(std::make_unique<Impl>()) {}
 TLSManipulator::~TLSManipulator() = default;
+
+void TLSManipulator::set_tls_fingerprint(ncp::TLSFingerprint* fp) {
+    impl_->external_fp_ = fp;
+}
+
+std::vector<uint8_t> TLSManipulator::create_fingerprinted_client_hello(
+    const std::string& sni) {
+    // Use external fingerprint's current profile (don't randomize — caller controls profile)
+    auto& fp = impl_->active_fp();
+    fp.set_sni(sni);
+
+    auto ciphers     = fp.get_cipher_suites();
+    auto extensions  = fp.get_extensions();
+    auto alpn_protos = fp.get_alpn();
+
+    std::vector<uint8_t> hello;
+    hello.reserve(512);
+
+    // === TLS Record Header ===
+    hello.push_back(0x16);
+    hello.push_back(0x03); hello.push_back(0x01);
+    size_t rec_len_pos = hello.size();
+    hello.push_back(0x00); hello.push_back(0x00);
+
+    // === Handshake Header ===
+    hello.push_back(0x01);
+    size_t hs_len_pos = hello.size();
+    hello.push_back(0x00); hello.push_back(0x00); hello.push_back(0x00);
+
+    // === ClientHello Body ===
+    hello.push_back(0x03); hello.push_back(0x03);
+
+    auto rnd = ncp::csprng_bytes(32);
+    hello.insert(hello.end(), rnd.begin(), rnd.end());
+
+    hello.push_back(32);
+    auto sid = ncp::csprng_bytes(32);
+    hello.insert(hello.end(), sid.begin(), sid.end());
+
+    // === Cipher Suites ===
+    uint16_t cs_len = static_cast<uint16_t>(ciphers.size() * 2);
+    hello.push_back(static_cast<uint8_t>((cs_len >> 8) & 0xFF));
+    hello.push_back(static_cast<uint8_t>(cs_len & 0xFF));
+    for (uint16_t cs : ciphers) {
+        hello.push_back(static_cast<uint8_t>((cs >> 8) & 0xFF));
+        hello.push_back(static_cast<uint8_t>(cs & 0xFF));
+    }
+
+    // === Compression Methods ===
+    hello.push_back(0x01); hello.push_back(0x00);
+
+    // === Extensions ===
+    size_t ext_len_pos = hello.size();
+    hello.push_back(0x00); hello.push_back(0x00);
+
+    auto append_ext = [&](uint16_t type, const std::vector<uint8_t>& d) {
+        hello.push_back(static_cast<uint8_t>((type >> 8) & 0xFF));
+        hello.push_back(static_cast<uint8_t>(type & 0xFF));
+        uint16_t l = static_cast<uint16_t>(d.size());
+        hello.push_back(static_cast<uint8_t>((l >> 8) & 0xFF));
+        hello.push_back(static_cast<uint8_t>(l & 0xFF));
+        hello.insert(hello.end(), d.begin(), d.end());
+    };
+
+    for (uint16_t ext_id : extensions) {
+        switch (ext_id) {
+        case 0: { // server_name
+            std::vector<uint8_t> sni_data;
+            uint16_t list_l = static_cast<uint16_t>(sni.size() + 3);
+            sni_data.push_back(static_cast<uint8_t>((list_l >> 8) & 0xFF));
+            sni_data.push_back(static_cast<uint8_t>(list_l & 0xFF));
+            sni_data.push_back(0x00);
+            uint16_t nm_l = static_cast<uint16_t>(sni.size());
+            sni_data.push_back(static_cast<uint8_t>((nm_l >> 8) & 0xFF));
+            sni_data.push_back(static_cast<uint8_t>(nm_l & 0xFF));
+            sni_data.insert(sni_data.end(), sni.begin(), sni.end());
+            append_ext(0, sni_data);
+            break;
+        }
+        case 10: { // supported_groups
+            auto ja3 = fp.generate_ja3();
+            auto& curves = ja3.elliptic_curves;
+            std::vector<uint8_t> gd;
+            uint16_t gl = static_cast<uint16_t>(curves.size() * 2);
+            gd.push_back(static_cast<uint8_t>((gl >> 8) & 0xFF));
+            gd.push_back(static_cast<uint8_t>(gl & 0xFF));
+            for (uint16_t g : curves) {
+                gd.push_back(static_cast<uint8_t>((g >> 8) & 0xFF));
+                gd.push_back(static_cast<uint8_t>(g & 0xFF));
+            }
+            append_ext(10, gd);
+            break;
+        }
+        case 11: append_ext(11, {0x01, 0x00}); break;
+        case 13: {
+            std::vector<uint16_t> sa = {
+                0x0403, 0x0503, 0x0603, 0x0807, 0x0808,
+                0x0809, 0x080A, 0x080B, 0x0401, 0x0501, 0x0601, 0x0203, 0x0201
+            };
+            std::vector<uint8_t> sd;
+            uint16_t sl = static_cast<uint16_t>(sa.size() * 2);
+            sd.push_back(static_cast<uint8_t>((sl >> 8) & 0xFF));
+            sd.push_back(static_cast<uint8_t>(sl & 0xFF));
+            for (uint16_t s : sa) {
+                sd.push_back(static_cast<uint8_t>((s >> 8) & 0xFF));
+                sd.push_back(static_cast<uint8_t>(s & 0xFF));
+            }
+            append_ext(13, sd);
+            break;
+        }
+        case 16: {
+            std::vector<uint8_t> al;
+            std::vector<uint8_t> alist;
+            for (const auto& p : alpn_protos) {
+                alist.push_back(static_cast<uint8_t>(p.size()));
+                alist.insert(alist.end(), p.begin(), p.end());
+            }
+            uint16_t all = static_cast<uint16_t>(alist.size());
+            al.push_back(static_cast<uint8_t>((all >> 8) & 0xFF));
+            al.push_back(static_cast<uint8_t>(all & 0xFF));
+            al.insert(al.end(), alist.begin(), alist.end());
+            append_ext(16, al);
+            break;
+        }
+        case 43: {
+            std::vector<uint8_t> sv;
+            sv.push_back(0x04);
+            sv.push_back(0x03); sv.push_back(0x04);
+            sv.push_back(0x03); sv.push_back(0x03);
+            append_ext(43, sv);
+            break;
+        }
+        case 45: append_ext(45, {0x01, 0x01}); break;
+        case 51: {
+            uint8_t pk[32], sk[32];
+            crypto_box_keypair(pk, sk);
+            sodium_memzero(sk, sizeof(sk));
+            std::vector<uint8_t> ks;
+            uint16_t ksl = 2 + 2 + 32;
+            ks.push_back(static_cast<uint8_t>((ksl >> 8) & 0xFF));
+            ks.push_back(static_cast<uint8_t>(ksl & 0xFF));
+            ks.push_back(0x00); ks.push_back(0x1D);
+            ks.push_back(0x00); ks.push_back(0x20);
+            ks.insert(ks.end(), pk, pk + 32);
+            append_ext(51, ks);
+            break;
+        }
+        default:
+            if ((ext_id & 0x0F0F) == 0x0A0A) {
+                append_ext(ext_id, {static_cast<uint8_t>(ncp::csprng_uniform(256))});
+            } else {
+                append_ext(ext_id, {});
+            }
+            break;
+        }
+    }
+
+    // === Fill lengths ===
+    uint16_t el = static_cast<uint16_t>(hello.size() - ext_len_pos - 2);
+    hello[ext_len_pos]     = static_cast<uint8_t>((el >> 8) & 0xFF);
+    hello[ext_len_pos + 1] = static_cast<uint8_t>(el & 0xFF);
+
+    uint32_t hl = static_cast<uint32_t>(hello.size() - hs_len_pos - 3);
+    hello[hs_len_pos]     = static_cast<uint8_t>((hl >> 16) & 0xFF);
+    hello[hs_len_pos + 1] = static_cast<uint8_t>((hl >> 8) & 0xFF);
+    hello[hs_len_pos + 2] = static_cast<uint8_t>(hl & 0xFF);
+
+    uint16_t rl = static_cast<uint16_t>(hello.size() - 5);
+    hello[rec_len_pos]     = static_cast<uint8_t>((rl >> 8) & 0xFF);
+    hello[rec_len_pos + 1] = static_cast<uint8_t>(rl & 0xFF);
+
+    return hello;
+}
 
 int TLSManipulator::Impl::find_sni_offset(const uint8_t* data, size_t len) {
     if (!data || len < 5 + 4) return -1;
@@ -218,21 +400,24 @@ std::vector<uint8_t> TLSManipulator::inject_grease(
 
 // =====================================================================
 // Phase 2: TLSFingerprint-driven ClientHello generation
-// Replaces hardcoded minimal TLS 1.2 ClientHello with a realistic
-// browser-mimicking ClientHello built from TLSFingerprint profiles.
+// create_fake_client_hello — randomizes browser profile per call (decoy)
+// create_fingerprinted_client_hello — uses caller-controlled profile
 // =====================================================================
 
 std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
     const std::string& fake_sni) {
 
-    auto& fp = impl_->tls_fp_;
+    auto& fp = impl_->active_fp();
 
-    // Randomly pick browser profile per decoy hello (avoids fingerprint correlation)
-    static const ncp::BrowserType profiles[] = {
-        ncp::BrowserType::CHROME, ncp::BrowserType::FIREFOX,
-        ncp::BrowserType::SAFARI, ncp::BrowserType::EDGE
-    };
-    fp.set_profile(profiles[ncp::csprng_uniform(4)]);
+    // For decoy hellos: randomize profile to avoid fingerprint correlation
+    // (only when using internal fp — external fp is caller-controlled)
+    if (!impl_->external_fp_) {
+        static const ncp::BrowserType profiles[] = {
+            ncp::BrowserType::CHROME, ncp::BrowserType::FIREFOX,
+            ncp::BrowserType::SAFARI, ncp::BrowserType::EDGE
+        };
+        fp.set_profile(profiles[ncp::csprng_uniform(4)]);
+    }
     fp.set_sni(fake_sni);
 
     auto ciphers    = fp.get_cipher_suites();
@@ -243,20 +428,19 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
     hello.reserve(512);
 
     // === TLS Record Header ===
-    hello.push_back(0x16); // Handshake
-    hello.push_back(0x03); hello.push_back(0x01); // TLS 1.0 record layer
+    hello.push_back(0x16);
+    hello.push_back(0x03); hello.push_back(0x01);
     size_t rec_len_pos = hello.size();
     hello.push_back(0x00); hello.push_back(0x00);
 
     // === Handshake Header ===
-    hello.push_back(0x01); // ClientHello
+    hello.push_back(0x01);
     size_t hs_len_pos = hello.size();
     hello.push_back(0x00); hello.push_back(0x00); hello.push_back(0x00);
 
     // === ClientHello Body ===
-    hello.push_back(0x03); hello.push_back(0x03); // TLS 1.2 in body
+    hello.push_back(0x03); hello.push_back(0x03);
 
-    // Random (32 bytes CSPRNG)
     auto rnd = ncp::csprng_bytes(32);
     hello.insert(hello.end(), rnd.begin(), rnd.end());
 
@@ -292,7 +476,7 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
 
     for (uint16_t ext_id : extensions) {
         switch (ext_id) {
-        case 0: { // server_name
+        case 0: {
             std::vector<uint8_t> sni;
             uint16_t list_l = static_cast<uint16_t>(fake_sni.size() + 3);
             sni.push_back(static_cast<uint8_t>((list_l >> 8) & 0xFF));
@@ -305,7 +489,7 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
             append_ext(0, sni);
             break;
         }
-        case 10: { // supported_groups
+        case 10: {
             auto ja3 = fp.generate_ja3();
             auto& curves = ja3.elliptic_curves;
             std::vector<uint8_t> gd;
@@ -319,8 +503,8 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
             append_ext(10, gd);
             break;
         }
-        case 11: append_ext(11, {0x01, 0x00}); break; // ec_point_formats
-        case 13: { // signature_algorithms
+        case 11: append_ext(11, {0x01, 0x00}); break;
+        case 13: {
             std::vector<uint16_t> sa = {
                 0x0403, 0x0503, 0x0603, 0x0807, 0x0808,
                 0x0809, 0x080A, 0x080B, 0x0401, 0x0501, 0x0601, 0x0203, 0x0201
@@ -336,7 +520,7 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
             append_ext(13, sd);
             break;
         }
-        case 16: { // ALPN
+        case 16: {
             std::vector<uint8_t> al;
             std::vector<uint8_t> alist;
             for (const auto& p : alpn_protos) {
@@ -350,16 +534,16 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
             append_ext(16, al);
             break;
         }
-        case 43: { // supported_versions
+        case 43: {
             std::vector<uint8_t> sv;
-            sv.push_back(0x04); // 4 bytes of versions
-            sv.push_back(0x03); sv.push_back(0x04); // TLS 1.3
-            sv.push_back(0x03); sv.push_back(0x03); // TLS 1.2
+            sv.push_back(0x04);
+            sv.push_back(0x03); sv.push_back(0x04);
+            sv.push_back(0x03); sv.push_back(0x03);
             append_ext(43, sv);
             break;
         }
-        case 45: append_ext(45, {0x01, 0x01}); break; // psk_key_exchange_modes
-        case 51: { // key_share (ephemeral x25519)
+        case 45: append_ext(45, {0x01, 0x01}); break;
+        case 51: {
             uint8_t pk[32], sk[32];
             crypto_box_keypair(pk, sk);
             sodium_memzero(sk, sizeof(sk));
@@ -367,8 +551,8 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
             uint16_t ksl = 2 + 2 + 32;
             ks.push_back(static_cast<uint8_t>((ksl >> 8) & 0xFF));
             ks.push_back(static_cast<uint8_t>(ksl & 0xFF));
-            ks.push_back(0x00); ks.push_back(0x1D); // x25519
-            ks.push_back(0x00); ks.push_back(0x20); // 32 bytes
+            ks.push_back(0x00); ks.push_back(0x1D);
+            ks.push_back(0x00); ks.push_back(0x20);
             ks.insert(ks.end(), pk, pk + 32);
             append_ext(51, ks);
             break;
@@ -509,6 +693,10 @@ struct AdvancedDPIBypass::Impl {
     mutable std::mutex stats_mutex;
     std::atomic<int> detection_counter{0};
     std::atomic<int> current_strategy{0};
+
+    // Phase 3C: External TLS fingerprint (forwarded to tls_manip)
+    ncp::TLSFingerprint* external_fp_ = nullptr;
+
     void log(const std::string& msg) { if (log_callback) log_callback(msg); }
 };
 
@@ -523,11 +711,27 @@ bool AdvancedDPIBypass::initialize(const AdvancedDPIConfig& config) {
     }
     impl_->tcp_manip = std::make_unique<TCPManipulator>();
     impl_->tls_manip = std::make_unique<TLSManipulator>();
+
+    // Forward external fingerprint to TLSManipulator if already set
+    if (impl_->external_fp_) {
+        impl_->tls_manip->set_tls_fingerprint(impl_->external_fp_);
+    }
+
     if (config.obfuscation != ObfuscationMode::NONE) {
         impl_->obfuscator = std::make_unique<TrafficObfuscator>(config.obfuscation, config.obfuscation_key);
     }
     impl_->log("Advanced DPI bypass initialized with " + std::to_string(config.techniques.size()) + " techniques");
     return true;
+}
+
+void AdvancedDPIBypass::set_tls_fingerprint(ncp::TLSFingerprint* fp) {
+    impl_->external_fp_ = fp;
+    // Forward to TLSManipulator if already created
+    if (impl_->tls_manip) {
+        impl_->tls_manip->set_tls_fingerprint(fp);
+    }
+    impl_->log("TLS fingerprint " + std::string(fp ? "set" : "cleared") +
+               " on advanced bypass pipeline");
 }
 
 bool AdvancedDPIBypass::start() {
@@ -566,7 +770,7 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         impl_->stats.grease_injected++;
     }
 
-    // Phase 2: Decoy SNI now uses TLSFingerprint-driven realistic ClientHello
+    // Phase 2: Decoy SNI uses fingerprinted ClientHello when external fp is set
     if (cfg.base_config.enable_decoy_sni && is_client_hello && !cfg.base_config.decoy_sni_domains.empty()) {
         for (const auto& decoy_domain : cfg.base_config.decoy_sni_domains) {
             auto fake_hello = impl_->tls_manip->create_fake_client_hello(decoy_domain);
