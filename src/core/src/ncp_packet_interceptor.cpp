@@ -6,8 +6,10 @@
 #include <sodium.h>
 
 #ifdef __linux__
+#ifdef HAVE_NFQUEUE
 #include <libnetfilter_queue/libnetfilter_queue.h>
 #include <linux/netfilter.h>
+#endif
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -71,6 +73,10 @@ static constexpr uint8_t IPPROTO_IPIP = 4;
 static constexpr uint16_t VXLAN_PORT = 4789;
 static constexpr uint16_t GRE_PROTO_IPV4 = 0x0800;
 
+// Forward declaration
+static std::vector<uint8_t> encapsulate_packet(const std::vector<uint8_t>& packet,
+                                               const PacketInterceptor::Config& cfg);
+
 // ==================== Platform-Specific Implementation ====================
 
 class PacketInterceptor::Impl {
@@ -84,7 +90,7 @@ public:
     PacketInterceptor* parent = nullptr;
 };
 
-#ifdef __linux__
+#if defined(__linux__) && defined(HAVE_NFQUEUE)
 // ==================== NFQUEUE Backend (Linux) ====================
 
 class NFQUEUEBackend : public PacketInterceptor::Impl {
@@ -272,7 +278,7 @@ private:
     bool iptables_rule_added_ = false;
     Config config_;
 };
-#endif // __linux__
+#endif // __linux__ && HAVE_NFQUEUE
 
 #ifdef _WIN32
 // ==================== WFP Backend (Windows) ====================
@@ -351,7 +357,7 @@ bool PacketInterceptor::initialize(const Config& config) {
         return true;
     }
 
-#ifdef __linux__
+#if defined(__linux__) && defined(HAVE_NFQUEUE)
     if (backend == Backend::NFQUEUE) {
         impl_ = std::make_unique<NFQUEUEBackend>();
         impl_->parent = this;
@@ -502,11 +508,11 @@ PacketInterceptor::Verdict PacketInterceptor::default_packet_handler(
                 uint16_t* buf = reinterpret_cast<uint16_t*>(packet.data());
                 int len = (ip->ihl_ver & 0x0F) * 4;
                 for (int i = 0; i < len / 2; i++) {
-                    sum += buf[i];
+                    sum += ntohs(buf[i]);
                 }
                 sum = (sum >> 16) + (sum & 0xFFFF);
                 sum += (sum >> 16);
-                ip->check = static_cast<uint16_t>(~sum);
+                ip->check = htons(static_cast<uint16_t>(~sum));
                 modified = true;
                 stats_.ttl_rewrites++;
             }
@@ -670,7 +676,7 @@ bool PacketInterceptor::is_elevated() {
 }
 
 bool PacketInterceptor::is_nfqueue_available() {
-#ifdef __linux__
+#if defined(__linux__) && defined(HAVE_NFQUEUE)
     // Check if libnetfilter_queue is available
     struct nfq_handle* h = nfq_open();
     if (h) {
@@ -699,7 +705,7 @@ bool PacketInterceptor::is_wfp_available() {
 }
 
 PacketInterceptor::Backend PacketInterceptor::detect_backend() {
-#ifdef __linux__
+#if defined(__linux__) && defined(HAVE_NFQUEUE)
     if (is_nfqueue_available()) return Backend::NFQUEUE;
 #elif defined(_WIN32)
     if (is_wfp_available()) return Backend::WFP;
