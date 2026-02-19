@@ -36,8 +36,9 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_geneva_engine.cpp
     src/ncp_paranoid.cpp
     src/ncp_secure_memory.cpp
-    # Adversarial padding (Phase 1 — anti ML-TSPU)
-    src/ncp_adversarial.cpp
+    # Anti ML-TSPU modules
+    src/ncp_adversarial.cpp      # Phase 1: adversarial padding
+    src/ncp_flow_shaper.cpp      # Phase 2: flow-level traffic shaping
     # Hybrid network backend sources
     src/network_raw_socket.cpp
     src/dhcp_spoofer.cpp
@@ -57,6 +58,7 @@ set(NCP_CORE_SRC_SOURCES
     include/ncp_entropy_masking.hpp
     include/ncp_geneva_engine.hpp
     include/ncp_adversarial.hpp
+    include/ncp_flow_shaper.hpp
 )
 
 # Conditionally add sources that depend on optional libraries
@@ -99,8 +101,9 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_paranoid.hpp
     include/ncp_secure_memory.hpp
     include/ncp_secure_buffer.hpp
-    # Adversarial padding (Phase 1 — anti ML-TSPU)
+    # Anti ML-TSPU headers
     include/ncp_adversarial.hpp
+    include/ncp_flow_shaper.hpp
     # Hybrid network backend headers
     include/ncp_network_backend.hpp
     include/ncp_winsock_raii.hpp
@@ -197,7 +200,7 @@ elseif(WIN32)
     # Windows networking libraries for hybrid backend (always needed)
     target_link_libraries(ncp_core PUBLIC ws2_32 iphlpapi)
 
-    # bcrypt.lib for CSPRNG in adversarial padding
+    # bcrypt.lib for CSPRNG in adversarial padding + flow shaper
     target_link_libraries(ncp_core PUBLIC bcrypt)
 endif()
 
