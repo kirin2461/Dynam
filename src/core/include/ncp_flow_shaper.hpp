@@ -19,7 +19,6 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
-#include <random>
 #include <atomic>
 #include <string>
 #include <functional>
@@ -28,6 +27,7 @@
 #include <mutex>
 #include <thread>
 #include <memory>
+#include "ncp_csprng.hpp"
 
 namespace ncp {
 namespace DPI {
@@ -310,8 +310,7 @@ private:
     FlowShaperConfig config_;
     FlowShaperStats stats_;
 
-    // RNG
-    std::mt19937 rng_;
+    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
 
     // Burst state machine
     enum class BurstState { BURSTING, PAUSING, IDLE };

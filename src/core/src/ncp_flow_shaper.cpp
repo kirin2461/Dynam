@@ -6,18 +6,6 @@
 #include <cassert>
 #include <condition_variable>
 
-#ifdef _WIN32
-#  define NOMINMAX
-#  include <windows.h>
-#  include <bcrypt.h>
-#  undef min
-#  undef max
-#  undef ERROR
-#else
-#  include <fcntl.h>
-#  include <unistd.h>
-#endif
-
 namespace ncp {
 namespace DPI {
 
@@ -230,25 +218,6 @@ FlowShaperConfig FlowShaperConfig::file_download() {
     return c;
 }
 
-// ===== CSPRNG helper =====
-
-static void csprng_fill(uint8_t* buf, size_t len) {
-#ifdef _WIN32
-    BCryptGenRandom(nullptr, buf, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-#else
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        size_t off = 0;
-        while (off < len) {
-            ssize_t r = read(fd, buf + off, len - off);
-            if (r <= 0) break;
-            off += static_cast<size_t>(r);
-        }
-        close(fd);
-    }
-#endif
-}
-
 // ===== Constructor / Destructor =====
 
 FlowShaper::FlowShaper()
@@ -261,9 +230,8 @@ FlowShaper::FlowShaper(const FlowShaperConfig& config)
       current_burst_target_(0),
       upload_bytes_(0),
       download_bytes_(0) {
-    uint32_t seed;
-    csprng_fill(reinterpret_cast<uint8_t*>(&seed), sizeof(seed));
-    rng_.seed(seed);
+    // Phase 0: Initialize libsodium CSPRNG (idempotent)
+    ncp::csprng_init();
     last_packet_time_ = std::chrono::steady_clock::now();
     apply_profile_defaults();
     precompute_weights();
@@ -458,8 +426,7 @@ std::vector<ShapedPacket> FlowShaper::shape_sync(
 
     // Step 3: Maybe inject dummy packet
     if (config_.enable_flow_dummy) {
-        std::uniform_real_distribution<double> coin(0.0, 1.0);
-        if (coin(rng_) < config_.dummy_ratio) {
+        if (ncp::csprng_double() < config_.dummy_ratio) {
             result.push_back(generate_dummy());
         }
     }
@@ -498,17 +465,15 @@ std::vector<std::vector<uint8_t>> FlowShaper::reshape_size(
 size_t FlowShaper::select_target_size() {
     if (cumulative_weights_.empty()) return 1460;
 
-    std::uniform_real_distribution<double> dist(0.0, 1.0);
-    double r = dist(rng_);
+    double r = ncp::csprng_double();
 
     for (size_t i = 0; i < cumulative_weights_.size(); ++i) {
         if (r <= cumulative_weights_[i]) {
             size_t base = config_.size_dist.buckets[i].size;
             // Add small jitter (±10%) to avoid exact pattern
-            std::uniform_int_distribution<int> jitter(
-                -static_cast<int>(base / 10),
-                 static_cast<int>(base / 10));
-            int result = static_cast<int>(base) + jitter(rng_);
+            int jitter_range = static_cast<int>(base / 10);
+            int jitter = (jitter_range > 0) ? ncp::csprng_range(-jitter_range, jitter_range) : 0;
+            int result = static_cast<int>(base) + jitter;
             if (result < 20) result = 20;
             return static_cast<size_t>(result);
         }
@@ -523,10 +488,10 @@ std::vector<uint8_t> FlowShaper::pad_to_size(
     std::vector<uint8_t> result = data;
     size_t pad_needed = target - data.size();
 
-    // Fill with pseudo-random bytes
+    // Fill with CSPRNG bytes
     size_t old_size = result.size();
     result.resize(target);
-    csprng_fill(result.data() + old_size, pad_needed);
+    ncp::csprng_fill(result.data() + old_size, pad_needed);
 
     return result;
 }
@@ -546,8 +511,7 @@ std::vector<std::vector<uint8_t>> FlowShaper::split_packet(
         size_t take = (std::min)(data_space, remaining);
 
         std::vector<uint8_t> chunk;
-        // 4-byte header: [total_packets:8][chunk_index:8][original_len:16]
-        // Simplified: just [original_total_len:16][chunk_offset:16]
+        // 4-byte header: [original_total_len:16][chunk_offset:16]
         uint16_t total_len = static_cast<uint16_t>(data.size() & 0xFFFF);
         uint16_t chunk_off = static_cast<uint16_t>(offset & 0xFFFF);
         chunk.push_back(static_cast<uint8_t>((total_len >> 8) & 0xFF));
@@ -562,7 +526,7 @@ std::vector<std::vector<uint8_t>> FlowShaper::split_packet(
             size_t pad = chunk_target - chunk.size();
             size_t old_sz = chunk.size();
             chunk.resize(chunk_target);
-            csprng_fill(chunk.data() + old_sz, pad);
+            ncp::csprng_fill(chunk.data() + old_sz, pad);
         }
 
         chunks.push_back(std::move(chunk));
@@ -587,10 +551,9 @@ std::chrono::microseconds FlowShaper::next_delay() {
         }
         // Pause over, start new burst
         burst_state_ = BurstState::BURSTING;
-        std::uniform_int_distribution<int> bd(
+        current_burst_target_ = ncp::csprng_range(
             config_.burst_model.burst_packets_min,
             config_.burst_model.burst_packets_max);
-        current_burst_target_ = bd(rng_);
         packets_in_current_burst_ = 0;
         stats_.bursts_generated.fetch_add(1);
     }
@@ -606,10 +569,9 @@ void FlowShaper::advance_burst_state() {
     if (burst_state_ == BurstState::IDLE) {
         // Start first burst
         burst_state_ = BurstState::BURSTING;
-        std::uniform_int_distribution<int> bd(
+        current_burst_target_ = ncp::csprng_range(
             config_.burst_model.burst_packets_min,
             config_.burst_model.burst_packets_max);
-        current_burst_target_ = bd(rng_);
         packets_in_current_burst_ = 0;
         stats_.bursts_generated.fetch_add(1);
         return;
@@ -620,11 +582,9 @@ void FlowShaper::advance_burst_state() {
         if (packets_in_current_burst_ >= current_burst_target_) {
             // Burst complete — enter pause
             burst_state_ = BurstState::PAUSING;
-            double pause_ms;
-            std::uniform_real_distribution<double> pd(
+            double pause_ms = ncp::csprng_double_range(
                 config_.burst_model.pause_ms_min,
                 config_.burst_model.pause_ms_max);
-            pause_ms = pd(rng_);
             pause_end_time_ = std::chrono::steady_clock::now() +
                 std::chrono::microseconds(static_cast<int64_t>(pause_ms * 1000.0));
         }
@@ -646,17 +606,21 @@ std::chrono::microseconds FlowShaper::sample_delay() {
             break;
         }
         case BurstModel::Distribution::GAUSSIAN: {
+            // Box-Muller transform with CSPRNG
             double mean = (bm.burst_inter_ms_min + bm.burst_inter_ms_max) / 2.0;
             double stddev = (bm.burst_inter_ms_max - bm.burst_inter_ms_min) / 4.0;
-            std::normal_distribution<double> nd(mean, stddev);
-            delay_ms = nd(rng_);
+            double u1 = ncp::csprng_double();
+            double u2 = ncp::csprng_double();
+            // Avoid log(0)
+            if (u1 < 1e-10) u1 = 1e-10;
+            double z = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
+            delay_ms = mean + stddev * z;
             break;
         }
         case BurstModel::Distribution::UNIFORM:
         default: {
-            std::uniform_real_distribution<double> ud(
+            delay_ms = ncp::csprng_double_range(
                 bm.burst_inter_ms_min, bm.burst_inter_ms_max);
-            delay_ms = ud(rng_);
             break;
         }
     }
@@ -669,14 +633,17 @@ std::chrono::microseconds FlowShaper::sample_delay() {
 }
 
 double FlowShaper::sample_pareto(double alpha, double xm) {
-    // Pareto distribution: X = xm / U^(1/alpha)
-    std::uniform_real_distribution<double> u(0.0001, 1.0);
-    return xm / std::pow(u(rng_), 1.0 / alpha);
+    // Pareto distribution: X = xm / U^(1/alpha), U ~ Uniform(0,1)
+    double u = ncp::csprng_double();
+    if (u < 1e-10) u = 1e-10; // avoid division by zero
+    return xm / std::pow(u, 1.0 / alpha);
 }
 
 double FlowShaper::sample_exponential(double lambda) {
-    std::exponential_distribution<double> ed(lambda);
-    return ed(rng_);
+    // Inverse transform: X = -ln(U) / lambda, U ~ Uniform(0,1)
+    double u = ncp::csprng_double();
+    if (u < 1e-10) u = 1e-10; // avoid log(0)
+    return -std::log(u) / lambda;
 }
 
 // ===== Dummy / Keepalive =====
@@ -690,7 +657,7 @@ ShapedPacket FlowShaper::generate_dummy() {
     sp.data[2] = FLOW_DUMMY_MAGIC_2;
     sp.data[3] = FLOW_DUMMY_MAGIC_3;
     if (sz > 0) {
-        csprng_fill(sp.data.data() + 4, sz);
+        ncp::csprng_fill(sp.data.data() + 4, sz);
     }
     sp.is_dummy = true;
     sp.is_upload = true;
@@ -759,7 +726,7 @@ ShapedPacket FlowShaper::generate_ratio_balance_packet() {
     sp.data[2] = FLOW_DUMMY_MAGIC_2;
     sp.data[3] = FLOW_DUMMY_MAGIC_3;
     if (sz > 0) {
-        csprng_fill(sp.data.data() + 4, sz);
+        ncp::csprng_fill(sp.data.data() + 4, sz);
     }
     sp.is_dummy = true;
     sp.is_upload = need_upload;
