@@ -4,16 +4,18 @@
  *
  * Periodic device identity rotation to prevent tracking.
  * Manages pool of identities (MAC, hostname, DHCP fingerprint).
+ *
+ * Phase 0.11: Replaced std::mt19937/std::shuffle with CSPRNG-based Fisher-Yates.
  */
 
 #include "ncp_identity.hpp"
+#include "ncp_csprng.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <mutex>
 #include <sodium.h>
-#include <random>  // for std::shuffle, std::mt19937
 #include <thread>
 
 namespace ncp {
@@ -58,7 +60,7 @@ DeviceIdentity DeviceIdentity::linux_desktop() {
 }
 
 DeviceIdentity DeviceIdentity::random_device() {
-    // Using libsodium CSPRNG instead of mt19937
+    // Using libsodium CSPRNG
 
     DeviceIdentity id;
     // Generate random MAC with locally-administered bit set
@@ -130,16 +132,13 @@ struct IdentityRotation::Impl {
         }
 
         if (config.rotate_host) {
-            // Append random suffix to base hostname
-            std::uniform_int_distribution<int> suffix_dist(100, 999);
-            // hostname stays as-is from profile (already unique per identity)
             stats.hostname_changes++;
         }
 
         stats.rotations_total++;
         stats.current_identity = current_index;
 
-        // Fire callback outside of lock? No - keep simple for now
+        // Fire callback
         if (on_change) {
             on_change(next);
         }
@@ -237,8 +236,8 @@ void IdentityRotation::generate_pool(size_t count) {
         impl_->pool.push_back(DeviceIdentity::random_device());
     }
 
-    // Shuffle pool
-    std::shuffle(impl_->pool.begin(), impl_->pool.end(), std::mt19937{std::random_device{}()});
+    // CSPRNG-based Fisher-Yates shuffle (replaces std::shuffle + mt19937)
+    ncp::CSPRNG::shuffle(impl_->pool);
     impl_->current_index = 0;
 }
 

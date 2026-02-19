@@ -5,9 +5,12 @@
  * Background thread-based packet timing obfuscation.
  * Adds jitter and random delays between packet transmissions
  * to defeat timing-based DPI/traffic analysis.
+ *
+ * Phase 0.11: Replaced std::mt19937 with ncp::CSPRNG (libsodium).
  */
 
 #include "ncp_timing.hpp"
+#include "ncp_csprng.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -15,7 +18,6 @@
 #include <cmath>
 #include <mutex>
 #include <queue>
-#include <random>
 #include <thread>
 
 namespace ncp {
@@ -80,23 +82,24 @@ struct TimingObfuscator::Impl {
 
     std::atomic<bool>                      running{false};
     std::thread                            worker;
-    std::mt19937                           rng;
 
-    Impl() : rng(std::random_device{}()) {}
+    Impl() {}
 
     // ── Compute a single delay with jitter ──────────────────────────────────
     double compute_delay() {
-        std::uniform_real_distribution<double> base_dist(
+        // Uniform base delay via CSPRNG
+        double base_delay = ncp::CSPRNG::uniform_double(
             profile.min_delay_ms, profile.max_delay_ms
         );
-        double base_delay = base_dist(rng);
 
-        // Apply jitter: Gaussian noise around the base delay
-        std::normal_distribution<double> jitter_dist(
-            0.0, base_delay * profile.jitter_factor
-        );
-        double jitter = jitter_dist(rng);
-        double delay  = base_delay + jitter;
+        // Apply jitter: approximate Gaussian via Box-Muller with CSPRNG
+        double stddev = base_delay * profile.jitter_factor;
+        double u1 = ncp::CSPRNG::uniform_double(1e-10, 1.0);
+        double u2 = ncp::CSPRNG::uniform_double(0.0, 1.0);
+        double z  = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
+        double jitter = z * stddev;
+
+        double delay = base_delay + jitter;
 
         // Clamp to valid range
         delay = std::max(0.5, delay);  // at least 0.5ms
@@ -129,8 +132,8 @@ struct TimingObfuscator::Impl {
 
             // Check for burst mode
             if (profile.burst_mode) {
-                std::uniform_real_distribution<double> prob_dist(0.0, 1.0);
-                if (prob_dist(rng) < profile.burst_prob) {
+                double roll = ncp::CSPRNG::uniform_double(0.0, 1.0);
+                if (roll < profile.burst_prob) {
                     // Burst: send multiple packets with minimal delay
                     send_packet(packet, 0.5);  // minimal delay for first
 
