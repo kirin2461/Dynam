@@ -4,46 +4,55 @@
 >
 > ## Current Status
 
-**Version**: 1.2.0 (Active Development)
+**Version**: 1.3.0 (Active Development)
 
 ### Implementation Progress
 
 **Core Library (libncp_core)**:
-- ✅ **Fully Implemented** (80-90%): Cryptography, DPI Bypass, Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration
+- ✅ **Fully Implemented** (80-90%): Cryptography, DPI Bypass, Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, **CSPRNG**
 - ⚠️ **Partial Implementation** (40-60%): Paranoid Mode (core features work, some advanced methods pending), E2E Encryption (X25519 done, X448/ECDH_P256 in progress)
 - 🚧 **Stub/Minimal** (10-30%): I2P Integration (API defined, SAM bridge implementation in progress), Traffic Mimicry (basic structure, full protocol emulation pending)
+
+**Security Hardening (Phase 0)**:
+- ✅ Complete CSPRNG migration — all `std::mt19937` replaced with libsodium `randombytes_*`
+- ✅ New `ncp::CSPRNG` header-only wrapper with `random_bytes`, `uniform_uint32`, `uniform_double`, `shuffle`
+- ✅ 12 modules patched, 50+ replacement sites, 18 dedicated CSPRNG unit tests
 
 **CLI Tool**:
 - ✅ **Working Commands**: `status`, `help`
 - 🚧 **In Active Development**: `run`, `stop`, `rotate`, `crypto`, `license`, `network`, `dpi`, `i2p`, `mimic`
-- ⚠️ **Note**: CLI handlers currently being refactored from stubs to full implementations (see [CLAUDE_ACTION_PLAN.md](CLAUDE_ACTION_PLAN.md))
+- ⚠️ **Note**: CLI handlers currently being refactored from stubs to full implementations
 
 **Testing**:
 - ✅ Basic unit tests for core modules (crypto, DPI, networking)
 - ✅ Comprehensive test coverage for E2E, Paranoid Mode, Secure Memory, I2P modules
+- ✅ CSPRNG unit tests (18 tests: bounds, distribution, uniqueness, shuffle)
 
 **Known Limitations**:
 - I2P integration requires external I2P router with SAM bridge enabled
 - Paranoid Mode advanced features (memory protection, kill switch, traffic morphing) are platform-specific and may require elevated privileges
 - Some CLI commands shown in documentation are not yet functional (marked above)
 
-**Roadmap** (See [CLAUDE_ACTION_PLAN.md](CLAUDE_ACTION_PLAN.md) for detailed tasks):
+**Roadmap**:
 1. ✅ **Phase 1** (Completed): CLI command handlers completion + RAII refactoring
 2. ✅ **Phase 2** (Completed): I2P SAM implementation + Paranoid Mode advanced methods
 3. ✅ **Phase 3** (Completed): Security fixes (thread pool, CSPRNG migration)
 4. ✅ **Phase 4-6** (Completed): Code quality, testing, CI/CD, documentation
+5. ✅ **Phase 0** (Completed): Full CSPRNG migration — eliminate all `std::mt19937`
+6. ✅ **Phase 1-CI** (Completed): CI/CMake fixes, CSPRNG tests, lighter workflows
 
 
 
 ## Features
 
-### Core Library (libncp_core) - 18 modules
+### Core Library (libncp_core) - 19 modules
 
+- **CSPRNG** (`ncp_csprng.hpp`) - Header-only libsodium wrapper: `random_bytes`, `uniform_uint32`, `uniform_double`, `fill_random`, `shuffle` — replaces all `std::mt19937` usage
 - **Cryptography** (`ncp_crypto.hpp`) - Ed25519, Curve25519, ChaCha20-Poly1305, X25519 key exchange, AEAD encryption with `constexpr`/`noexcept` optimization
 - **DPI Bypass** (`ncp_dpi.hpp`, `ncp_dpi_advanced.hpp`) - TCP fragmentation, fake packets, disorder mode, SNI splitting, RuNet presets (Soft/Strong)
 - **Network Spoofing** (`ncp_spoofer.hpp`) - IPv4/IPv6/MAC/DNS spoofing with automatic identity rotation, SMBIOS serial spoofing, disk serial randomization, DHCP client ID spoofing, TCP/IP fingerprint emulation (Windows 10/Linux 5.x/macOS profiles)
 - **Network Operations** (`ncp_network.hpp`) - libpcap packet capture, raw sockets, typed `unique_ptr` handles, bypass techniques (HTTP/TLS mimicry)
-- **Paranoid Mode** (`ncp_paranoid.hpp`) - 8-layer protection: entry obfuscation, multi-anonymization (VPN->Tor->I2P), traffic morphing, timing protection, metadata stripping, post-quantum crypto, anti-correlation, system-level memory protection
+- **Paranoid Mode** (`ncp_paranoid.hpp`) - 8-layer protection: entry obfuscation, multi-anonymization (VPN→Tor→I2P), traffic morphing, timing protection, metadata stripping, post-quantum crypto, anti-correlation, system-level memory protection
 - **Traffic Mimicry** (`ncp_mimicry.hpp`) - HTTP/TLS/WebSocket protocol emulation for traffic camouflage
 - **TLS Fingerprinting** (`ncp_tls_fingerprint.hpp`) - JA3/JA3S fingerprint randomization and evasion
 - **I2P Integration** (`ncp_i2p.hpp`) - I2P garlic routing, SAM bridge, tunnel management
@@ -56,6 +65,7 @@
 - **License Management** (`ncp_license.hpp`) - Hardware ID-based offline validation
 - **Logging** (`ncp_logger.hpp`) - Structured logging with severity levels
 - **Configuration** (`ncp_config.hpp`) - Runtime configuration management
+- **Thread Pool** (`ncp_thread_pool.hpp`) - Lock-free task queue with configurable worker count
 
 ### CLI Tool
 
@@ -86,7 +96,7 @@
 - Cross-platform: Windows, Linux, macOS
 - CMake + vcpkg/Conan build system
 - Fuzzing tests (LibFuzzer) for crypto, DPI, and packet parser
-- CI/CD via GitHub Actions
+- CI/CD via GitHub Actions (Linux, macOS, sanitizers)
 
 ## Quick Start
 
@@ -103,7 +113,7 @@ build.bat
 
 ```bash
 # Install dependencies
-sudo apt-get install -y cmake build-essential git libsodium-dev libssl-dev libsqlite3-dev libgtest-dev
+sudo apt-get install -y cmake build-essential git libsodium-dev libssl-dev libpcap-dev libgtest-dev pkg-config
 
 # Build
 git clone https://github.com/kirin2461/Dynam.git
@@ -171,7 +181,7 @@ ncp network interfaces
 Dynam/
 |-- src/
 |   |-- core/                    # Core library (libncp_core)
-|   |   |-- include/             # 18 public headers (ncp_*.hpp)
+|   |   |-- include/             # 19 public headers (ncp_*.hpp)
 |   |   |-- src/                 # Implementation files
 |   |   |-- CMakeLists.txt
 |   |-- cli/                     # CLI tool (main.cpp)
@@ -208,6 +218,7 @@ Dynam/
 
 ## Security
 
+- **CSPRNG**: All randomness via libsodium (`randombytes_*`) — zero `std::mt19937` in codebase
 - **Cryptography**: libsodium (audited, industry-standard)
 - **AEAD**: XChaCha20-Poly1305 authenticated encryption with associated data
 - **Key Exchange**: X25519, X448, ECDH_P256
@@ -222,8 +233,8 @@ Dynam/
 
 | Library | Purpose | Required |
 |---------|---------|----------|
-| libsodium | Cryptography (Ed25519, ChaCha20, X25519, AEAD) | Yes |
-| OpenSSL | TLS operations, DoH | Yes |
+| libsodium | Cryptography + CSPRNG (Ed25519, ChaCha20, X25519, AEAD, `randombytes`) | Yes |
+| OpenSSL | TLS operations, DoH, ECH/HPKE | Yes |
 | SQLite3 | Encrypted database | Yes |
 | GoogleTest | Unit testing | For tests |
 | libpcap | Packet capture (Linux/macOS) | Optional |
@@ -248,6 +259,6 @@ For issues and questions, please open a [GitHub Issue](https://github.com/kirin2
 
 ---
 
-**Last Updated**: February 12, 2026
-**Version**: 1.1.0
-**Status**: Core library (18 modules), CLI, DPI bypass, Paranoid Mode, HW spoofing, SecureBuffer - implemented
+**Last Updated**: February 19, 2026  
+**Version**: 1.3.0  
+**Status**: Core library (19 modules), CLI, DPI bypass, Paranoid Mode, HW spoofing, SecureBuffer, CSPRNG — implemented
