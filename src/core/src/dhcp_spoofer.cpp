@@ -2,9 +2,9 @@
 #include <sstream>
 #include <fstream>
 #include <string>
-#include <random>
 #include <iomanip>
 #include <iostream>
+#include <sodium.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -32,13 +32,10 @@ std::string DHCPSpoofer::generate_from_mac(const std::string& mac) {
 }
 
 std::string DHCPSpoofer::generate_random() {
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<int> dist(0, 255);
     std::ostringstream oss;
     oss << "00";
     for (int i = 0; i < 8; ++i) {
-        oss << std::hex << std::setfill('0') << std::setw(2) << dist(gen);
+        oss << std::hex << std::setfill('0') << std::setw(2) << randombytes_uniform(256);
     }
     return oss.str();
 }
