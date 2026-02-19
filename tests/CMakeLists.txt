@@ -68,15 +68,7 @@ if (WIN32)
 endif()
 
 # ==================== Test Registration ====================
-# NOTE: gtest_discover_tests is intentionally NOT used here.
-# It runs the test binary at CMake/MSBuild time (before DLLs are
-# available on PATH), which causes exit code 0xC0000135 on Windows CI.
-# Tests are run via ctest after the build, when DLLs are already present.
-#
-# include(GoogleTest)
-# gtest_discover_tests(ncp_tests
-#     WORKING_DIRECTORY $<TARGET_FILE_DIR:ncp_tests>
-#     DISCOVERY_TIMEOUT 10
-# )
-
+# Register as a single CTest test with a timeout to prevent
+# CI from hanging on unreachable network endpoints.
 add_test(NAME ncp_tests COMMAND ncp_tests)
+set_tests_properties(ncp_tests PROPERTIES TIMEOUT 120)
