@@ -3,6 +3,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <sodium.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -207,7 +208,8 @@ public:
         ip->ihl_ver = 0x45;
         ip->tos = 0;
         ip->tot_len = htons(static_cast<uint16_t>(total));
-        ip->id = htons(static_cast<uint16_t>(rand() % 65535));
+        // SECURITY FIX: Use cryptographically secure random from libsodium
+        ip->id = htons(static_cast<uint16_t>(randombytes_uniform(65536)));
         ip->frag_off = 0;
         ip->ttl = ttl;
         ip->protocol = IPPROTO_TCP;
@@ -219,7 +221,8 @@ public:
         // TCP header
         tcp->source = htons(src_port);
         tcp->dest = htons(dst_port);
-        tcp->seq = htonl(static_cast<uint32_t>(rand()));
+        // SECURITY FIX: Use cryptographically secure random for TCP seq
+        tcp->seq = htonl(randombytes_random());
         tcp->ack_seq = 0;
         tcp->res_doff = 0x50; // data offset = 5 (20 bytes)
         tcp->flags = tcp_flags;
