@@ -71,11 +71,6 @@ public:
     ECHConfigCache();
     explicit ECHConfigCache(const CacheConfig& config);
     ~ECHConfigCache();
-    // ... остальное без изменений
-
-    ECHConfigCache();
-    explicit ECHConfigCache(const CacheConfig& config);
-    ~ECHConfigCache();
 
     /**
      * @brief Get ECHConfig from cache
