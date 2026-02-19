@@ -50,7 +50,6 @@ OrchestratorStrategy OrchestratorStrategy::stealth() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
-    // Phase 2+: Full TLS fingerprinting + advanced DPI
     s.enable_tls_fingerprint = true;
     s.tls_browser_profile = ncp::BrowserType::CHROME;
     s.tls_rotate_per_connection = true;
@@ -77,7 +76,6 @@ OrchestratorStrategy OrchestratorStrategy::balanced() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
-    // Phase 2+: TLS fingerprinting on, advanced DPI moderate
     s.enable_tls_fingerprint = true;
     s.tls_browser_profile = ncp::BrowserType::CHROME;
     s.tls_rotate_per_connection = false;
@@ -103,7 +101,6 @@ OrchestratorStrategy OrchestratorStrategy::performance() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
-    // Phase 2+: TLS fingerprinting on, no advanced DPI
     s.enable_tls_fingerprint = true;
     s.tls_browser_profile = ncp::BrowserType::CHROME;
     s.enable_advanced_dpi = false;
@@ -125,7 +122,6 @@ OrchestratorStrategy OrchestratorStrategy::max_compat() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
-    // Phase 2+: Minimal fingerprinting, no advanced DPI
     s.enable_tls_fingerprint = true;
     s.tls_browser_profile = ncp::BrowserType::CHROME;
     s.enable_advanced_dpi = false;
@@ -161,11 +157,42 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
       current_strategy_(config.strategy),
       threat_level_(ThreatLevel::NONE),
       tls_fingerprint_(config.strategy.tls_browser_profile),
+      ech_initialized_(false),
       consecutive_failures_(0),
       consecutive_successes_(0) {
 
     if (!config_.shared_secret.empty()) {
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
+    }
+
+    // Initialize ECH config once in constructor
+    if (config_.ech_enabled) {
+        if (!config_.ech_config_data.empty()) {
+            // Parse provided ECHConfig
+            if (ECH::parse_ech_config(config_.ech_config_data, ech_config_)) {
+                ech_initialized_ = true;
+            } else {
+                // Fallback to test config on parse failure
+                std::string public_name = (current_strategy_.tls_browser_profile == ncp::BrowserType::SAFARI)
+                                          ? "apple.com" : "cloudflare.com";
+                ech_config_ = ECH::create_test_ech_config(
+                    public_name,
+                    ECH::HPKECipherSuite(),
+                    ech_private_key_
+                );
+                ech_initialized_ = true;
+            }
+        } else {
+            // Generate test ECHConfig for development/testing
+            std::string public_name = (current_strategy_.tls_browser_profile == ncp::BrowserType::SAFARI)
+                                      ? "apple.com" : "cloudflare.com";
+            ech_config_ = ECH::create_test_ech_config(
+                public_name,
+                ECH::HPKECipherSuite(),
+                ech_private_key_
+            );
+            ech_initialized_ = true;
+        }
     }
 
     apply_strategy(current_strategy_);
@@ -230,10 +257,12 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
 
     std::vector<uint8_t> data = payload;
 
-    // Phase 2+: Apply TLS fingerprint rotation before handshake
-    if (current_strategy_.enable_tls_fingerprint && !data.empty() &&
-        data.size() > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01) {
+    // Detect ClientHello: ContentType=0x16, Version=0x03, HandshakeType=0x01
+    bool is_client_hello = (!data.empty() && data.size() > 5 &&
+                           data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01);
 
+    // Phase 2+: Apply TLS fingerprint rotation before handshake
+    if (current_strategy_.enable_tls_fingerprint && is_client_hello) {
         if (current_strategy_.tls_rotate_per_connection) {
             static const ncp::BrowserType profiles[] = {
                 ncp::BrowserType::CHROME, ncp::BrowserType::FIREFOX,
@@ -245,17 +274,11 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
     }
 
     // Phase 2+: Apply ECH if configured and ClientHello detected
-    if (config_.ech_enabled && !config_.ech_config_data.empty() &&
-        !data.empty() && data.size() > 5 &&
-        data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01) {
-
-        ECH::ECHConfig ech_config;
-        if (ECH::parse_ech_config(config_.ech_config_data, ech_config)) {
-            auto ech_result = ECH::apply_ech(data, ech_config);
-            if (!ech_result.empty() && ech_result != data) {
-                data = std::move(ech_result);
-                stats_.ech_encryptions.fetch_add(1);
-            }
+    if (config_.ech_enabled && ech_initialized_ && is_client_hello) {
+        auto ech_result = ECH::apply_ech(data, ech_config_);
+        if (!ech_result.empty() && ech_result.size() > data.size()) {
+            data = std::move(ech_result);
+            stats_.ech_encryptions.fetch_add(1);
         }
     }
 
@@ -588,9 +611,11 @@ const FlowShaper& ProtocolOrchestrator::flow_shaper() const { return flow_shaper
 const ProbeResist& ProtocolOrchestrator::probe_resist() const { return probe_resist_; }
 const TrafficMimicry& ProtocolOrchestrator::mimicry() const { return mimicry_; }
 
-// Phase 2+: TLS Fingerprint access
 ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() { return tls_fingerprint_; }
 const ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() const { return tls_fingerprint_; }
+
+const ECH::ECHConfig& ProtocolOrchestrator::ech_config() const { return ech_config_; }
+bool ProtocolOrchestrator::is_ech_initialized() const { return ech_initialized_; }
 
 // ===== Config & Stats =====
 
