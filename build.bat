@@ -20,7 +20,7 @@ set "PROJECT_DIR=%~dp0"
 :: ============================================
 :: 1. Check Git
 :: ============================================
-echo [1/6] Checking Git...
+echo [1/7] Checking Git...
 where git >nul 2>&1
 if %errorlevel% neq 0 (
     echo [!] Git not found. Downloading Git...
@@ -42,7 +42,7 @@ echo.
 :: ============================================
 :: 2. Check CMake
 :: ============================================
-echo [2/6] Checking CMake...
+echo [2/7] Checking CMake...
 where cmake >nul 2>&1
 if %errorlevel% neq 0 (
     echo [!] CMake not found. Downloading CMake...
@@ -63,7 +63,7 @@ echo.
 :: ============================================
 :: 3. Check Visual Studio / MSVC
 :: ============================================
-echo [3/6] Checking Visual Studio...
+echo [3/7] Checking Visual Studio...
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
     echo [!] Visual Studio not found.
@@ -90,7 +90,7 @@ if %errorlevel% neq 0 (
 :: ============================================
 :: 4. Install vcpkg and dependencies
 :: ============================================
-echo [4/6] Setting up vcpkg and dependencies...
+echo [4/7] Setting up vcpkg and dependencies...
 if not exist "%VCPKG_DIR%" (
     echo     Cloning vcpkg...
     git clone https://github.com/microsoft/vcpkg.git "%VCPKG_DIR%"
@@ -102,6 +102,7 @@ if not exist "%VCPKG_DIR%" (
 echo     Installing dependencies (this may take a while)...
 "%VCPKG_DIR%\vcpkg.exe" install libsodium:x64-windows
 "%VCPKG_DIR%\vcpkg.exe" install openssl:x64-windows
+"%VCPKG_DIR%\vcpkg.exe" install libwebsockets:x64-windows
 "%VCPKG_DIR%\vcpkg.exe" install sqlite3:x64-windows
 "%VCPKG_DIR%\vcpkg.exe" install gtest:x64-windows
 
@@ -117,10 +118,17 @@ if not defined NUMBER_OF_PROCESSORS set "NUMBER_OF_PROCESSORS=4"
 :: ============================================
 :: 6. Build the project
 :: ============================================
-echo [5/6] Configuring with CMake...
+echo [5/7] Configuring with CMake...
 if not exist "%PROJECT_DIR%build" mkdir "%PROJECT_DIR%build"
 
-cmake -S "%PROJECT_DIR%." -B "%PROJECT_DIR%build" -DCMAKE_BUILD_TYPE=%BUILD_TYPE% -DCMAKE_TOOLCHAIN_FILE="%VCPKG_DIR%/scripts/buildsystems/vcpkg.cmake" -G "Visual Studio 17 2022" -A x64
+cmake -S "%PROJECT_DIR%." -B "%PROJECT_DIR%build" ^
+    -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
+    -DCMAKE_TOOLCHAIN_FILE="%VCPKG_DIR%/scripts/buildsystems/vcpkg.cmake" ^
+    -DENABLE_TESTS=ON ^
+    -DENABLE_CLI=ON ^
+    -DENABLE_GUI=OFF ^
+    -DENABLE_WEBSOCKETS=ON ^
+    -G "Visual Studio 17 2022" -A x64
 
 if %errorlevel% neq 0 (
     echo [ERROR] CMake configuration failed.
@@ -128,13 +136,27 @@ if %errorlevel% neq 0 (
 )
 
 echo.
-echo [6/6] Building project...
+echo [6/7] Building project...
 cmake --build "%PROJECT_DIR%build" --config %BUILD_TYPE% -j %NUMBER_OF_PROCESSORS%
 
 if %errorlevel% neq 0 (
     echo [ERROR] Build failed.
     goto :error
 )
+
+:: ============================================
+:: 7. Run tests
+:: ============================================
+echo.
+echo [7/7] Running tests...
+cd "%PROJECT_DIR%build"
+ctest -C %BUILD_TYPE% --output-on-failure --timeout 120
+if %errorlevel% neq 0 (
+    echo [WARNING] Some tests failed. Check output above.
+) else (
+    echo [OK] All tests passed.
+)
+cd "%PROJECT_DIR%"
 
 echo.
 echo ============================================
@@ -144,10 +166,10 @@ echo.
 echo Binaries located in: %PROJECT_DIR%build\bin\%BUILD_TYPE%
 echo.
 
-if exist "%PROJECT_DIR%build\bin\%BUILD_TYPE%\ncp-cli.exe" (
-    echo Found ncp-cli.exe - launching...
+if exist "%PROJECT_DIR%build\bin\%BUILD_TYPE%\ncp.exe" (
+    echo Found ncp.exe - launching...
     echo.
-    "%PROJECT_DIR%build\bin\%BUILD_TYPE%\ncp-cli.exe"
+    "%PROJECT_DIR%build\bin\%BUILD_TYPE%\ncp.exe"
 ) else (
     echo Executable files in build\bin\:
     dir /b "%PROJECT_DIR%build\bin\%BUILD_TYPE%\*.exe" 2>nul
