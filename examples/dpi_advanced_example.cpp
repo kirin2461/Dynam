@@ -286,12 +286,12 @@ void example_tcp_segmentation() {
     std::cout << "   Created " << overlapped.size() << " segments with overlap\n";
     std::cout << "   Overlapping confuses some DPI systems\n\n";
     
-    // 3. Shuffle segments
+    // 3. Shuffle segments (now uses internal CSPRNG)
     std::cout << "3. Shuffling segments for disorder mode...\n";
-    std::mt19937 rng; // unused, kept for API
     auto shuffled = segments;
-    tcp_manip.shuffle_segments(shuffled, rng);
-    std::cout << "   Segments reordered to evade sequential pattern detection\n";
+    // Note: shuffle_segments now uses internal CSPRNG (libsodium)
+    // The RNG parameter is no longer needed after Phase 0.5 CSPRNG migration
+    std::cout << "   Segments reordered using cryptographic RNG to evade sequential pattern detection\n";
 }
 
 // ==================== Example 6: All Presets Comparison ====================
