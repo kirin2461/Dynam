@@ -68,8 +68,8 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       # ============================================================
-      # Npcap SDK — заголовки + import libs для компиляции на Windows
-      # Runtime pcap-тесты выполняются только на Linux
+      # Npcap SDK — headers + import libs for Windows compilation
+      # Runtime pcap tests run only on Linux
       # ============================================================
       - name: Install Npcap SDK (headers + libs)
         if: runner.os == 'Windows'
@@ -156,7 +156,7 @@ jobs:
       - name: Run tests
         run: |
           cd build
-          ctest -C Release --output-on-failure
+          ctest -C Release --output-on-failure --timeout 120
         shell: bash
 
       - name: Archive build artifacts
@@ -222,4 +222,4 @@ jobs:
       - name: Run tests with ${{ matrix.sanitizer }}
         run: |
           cd build
-          ctest --output-on-failure
+          ctest --output-on-failure --timeout 120

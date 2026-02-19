@@ -7,7 +7,7 @@
 #include <thread>
 #include <mutex>
 #include <unordered_map>
-#include <math>
+#include <cmath>
 
 namespace ncp {
 namespace DPI {
@@ -133,13 +133,9 @@ ECHResult ECHConnectionManager::connect_with_ech(
 
     // Try 3: Retry with backoff
     for (uint32_t retry = 0; retry < impl_->policy.max_retries; ++retry) {
-        // Calculate delay
-        
         // Calculate delay with explicit duration_cast to resolve std::min ambiguity
         auto delay_raw = impl_->policy.initial_delay * static_cast<double>(std::pow(impl_->policy.backoff_multiplier, retry));
         auto delay = std::chrono::duration_cast<std::chrono::milliseconds>(delay_raw);
-        delay = std::min(delay, impl_->policy.max_delay);
-
         delay = std::min(delay, impl_->policy.max_delay);
 
         std::this_thread::sleep_for(delay);

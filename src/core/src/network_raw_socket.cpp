@@ -63,14 +63,14 @@ struct PseudoHeader {
 // ==================== Checksum ====================
 
 static uint16_t calculate_checksum(const void* data, int len) {
-    const uint16_t* buf = static_castst uint16_t*>(data);
+    const uint16_t* buf = static_cast<const uint16_t*>(data);
     uint32_t sum = 0;
     while (len > 1) {
         sum += *buf++;
         len -= 2;
     }
     if (len == 1) {
-        sum += *reinterpret_castst uint8_t*>(buf);
+        sum += *reinterpret_cast<const uint8_t*>(buf);
     }
     sum = (sum >> 16) + (sum & 0xFFFF);
     sum += (sum >> 16);

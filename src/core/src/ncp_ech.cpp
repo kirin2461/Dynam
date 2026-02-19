@@ -4,7 +4,7 @@
  */
 
 #include "../include/ncp_ech.hpp"
-#include string>
+#include <string>
 #include <algorithm>
 
 #ifdef HAVE_OPENSSL
@@ -46,7 +46,7 @@ static uint16_t hpke_aead_to_id(HPKEAEAD aead) {
     switch (aead) {
         case HPKEAEAD::AES_128_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_128;
         case HPKEAEAD::AES_256_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_256;
-        case HPKEAEAD::CHACHA20_POLY1305:   return OSSL_HPKE_AEAD_ID_CHACHA20_POLY1305;
+        case HPKEAEAD::CHACHA20_POLY1305:   return OSSL_HPKE_AEAD_ID_CHACHA_POLY1305;
         default: return 0;
     }
 }
@@ -318,4 +318,74 @@ bool parse_ech_config(const std::vector<uint8_t>& data, ECHConfig& config) {
 
     // Public key
     if (pos + pk_len > data.size()) return false;
-    config.public_key.
+    config.public_key.assign(data.begin() + pos, data.begin() + pos + pk_len);
+    pos += pk_len;
+
+    // Store raw config
+    config.raw_config = data;
+
+    // Basic cipher suite setup
+    HPKECipherSuite cs;
+    cs.kem_id = static_cast<HPKEKem>(kem_id);
+    cs.kdf_id = HPKEKDF::HKDF_SHA256;  // Default
+    cs.aead_id = HPKEAEAD::AES_128_GCM;  // Default
+    config.cipher_suites.push_back(cs);
+
+    return true;
+}
+
+std::vector<uint8_t> apply_ech(
+    const std::vector<uint8_t>& client_hello,
+    const ECHConfig& config
+) {
+    ECHClientContext ctx;
+    if (!ctx.init(config)) {
+        return client_hello;  // Return unmodified on failure
+    }
+
+    std::vector<uint8_t> enc, encrypted;
+    std::vector<uint8_t> aad;  // Empty AAD for now
+
+    if (!ctx.encrypt(client_hello, aad, enc, encrypted)) {
+        return client_hello;  // Return unmodified on failure
+    }
+
+    // Build ECH extension
+    std::vector<uint8_t> result;
+    // ECH extension type (0xfe0d for draft)
+    result.push_back(0xfe);
+    result.push_back(0x0d);
+    // Config ID
+    result.push_back(ctx.get_config_id());
+    // Enc
+    result.push_back(static_cast<uint8_t>(enc.size() >> 8));
+    result.push_back(static_cast<uint8_t>(enc.size() & 0xFF));
+    result.insert(result.end(), enc.begin(), enc.end());
+    // Encrypted payload
+    result.push_back(static_cast<uint8_t>(encrypted.size() >> 8));
+    result.push_back(static_cast<uint8_t>(encrypted.size() & 0xFF));
+    result.insert(result.end(), encrypted.begin(), encrypted.end());
+
+    return result;
+}
+
+#else // !HAVE_OPENSSL
+
+// Stub implementations when OpenSSL is not available
+
+bool parse_ech_config(const std::vector<uint8_t>&, ECHConfig&) {
+    return false;
+}
+
+std::vector<uint8_t> apply_ech(
+    const std::vector<uint8_t>& client_hello,
+    const ECHConfig&
+) {
+    return client_hello;
+}
+
+#endif // HAVE_OPENSSL
+
+} // namespace ECH
+} // namespace DPI
+} // namespace ncp

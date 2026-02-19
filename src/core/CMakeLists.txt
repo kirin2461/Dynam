@@ -6,7 +6,6 @@ cmake_minimum_required(VERSION 3.20)
 # Source files in root of core/
 set(NCP_CORE_ROOT_SOURCES
     NetworkManager.cpp
-    ConnectionMonitor.cpp
     InterfaceSelector.cpp
 )
 
@@ -46,7 +45,8 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_ech_cache.cpp
     src/ncp_ech_fetch.cpp
     src/ncp_ech_retry.cpp
-    src/ncp_mimicry.cpp
+    # NOTE: ncp_mimicry.cpp removed — mimicry.cpp is the canonical implementation
+    #       with Russian TSPU/Roskomnadzor whitelist domains
     # Headers bundled with src
     include/ncp_arp.hpp
     include/ncp_dummy.hpp
@@ -66,6 +66,8 @@ if(ENABLE_WEBSOCKETS OR HAVE_LIBWEBSOCKETS)
 endif()
 
 # Always compile these with #ifdef guards inside
+# NOTE: ConnectionMonitor.cpp removed — security.cpp is the canonical source
+#       for ncp::ConnectionMonitor
 list(APPEND NCP_CORE_SRC_SOURCES
     src/e2e.cpp
     src/mimicry.cpp
