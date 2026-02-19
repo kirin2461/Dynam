@@ -8,11 +8,11 @@
 #include <chrono>
 #include <mutex>
 #include <fstream>
-#include <random>
 #include <map>
 #include <unordered_map>
 #include <memory>
 #include <algorithm>
+#include "ncp_csprng.hpp"
 
 // Windows defines ERROR as a macro, which conflicts with enum values
 #ifdef ERROR
@@ -206,7 +206,7 @@ public:
 private:
     uint32_t min_size_;
     uint32_t max_size_;
-    std::mt19937 rng_;
+    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     std::mutex mutex_;
 };
 

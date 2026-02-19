@@ -298,8 +298,11 @@ void ConnectionMonitor::clear_history() {
 // ==================== TrafficPadder ====================
 
 TrafficPadder::TrafficPadder(uint32_t min_size, uint32_t max_size)
-    : min_size_(min_size), max_size_(max_size), rng_(std::random_device{}())
-{}
+    : min_size_(min_size), max_size_(max_size)
+{
+    // Phase 0: CSPRNG init (idempotent)
+    ncp::csprng_init();
+}
 
 TrafficPadder::~TrafficPadder() = default;
 
@@ -309,8 +312,8 @@ std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data
     // Determine target size
     uint32_t target = (std::max)(min_size_, static_cast<uint32_t>(data.size()));
     if (target < max_size_) {
-        std::uniform_int_distribution<uint32_t> dist(target, max_size_);
-        target = dist(rng_);
+        target = static_cast<uint32_t>(ncp::csprng_range(
+            static_cast<int>(target), static_cast<int>(max_size_)));
     }
 
     // Format: [4-byte original length (big-endian)] [original data] [random padding]
@@ -325,10 +328,12 @@ std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data
 
     result.insert(result.end(), data.begin(), data.end());
 
-    // Fill remainder with random bytes
-    std::uniform_int_distribution<int> byte_dist(0, 255);
-    while (result.size() < static_cast<size_t>(4 + target)) {
-        result.push_back(static_cast<uint8_t>(byte_dist(rng_)));
+    // Fill remainder with CSPRNG bytes
+    size_t pad_needed = static_cast<size_t>(4 + target) - result.size();
+    if (pad_needed > 0) {
+        size_t old_size = result.size();
+        result.resize(old_size + pad_needed);
+        ncp::csprng_fill(result.data() + old_size, pad_needed);
     }
 
     return result;
