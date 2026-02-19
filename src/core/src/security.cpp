@@ -16,16 +16,30 @@
 #include <ctime>
 
 #ifdef _WIN32
-#include <windows.h>
-#include <io.h>
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#  include <io.h>
+// windows.h defines ERROR macro which conflicts with EventType::ERROR
+#  ifdef ERROR
+#    undef ERROR
+#  endif
+// Also kill min/max macros if NOMINMAX didn't work (e.g. included transitively)
+#  ifdef min
+#    undef min
+#  endif
+#  ifdef max
+#    undef max
+#  endif
 #else
-#include <unistd.h>
-#include <sys/mman.h>
-#include <sys/prctl.h>
-#include <sys/resource.h>
-#include <signal.h>
-#include <dirent.h>
-#include <fstream>
+#  include <unistd.h>
+#  include <sys/mman.h>
+#  include <sys/prctl.h>
+#  include <sys/resource.h>
+#  include <signal.h>
+#  include <dirent.h>
+#  include <fstream>
 #endif
 
 namespace ncp {
@@ -154,9 +168,9 @@ LatencyMonitor::LatencyStats LatencyMonitor::get_latency_stats(const std::string
 
     if (!sorted.empty()) {
         size_t n = sorted.size();
-        stats.p50_ms = sorted[std::min(n * 50 / 100, n - 1)];
-        stats.p95_ms = sorted[std::min(n * 95 / 100, n - 1)];
-        stats.p99_ms = sorted[std::min(n * 99 / 100, n - 1)];
+        stats.p50_ms = sorted[(std::min)(n * 50 / 100, n - 1)];
+        stats.p95_ms = sorted[(std::min)(n * 95 / 100, n - 1)];
+        stats.p99_ms = sorted[(std::min)(n * 99 / 100, n - 1)];
     }
 
     return stats;
@@ -293,7 +307,7 @@ std::vector<uint8_t> TrafficPadder::add_padding(const std::vector<uint8_t>& data
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Determine target size
-    uint32_t target = std::max(min_size_, static_cast<uint32_t>(data.size()));
+    uint32_t target = (std::max)(min_size_, static_cast<uint32_t>(data.size()));
     if (target < max_size_) {
         std::uniform_int_distribution<uint32_t> dist(target, max_size_);
         target = dist(rng_);
@@ -757,7 +771,6 @@ AntiForensics::AntiForensics(const Config& config) : config_(config) {}
 
 bool AntiForensics::secure_delete_file(const std::string& path) {
 #ifdef _WIN32
-    // Open, overwrite, close, delete
     HANDLE hFile = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) return false;
@@ -766,14 +779,15 @@ bool AntiForensics::secure_delete_file(const std::string& path) {
     GetFileSizeEx(hFile, &file_size);
     auto size = static_cast<size_t>(file_size.QuadPart);
 
-    std::vector<uint8_t> buf(std::min(size, size_t(65536)));
+    size_t buf_size = size < 65536 ? size : 65536;
+    std::vector<uint8_t> buf(buf_size);
     for (int pass = 0; pass < config_.overwrite_passes; ++pass) {
         SetFilePointer(hFile, 0, nullptr, FILE_BEGIN);
         uint8_t fill = (pass % 3 == 0) ? 0x00 : (pass % 3 == 1) ? 0xFF : 0x55;
         std::memset(buf.data(), fill, buf.size());
         size_t remaining = size;
         while (remaining > 0) {
-            DWORD to_write = static_cast<DWORD>(std::min(remaining, buf.size()));
+            DWORD to_write = static_cast<DWORD>(remaining < buf.size() ? remaining : buf.size());
             DWORD written = 0;
             WriteFile(hFile, buf.data(), to_write, &written, nullptr);
             remaining -= written;
@@ -789,19 +803,19 @@ bool AntiForensics::secure_delete_file(const std::string& path) {
     file.seekg(0, std::ios::end);
     auto size = static_cast<size_t>(file.tellg());
 
-    std::vector<uint8_t> buf(std::min(size, size_t(65536)));
+    size_t buf_size = size < 65536 ? size : 65536;
+    std::vector<uint8_t> buf(buf_size);
     for (int pass = 0; pass < config_.overwrite_passes; ++pass) {
         file.seekp(0, std::ios::beg);
         uint8_t fill = (pass % 3 == 0) ? 0x00 : (pass % 3 == 1) ? 0xFF : 0x55;
         std::memset(buf.data(), fill, buf.size());
         size_t remaining = size;
         while (remaining > 0) {
-            size_t chunk = std::min(remaining, buf.size());
+            size_t chunk = remaining < buf.size() ? remaining : buf.size();
             file.write(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(chunk));
             remaining -= chunk;
         }
         file.flush();
-        fsync(fileno(fopen(path.c_str(), "r")));
     }
     file.close();
     return (unlink(path.c_str()) == 0);
@@ -810,7 +824,6 @@ bool AntiForensics::secure_delete_file(const std::string& path) {
 
 bool AntiForensics::secure_delete_directory(const std::string& path) {
     (void)path;
-    // Recursive secure delete is risky — left as platform-specific TODO
     return false;
 }
 
@@ -843,15 +856,14 @@ bool AntiForensics::secure_zero_memory(void* ptr, size_t size) {
 
 bool AntiForensics::disable_ptrace() {
 #ifdef _WIN32
-    return false;  // Use IsDebuggerPresent() checks instead
+    return false;
 #else
     return prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0;
 #endif
 }
 
 bool AntiForensics::enable_aslr() {
-    // ASLR is OS-level; we can only verify it's active
-    return true;  // Enabled by default on modern OS
+    return true;
 }
 
 bool AntiForensics::set_process_dumpable(bool dumpable) {
@@ -875,12 +887,10 @@ bool AntiForensics::clear_bash_history() {
 }
 
 bool AntiForensics::clear_system_logs() {
-    // Dangerous operation — only clear NCP-related entries
     return false;
 }
 
 bool AntiForensics::clear_browser_cache() {
-    // Too destructive for general use
     return false;
 }
 
@@ -900,9 +910,9 @@ bool MonitoringDetector::check_debugger_linux() {
 #ifdef _WIN32
     return false;
 #else
-    std::ifstream status("/proc/self/status");
+    std::ifstream status_file("/proc/self/status");
     std::string line;
-    while (std::getline(status, line)) {
+    while (std::getline(status_file, line)) {
         if (line.find("TracerPid:") != std::string::npos) {
             auto pos = line.find(':');
             if (pos != std::string::npos) {
@@ -921,7 +931,6 @@ bool MonitoringDetector::is_running_in_vm() {
 
 bool MonitoringDetector::check_vm_artifacts() {
 #ifdef _WIN32
-    // Check for VM-related registry keys / services
     HKEY hKey;
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, "SYSTEM\\CurrentControlSet\\Services\\VBoxGuest",
                       0, KEY_READ, &hKey) == ERROR_SUCCESS) {
@@ -935,7 +944,6 @@ bool MonitoringDetector::check_vm_artifacts() {
     }
     return false;
 #else
-    // Check DMI for VM signatures
     std::ifstream vendor("/sys/class/dmi/id/sys_vendor");
     if (vendor.is_open()) {
         std::string v;
@@ -953,12 +961,9 @@ bool MonitoringDetector::check_vm_artifacts() {
 
 bool MonitoringDetector::is_running_in_sandbox() {
 #ifdef _WIN32
-    // Check for common sandbox DLLs
-    if (GetModuleHandleA("SbieDll.dll")) return true;      // Sandboxie
-    if (GetModuleHandleA("dbghelp.dll")) return false;     // Normal
+    if (GetModuleHandleA("SbieDll.dll")) return true;
     return false;
 #else
-    // Check for container namespaces
     std::ifstream cgroup("/proc/1/cgroup");
     if (cgroup.is_open()) {
         std::string line;
@@ -982,13 +987,11 @@ bool MonitoringDetector::detect_wireshark() {
     HWND hwnd = FindWindowA(nullptr, "The Wireshark Network Analyzer");
     return hwnd != nullptr;
 #else
-    // Check for common capture processes
     DIR* proc_dir = opendir("/proc");
     if (!proc_dir) return false;
 
     struct dirent* entry;
     while ((entry = readdir(proc_dir)) != nullptr) {
-        // Only numeric directories (PIDs)
         if (entry->d_name[0] < '0' || entry->d_name[0] > '9') continue;
 
         std::string cmdline_path = std::string("/proc/") + entry->d_name + "/comm";
@@ -1014,20 +1017,16 @@ MonitoringDetector::ThreatInfo MonitoringDetector::scan_threats() {
     info.vm_detected = is_running_in_vm();
     info.sandbox_detected = is_running_in_sandbox();
     info.wireshark_detected = detect_wireshark();
-    // process_monitor_detected left as extension point
     return info;
 }
 
 bool MonitoringDetector::evade_debugger() {
 #ifdef _WIN32
-    // Timing-based: NtQueryInformationProcess is more reliable but
-    // requires ntdll import. Simple approach:
     if (IsDebuggerPresent()) {
-        return false;  // Already attached — can't detach
+        return false;
     }
     return true;
 #else
-    // Set non-dumpable to prevent ptrace attach
     return prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0;
 #endif
 }
@@ -1054,9 +1053,8 @@ ProcessStealth::ProcessStealth() {}
 
 bool ProcessStealth::hide_process() {
 #ifdef _WIN32
-    return false;  // Requires kernel driver on Windows
+    return false;
 #else
-    // Rename process via prctl
     return prctl(PR_SET_NAME, config_.fake_name.c_str(), 0, 0, 0) == 0;
 #endif
 }
@@ -1071,7 +1069,6 @@ bool ProcessStealth::unhide_process() {
 }
 
 bool ProcessStealth::hide_network_connections() {
-    // Requires root / netfilter manipulation — not safe for general use
     return false;
 }
 
@@ -1080,7 +1077,6 @@ bool ProcessStealth::set_fake_process_name(const std::string& name) {
     (void)name;
     return false;
 #else
-    // Save original name first
     if (original_name_.empty()) {
         char buf[16]{};
         prctl(PR_GET_NAME, buf, 0, 0, 0);
