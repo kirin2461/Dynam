@@ -18,6 +18,7 @@ add_executable(ncp_tests
     crypto_test.cpp
     test_csprng.cpp          # Phase 1: CSPRNG unit tests
     test_dpi.cpp
+    test_dpi_advanced_integration.cpp  # Phase 1+2: Advanced DPI + Orchestrator
     test_integration.cpp
     test_license.cpp
     test_network.cpp
