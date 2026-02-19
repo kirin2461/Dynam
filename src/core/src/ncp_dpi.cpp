@@ -1,4 +1,7 @@
 #include "ncp_dpi.hpp"
+#include "ncp_dpi_advanced.hpp"
+#include "ncp_tls_fingerprint.hpp"
+#include "ncp_ech.hpp"
 #include "ncp_thread_pool.hpp"
 #include <thread>
 #include <mutex>
@@ -46,8 +49,7 @@ std::string to_lower_copy(const std::string& s) {
 
 } // namespace
 
-   // Using libsodium CSPRNG (randombytes_uniform) instead of mt19937
- // Replaced insecure std::mt19937 + std::uniform_int_distribution with randombytes_uniform()
+// Using libsodium CSPRNG (randombytes_uniform) instead of mt19937
 
 // TLS ClientHello detection
 static bool is_tls_client_hello(const uint8_t* data, size_t len) {
@@ -56,141 +58,80 @@ static bool is_tls_client_hello(const uint8_t* data, size_t len) {
 
 /**
  * @brief Best-effort parser for TLS ClientHello to locate SNI hostname offset.
- *
- * Returns offset (in bytes from start of record) where the SNI hostname bytes begin,
- * or -1 if SNI cannot be found / parsed.
- *
- * Exposed with external linkage so unit tests can validate parsing robustness.
  */
 int find_sni_hostname_offset(const uint8_t* data, size_t len) {
-    // Basic TLS record header (5 bytes) + minimum handshake header
-    if (!data || len < 5 + 4) {
-        return -1;
-    }
+    if (!data || len < 5 + 4) return -1;
+    if (data[0] != 0x16 || data[1] != 0x03) return -1;
 
-    // TLS record type 0x16 (handshake) and version 0x03,xx already checked by is_tls_client_hello.
-    if (data[0] != 0x16 || data[1] != 0x03) {
-        return -1;
-    }
-
-    size_t pos = 5; // Start of Handshake message
-    if (pos + 4 > len) {
-        return -1;
-    }
+    size_t pos = 5;
+    if (pos + 4 > len) return -1;
 
     uint8_t handshake_type = data[pos];
-    if (handshake_type != 0x01) { // ClientHello
-        return -1;
-    }
+    if (handshake_type != 0x01) return -1;
 
-    // Handshake length (3 bytes) - we mostly rely on outer bounds
     uint32_t hs_len = (static_cast<uint32_t>(data[pos + 1]) << 16) |
                       (static_cast<uint32_t>(data[pos + 2]) << 8) |
                       static_cast<uint32_t>(data[pos + 3]);
     (void)hs_len;
     pos += 4;
 
-    // ClientHello structure (RFC 5246 / 8446-style, simplified)
-    if (pos + 2 + 32 + 1 > len) {
-        return -1;
-    }
+    if (pos + 2 + 32 + 1 > len) return -1;
+    pos += 2; // client_version
+    pos += 32; // random
 
-    // client_version (2) + random (32)
-    pos += 2;
-    pos += 32;
-
-    // session_id
     uint8_t session_id_len = data[pos];
     pos += 1;
-    if (pos + session_id_len > len) {
-        return -1;
-    }
+    if (pos + session_id_len > len) return -1;
     pos += session_id_len;
 
-    // cipher_suites
-    if (pos + 2 > len) {
-        return -1;
-    }
+    if (pos + 2 > len) return -1;
     uint16_t cipher_suites_len = (static_cast<uint16_t>(data[pos]) << 8) |
                                  static_cast<uint16_t>(data[pos + 1]);
     pos += 2;
-    if (pos + cipher_suites_len > len) {
-        return -1;
-    }
+    if (pos + cipher_suites_len > len) return -1;
     pos += cipher_suites_len;
 
-    // compression_methods
-    if (pos + 1 > len) {
-        return -1;
-    }
+    if (pos + 1 > len) return -1;
     uint8_t compression_methods_len = data[pos];
     pos += 1;
-    if (pos + compression_methods_len > len) {
-        return -1;
-    }
+    if (pos + compression_methods_len > len) return -1;
     pos += compression_methods_len;
 
-    // extensions length
-    if (pos + 2 > len) {
-        return -1;
-    }
+    if (pos + 2 > len) return -1;
     uint16_t extensions_len = (static_cast<uint16_t>(data[pos]) << 8) |
                               static_cast<uint16_t>(data[pos + 1]);
     pos += 2;
 
     size_t exts_end = pos + extensions_len;
-    if (exts_end > len) {
-        exts_end = len;
-    }
+    if (exts_end > len) exts_end = len;
 
-    // Walk over extensions
     while (pos + 4 <= exts_end) {
         uint16_t ext_type = (static_cast<uint16_t>(data[pos]) << 8) |
                             static_cast<uint16_t>(data[pos + 1]);
         uint16_t ext_data_len = (static_cast<uint16_t>(data[pos + 2]) << 8) |
                                 static_cast<uint16_t>(data[pos + 3]);
         pos += 4;
+        if (pos + ext_data_len > exts_end) break;
 
-        if (pos + ext_data_len > exts_end) {
-            break;
-        }
-
-        if (ext_type == 0x0000) { // server_name extension
+        if (ext_type == 0x0000) {
             size_t sni_pos = pos;
-            if (sni_pos + 2 > exts_end) {
-                return -1;
-            }
-
+            if (sni_pos + 2 > exts_end) return -1;
             uint16_t list_len = (static_cast<uint16_t>(data[sni_pos]) << 8) |
                                 static_cast<uint16_t>(data[sni_pos + 1]);
             sni_pos += 2;
-            if (sni_pos + list_len > exts_end || list_len < 3) {
-                return -1;
-            }
-
-            // We only look at the first name in the list
+            if (sni_pos + list_len > exts_end || list_len < 3) return -1;
             uint8_t name_type = data[sni_pos];
-            (void)name_type; // Typically 0x00 (host_name)
+            (void)name_type;
             sni_pos += 1;
-            if (sni_pos + 2 > exts_end) {
-                return -1;
-            }
-
+            if (sni_pos + 2 > exts_end) return -1;
             uint16_t host_len = (static_cast<uint16_t>(data[sni_pos]) << 8) |
                                 static_cast<uint16_t>(data[sni_pos + 1]);
             sni_pos += 2;
-
-            if (sni_pos + host_len > exts_end) {
-                return -1;
-            }
-
-            // sni_pos now points at the first byte of the SNI hostname
+            if (sni_pos + host_len > exts_end) return -1;
             return static_cast<int>(sni_pos);
         }
-
         pos += ext_data_len;
     }
-
     return -1;
 }
 
@@ -199,20 +140,84 @@ public:
     std::atomic<bool> running{false};
     DPIConfig config;
 
-DPIStats stats;
+    DPIStats stats;
     mutable std::mutex stats_mutex;
     std::thread worker_thread;
     std::function<void(const std::string&)> log_callback;
 
+    // === Phase 2: Advanced DPI bypass integration ===
+    std::unique_ptr<AdvancedDPIBypass> advanced_bypass_;
+    bool advanced_enabled_ = false;
 
-    // === Thread pool for connection handling (Task 3.1) ===
+    // === Phase 2: TLS Fingerprint for realistic ClientHello ===
+    std::unique_ptr<ncp::TLSFingerprint> tls_fingerprint_;
+
+    // === Thread pool for connection handling ===
     std::unique_ptr<ncp::ThreadPool> thread_pool_;
     std::atomic<int> active_connections_{0};
     static constexpr int MAX_CONNECTIONS = 256;
+
+    // =========================================================
+    // Phase 2: Initialize AdvancedDPIBypass from DPIConfig
+    // =========================================================
+    void init_advanced_bypass() {
+        AdvancedDPIConfig adv_config;
+        adv_config.base_config = config;
+
+        if (config.enable_tcp_split) {
+            adv_config.techniques.push_back(EvasionTechnique::SNI_SPLIT);
+            adv_config.techniques.push_back(EvasionTechnique::TCP_SEGMENTATION);
+        }
+        if (config.enable_fake_packet) {
+            adv_config.techniques.push_back(EvasionTechnique::IP_TTL_TRICKS);
+            adv_config.techniques.push_back(EvasionTechnique::FAKE_SNI);
+        }
+        if (config.enable_pattern_obfuscation) {
+            adv_config.techniques.push_back(EvasionTechnique::TLS_GREASE);
+        }
+        if (config.enable_timing_jitter) {
+            adv_config.techniques.push_back(EvasionTechnique::TIMING_JITTER);
+        }
+        if (config.enable_disorder) {
+            adv_config.techniques.push_back(EvasionTechnique::TCP_DISORDER);
+        }
+
+        if (config.enable_fake_packet && config.enable_tcp_split &&
+            config.enable_pattern_obfuscation) {
+            adv_config.tspu_bypass = true;
+        }
+
+        advanced_bypass_ = std::make_unique<AdvancedDPIBypass>();
+        advanced_bypass_->set_log_callback([this](const std::string& msg) {
+            log("[Advanced] " + msg);
+        });
+
+        if (advanced_bypass_->initialize(adv_config)) {
+            advanced_bypass_->start();
+            advanced_enabled_ = true;
+            log("Advanced DPI bypass layer initialized with " +
+                std::to_string(adv_config.techniques.size()) + " techniques");
+        } else {
+            log("Warning: Advanced DPI bypass initialization failed, using basic mode");
+            advanced_bypass_.reset();
+            advanced_enabled_ = false;
+        }
+    }
+
+    // =========================================================
+    // Phase 2: Initialize TLS Fingerprint
+    // =========================================================
+    void init_tls_fingerprint() {
+        tls_fingerprint_ = std::make_unique<ncp::TLSFingerprint>(ncp::BrowserType::CHROME);
+        if (!config.target_host.empty()) {
+            tls_fingerprint_->set_sni(config.target_host);
+        }
+        log("TLS fingerprint initialized (profile=Chrome, target=" + config.target_host + ")");
+    }
+
     // === Proxy mode state ===
     void proxy_listen_loop() {
 #ifdef _WIN32
-        // Ensure Winsock is initialized for standalone DPI usage
         WSADATA wsa_data;
         if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
             log("Failed to initialize Winsock for DPI proxy");
@@ -238,7 +243,6 @@ DPIStats stats;
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(config.listen_port);
-        // Bind to localhost for home-user proxy usage
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
         if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -261,7 +265,6 @@ DPIStats stats;
             return;
         }
 
-                // Initialize thread pool (Task 3.1)
         size_t num_threads = std::min<size_t>(std::thread::hardware_concurrency(), 8);
         thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
         log("DPI proxy listening on 127.0.0.1:" + std::to_string(config.listen_port));
@@ -281,14 +284,13 @@ DPIStats stats;
                 if (!running) break;
                 continue;
             }
-        
-                    // Thread pool implementation (Task 3.1) - replaces detach() for proper resource management
+
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
                 stats.connections_handled++;
             }
 
-                        thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
+            thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
         }
 
         CLOSE_SOCKET(listen_sock);
@@ -305,7 +307,6 @@ DPIStats stats;
             return;
         }
 
-        // Resolve target host
         addrinfo hints{};
         std::memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
@@ -332,6 +333,11 @@ DPIStats stats;
             return;
         }
 
+        // Phase 2: Set TCP_NODELAY to prevent Nagle from coalescing fragments
+        int nodelay = 1;
+        setsockopt(server_sock, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+
         if (connect(server_sock,
                     reinterpret_cast<sockaddr*>(&remote_addr),
                     sizeof(remote_addr)) < 0) {
@@ -341,8 +347,6 @@ DPIStats stats;
             return;
         }
 
-        // Bidirectional piping: client -> server (with fragmentation/SNI-split)
-        // and server -> client (plain forward).
         std::thread t_cs(&Impl::pipe_client_to_server, this, client_sock, server_sock);
         std::thread t_sc(&Impl::pipe_server_to_client, this, server_sock, client_sock);
 
@@ -360,11 +364,8 @@ DPIStats stats;
         while (running) {
             int received = recv(client_sock,
                                 reinterpret_cast<char*>(buffer.data()),
-                                static_cast<int>(buffer.size()),
-                                0);
-            if (received <= 0) {
-                break;
-            }
+                                static_cast<int>(buffer.size()), 0);
+            if (received <= 0) break;
 
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
@@ -372,20 +373,21 @@ DPIStats stats;
                 stats.packets_total++;
             }
 
-            bool is_client_hello = false;
+            bool is_ch = false;
             if (!client_hello_processed &&
-                is_tls_client_hello(buffer.data(),
-                                    static_cast<size_t>(received))) {
-                is_client_hello = true;
+                is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
+                is_ch = true;
                 client_hello_processed = true;
             }
 
-            send_with_fragmentation(
-                server_sock,
-                buffer.data(),
-                static_cast<size_t>(received),
-                is_client_hello
-            );
+            // Phase 2: Route ClientHello through AdvancedDPIBypass
+            if (is_ch && advanced_enabled_ && advanced_bypass_) {
+                send_via_advanced(server_sock, buffer.data(),
+                                 static_cast<size_t>(received));
+            } else {
+                send_with_fragmentation(server_sock, buffer.data(),
+                                        static_cast<size_t>(received), is_ch);
+            }
         }
     }
 
@@ -395,11 +397,8 @@ DPIStats stats;
         while (running) {
             int received = recv(server_sock,
                                 reinterpret_cast<char*>(buffer.data()),
-                                static_cast<int>(buffer.size()),
-                                0);
-            if (received <= 0) {
-                break;
-            }
+                                static_cast<int>(buffer.size()), 0);
+            if (received <= 0) break;
 
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
@@ -407,14 +406,84 @@ DPIStats stats;
                 stats.packets_total++;
             }
 
-            // No fragmentation for server->client path
-            send_with_fragmentation(
-                client_sock,
-                buffer.data(),
-                static_cast<size_t>(received),
-                false
-            );
+            // Phase 2: Incoming data through advanced deobfuscation if active
+            if (advanced_enabled_ && advanced_bypass_) {
+                auto deobf = advanced_bypass_->process_incoming(
+                    buffer.data(), static_cast<size_t>(received));
+                if (!deobf.empty()) {
+                    send_raw(client_sock, deobf.data(), deobf.size());
+                }
+            } else {
+                send_with_fragmentation(client_sock, buffer.data(),
+                                        static_cast<size_t>(received), false);
+            }
         }
+    }
+
+    // =========================================================
+    // Phase 2: Send data through AdvancedDPIBypass pipeline
+    // =========================================================
+    void send_via_advanced(SOCKET sock, const uint8_t* data, size_t len) {
+        auto segments = advanced_bypass_->process_outgoing(data, len);
+
+        auto send_all = [&](const uint8_t* d, size_t l) -> size_t {
+            size_t total_sent = 0;
+            while (total_sent < l) {
+                int to_send = static_cast<int>(std::min<size_t>(l - total_sent, 1460));
+                int sent = send(sock,
+                                reinterpret_cast<const char*>(d + total_sent),
+                                to_send, 0);
+                if (sent <= 0) break;
+                total_sent += static_cast<size_t>(sent);
+            }
+            return total_sent;
+        };
+
+        size_t sent_total = 0;
+        for (size_t i = 0; i < segments.size(); ++i) {
+            const auto& seg = segments[i];
+
+            if (i > 0 && config.enable_timing_jitter &&
+                config.timing_jitter_min_us > 0) {
+                uint32_t delay = config.timing_jitter_min_us +
+                    randombytes_uniform(static_cast<uint32_t>(
+                        config.timing_jitter_max_us - config.timing_jitter_min_us + 1));
+                std::this_thread::sleep_for(std::chrono::microseconds(delay));
+            } else if (i > 0 && config.enable_disorder && config.disorder_delay_ms > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(config.disorder_delay_ms));
+            }
+
+            sent_total += send_all(seg.data(), seg.size());
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            stats.bytes_sent += static_cast<uint64_t>(sent_total);
+            if (segments.size() > 1) {
+                stats.packets_fragmented++;
+            }
+        }
+    }
+
+    // =========================================================
+    // Raw send helper (no fragmentation)
+    // =========================================================
+    size_t send_raw(SOCKET sock, const uint8_t* data, size_t len) {
+        size_t total_sent = 0;
+        while (total_sent < len) {
+            int to_send = static_cast<int>(std::min<size_t>(len - total_sent, 1460));
+            int sent = send(sock,
+                            reinterpret_cast<const char*>(data + total_sent),
+                            to_send, 0);
+            if (sent <= 0) break;
+            total_sent += static_cast<size_t>(sent);
+        }
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            stats.bytes_sent += static_cast<uint64_t>(total_sent);
+        }
+        return total_sent;
     }
 
     void send_with_fragmentation(
@@ -423,9 +492,7 @@ DPIStats stats;
         size_t len,
         bool is_client_hello
     ) {
-        if (!data || len == 0) {
-            return;
-        }
+        if (!data || len == 0) return;
 
         auto send_all = [&](const uint8_t* d, size_t l) -> size_t {
             size_t total_sent = 0;
@@ -433,34 +500,28 @@ DPIStats stats;
                 int to_send = static_cast<int>(std::min<size_t>(l - total_sent, 1460));
                 int sent = send(sock,
                                 reinterpret_cast<const char*>(d + total_sent),
-                                to_send,
-                                0);
-                if (sent <= 0) {
-                    break;
-                }
+                                to_send, 0);
+                if (sent <= 0) break;
                 total_sent += static_cast<size_t>(sent);
             }
             return total_sent;
         };
 
-        // Add Noise/Junk data before the actual ClientHello
+        // Noise/Junk before ClientHello
         if (is_client_hello && config.enable_noise) {
             std::vector<uint8_t> junk;
             if (!config.fake_host.empty()) {
-                // Use fake host as noise to mislead DPI
                 std::string mask = "GET / HTTP/1.1\r\nHost: " + config.fake_host + "\r\n\r\n";
                 junk.assign(mask.begin(), mask.end());
             } else {
                 junk.resize(config.noise_size > 0 ? config.noise_size : 64);
                 for(auto& b : junk) b = static_cast<uint8_t>(randombytes_uniform(256));
             }
-            
-            // Send junk with low TTL if fake_packet is enabled, otherwise just as noise
 #ifdef IP_TTL
             int original_ttl = 64;
             socklen_t optlen = sizeof(original_ttl);
             getsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<char*>(&original_ttl), &optlen);
-            int low_ttl = 2; 
+            int low_ttl = 2;
             setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&low_ttl), sizeof(low_ttl));
             send_all(junk.data(), junk.size());
             setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&original_ttl), sizeof(original_ttl));
@@ -469,54 +530,44 @@ DPIStats stats;
 #endif
         }
 
-        // Optional fake low‑TTL probe before main ClientHello
+        // Fake low-TTL probe before main ClientHello
         if (is_client_hello && config.enable_fake_packet) {
-            
-            // Send multiple fake packets with different characteristics
             for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
-                // Randomize fake packet to avoid DPI fingerprinting
                 std::vector<uint8_t> fake_data = {
-                    0x16, 0x03, static_cast<uint8_t>(randombytes_uniform(256) % 4), // TLS record + random version minor
-                    static_cast<uint8_t>(randombytes_uniform(256)), static_cast<uint8_t>(randombytes_uniform(256)), // Random length
-                    0x01 // ClientHello
-                                };
-    #ifdef IP_TTL
-                                int original_ttl = 0;
-                    socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
-                    bool ttl_changed = false;
-                    if (getsockopt(sock, IPPROTO_IP, IP_TTL,
-                                   reinterpret_cast<char*>(&original_ttl),
-                                   &optlen) == 0) {
-                        int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
-                        if (setsockopt(sock, IPPROTO_IP, IP_TTL,
-                                       reinterpret_cast<const char*>(&ttl),
-                                       sizeof(ttl)) == 0) {
-                            ttl_changed = true;
-                        }
-                    }
-    #endif
-                    send_all(fake_data.data(), fake_data.size());
-                    
-                    {
-                        std::lock_guard<std::mutex> lock(stats_mutex);
-                        stats.fake_packets_sent++;
-                    }
-    
-    #ifdef IP_TTL
-                    if (ttl_changed) {
-                        setsockopt(sock, IPPROTO_IP, IP_TTL,
-                                   reinterpret_cast<const char*>(&original_ttl),
-                                   sizeof(original_ttl));
-                    }
-    #endif
-                    if (config.disorder_delay_ms > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
+                    0x16, 0x03, static_cast<uint8_t>(randombytes_uniform(256) % 4),
+                    static_cast<uint8_t>(randombytes_uniform(256)), static_cast<uint8_t>(randombytes_uniform(256)),
+                    0x01
+                };
+#ifdef IP_TTL
+                int original_ttl = 0;
+                socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
+                bool ttl_changed = false;
+                if (getsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<char*>(&original_ttl), &optlen) == 0) {
+                    int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
+                    if (setsockopt(sock, IPPROTO_IP, IP_TTL,
+                                   reinterpret_cast<const char*>(&ttl), sizeof(ttl)) == 0) {
+                        ttl_changed = true;
                     }
                 }
+#endif
+                send_all(fake_data.data(), fake_data.size());
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.fake_packets_sent++;
+                }
+#ifdef IP_TTL
+                if (ttl_changed) {
+                    setsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<const char*>(&original_ttl), sizeof(original_ttl));
+                }
+#endif
+                if (config.disorder_delay_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
+                }
+            }
         }
 
-        // If this is not a ClientHello or TCP splitting is disabled,
-        // just send as-is (potentially chunked by MTU size).
         if (!is_client_hello || !config.enable_tcp_split) {
             size_t sent = send_all(data, len);
             std::lock_guard<std::mutex> lock(stats_mutex);
@@ -524,8 +575,6 @@ DPIStats stats;
             return;
         }
 
-        // Determine split point: SNI-based if requested and available,
-        // otherwise based on split_position, with a safe minimum.
         size_t first_len = 0;
         int sni_offset = -1;
 
@@ -549,27 +598,20 @@ DPIStats stats;
         size_t remaining = (sent_first < len) ? (len - sent_first) : 0;
 
         if (remaining > 0) {
-            // Advanced fragmentation with randomness
             size_t base_frag_size = (config.fragment_size > 0)
                                    ? static_cast<size_t>(config.fragment_size)
                                    : 2;
-            
             size_t offset = 0;
             while (offset < remaining) {
-                // Randomize fragment size slightly for evasion
-                size_t jitter = randombytes_uniform(3); 
+                size_t jitter = randombytes_uniform(3);
                 size_t current_frag = std::min(base_frag_size + jitter, remaining - offset);
-
                 if (config.enable_disorder && config.disorder_delay_ms > 0) {
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(config.disorder_delay_ms));
                 }
-
                 size_t sent = send_all(data + sent_first + offset, current_frag);
                 sent_total += sent;
-                if (sent == 0) {
-                    break;
-                }
+                if (sent == 0) break;
                 offset += sent;
             }
         }
@@ -582,33 +624,30 @@ DPIStats stats;
             }
         }
     }
-    
+
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     struct nfq_handle* nfq_h = nullptr;
     struct nfq_q_handle* nfq_qh = nullptr;
     int m_nfq_fd = -1;
-    
+
     static int nfq_callback(struct nfq_q_handle* qh, struct nfgenmsg*,
                            struct nfq_data* nfa, void* data) {
         Impl* self = static_cast<Impl*>(data);
         struct nfqnl_msg_packet_hdr* ph = nfq_get_msg_packet_hdr(nfa);
         if (!ph) return -1;
         uint32_t id = ntohl(ph->packet_id);
-        
         unsigned char* payload;
         int payload_len = nfq_get_payload(nfa, &payload);
         if (payload_len < 0) {
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
         }
-        
         {
             std::lock_guard<std::mutex> lock(self->stats_mutex);
             self->stats.packets_total++;
         }
-        
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
     }
-    
+
     bool init_nfqueue() {
         nfq_h = nfq_open();
         if (!nfq_h) return false;
@@ -626,7 +665,7 @@ DPIStats stats;
         m_nfq_fd = nfq_fd(nfq_h);
         return true;
     }
-    
+
     void nfqueue_loop() {
         char buf[65536];
         while (running) {
@@ -634,7 +673,7 @@ DPIStats stats;
             if (rv >= 0) nfq_handle_packet(nfq_h, buf, rv);
         }
     }
-    
+
     void cleanup_nfqueue() {
         if (nfq_qh) { nfq_destroy_queue(nfq_qh); nfq_qh = nullptr; }
         if (nfq_h) { nfq_close(nfq_h); nfq_h = nullptr; }
@@ -646,7 +685,6 @@ DPIStats stats;
         if (log_callback) {
             log_callback(msg);
         } else {
-            // Fallback when no callback is installed (e.g. tests)
             std::clog << "[DPI] " << msg << std::endl;
         }
     }
@@ -655,7 +693,6 @@ DPIStats stats;
 void apply_preset(DPIPreset preset, DPIConfig& config) {
     switch (preset) {
     case DPIPreset::RUNET_SOFT:
-        // Mild settings targeting common Russian DPI deployments
         config.mode = DPIMode::PROXY;
         config.enable_tcp_split = true;
         config.split_at_sni = true;
@@ -667,7 +704,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.enable_oob_data = false;
         break;
     case DPIPreset::RUNET_STRONG:
-        // Aggressive profile for heavily filtered networks (modernized for TSPU)
         config.mode = DPIMode::PROXY;
         config.enable_tcp_split = true;
         config.split_at_sni = true;
@@ -681,7 +717,7 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.noise_size = 256;
         config.enable_host_case = true;
         config.fake_host = "google.com";
-        config.fake_ttl = 2; // Paranoid level
+        config.fake_ttl = 2;
         break;
     case DPIPreset::NONE:
     default:
@@ -720,6 +756,27 @@ bool DPIBypass::initialize(const DPIConfig& config) {
                           config.mode == DPIMode::PROXY ? "proxy" : "passive") +
               ", listen_port=" + std::to_string(config.listen_port) +
               ", fragment_size=" + std::to_string(config.fragment_size) + ")");
+
+    // Phase 2: Initialize TLS fingerprint for all modes
+    impl_->init_tls_fingerprint();
+
+    // Phase 2: Auto-detect when to enable advanced bypass
+    bool needs_advanced = config.enable_pattern_obfuscation ||
+                          config.enable_decoy_sni ||
+                          config.enable_multi_layer_split ||
+                          config.enable_adaptive_fragmentation ||
+                          config.enable_timing_jitter ||
+                          config.enable_tcp_options_randomization;
+
+    if (config.enable_fake_packet && config.enable_tcp_split &&
+        config.enable_noise && config.enable_disorder) {
+        needs_advanced = true;
+    }
+
+    if (needs_advanced) {
+        impl_->init_advanced_bypass();
+    }
+
     return true;
 }
 
@@ -737,11 +794,11 @@ bool DPIBypass::start() {
     if (impl_->config.mode == DPIMode::PROXY) {
         impl_->running = true;
         impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl_.get());
-        impl_->log("DPI bypass started (TCP proxy mode)");
+        impl_->log("DPI bypass started (TCP proxy mode" +
+                  std::string(impl_->advanced_enabled_ ? " + Advanced" : "") + ")");
         return true;
     }
 
-    // Passive fallback mode (no packet/stream modification)
     impl_->running = true;
     impl_->log("DPI bypass started (passive mode - nfqueue/proxy not active)");
     return true;
@@ -749,6 +806,9 @@ bool DPIBypass::start() {
 
 void DPIBypass::stop() {
     impl_->running = false;
+    if (impl_->advanced_bypass_) {
+        impl_->advanced_bypass_->stop();
+    }
     if (impl_->worker_thread.joinable()) impl_->worker_thread.join();
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     impl_->cleanup_nfqueue();
@@ -813,6 +873,4 @@ void DPIBypass::notify_config_change(const DPIConfig& old_cfg, const DPIConfig& 
 }
 
 } // namespace DPI
-
 } // namespace ncp
-

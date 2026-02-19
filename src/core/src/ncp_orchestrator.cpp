@@ -1,7 +1,9 @@
 #include "ncp_orchestrator.hpp"
+#include "ncp_ech.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <sodium.h>
 
 namespace ncp {
 namespace DPI {
@@ -48,6 +50,13 @@ OrchestratorStrategy OrchestratorStrategy::stealth() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // Phase 2+: Full TLS fingerprinting + advanced DPI
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.tls_rotate_per_connection = true;
+    s.enable_advanced_dpi = true;
+    s.dpi_preset = AdvancedDPIBypass::BypassPreset::STEALTH;
+
     return s;
 }
 
@@ -68,6 +77,13 @@ OrchestratorStrategy OrchestratorStrategy::balanced() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // Phase 2+: TLS fingerprinting on, advanced DPI moderate
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.tls_rotate_per_connection = false;
+    s.enable_advanced_dpi = true;
+    s.dpi_preset = AdvancedDPIBypass::BypassPreset::MODERATE;
+
     return s;
 }
 
@@ -79,13 +95,18 @@ OrchestratorStrategy OrchestratorStrategy::performance() {
     s.enable_adversarial = true;
     s.adversarial_config = AdversarialConfig::minimal();
 
-    s.enable_flow_shaping = false;  // no flow shaping — min latency
+    s.enable_flow_shaping = false;
 
     s.enable_probe_resist = true;
     s.probe_config = ProbeResistConfig::permissive();
 
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
+
+    // Phase 2+: TLS fingerprinting on, no advanced DPI
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.enable_advanced_dpi = false;
 
     return s;
 }
@@ -103,6 +124,11 @@ OrchestratorStrategy OrchestratorStrategy::max_compat() {
 
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
+
+    // Phase 2+: Minimal fingerprinting, no advanced DPI
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.enable_advanced_dpi = false;
 
     return s;
 }
@@ -134,10 +160,10 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
     : config_(config),
       current_strategy_(config.strategy),
       threat_level_(ThreatLevel::NONE),
+      tls_fingerprint_(config.strategy.tls_browser_profile),
       consecutive_failures_(0),
       consecutive_successes_(0) {
 
-    // Initialize shared secret
     if (!config_.shared_secret.empty()) {
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
     }
@@ -159,7 +185,6 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
     send_callback_ = send_cb;
     running_.store(true);
 
-    // Start flow shaper if enabled
     if (current_strategy_.enable_flow_shaping) {
         flow_shaper_.start([this](const ShapedPacket& sp) {
             if (send_callback_) {
@@ -172,7 +197,6 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
         });
     }
 
-    // Start health monitor
     if (config_.health_check_interval_sec > 0) {
         health_thread_ = std::thread(&ProtocolOrchestrator::health_monitor_func, this);
     }
@@ -206,12 +230,41 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
 
     std::vector<uint8_t> data = payload;
 
+    // Phase 2+: Apply TLS fingerprint rotation before handshake
+    if (current_strategy_.enable_tls_fingerprint && !data.empty() &&
+        data.size() > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01) {
+
+        if (current_strategy_.tls_rotate_per_connection) {
+            static const ncp::BrowserType profiles[] = {
+                ncp::BrowserType::CHROME, ncp::BrowserType::FIREFOX,
+                ncp::BrowserType::SAFARI, ncp::BrowserType::EDGE
+            };
+            tls_fingerprint_.set_profile(profiles[randombytes_uniform(4)]);
+        }
+        stats_.tls_fingerprints_applied.fetch_add(1);
+    }
+
+    // Phase 2+: Apply ECH if configured and ClientHello detected
+    if (config_.ech_enabled && !config_.ech_config_data.empty() &&
+        !data.empty() && data.size() > 5 &&
+        data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01) {
+
+        ECH::ECHConfig ech_config;
+        if (ECH::parse_ech_config(config_.ech_config_data, ech_config)) {
+            auto ech_result = ECH::apply_ech(data, ech_config);
+            if (!ech_result.empty() && ech_result != data) {
+                data = std::move(ech_result);
+                stats_.ech_encryptions.fetch_add(1);
+            }
+        }
+    }
+
     // Step 1: Adversarial Padding (Phase 1)
     if (current_strategy_.enable_adversarial) {
         data = adversarial_.pad(data);
     }
 
-    // Step 2: Protocol Mimicry (wrap in HTTPS/DNS/QUIC)
+    // Step 2: Protocol Mimicry
     if (current_strategy_.enable_mimicry) {
         data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
     }
@@ -238,7 +291,6 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         return result;
     }
 
-    // No flow shaping — return single packet
     OrchestratedPacket op;
     op.data = std::move(data);
     stats_.bytes_on_wire.fetch_add(op.data.size());
@@ -254,7 +306,6 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 
     std::vector<uint8_t> data = payload;
 
-    // Steps 1-3 synchronous
     if (current_strategy_.enable_adversarial) {
         data = adversarial_.pad(data);
     }
@@ -266,7 +317,6 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
         data.insert(data.begin(), token.begin(), token.end());
     }
 
-    // Step 4: Enqueue for async flow shaping
     if (current_strategy_.enable_flow_shaping && flow_shaper_.is_running()) {
         flow_shaper_.enqueue(data, true);
     } else if (send_callback_) {
@@ -294,7 +344,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     std::vector<uint8_t> data = wire_data;
 
-    // Step 1: Auth check (Phase 3 server-side)
     if (current_strategy_.enable_probe_resist && config_.is_server) {
         AuthResult result = probe_resist_.process_connection(
             source_ip, source_port, data.data(), data.size(), ja3);
@@ -302,10 +351,9 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
         if (auth_result) *auth_result = result;
 
         if (result != AuthResult::AUTHENTICATED) {
-            return {};  // Caller should send cover response
+            return {};
         }
 
-        // Strip auth token from data
         size_t auth_len = probe_resist_.get_config().nonce_length + 4 +
                           probe_resist_.get_config().auth_length;
         if (data.size() > auth_len) {
@@ -315,26 +363,22 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
         if (auth_result) *auth_result = AuthResult::AUTHENTICATED;
     }
 
-    // Step 2: Discard flow dummies
     if (current_strategy_.enable_flow_shaping) {
         if (FlowShaper::is_flow_dummy(data.data(), data.size())) {
-            return {};  // dummy packet, discard
+            return {};
         }
     }
 
-    // Step 3: Discard adversarial dummies
     if (current_strategy_.enable_adversarial) {
         if (AdversarialPadding::is_dummy(data.data(), data.size())) {
-            return {};  // dummy packet, discard
+            return {};
         }
     }
 
-    // Step 4: Protocol unwrap (mimicry)
     if (current_strategy_.enable_mimicry) {
         data = mimicry_.unwrap_payload(data);
     }
 
-    // Step 5: Adversarial unpad
     if (current_strategy_.enable_adversarial) {
         data = adversarial_.unpad(data);
     }
@@ -362,7 +406,7 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
 
         case DetectionEvent::Type::CONNECTION_RESET:
         case DetectionEvent::Type::TLS_ALERT:
-            consecutive_failures_ += 2;  // strong signal
+            consecutive_failures_ += 2;
             consecutive_successes_ = 0;
             break;
 
@@ -374,7 +418,7 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
 
         case DetectionEvent::Type::PROBE_RECEIVED:
         case DetectionEvent::Type::IP_BLOCKED:
-            consecutive_failures_ += 3;  // critical signal
+            consecutive_failures_ += 3;
             consecutive_successes_ = 0;
             break;
 
@@ -403,7 +447,6 @@ void ProtocolOrchestrator::report_success() {
     consecutive_successes_++;
     consecutive_failures_ = (std::max)(0, consecutive_failures_ - 1);
 
-    // Check cooldown
     auto now = std::chrono::steady_clock::now();
     auto since_escalation = std::chrono::duration_cast<std::chrono::seconds>(
         now - last_escalation_).count();
@@ -427,7 +470,6 @@ void ProtocolOrchestrator::escalate(const std::string& reason) {
     consecutive_failures_ = 0;
     last_escalation_ = std::chrono::steady_clock::now();
 
-    // Apply new strategy for this threat level
     auto new_strategy = strategy_for_threat(threat_level_);
     apply_strategy(new_strategy);
 
@@ -492,12 +534,10 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
     current_strategy_ = strategy;
     stats_.current_strategy_name = strategy.name;
 
-    // Propagate shared secret
     if (!config_.shared_secret.empty()) {
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
     }
 
-    // Apply to components
     if (strategy.enable_adversarial) {
         adversarial_.set_config(strategy.adversarial_config);
     }
@@ -511,6 +551,11 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
         TrafficMimicry::MimicConfig mc;
         mc.profile = strategy.mimic_profile;
         mimicry_.set_config(mc);
+    }
+
+    // Phase 2+: Apply TLS fingerprint profile
+    if (strategy.enable_tls_fingerprint) {
+        tls_fingerprint_.set_profile(strategy.tls_browser_profile);
     }
 }
 
@@ -542,6 +587,10 @@ const AdversarialPadding& ProtocolOrchestrator::adversarial() const { return adv
 const FlowShaper& ProtocolOrchestrator::flow_shaper() const { return flow_shaper_; }
 const ProbeResist& ProtocolOrchestrator::probe_resist() const { return probe_resist_; }
 const TrafficMimicry& ProtocolOrchestrator::mimicry() const { return mimicry_; }
+
+// Phase 2+: TLS Fingerprint access
+ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() { return tls_fingerprint_; }
+const ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() const { return tls_fingerprint_; }
 
 // ===== Config & Stats =====
 
@@ -586,12 +635,10 @@ void ProtocolOrchestrator::health_monitor_func() {
 
         if (!running_.load()) break;
 
-        // Periodic cleanup
         if (current_strategy_.enable_probe_resist) {
             probe_resist_.cleanup_stale_data();
         }
 
-        // Update overhead stats
         update_overhead_stats();
     }
 }
