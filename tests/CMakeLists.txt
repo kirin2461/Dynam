@@ -16,6 +16,7 @@ FetchContent_MakeAvailable(googletest)
 
 add_executable(ncp_tests
     crypto_test.cpp
+    test_csprng.cpp          # Phase 1: CSPRNG unit tests
     test_dpi.cpp
     test_integration.cpp
     test_license.cpp
@@ -24,8 +25,8 @@ add_executable(ncp_tests
     test_paranoid.cpp
     test_secure_memory.cpp
     test_i2p.cpp
-    test_critical_fixes.cpp  # NEW: Critical security fixes tests (Issue #17)
-    test_l3_l2_stealth.cpp   # NEW: L3/L2 Stealth tests (Phase 1-3)
+    test_critical_fixes.cpp  # Critical security fixes tests (Issue #17)
+    test_l3_l2_stealth.cpp   # L3/L2 Stealth tests (Phase 1-3)
 )
 
 target_link_libraries(ncp_tests

@@ -94,6 +94,7 @@ list(APPEND NCP_CORE_SRC_SOURCES
 set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_crypto.hpp
     include/ncp_crypto_constants.hpp
+    include/ncp_csprng.hpp
     include/ncp_doh.hpp
     include/ncp_db.hpp
     include/ncp_license.hpp
@@ -111,6 +112,7 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_paranoid.hpp
     include/ncp_secure_memory.hpp
     include/ncp_secure_buffer.hpp
+    include/ncp_thread_pool.hpp
     # Anti ML-TSPU headers (Phase 1-5)
     include/ncp_adversarial.hpp
     include/ncp_flow_shaper.hpp

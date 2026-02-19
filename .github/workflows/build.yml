@@ -24,8 +24,9 @@ jobs:
             build-essential \
             libsodium-dev \
             libpcap-dev \
+            libssl-dev \
             libnetfilter-queue-dev \
-            libwebsockets-dev \
+            libgtest-dev \
             pkg-config
 
       - name: Configure CMake
@@ -36,7 +37,7 @@ jobs:
             -DENABLE_CLI=ON \
             -DENABLE_GUI=OFF \
             -DENABLE_LIBOQS=OFF \
-            -DENABLE_WEBSOCKETS=ON \
+            -DENABLE_WEBSOCKETS=OFF \
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
@@ -53,7 +54,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          brew install libsodium libwebsockets cmake
+          brew install libsodium openssl cmake
 
       - name: Configure CMake
         run: |
@@ -63,7 +64,7 @@ jobs:
             -DENABLE_CLI=ON \
             -DENABLE_GUI=OFF \
             -DENABLE_LIBOQS=OFF \
-            -DENABLE_WEBSOCKETS=ON \
+            -DENABLE_WEBSOCKETS=OFF \
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
@@ -73,25 +74,28 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
+  # Windows build disabled — Npcap licensing prevents automated CI install.
+  # Enable when vcpkg + Npcap SDK workflow is validated locally.
   build-windows:
-      if: false
+    if: false
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4  
+      - uses: actions/checkout@v4
+
       - name: Cache vcpkg
         uses: actions/cache@v4
         with:
-          path: C:\\vcpkg\\installed
+          path: C:\vcpkg\installed
           key: vcpkg-libsodium-ws-x64-windows-${{ hashFiles('.github/workflows/build.yml') }}
 
       - name: Install vcpkg and dependencies
         shell: cmd
         run: |
-          if not exist C:\\vcpkg\\vcpkg.exe (
-            git clone https://github.com/microsoft/vcpkg.git C:\\vcpkg
-            C:\\vcpkg\\bootstrap-vcpkg.bat
+          if not exist C:\vcpkg\vcpkg.exe (
+            git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+            C:\vcpkg\bootstrap-vcpkg.bat
           )
-          C:\\vcpkg\\vcpkg install libsodium:x64-windows libwebsockets:x64-windows
+          C:\vcpkg\vcpkg install libsodium:x64-windows
 
       - name: Download Npcap SDK
         run: |
@@ -108,27 +112,12 @@ jobs:
           }
           Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
 
-      - name: Install Npcap runtime (silent)
-        shell: pwsh
-        run: |
-          $npcapUrl = "https://npcap.com/dist/npcap-1.80.exe"
-          Invoke-WebRequest -Uri $npcapUrl -OutFile "$env:TEMP\npcap-installer.exe" -TimeoutSec 120
-          Start-Process -FilePath "$env:TEMP\npcap-installer.exe" `
-            -ArgumentList "/S /winpcap_mode" -Wait
-          # Verify installation
-          $npcapDir = "C:\Windows\System32\Npcap"
-          if (Test-Path $npcapDir) {
-            Write-Host "Npcap installed. DLLs found:"
-            Get-ChildItem "$npcapDir\*.dll" | Select-Object Name
-          } else {
-            Write-Warning "Npcap dir not found at $npcapDir, checking System32..."
-            Get-ChildItem "C:\Windows\System32\wpcap.dll" -ErrorAction SilentlyContinue
-          }
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure CMake
         shell: pwsh
         run: |
-          $env:PATH = "C:\Program Files\CMake\bin;$env:PATH"
           cmake -B build `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
@@ -137,7 +126,7 @@ jobs:
             -DENABLE_CLI=ON `
             -DENABLE_GUI=OFF `
             -DENABLE_LIBOQS=OFF `
-            -DENABLE_WEBSOCKETS=ON `
+            -DENABLE_WEBSOCKETS=OFF `
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
@@ -150,54 +139,11 @@ jobs:
           if (-not (Test-Path $testBin)) {
             New-Item -ItemType Directory -Path $testBin -Force | Out-Null
           }
-
-          # 1) vcpkg DLLs
           $vcpkgBin = "C:/vcpkg/installed/x64-windows/bin"
           if (Test-Path $vcpkgBin) {
             Copy-Item "$vcpkgBin\*.dll" $testBin -Force
-            Write-Host "Copied vcpkg DLLs from $vcpkgBin"
-          }
-
-          # 2) Npcap runtime DLLs
-          $npcapDirs = @("C:\Windows\System32\Npcap", "C:\Windows\System32")
-          $npcapDlls = @("wpcap.dll", "Packet.dll")
-          foreach ($dll in $npcapDlls) {
-            $copied = $false
-            foreach ($dir in $npcapDirs) {
-              $src = Join-Path $dir $dll
-              if (Test-Path $src) {
-                Copy-Item $src -Destination $testBin -Force
-                Write-Host "Copied $dll from $dir"
-                $copied = $true
-                break
-              }
-            }
-            if (-not $copied) { Write-Warning "$dll not found in any known location!" }
-          }
-
-          # 3) Verify
-          Write-Host "`nAll DLLs in test directory:"
-          Get-ChildItem "$testBin\*.dll" | Select-Object Name
-
-      - name: Diagnose dependencies
-        shell: pwsh
-        run: |
-          $exe = Get-ChildItem "build/bin/Release/ncp_tests.exe" -ErrorAction SilentlyContinue
-          if ($exe) {
-            $dumpbin = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" `
-              -Recurse -Filter "dumpbin.exe" -ErrorAction SilentlyContinue |
-              Select-Object -First 1 -ExpandProperty FullName
-            if ($dumpbin) {
-              Write-Host "=== DEPENDENTS of $($exe.Name) ==="
-              & $dumpbin /DEPENDENTS $exe.FullName
-            }
-          } else {
-            Write-Warning "ncp_tests.exe not found"
           }
 
       - name: Run tests
         working-directory: build
-        shell: pwsh
-        run: |
-          $env:PATH = "C:\Program Files\CMake\bin;C:\vcpkg\installed\x64-windows\bin;C:\Windows\System32\Npcap;$env:PATH"
-          ctest -C Release --output-on-failure
+        run: ctest -C Release --output-on-failure

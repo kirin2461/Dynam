@@ -24,21 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Qt6
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.5.*'
-          host: ${{ runner.os == 'Linux' && 'linux' || 'windows' }}
-          target: 'desktop'
-          arch: ${{ runner.os == 'Linux' && 'gcc_64' || 'win64_msvc2019_64' }}
-          modules: 'qtcharts qtnetworkauth'
-
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential pkg-config \
-            libpcap-dev libssl-dev libgtest-dev libsodium-dev libwebsockets-dev
+            libpcap-dev libssl-dev libgtest-dev libsodium-dev
 
       - name: Cache vcpkg
         if: runner.os == 'Windows'
@@ -55,7 +46,7 @@ jobs:
             git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
             C:\vcpkg\bootstrap-vcpkg.bat
           )
-          C:\vcpkg\vcpkg install libsodium:x64-windows libwebsockets:x64-windows
+          C:\vcpkg\vcpkg install libsodium:x64-windows
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
@@ -67,10 +58,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
 
-      # ============================================================
       # Npcap SDK — headers + import libs for Windows compilation
-      # Runtime pcap tests run only on Linux
-      # ============================================================
       - name: Install Npcap SDK (headers + libs)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -99,10 +87,8 @@ jobs:
 
           if (Test-Path "$sdkDir\Include\pcap.h") {
             Write-Host "Npcap SDK ready at $sdkDir"
-            Write-Host "Headers: $(Get-ChildItem "$sdkDir\Include\*.h" | Measure-Object | Select-Object -Expand Count) files"
-            Write-Host "Libs: $(Get-ChildItem "$sdkDir\Lib\x64\*.lib" | Measure-Object | Select-Object -Expand Count) files"
           } else {
-            Write-Warning "pcap.h not found — checking structure:"
+            Write-Warning "pcap.h not found"
             Get-ChildItem $sdkDir -Recurse -Depth 2 | Select-Object FullName
           }
 
@@ -116,7 +102,7 @@ jobs:
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_TESTS=ON -DENABLE_CLI=ON \
-            -DENABLE_GUI=OFF -DENABLE_WEBSOCKETS=ON
+            -DENABLE_GUI=OFF -DENABLE_WEBSOCKETS=OFF
         shell: bash
 
       - name: Configure CMake (Windows)
@@ -127,7 +113,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake \
             -DNPCAP_SDK_DIR=$GITHUB_WORKSPACE/npcap-sdk \
             -DENABLE_TESTS=ON -DENABLE_CLI=ON \
-            -DENABLE_GUI=OFF -DENABLE_WEBSOCKETS=ON
+            -DENABLE_GUI=OFF -DENABLE_WEBSOCKETS=OFF
         shell: bash
 
       - name: Build
@@ -149,8 +135,6 @@ jobs:
           if (Test-Path $vcpkgBin) {
             Copy-Item "$vcpkgBin\*.dll" $testBin -Force
             Write-Host "Copied DLLs from $vcpkgBin to $testBin"
-          } else {
-            Write-Host "vcpkg bin dir not found at $vcpkgBin"
           }
 
       - name: Run tests
@@ -177,20 +161,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Qt6
-        uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.5.*'
-          host: 'linux'
-          target: 'desktop'
-          arch: 'gcc_64'
-          modules: 'qtcharts qtnetworkauth'
-
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake build-essential pkg-config \
-            libpcap-dev libssl-dev libgtest-dev libsodium-dev libwebsockets-dev
+            libpcap-dev libssl-dev libgtest-dev libsodium-dev
 
       - name: Configure with ${{ matrix.sanitizer }}
         run: |
@@ -198,17 +173,17 @@ jobs:
           cd build
           case "${{ matrix.sanitizer }}" in
             asan)
-              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DENABLE_WEBSOCKETS=ON \
+              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DENABLE_WEBSOCKETS=OFF \
                 -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
                 -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer"
               ;;
             tsan)
-              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DENABLE_WEBSOCKETS=ON \
+              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DENABLE_WEBSOCKETS=OFF \
                 -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
                 -DCMAKE_C_FLAGS="-fsanitize=thread"
               ;;
             ubsan)
-              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DENABLE_WEBSOCKETS=ON \
+              cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_TESTS=ON -DENABLE_WEBSOCKETS=OFF \
                 -DCMAKE_CXX_FLAGS="-fsanitize=undefined" \
                 -DCMAKE_C_FLAGS="-fsanitize=undefined"
               ;;
