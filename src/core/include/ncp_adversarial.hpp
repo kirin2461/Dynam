@@ -19,12 +19,12 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
-#include <random>
 #include <atomic>
 #include <string>
 #include <functional>
 #include <array>
 #include <chrono>
+#include "ncp_csprng.hpp"
 
 namespace ncp {
 namespace DPI {
@@ -275,8 +275,7 @@ private:
     AdversarialConfig config_;
     AdversarialStats stats_;
     
-    // RNG
-    std::mt19937 rng_;
+    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     
     // Adaptive state
     AdversarialStrategy active_strategy_;

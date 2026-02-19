@@ -5,19 +5,6 @@
 #include <numeric>
 #include <cassert>
 
-#ifdef _WIN32
-#  define NOMINMAX
-#  include <windows.h>
-#  include <bcrypt.h>
-#  pragma comment(lib, "bcrypt.lib")
-#  undef min
-#  undef max
-#  undef ERROR
-#else
-#  include <fcntl.h>
-#  include <unistd.h>
-#endif
-
 namespace ncp {
 namespace DPI {
 
@@ -118,25 +105,6 @@ AdversarialConfig AdversarialConfig::stealth_max() {
     return c;
 }
 
-// ===== CSPRNG helper =====
-
-static void csprng_fill(uint8_t* buf, size_t len) {
-#ifdef _WIN32
-    BCryptGenRandom(nullptr, buf, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-#else
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        size_t off = 0;
-        while (off < len) {
-            ssize_t r = read(fd, buf + off, len - off);
-            if (r <= 0) break;
-            off += static_cast<size_t>(r);
-        }
-        close(fd);
-    }
-#endif
-}
-
 // ===== Constructor / Destructor =====
 
 AdversarialPadding::AdversarialPadding()
@@ -148,10 +116,8 @@ AdversarialPadding::AdversarialPadding(const AdversarialConfig& config)
                        ? AdversarialStrategy::TLS_MIMIC
                        : config.strategy),
       packets_since_evaluation_(0) {
-    // Seed RNG with CSPRNG
-    uint32_t seed;
-    csprng_fill(reinterpret_cast<uint8_t*>(&seed), sizeof(seed));
-    rng_.seed(seed);
+    // Phase 0: Initialize libsodium CSPRNG (idempotent)
+    ncp::csprng_init();
     
     strategy_scores_.fill(0.5); // neutral starting score
 }
@@ -164,9 +130,7 @@ AdversarialPadding& AdversarialPadding::operator=(AdversarialPadding&&) noexcept
 // ===== Padding Generation =====
 
 std::vector<uint8_t> AdversarialPadding::generate_random_padding(size_t len) {
-    std::vector<uint8_t> pad(len);
-    csprng_fill(pad.data(), len);
-    return pad;
+    return ncp::csprng_bytes(len);
 }
 
 std::vector<uint8_t> AdversarialPadding::generate_http_mimic_padding(size_t len) {
@@ -184,8 +148,7 @@ std::vector<uint8_t> AdversarialPadding::generate_http_mimic_padding(size_t len)
          0x50,0x2F,0x31,0x2E,0x31,0x0D,0x0A},
     };
     
-    std::uniform_int_distribution<size_t> dist(0, http_prefixes.size() - 1);
-    const auto& prefix = http_prefixes[dist(rng_)];
+    const auto& prefix = http_prefixes[ncp::csprng_uniform(static_cast<uint32_t>(http_prefixes.size()))];
     
     std::vector<uint8_t> result(len);
     size_t copy_len = (std::min)(len, prefix.size());
@@ -193,9 +156,8 @@ std::vector<uint8_t> AdversarialPadding::generate_http_mimic_padding(size_t len)
     
     // Fill remainder with printable ASCII (HTTP-like)
     if (copy_len < len) {
-        std::uniform_int_distribution<int> ascii_dist(0x20, 0x7E);
         for (size_t i = copy_len; i < len; ++i) {
-            result[i] = static_cast<uint8_t>(ascii_dist(rng_));
+            result[i] = static_cast<uint8_t>(ncp::csprng_range(0x20, 0x7E));
         }
     }
     return result;
@@ -217,10 +179,10 @@ std::vector<uint8_t> AdversarialPadding::generate_tls_mimic_padding(size_t len) 
         
         // Fill rest with high-entropy data (looks like encrypted TLS)
         if (len > 5) {
-            csprng_fill(result.data() + 5, len - 5);
+            ncp::csprng_fill(result.data() + 5, len - 5);
         }
     } else {
-        csprng_fill(result.data(), len);
+        ncp::csprng_fill(result.data(), len);
     }
     return result;
 }
@@ -240,14 +202,14 @@ std::vector<uint8_t> AdversarialPadding::generate_quic_mimic_padding(size_t len)
         // DCID length
         result[5] = 0x08; // 8 bytes DCID
         // Random DCID
-        csprng_fill(result.data() + 6, (std::min)(len - 6, static_cast<size_t>(8)));
+        ncp::csprng_fill(result.data() + 6, (std::min)(len - 6, static_cast<size_t>(8)));
         
         // Fill rest
         if (len > 14) {
-            csprng_fill(result.data() + 14, len - 14);
+            ncp::csprng_fill(result.data() + 14, len - 14);
         }
     } else {
-        csprng_fill(result.data(), len);
+        ncp::csprng_fill(result.data(), len);
     }
     return result;
 }
@@ -258,7 +220,7 @@ std::vector<uint8_t> AdversarialPadding::generate_dns_mimic_padding(size_t len) 
     
     if (len >= 12) {
         // Transaction ID (random)
-        csprng_fill(result.data(), 2);
+        ncp::csprng_fill(result.data(), 2);
         // Flags: standard query, recursion desired
         result[2] = 0x01;
         result[3] = 0x00;
@@ -268,15 +230,14 @@ std::vector<uint8_t> AdversarialPadding::generate_dns_mimic_padding(size_t len) 
         // ANCOUNT, NSCOUNT, ARCOUNT = 0
         std::memset(result.data() + 6, 0, 6);
         
-        // Fill rest with label-like data
+        // Fill rest with label-like data (a-z)
         if (len > 12) {
-            std::uniform_int_distribution<int> label_dist(0x61, 0x7A); // a-z
             for (size_t i = 12; i < len; ++i) {
-                result[i] = static_cast<uint8_t>(label_dist(rng_));
+                result[i] = static_cast<uint8_t>(ncp::csprng_range(0x61, 0x7A));
             }
         }
     } else {
-        csprng_fill(result.data(), len);
+        ncp::csprng_fill(result.data(), len);
     }
     return result;
 }
@@ -311,8 +272,7 @@ size_t AdversarialPadding::select_pre_padding_size() {
     size_t min_s = config_.pre_padding_min;
     size_t max_s = (std::min)(config_.pre_padding_max, config_.max_padding_absolute);
     if (min_s >= max_s) return min_s;
-    std::uniform_int_distribution<size_t> dist(min_s, max_s);
-    return dist(rng_);
+    return ncp::csprng_range_size(min_s, max_s);
 }
 
 size_t AdversarialPadding::select_post_padding_size() {
@@ -320,8 +280,7 @@ size_t AdversarialPadding::select_post_padding_size() {
     size_t min_s = config_.post_padding_min;
     size_t max_s = (std::min)(config_.post_padding_max, config_.max_padding_absolute);
     if (min_s >= max_s) return min_s;
-    std::uniform_int_distribution<size_t> dist(min_s, max_s);
-    return dist(rng_);
+    return ncp::csprng_range_size(min_s, max_s);
 }
 
 size_t AdversarialPadding::find_nearest_target_size(size_t current_size) const {
@@ -434,7 +393,7 @@ std::vector<uint8_t> AdversarialPadding::unpad(
     
     size_t data_start = CONTROL_HEADER_SIZE + pre_len;
     if (data_start >= len) {
-        // Malformed — return empty or raw
+        // Malformed — return empty
         return {};
     }
     
@@ -475,7 +434,7 @@ bool AdversarialPadding::mutate_tcp_header(uint8_t* tcp_header, size_t header_le
         // Set URG flag and random urgent pointer
         tcp_header[13] |= 0x20; // URG flag
         uint16_t urg;
-        csprng_fill(reinterpret_cast<uint8_t*>(&urg), sizeof(urg));
+        ncp::csprng_fill(&urg, sizeof(urg));
         tcp_header[18] = static_cast<uint8_t>((urg >> 8) & 0xFF);
         tcp_header[19] = static_cast<uint8_t>(urg & 0xFF);
         mutated = true;
@@ -493,11 +452,9 @@ void AdversarialPadding::randomize_window_size(uint8_t* tcp_header) {
     static const uint16_t common_windows[] = {
         64240, 65535, 29200, 28960, 32768, 16384, 42340, 64000
     };
-    std::uniform_int_distribution<size_t> dist(0, 7);
-    uint16_t win = common_windows[dist(rng_)];
+    uint16_t win = common_windows[ncp::csprng_uniform(8)];
     // Add small jitter
-    std::uniform_int_distribution<int> jitter(-128, 128);
-    int w = static_cast<int>(win) + jitter(rng_);
+    int w = static_cast<int>(win) + ncp::csprng_range(-128, 128);
     if (w < 1) w = 1;
     if (w > 65535) w = 65535;
     win = static_cast<uint16_t>(w);
@@ -513,9 +470,8 @@ void AdversarialPadding::randomize_tcp_options(uint8_t* tcp_header, size_t heade
     
     for (size_t i = opts_start; i < header_len; ++i) {
         if (tcp_header[i] == 0x01) { // NOP
-            // Sometimes replace NOP with NOP (keep), sometimes with 0x00 (EOL style)
-            std::uniform_int_distribution<int> d(0, 3);
-            if (d(rng_) == 0) {
+            // Sometimes replace NOP with NOP (keep), sometimes leave as is
+            if (ncp::csprng_uniform(4) == 0) {
                 tcp_header[i] = 0x01; // keep NOP
             }
             // else leave as is
@@ -543,8 +499,7 @@ void AdversarialPadding::jitter_timestamps(uint8_t* tcp_header, size_t header_le
             tsval |= static_cast<uint32_t>(tcp_header[i+4]) << 8;
             tsval |= static_cast<uint32_t>(tcp_header[i+5]);
             
-            std::uniform_int_distribution<int> jitter(-50, 50);
-            int new_ts = static_cast<int>(tsval) + jitter(rng_);
+            int new_ts = static_cast<int>(tsval) + ncp::csprng_range(-50, 50);
             if (new_ts < 0) new_ts = 0;
             tsval = static_cast<uint32_t>(new_ts);
             
@@ -583,9 +538,7 @@ std::vector<uint8_t> AdversarialPadding::normalize_size(
 // ===== Dummy Packets =====
 
 std::vector<uint8_t> AdversarialPadding::generate_dummy_packet() {
-    std::uniform_int_distribution<size_t> size_dist(
-        config_.dummy_min_size, config_.dummy_max_size);
-    size_t sz = size_dist(rng_);
+    size_t sz = ncp::csprng_range_size(config_.dummy_min_size, config_.dummy_max_size);
     
     std::vector<uint8_t> dummy;
     dummy.reserve(4 + sz); // 4 bytes magic + payload
