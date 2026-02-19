@@ -59,12 +59,14 @@ static const std::array<const char*, 8> RU_TLS_SNI_HOSTS = {{
 
 // ==================== Constructors / Destructor ====================
 TrafficMimicry::TrafficMimicry()
-    : rng_(std::random_device{}()),
-      tls_sequence_number_(0), dns_transaction_id_(0), quic_packet_number_(0) {}
+    : tls_sequence_number_(0), dns_transaction_id_(0), quic_packet_number_(0) {
+    ncp::csprng_init();
+}
 
 TrafficMimicry::TrafficMimicry(const MimicConfig& config)
-    : config_(config), rng_(std::random_device{}()),
+    : config_(config),
       tls_sequence_number_(0), dns_transaction_id_(0), quic_packet_number_(0) {
+    ncp::csprng_init();
     if (config_.http_user_agent.empty()) {
         config_.http_user_agent = generate_random_user_agent();
     }
@@ -244,43 +246,40 @@ std::chrono::milliseconds TrafficMimicry::calculate_realistic_delay(
     // Larger packets take slightly longer
     base_delay += static_cast<int>(packet_size / 1000);
 
-    std::uniform_int_distribution<int> dist(-jitter, jitter);
     int final_delay = std::max(config_.min_inter_packet_delay,
                                std::min(config_.max_inter_packet_delay,
-                                        base_delay + dist(rng_)));
+                                        base_delay + ncp::csprng_range(-jitter, jitter)));
     return std::chrono::milliseconds(final_delay);
 }
 
 // ==================== Utility helpers (RU whitelists) ====================
 std::string TrafficMimicry::generate_random_http_path() {
-    std::uniform_int_distribution<int> dist(0, static_cast<int>(RU_WHITELIST_PATHS.size()) - 1);
-    return RU_WHITELIST_PATHS[dist(rng_)];
+    int idx = ncp::csprng_range(0, static_cast<int>(RU_WHITELIST_PATHS.size()) - 1);
+    return RU_WHITELIST_PATHS[idx];
 }
 
 std::string TrafficMimicry::generate_random_user_agent() {
     if (!config_.http_user_agent.empty()) return config_.http_user_agent;
-    std::uniform_int_distribution<int> dist(0, static_cast<int>(RU_USER_AGENTS.size()) - 1);
-    return RU_USER_AGENTS[dist(rng_)];
+    int idx = ncp::csprng_range(0, static_cast<int>(RU_USER_AGENTS.size()) - 1);
+    return RU_USER_AGENTS[idx];
 }
 
 std::string TrafficMimicry::generate_random_hostname() {
     if (!config_.http_host.empty()) return config_.http_host;
-    std::uniform_int_distribution<int> dist(0, static_cast<int>(RU_WHITELIST_HOSTS.size()) - 1);
-    return RU_WHITELIST_HOSTS[dist(rng_)];
+    int idx = ncp::csprng_range(0, static_cast<int>(RU_WHITELIST_HOSTS.size()) - 1);
+    return RU_WHITELIST_HOSTS[idx];
 }
 
 uint16_t TrafficMimicry::generate_random_port() {
-    std::uniform_int_distribution<uint16_t> dist(1024, 65535);
-    return dist(rng_);
+    return static_cast<uint16_t>(ncp::csprng_range(1024, 65535));
 }
 
 std::vector<uint8_t> TrafficMimicry::generate_random_padding(size_t min_size, size_t max_size) {
     if (!config_.enable_size_mimicry) return {};
-    std::uniform_int_distribution<size_t> sz_dist(min_size, max_size);
-    size_t sz = sz_dist(rng_);
+    size_t sz = static_cast<size_t>(ncp::csprng_range(
+        static_cast<int>(min_size), static_cast<int>(max_size)));
     std::vector<uint8_t> pad(sz);
-    std::uniform_int_distribution<int> byte_dist(0, 255);
-    for (auto& b : pad) b = static_cast<uint8_t>(byte_dist(rng_));
+    ncp::csprng_fill(pad.data(), sz);
     return pad;
 }
 
@@ -392,8 +391,8 @@ std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std
     // Pick SNI from RU whitelist
     std::string sni = config_.tls_sni;
     if (sni.empty()) {
-        std::uniform_int_distribution<int> d(0, static_cast<int>(RU_TLS_SNI_HOSTS.size()) - 1);
-        sni = RU_TLS_SNI_HOSTS[d(rng_)];
+        int idx = ncp::csprng_range(0, static_cast<int>(RU_TLS_SNI_HOSTS.size()) - 1);
+        sni = RU_TLS_SNI_HOSTS[idx];
     }
 
     std::vector<uint8_t> result;
@@ -419,8 +418,7 @@ std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std
     result.push_back((payload_len >> 16) & 0xFF);
     result.push_back((payload_len >> 8) & 0xFF);
     result.push_back(payload_len & 0xFF);
-    std::uniform_int_distribution<int> bd(0, 255);
-    for (int i = 0; i < 28; ++i) result.push_back(static_cast<uint8_t>(bd(rng_)));
+    for (int i = 0; i < 28; ++i) result.push_back(ncp::csprng_byte());
 
     // Session ID — embed first 32 bytes of payload
     size_t session_id_len = std::min(payload.size(), size_t(32));
@@ -508,8 +506,8 @@ std::vector<uint8_t> TrafficMimicry::create_https_application_wrapper(const std:
     // Padded length = 4-byte length prefix + payload + optional padding
     size_t padded_len = payload.size() + 4;
     if (config_.enable_size_mimicry && config_.max_padding > 0) {
-        std::uniform_int_distribution<int> dist(config_.min_padding, config_.max_padding);
-        padded_len += dist(rng_);
+        padded_len += static_cast<size_t>(ncp::csprng_range(
+            config_.min_padding, config_.max_padding));
     }
 
     result.push_back(static_cast<uint8_t>((padded_len >> 8) & 0xFF));
@@ -526,7 +524,7 @@ std::vector<uint8_t> TrafficMimicry::create_https_application_wrapper(const std:
 
     // Padding
     while (result.size() < 5 + padded_len) {
-        result.push_back(static_cast<uint8_t>(rng_() & 0xFF));
+        result.push_back(ncp::csprng_byte());
     }
 
     tls_sequence_number_++;
@@ -610,9 +608,9 @@ std::vector<uint8_t> TrafficMimicry::create_websocket_wrapper(const std::vector<
         for (int i = 7; i >= 0; --i)
             frame.push_back(static_cast<uint8_t>((len >> (i * 8)) & 0xFF));
     }
-    std::uniform_int_distribution<int> bd(0, 255);
     std::array<uint8_t, 4> mask;
-    for (int i = 0; i < 4; ++i) { mask[i] = static_cast<uint8_t>(bd(rng_)); frame.push_back(mask[i]); }
+    ncp::csprng_fill(mask.data(), 4);
+    for (int i = 0; i < 4; ++i) frame.push_back(mask[i]);
     for (size_t i = 0; i < payload.size(); ++i)
         frame.push_back(payload[i] ^ mask[i % 4]);
     return frame;
@@ -635,7 +633,7 @@ std::vector<uint8_t> TrafficMimicry::extract_websocket_payload(const std::vector
 
 // ==================== DNS (RU domains + hex subdomain labels + EDNS0) ====================
 std::vector<uint8_t> TrafficMimicry::create_dns_query_wrapper(const std::vector<uint8_t>& payload) {
-    dns_transaction_id_ = rng_() & 0xFFFF;
+    dns_transaction_id_ = static_cast<uint16_t>(ncp::csprng_range(0, 0xFFFF));
     uint16_t txn_id = dns_transaction_id_;
 
     std::vector<uint8_t> result = {
@@ -667,8 +665,8 @@ std::vector<uint8_t> TrafficMimicry::create_dns_query_wrapper(const std::vector<
     }
 
     // RU domain suffix
-    std::uniform_int_distribution<int> d(0, static_cast<int>(RU_DNS_LABELS.size()) - 1);
-    const auto& lbl = RU_DNS_LABELS[d(rng_)];
+    int idx = ncp::csprng_range(0, static_cast<int>(RU_DNS_LABELS.size()) - 1);
+    const auto& lbl = RU_DNS_LABELS[idx];
     result.push_back(lbl.sld_len);
     result.insert(result.end(), lbl.sld, lbl.sld + lbl.sld_len);
     result.push_back(lbl.tld_len);
@@ -703,8 +701,8 @@ std::vector<uint8_t> TrafficMimicry::create_dns_response_wrapper(const std::vect
     };
 
     // Question section — RU domain
-    std::uniform_int_distribution<int> d(0, static_cast<int>(RU_DNS_LABELS.size()) - 1);
-    const auto& lbl = RU_DNS_LABELS[d(rng_)];
+    int idx = ncp::csprng_range(0, static_cast<int>(RU_DNS_LABELS.size()) - 1);
+    const auto& lbl = RU_DNS_LABELS[idx];
     result.push_back(lbl.sld_len);
     result.insert(result.end(), lbl.sld, lbl.sld + lbl.sld_len);
     result.push_back(lbl.tld_len);
@@ -808,7 +806,7 @@ std::vector<uint8_t> TrafficMimicry::create_quic_initial_wrapper(const std::vect
     std::vector<uint8_t> result;
 
     // Long Header: Form=1, Fixed=1, Type=Initial
-    result.push_back(0xC0 | (rng_() & 0x03));
+    result.push_back(0xC0 | (ncp::csprng_byte() & 0x03));
 
     // Version (QUIC v1)
     result.push_back(0x00); result.push_back(0x00);
@@ -816,11 +814,11 @@ std::vector<uint8_t> TrafficMimicry::create_quic_initial_wrapper(const std::vect
 
     // Destination CID (8 bytes)
     result.push_back(8);
-    for (int i = 0; i < 8; ++i) result.push_back(rng_() & 0xFF);
+    for (int i = 0; i < 8; ++i) result.push_back(ncp::csprng_byte());
 
     // Source CID (8 bytes)
     result.push_back(8);
-    for (int i = 0; i < 8; ++i) result.push_back(rng_() & 0xFF);
+    for (int i = 0; i < 8; ++i) result.push_back(ncp::csprng_byte());
 
     // Token Length = 0
     result.push_back(0x00);
@@ -848,7 +846,7 @@ std::vector<uint8_t> TrafficMimicry::create_quic_initial_wrapper(const std::vect
 
     // Pad to minimum 1200 bytes (QUIC requirement)
     while (result.size() < 1200) {
-        result.push_back(rng_() & 0xFF);
+        result.push_back(ncp::csprng_byte());
     }
     return result;
 }
@@ -905,10 +903,10 @@ std::vector<uint8_t> TrafficMimicry::create_bittorrent_wrapper(const std::vector
     size_t hash_len = std::min(payload.size(), size_t(20));
     result.insert(result.end(), payload.begin(), payload.begin() + hash_len);
     // Pad to 20 if needed
-    for (size_t i = hash_len; i < 20; ++i) result.push_back(rng_() & 0xFF);
+    for (size_t i = hash_len; i < 20; ++i) result.push_back(ncp::csprng_byte());
 
     // Peer ID (20 bytes) — random
-    for (int i = 0; i < 20; ++i) result.push_back(rng_() & 0xFF);
+    for (int i = 0; i < 20; ++i) result.push_back(ncp::csprng_byte());
 
     // Remaining payload as piece message (msg_id=7)
     if (payload.size() > 20) {
@@ -929,7 +927,7 @@ std::vector<uint8_t> TrafficMimicry::create_bittorrent_wrapper(const std::vector
 std::vector<uint8_t> TrafficMimicry::create_skype_wrapper(const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> result;
     // Object ID (2 bytes)
-    result.push_back(rng_() & 0xFF); result.push_back(rng_() & 0xFF);
+    result.push_back(ncp::csprng_byte()); result.push_back(ncp::csprng_byte());
     // Type/Flags
     result.push_back(0x02); result.push_back(0x00); // Data packet
     // Sequence number
@@ -942,7 +940,7 @@ std::vector<uint8_t> TrafficMimicry::create_skype_wrapper(const std::vector<uint
     // Payload
     result.insert(result.end(), payload.begin(), payload.end());
     // Pad to typical VoIP packet size (160 bytes)
-    while (result.size() < 160) result.push_back(rng_() & 0xFF);
+    while (result.size() < 160) result.push_back(ncp::csprng_byte());
     return result;
 }
 
@@ -962,7 +960,7 @@ std::vector<uint8_t> TrafficMimicry::create_zoom_wrapper(const std::vector<uint8
     result.push_back((ts >> 24) & 0xFF); result.push_back((ts >> 16) & 0xFF);
     result.push_back((ts >> 8) & 0xFF);  result.push_back(ts & 0xFF);
     // SSRC (random)
-    for (int i = 0; i < 4; ++i) result.push_back(rng_() & 0xFF);
+    for (int i = 0; i < 4; ++i) result.push_back(ncp::csprng_byte());
     // Extension header (BEDE)
     result.push_back(0xBE); result.push_back(0xDE);
     uint16_t ext_len = static_cast<uint16_t>((payload.size() + 3) / 4); // 32-bit words

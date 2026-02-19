@@ -4,10 +4,10 @@
 #include <vector>
 #include <string>
 #include <cstdint>
-#include <random>
 #include <chrono>
 #include <map>
 #include <functional>
+#include "ncp_csprng.hpp"
 
 namespace ncp {
 
@@ -147,7 +147,7 @@ private:
     
     MimicConfig config_;
     MimicStats stats_;
-    std::mt19937 rng_;
+    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     std::chrono::steady_clock::time_point last_packet_time_;
     
     // Protocol-specific state
