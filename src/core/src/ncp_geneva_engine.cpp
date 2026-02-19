@@ -1,9 +1,21 @@
 #include "ncp_geneva_engine.hpp"
-#include <algorithm>
 #include <cstring>
+#include <sodium.h>
 
 namespace ncp {
 namespace DPI {
+
+// ==================== CSPRNG Helpers ====================
+uint8_t GenevaEngine::csprng_byte() {
+    uint8_t val;
+    randombytes_buf(&val, sizeof(val));
+    return val;
+}
+
+uint32_t GenevaEngine::csprng_uniform(uint32_t upper_bound) {
+    if (upper_bound <= 1) return 0;
+    return randombytes_uniform(upper_bound);
+}
 
 // ---- Preset strategies -------------------------------------------------
 
@@ -59,8 +71,7 @@ GenevaStrategy GenevaStrategy::universal() {
 
 // ---- GenevaEngine construction -----------------------------------------
 
-GenevaEngine::GenevaEngine()
-    : rng_(std::random_device{}()) {}
+GenevaEngine::GenevaEngine() {}
 
 GenevaEngine::~GenevaEngine() = default;
 
@@ -163,9 +174,9 @@ std::vector<std::vector<uint8_t>> GenevaEngine::action_tamper_seq(
     auto result = packets;
     if (target_idx < result.size() && result[target_idx].size() > 24) {
         // TCP seq number at offset 24 in IP+TCP (assuming 20-byte IP header + offset 4 in TCP)
-        std::uniform_int_distribution<unsigned short> dist(0, 255);
+        // SECURITY FIX: Use unbiased randombytes_uniform(256) instead of std::uniform_int_distribution with mt19937
         for (int i = 24; i < 28 && i < static_cast<int>(result[target_idx].size()); ++i) {
-            result[target_idx][i] = static_cast<uint8_t>(dist(rng_));
+            result[target_idx][i] = static_cast<uint8_t>(csprng_uniform(256));
         }
         stats_.packets_tampered++;
     }
@@ -211,8 +222,12 @@ std::vector<std::vector<uint8_t>> GenevaEngine::action_drop(
 std::vector<std::vector<uint8_t>> GenevaEngine::action_disorder(
     std::vector<std::vector<uint8_t>> packets)
 {
+    // SECURITY FIX: Replace std::shuffle with Fisher-Yates using unbiased randombytes_uniform
     if (packets.size() > 1) {
-        std::shuffle(packets.begin(), packets.end(), rng_);
+        for (size_t i = packets.size() - 1; i > 0; --i) {
+            size_t j = csprng_uniform(static_cast<uint32_t>(i + 1));
+            std::swap(packets[i], packets[j]);
+        }
     }
     return packets;
 }

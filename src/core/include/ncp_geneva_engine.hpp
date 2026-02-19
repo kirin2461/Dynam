@@ -5,7 +5,6 @@
 #include <cstddef>
 #include <vector>
 #include <string>
-#include <random>
 
 namespace ncp {
 namespace DPI {
@@ -97,7 +96,10 @@ private:
     std::vector<std::vector<uint8_t>> fragment_packet(
         const std::vector<uint8_t>& packet, size_t fragment_size);
 
-    std::mt19937 rng_;
+    // CSPRNG helpers (replaces insecure mt19937)
+    static uint8_t csprng_byte();
+    static uint32_t csprng_uniform(uint32_t upper_bound);
+
     GenevaStats stats_;
 };
 
