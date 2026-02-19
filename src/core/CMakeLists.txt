@@ -36,11 +36,12 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_geneva_engine.cpp
     src/ncp_paranoid.cpp
     src/ncp_secure_memory.cpp
-    # Anti ML-TSPU modules (Phase 1-4)
+    # Anti ML-TSPU modules (Phase 1-5)
     src/ncp_adversarial.cpp      # Phase 1: adversarial padding
     src/ncp_flow_shaper.cpp      # Phase 2: flow-level traffic shaping
     src/ncp_probe_resist.cpp     # Phase 3: active probing resistance
     src/ncp_orchestrator.cpp     # Phase 4: unified pipeline orchestrator
+    src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
     # Hybrid network backend sources
     src/network_raw_socket.cpp
     src/dhcp_spoofer.cpp
@@ -63,6 +64,7 @@ set(NCP_CORE_SRC_SOURCES
     include/ncp_flow_shaper.hpp
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
+    include/ncp_port_knock.hpp
 )
 
 # Conditionally add sources that depend on optional libraries
@@ -105,11 +107,12 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_paranoid.hpp
     include/ncp_secure_memory.hpp
     include/ncp_secure_buffer.hpp
-    # Anti ML-TSPU headers (Phase 1-4)
+    # Anti ML-TSPU headers (Phase 1-5)
     include/ncp_adversarial.hpp
     include/ncp_flow_shaper.hpp
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
+    include/ncp_port_knock.hpp
     # Hybrid network backend headers
     include/ncp_network_backend.hpp
     include/ncp_winsock_raii.hpp
