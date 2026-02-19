@@ -42,6 +42,10 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_probe_resist.cpp     # Phase 3: active probing resistance
     src/ncp_orchestrator.cpp     # Phase 4: unified pipeline orchestrator
     src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
+    # L3/L2 Stealth modules (Anti-ISP fingerprinting)
+    src/ncp_l3_stealth.cpp       # Phase 1: IPID/TTL/MSS/FlowLabel normalization
+    src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WFP packet interception + tunneling
+    src/ncp_l2_stealth.cpp       # Phase 3: ARP/LLDP/VLAN (Npcap-optional)
     # Hybrid network backend sources
     src/network_raw_socket.cpp
     src/dhcp_spoofer.cpp
@@ -113,6 +117,10 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
     include/ncp_port_knock.hpp
+    # L3/L2 Stealth headers
+    include/ncp_l3_stealth.hpp
+    include/ncp_packet_interceptor.hpp
+    include/ncp_l2_stealth.hpp
     # Hybrid network backend headers
     include/ncp_network_backend.hpp
     include/ncp_winsock_raii.hpp
@@ -181,7 +189,7 @@ if(UNIX)
             target_include_directories(ncp_core PUBLIC ${PCAP_INCLUDE_DIRS})
             message(STATUS "Found libpcap: ${PCAP_LIBRARIES}")
         else()
-            message(STATUS "libpcap not found - packet capture disabled")
+            message(STATUS "libpcap not found - L2 raw packet features disabled")
         endif()
     endif()
 
@@ -203,7 +211,7 @@ elseif(WIN32)
         target_compile_definitions(ncp_core PUBLIC HAVE_PCAP)
         message(STATUS "Found Npcap SDK at ${NPCAP_SDK_DIR}")
     else()
-        message(STATUS "Npcap SDK not found - using raw socket fallback on Windows")
+        message(STATUS "Npcap SDK not found - using raw socket fallback on Windows (L2 features limited)")
     endif()
 
     # Windows networking libraries for hybrid backend (always needed)
@@ -216,12 +224,14 @@ endif()
 # ==================== Optional: libnetfilter_queue ====================
 if(UNIX AND NOT APPLE)
     find_library(NFQ_LIBRARY NAMES netfilter_queue)
-    if(NFQ_LIBRARY)
+    find_path(NFQ_INCLUDE_DIR NAMES libnetfilter_queue/libnetfilter_queue.h)
+    if(NFQ_LIBRARY AND NFQ_INCLUDE_DIR)
         target_link_libraries(ncp_core PUBLIC ${NFQ_LIBRARY})
+        target_include_directories(ncp_core PRIVATE ${NFQ_INCLUDE_DIR})
         target_compile_definitions(ncp_core PRIVATE HAVE_NFQUEUE)
         message(STATUS "Found libnetfilter_queue: ${NFQ_LIBRARY}")
     else()
-        message(STATUS "libnetfilter_queue not found - DPI driver mode disabled")
+        message(STATUS "libnetfilter_queue not found - NFQUEUE packet interception disabled")
     endif()
 endif()
 

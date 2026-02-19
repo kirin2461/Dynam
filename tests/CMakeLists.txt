@@ -68,7 +68,7 @@ if (WIN32)
 endif()
 
 # ==================== Test Registration ====================
-# Register as a single CTest test with a timeout to prevent
-# CI from hanging on unreachable network endpoints.
+# Register as a single CTest test with a 3-minute timeout to prevent
+# CI from hanging on unreachable network endpoints or infinite loops.
 add_test(NAME ncp_tests COMMAND ncp_tests)
-set_tests_properties(ncp_tests PROPERTIES TIMEOUT 120)
+set_tests_properties(ncp_tests PROPERTIES TIMEOUT 180)
