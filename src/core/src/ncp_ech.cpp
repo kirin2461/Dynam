@@ -46,7 +46,7 @@ static uint16_t hpke_aead_to_id(HPKEAEAD aead) {
     switch (aead) {
         case HPKEAEAD::AES_128_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_128;
         case HPKEAEAD::AES_256_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_256;
-        case HPKEAEAD::CHACHA20_POLY1305:   return OSSL_HPKE_AEAD_ID_CHACHA20_POLY1305;
+        case HPKEAEAD::CHACHA20_POLY1305:   return OSSL_HPKE_AEAD_ID_CHACHA_POLY1305;
         default: return 0;
     }
 }
