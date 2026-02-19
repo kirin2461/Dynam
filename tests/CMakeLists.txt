@@ -25,6 +25,7 @@ add_executable(ncp_tests
     test_secure_memory.cpp
     test_i2p.cpp
     test_critical_fixes.cpp  # NEW: Critical security fixes tests (Issue #17)
+    test_l3_l2_stealth.cpp   # NEW: L3/L2 Stealth tests (Phase 1-3)
 )
 
 target_link_libraries(ncp_tests
