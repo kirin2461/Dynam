@@ -159,6 +159,7 @@ public:
 
     // =========================================================
     // Phase 2: Initialize AdvancedDPIBypass from DPIConfig
+    // Phase 3C: Forward TLSFingerprint to advanced bypass
     // =========================================================
     void init_advanced_bypass() {
         AdvancedDPIConfig adv_config;
@@ -192,11 +193,23 @@ public:
             log("[Advanced] " + msg);
         });
 
+        // Phase 3C: Set TLS fingerprint BEFORE initialize so it's available
+        // during initialization, and again after in case initialize() recreates
+        // internal TLSManipulator
+        if (tls_fingerprint_) {
+            advanced_bypass_->set_tls_fingerprint(tls_fingerprint_.get());
+        }
+
         if (advanced_bypass_->initialize(adv_config)) {
+            // Forward fingerprint again after initialize() creates TLSManipulator
+            if (tls_fingerprint_) {
+                advanced_bypass_->set_tls_fingerprint(tls_fingerprint_.get());
+            }
             advanced_bypass_->start();
             advanced_enabled_ = true;
             log("Advanced DPI bypass layer initialized with " +
-                std::to_string(adv_config.techniques.size()) + " techniques");
+                std::to_string(adv_config.techniques.size()) + " techniques" +
+                (tls_fingerprint_ ? " + TLS fingerprint" : ""));
         } else {
             log("Warning: Advanced DPI bypass initialization failed, using basic mode");
             advanced_bypass_.reset();
