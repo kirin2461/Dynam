@@ -31,7 +31,6 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
-#include <random>
 #include <array>
 #include <deque>
 
@@ -313,9 +312,6 @@ private:
     ProbeResistConfig config_;
     ProbeResistStats stats_;
     ProbeEventCallback event_callback_;
-
-    // RNG
-    std::mt19937 rng_;
 
     // Nonce window: hash → expiry time
     struct NonceEntry {

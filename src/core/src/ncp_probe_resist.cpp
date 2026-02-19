@@ -163,10 +163,6 @@ ProbeResist::ProbeResist()
 
 ProbeResist::ProbeResist(const ProbeResistConfig& config)
     : config_(config) {
-    uint32_t seed;
-    csprng_fill(reinterpret_cast<uint8_t*>(&seed), sizeof(seed));
-    rng_.seed(seed);
-
     // Populate scanner JA3 set
     for (const auto& ja3 : config_.known_scanner_ja3) {
         ja3_scanner_set_.insert(ja3);
