@@ -8,6 +8,7 @@
 #include <functional>
 #include <chrono>
 #include <cstdint>
+#include <algorithm>
 
 namespace ncp {
 namespace DPI {
@@ -151,6 +152,38 @@ struct AdvancedDPIConfig {
     // Russian DPI specific
     bool tspu_bypass = true;        // TSPU (Russian DPI) specific bypass
     bool china_gfw_bypass = false;  // China GFW specific techniques
+
+    /**
+     * @brief Check whether a specific evasion technique is enabled.
+     *
+     * Step 1D: This replaces ad-hoc checks against base_config.* flags
+     * in process_outgoing, centralizing the decision in the config.
+     *
+     * @param t  Technique to look up
+     * @return true if `t` is present in the `techniques` vector
+     */
+    bool has_technique(EvasionTechnique t) const noexcept {
+        return std::find(techniques.begin(), techniques.end(), t) != techniques.end();
+    }
+
+    /**
+     * @brief Add a technique if not already present.
+     */
+    void add_technique(EvasionTechnique t) {
+        if (!has_technique(t)) {
+            techniques.push_back(t);
+        }
+    }
+
+    /**
+     * @brief Remove a technique if present.
+     */
+    void remove_technique(EvasionTechnique t) {
+        techniques.erase(
+            std::remove(techniques.begin(), techniques.end(), t),
+            techniques.end()
+        );
+    }
 };
 
 /**

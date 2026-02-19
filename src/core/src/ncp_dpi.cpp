@@ -266,6 +266,20 @@ public:
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR,
                    reinterpret_cast<const char*>(&opt), sizeof(opt));
 
+        // Step 1C: Set accept() timeout so the loop can check `running`
+        // periodically and shut down cleanly instead of blocking forever.
+#ifdef _WIN32
+        DWORD accept_timeout_ms = 1000;
+        setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&accept_timeout_ms),
+                   sizeof(accept_timeout_ms));
+#else
+        struct timeval accept_tv{1, 0}; // 1 second
+        setsockopt(listen_sock, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&accept_tv),
+                   sizeof(accept_tv));
+#endif
+
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(config.listen_port);
@@ -309,7 +323,7 @@ public:
                                         reinterpret_cast<sockaddr*>(&client_addr),
                                         &addr_len);
             if (client_sock == INVALID_SOCKET) {
-                if (!running) break;
+                // accept() timed out or was interrupted — recheck running flag
                 continue;
             }
         
@@ -541,6 +555,23 @@ public:
                     static_cast<uint8_t>(randombytes_uniform(256)), static_cast<uint8_t>(randombytes_uniform(256)), // Random length
                     0x01 // ClientHello
                 };
+
+                // Step 1C: Set TCP_NODELAY before sending fake packet to force
+                // immediate flush — prevents Nagle from coalescing fake+real
+                // data into one TCP segment, which would defeat the purpose.
+                int nodelay_on = 1;
+                int prev_nodelay = 0;
+#ifdef _WIN32
+                int nd_len = static_cast<int>(sizeof(prev_nodelay));
+#else
+                socklen_t nd_len = static_cast<socklen_t>(sizeof(prev_nodelay));
+#endif
+                getsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                           reinterpret_cast<char*>(&prev_nodelay), &nd_len);
+                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                           reinterpret_cast<const char*>(&nodelay_on),
+                           sizeof(nodelay_on));
+
     #ifdef IP_TTL
                 int original_ttl = 0;
                 socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
@@ -570,6 +601,12 @@ public:
                                sizeof(original_ttl));
                 }
     #endif
+
+                // Restore original TCP_NODELAY value
+                setsockopt(sock, IPPROTO_TCP, TCP_NODELAY,
+                           reinterpret_cast<const char*>(&prev_nodelay),
+                           sizeof(prev_nodelay));
+
                 if (config.disorder_delay_ms > 0) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
                 }
