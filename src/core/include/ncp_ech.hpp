@@ -72,7 +72,7 @@ struct HPKECipherSuite {
  * @brief ECH configuration (simplified ECHConfig structure)
  */
 struct ECHConfig {
-    uint16_t version = 0xfe0d;  // ECH version (draft) - changed from uint8_t to uint16_t
+    uint16_t version = 0xfe0d;  // ECH version (draft)
     uint8_t config_id = 0;
     std::vector<uint8_t> public_key;  // Server's HPKE public key
     std::vector<HPKECipherSuite> cipher_suites;
@@ -85,11 +85,22 @@ struct ECHConfig {
 
 /**
  * @brief ECH client context for encryption
+ * 
+ * Non-copyable: holds OpenSSL HPKE context via unique_ptr<Impl>.
+ * Copying would cause double-free of OSSL_HPKE_CTX.
  */
 class ECHClientContext {
 public:
     ECHClientContext();
     ~ECHClientContext();
+
+    // Non-copyable — prevent double-free of OpenSSL HPKE context
+    ECHClientContext(const ECHClientContext&) = delete;
+    ECHClientContext& operator=(const ECHClientContext&) = delete;
+
+    // Moveable
+    ECHClientContext(ECHClientContext&&) noexcept = default;
+    ECHClientContext& operator=(ECHClientContext&&) noexcept = default;
 
     /**
      * @brief Initialize with ECHConfig
@@ -130,11 +141,22 @@ private:
 
 /**
  * @brief ECH server context for decryption
+ * 
+ * Non-copyable: holds OpenSSL HPKE context and EVP_PKEY via unique_ptr<Impl>.
+ * Copying would cause double-free of OpenSSL resources.
  */
 class ECHServerContext {
 public:
     ECHServerContext();
     ~ECHServerContext();
+
+    // Non-copyable — prevent double-free of OpenSSL HPKE context + EVP_PKEY
+    ECHServerContext(const ECHServerContext&) = delete;
+    ECHServerContext& operator=(const ECHServerContext&) = delete;
+
+    // Moveable
+    ECHServerContext(ECHServerContext&&) noexcept = default;
+    ECHServerContext& operator=(ECHServerContext&&) noexcept = default;
 
     /**
      * @brief Initialize with server private key

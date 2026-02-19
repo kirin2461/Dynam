@@ -35,19 +35,6 @@ option(ENABLE_WEBSOCKETS "Enable WebSocket tunneling" OFF)
 option(ENABLE_TOR_PROXY "Enable Tor proxy support" OFF)
 option(ENABLE_FUZZING "Enable fuzzing tests (requires Clang with LibFuzzer)" OFF)
 
-# ==================== ECH Support ====================
-# ECH now uses proper HPKE encryption - no insecure stub flag needed!
-# Requires OpenSSL 3.2+ for HPKE support
-if(OPENSSL_VERSION VERSION_GREATER_EQUAL "3.2")
-    message(STATUS "ECH with HPKE support enabled (OpenSSL ${OPENSSL_VERSION})")
-    add_definitions(-DHAVE_ECH_HPKE)
-else()
-    message(STATUS "ECH unavailable (requires OpenSSL 3.2+, found ${OPENSSL_VERSION})")
-endif()
-# ==================== Compilation Fixes ====================
-# Allow insecure ECH stub (TEMPORARY - should implement real ECH or remove)
-add_definitions(-DNCP_ALLOW_INSECURE_ECH_STUB)
-
 # ==================== Platform-specific Settings ====================
 if(WIN32)
     add_definitions(-DWIN32_LEAN_AND_MEAN)
@@ -124,6 +111,20 @@ if(OPENSSL_FOUND)
 else()
     message(STATUS "OpenSSL not found")
 endif()
+
+# ==================== ECH Support ====================
+# FIX HIGH #6: Moved AFTER find_package(OpenSSL) so OPENSSL_VERSION is populated
+if(OPENSSL_FOUND AND OPENSSL_VERSION VERSION_GREATER_EQUAL "3.2")
+    message(STATUS "ECH with HPKE support enabled (OpenSSL ${OPENSSL_VERSION})")
+    add_definitions(-DHAVE_ECH_HPKE)
+else()
+    if(OPENSSL_FOUND)
+        message(STATUS "ECH unavailable (requires OpenSSL 3.2+, found ${OPENSSL_VERSION})")
+    else()
+        message(STATUS "ECH unavailable (OpenSSL not found)")
+    endif()
+endif()
+# NOTE: NCP_ALLOW_INSECURE_ECH_STUB removed — real HPKE implementation exists now
 
 if(ENABLE_LIBOQS)
     find_package(liboqs QUIET)

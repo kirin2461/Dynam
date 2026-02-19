@@ -12,6 +12,10 @@
 #include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
 using ssize_t = ptrdiff_t;
+// FIX HIGH #7: SOCKET is UINT_PTR (8 bytes on x64), int is 4 bytes.
+// Use platform_socket_t to avoid truncation.
+using platform_socket_t = SOCKET;
+static constexpr platform_socket_t INVALID_SOCK = INVALID_SOCKET;
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -20,37 +24,36 @@ using ssize_t = ptrdiff_t;
 #include <netdb.h>
 #include <fcntl.h>
 #include <poll.h>
+using platform_socket_t = int;
+static constexpr platform_socket_t INVALID_SOCK = -1;
 #endif
 
 namespace ncp {
 
 // Impl definition with SAM Bridge connection
 struct I2PManager::Impl {
-    int sam_socket = -1;
+    platform_socket_t sam_socket = INVALID_SOCK;
     std::string session_id;
     std::string destination_keys;
     bool sam_connected = false;
     
-    // SECURITY FIX: Helper to send SAM command with proper recv() loop for fragmented responses
     bool send_sam_command(const std::string& cmd, std::string& response) {
-        if (sam_socket < 0) return false;
+        if (sam_socket == INVALID_SOCK) return false;
         
         std::string full_cmd = cmd + "\n";
         ssize_t sent = send(sam_socket, full_cmd.c_str(), static_cast<int>(full_cmd.length()), 0);
         if (sent <= 0) return false;
         
-        // SECURITY FIX: Loop recv() to handle fragmented responses
         char buffer[4096];
         response.clear();
         while (true) {
             ssize_t received = recv(sam_socket, buffer, sizeof(buffer) - 1, 0);
             if (received <= 0) {
-                return !response.empty(); // Return true if we got partial data
+                return !response.empty();
             }
             buffer[received] = '\0';
             response.append(buffer, received);
             
-            // SAM responses end with \n, check if complete
             if (response.find('\n') != std::string::npos) {
                 break;
             }
@@ -59,13 +62,13 @@ struct I2PManager::Impl {
     }
     
     void close_sam() {
-        if (sam_socket >= 0) {
+        if (sam_socket != INVALID_SOCK) {
 #ifdef _WIN32
             closesocket(sam_socket);
 #else
             close(sam_socket);
 #endif
-            sam_socket = -1;
+            sam_socket = INVALID_SOCK;
         }
         sam_connected = false;
     }
@@ -79,7 +82,6 @@ I2PManager::~I2PManager() {
     }
 }
 
-// SECURITY FIX: Initialize with non-blocking connect() and timeout
 bool I2PManager::initialize(const Config& config) {
     config_ = config;
     
@@ -90,9 +92,9 @@ bool I2PManager::initialize(const Config& config) {
     }
 #endif
     
-    // Connect to SAM Bridge with timeout
-    impl_->sam_socket = static_cast<int>(socket(AF_INET, SOCK_STREAM, 0));
-    if (impl_->sam_socket < 0) {
+    // FIX HIGH #7: No truncation — socket() returns platform_socket_t directly
+    impl_->sam_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (impl_->sam_socket == INVALID_SOCK) {
         return false;
     }
     
@@ -110,7 +112,6 @@ bool I2PManager::initialize(const Config& config) {
     sam_addr.sin_port = htons(config.sam_port);
     inet_pton(AF_INET, config.sam_host.c_str(), &sam_addr.sin_addr);
     
-    // Initiate non-blocking connect
     int connect_result = connect(impl_->sam_socket, (struct sockaddr*)&sam_addr, sizeof(sam_addr));
     
 #ifdef _WIN32
@@ -119,18 +120,16 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
-    // Wait for connection with 2-second timeout
     fd_set wset;
     FD_ZERO(&wset);
     FD_SET(impl_->sam_socket, &wset);
-    struct timeval tv = {2, 0}; // 2 seconds
+    struct timeval tv = {2, 0};
     
     if (select(0, nullptr, &wset, nullptr, &tv) <= 0) {
         impl_->close_sam();
-        return false; // Timeout or error
+        return false;
     }
     
-    // Check if connection succeeded
     int error = 0;
     int len = sizeof(error);
     getsockopt(impl_->sam_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len);
@@ -139,7 +138,6 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
-    // Set back to blocking mode
     mode = 0;
     ioctlsocket(impl_->sam_socket, FIONBIO, &mode);
 #else
@@ -148,14 +146,12 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
-    // Wait for connection with 2-second timeout
     struct pollfd pfd = {impl_->sam_socket, POLLOUT, 0};
-    if (poll(&pfd, 1, 2000) <= 0) { // 2000ms timeout
+    if (poll(&pfd, 1, 2000) <= 0) {
         impl_->close_sam();
         return false;
     }
     
-    // Check if connection succeeded
     int error = 0;
     socklen_t len = sizeof(error);
     getsockopt(impl_->sam_socket, SOL_SOCKET, SO_ERROR, &error, &len);
@@ -164,7 +160,6 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
-    // Set back to blocking mode
     flags = fcntl(impl_->sam_socket, F_GETFL, 0);
     fcntl(impl_->sam_socket, F_SETFL, flags & ~O_NONBLOCK);
 #endif
@@ -184,7 +179,6 @@ bool I2PManager::initialize(const Config& config) {
     impl_->sam_connected = true;
     is_initialized_ = true;
     
-    // Generate destination if not exists
     if (current_dest_.empty()) {
         current_dest_ = create_ephemeral_destination();
     }
