@@ -314,8 +314,10 @@ private:
     ProbeEventCallback event_callback_;
 
     // Nonce window: hash → expiry time
+    // FIX #25: hex_str stored alongside hash to avoid O(n) recomputation on eviction
     struct NonceEntry {
-        std::array<uint8_t, 32> hash;  // SHA256 of nonce
+        std::array<uint8_t, 32> hash;  // raw nonce bytes (zero-padded)
+        std::string hex_str;           // pre-computed hex for O(1) set erase
         std::chrono::steady_clock::time_point expiry;
     };
     std::deque<NonceEntry> nonce_window_;
@@ -340,6 +342,7 @@ private:
     // JA3 sets
     std::unordered_set<std::string> ja3_allowlist_;
     std::unordered_set<std::string> ja3_scanner_set_;
+    mutable std::mutex ja3_mutex_;  // FIX #24: protects ja3_allowlist_ and ja3_scanner_set_
 };
 
 } // namespace DPI
