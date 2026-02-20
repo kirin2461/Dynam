@@ -278,6 +278,9 @@ private:
     void health_monitor_func();
     void update_overhead_stats();
 
+    // Deadlock fix: lock-free version called when strategy_mutex_ is already held
+    void report_success_locked_();
+
     // Phase 4A: Initialize/rebuild AdvancedDPIBypass from current strategy
     void init_advanced_dpi_();
     void rebuild_advanced_dpi_();
