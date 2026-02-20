@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
-#include <random>
 
 namespace ncp {
 namespace DPI {
@@ -61,7 +60,9 @@ private:
     void apply_zero_padding(std::vector<uint8_t>& data, size_t padding_bytes);
     void inject_ascii_bytes(std::vector<uint8_t>& data, size_t target_ratio);
 
-    std::mt19937 rng_;
+    // CSPRNG helpers (replaces insecure mt19937)
+    static uint8_t csprng_byte();
+    static uint32_t csprng_uniform(uint32_t upper_bound);
 };
 
 } // namespace DPI

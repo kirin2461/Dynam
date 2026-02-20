@@ -24,8 +24,9 @@ jobs:
             build-essential \
             libsodium-dev \
             libpcap-dev \
+            libssl-dev \
             libnetfilter-queue-dev \
-            libwebsockets-dev \
+            libgtest-dev \
             pkg-config
 
       - name: Configure CMake
@@ -36,7 +37,7 @@ jobs:
             -DENABLE_CLI=ON \
             -DENABLE_GUI=OFF \
             -DENABLE_LIBOQS=OFF \
-            -DENABLE_WEBSOCKETS=ON \
+            -DENABLE_WEBSOCKETS=OFF \
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
@@ -48,13 +49,12 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
-
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
         run: |
-          brew install libsodium libwebsockets cmake
+          brew install libsodium openssl cmake
 
       - name: Configure CMake
         run: |
@@ -64,7 +64,7 @@ jobs:
             -DENABLE_CLI=ON \
             -DENABLE_GUI=OFF \
             -DENABLE_LIBOQS=OFF \
-            -DENABLE_WEBSOCKETS=ON \
+            -DENABLE_WEBSOCKETS=OFF \
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
@@ -74,9 +74,11 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
+  # Windows build disabled — Npcap licensing prevents automated CI install.
+  # Enable when vcpkg + Npcap SDK workflow is validated locally.
   build-windows:
+    if: false
     runs-on: windows-latest
-
     steps:
       - uses: actions/checkout@v4
 
@@ -93,7 +95,7 @@ jobs:
             git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
             C:\vcpkg\bootstrap-vcpkg.bat
           )
-          C:\vcpkg\vcpkg install libsodium:x64-windows libwebsockets:x64-windows
+          C:\vcpkg\vcpkg install libsodium:x64-windows
 
       - name: Download Npcap SDK
         run: |
@@ -110,13 +112,38 @@ jobs:
           }
           Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
 
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Configure CMake
+        shell: pwsh
         run: |
-          cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF -DENABLE_LIBOQS=OFF -DENABLE_WEBSOCKETS=ON -DENABLE_TOR_PROXY=OFF
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DNPCAP_SDK_DIR="${{ github.workspace }}/npcap-sdk" `
+            -DENABLE_TESTS=ON `
+            -DENABLE_CLI=ON `
+            -DENABLE_GUI=OFF `
+            -DENABLE_LIBOQS=OFF `
+            -DENABLE_WEBSOCKETS=OFF `
+            -DENABLE_TOR_PROXY=OFF
 
       - name: Build
         run: cmake --build build --config Release
 
+      - name: Copy DLLs for tests
+        shell: pwsh
+        run: |
+          $testBin = "build/bin/Release"
+          if (-not (Test-Path $testBin)) {
+            New-Item -ItemType Directory -Path $testBin -Force | Out-Null
+          }
+          $vcpkgBin = "C:/vcpkg/installed/x64-windows/bin"
+          if (Test-Path $vcpkgBin) {
+            Copy-Item "$vcpkgBin\*.dll" $testBin -Force
+          }
+
       - name: Run tests
         working-directory: build
-        run: ctest --output-on-failure -C Release
+        run: ctest -C Release --output-on-failure

@@ -286,6 +286,9 @@ void handle_run(const std::vector<std::string>& args) {
 }
 
 void handle_stop(const std::vector<std::string>& args) {
+    // FIX C4100: Mark unreferenced parameter
+    (void)args;
+    
     std::cout << "[*] Stopping all services and restoring settings...\n";
     
     g_running = false;
@@ -312,6 +315,9 @@ void handle_stop(const std::vector<std::string>& args) {
 }
 
 void handle_status(const std::vector<std::string>& args) {
+    // FIX C4100: Mark unreferenced parameter
+    (void)args;
+    
     std::cout << "=== NCP Status ===\n\n";
     
     // Spoofing status
@@ -363,6 +369,9 @@ void handle_status(const std::vector<std::string>& args) {
 }
 
 void handle_rotate(const std::vector<std::string>& args) {
+    // FIX C4100: Mark unreferenced parameter
+    (void)args;
+    
     if (!g_app.spoofer || !g_app.spoofer->is_enabled()) {
         std::cerr << "[!] Spoofing not active\n";
         return;
@@ -528,9 +537,14 @@ void handle_dpi(const std::vector<std::string>& args) {
     
     // Parse options
     config.mode = DPI::DPIMode::PROXY;
-    config.listen_port = get_option_int(args, "--port", 8080);
+    // FIX C4244: Explicit cast for int to uint16_t conversion
+    config.listen_port = static_cast<uint16_t>(get_option_int(args, "--port", 8080));
     config.target_host = get_option(args, "--target", "example.com");
-    config.target_port = get_option_int(args, "--target-port", 443);
+    // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
+    config.listen_port = static_cast<uint16_t>(get_option_int(args, "--port", 8080));
+    config.target_host = get_option(args, "--target", "example.com");
+    // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
+    config.target_port = static_cast<uint16_t>(get_option_int(args, "--target-port", 443));
     config.enable_tcp_split = !has_flag(args, "--no-split");
     config.split_position = get_option_int(args, "--split-pos", 2);
     config.enable_noise = !has_flag(args, "--no-noise");
@@ -596,7 +610,9 @@ void handle_i2p(const std::vector<std::string>& args) {
         I2PManager::Config cfg;
         cfg.enabled = true;
         cfg.sam_host = get_option(args, "--sam-host", "127.0.0.1");
-        cfg.sam_port = get_option_int(args, "--sam-port", 7656);
+        // FIX C4244: Explicit cast for int to uint16_t conversion
+        // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
+        cfg.sam_port = static_cast<uint16_t>(get_option_int(args, "--sam-port", 7656));
         cfg.enable_garlic_routing = true;
         cfg.tunnel_length = get_option_int(args, "--tunnel-length", 3);
         cfg.random_tunnel_selection = true;

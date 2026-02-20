@@ -62,6 +62,12 @@ struct CacheStats {
  */
 class ECHConfigCache {
 public:
+    // Delete copy, allow move (unique_ptr<Impl> is not copyable)
+    ECHConfigCache(const ECHConfigCache&) = delete;
+    ECHConfigCache& operator=(const ECHConfigCache&) = delete;
+    ECHConfigCache(ECHConfigCache&&) noexcept = default;
+    ECHConfigCache& operator=(ECHConfigCache&&) noexcept = default;
+
     ECHConfigCache();
     explicit ECHConfigCache(const CacheConfig& config);
     ~ECHConfigCache();

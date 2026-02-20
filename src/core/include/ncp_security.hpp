@@ -8,11 +8,11 @@
 #include <chrono>
 #include <mutex>
 #include <fstream>
-#include <random>
 #include <map>
 #include <unordered_map>
 #include <memory>
 #include <algorithm>
+#include "ncp_csprng.hpp"
 
 // Windows defines ERROR as a macro, which conflicts with enum values
 #ifdef ERROR
@@ -25,7 +25,7 @@ namespace ncp {
  * @brief Security enhancement features for NCP
  * 
  * Implements recommended security features:
- * - Certificate Pinning
+ * - Certificate Pinning (with TOFU, expiry, backup pins, and mismatch reporting)
  * - Latency Monitoring
  * - Traffic Padding
  * - Forensic Logging
@@ -37,6 +37,9 @@ namespace ncp {
 
 /**
  * @brief Certificate pinning for DoH servers
+ * 
+ * Supports TOFU (Trust On First Use), pin expiry via max_age,
+ * backup pin fallback on primary mismatch, and mismatch reporting.
  */
 class CertificatePinner {
 public:
@@ -44,30 +47,59 @@ public:
         std::string hostname;
         std::string sha256_hash;  // Base64 encoded SHA256 of certificate
         bool is_backup;           // Backup pin for key rotation
+        std::chrono::system_clock::time_point added_at;   // TOFU: when the pin was first seen/added
+        std::chrono::seconds max_age{0};                  // Pin expiry duration (0 = no expiry)
     };
+
+    struct PinMismatchReport {
+        std::string hostname;
+        std::string expected_hash;
+        std::string actual_hash;
+        bool backup_matched;      // true if a backup pin matched instead
+        std::chrono::system_clock::time_point timestamp;
+    };
+
+    using MismatchCallback = std::function<void(const PinMismatchReport&)>;
 
     CertificatePinner();
     ~CertificatePinner();
 
-    // Add pinned certificates
-    void add_pin(const std::string& hostname, const std::string& sha256_hash, bool is_backup = false);
+    // Add pinned certificates (with optional max_age for expiry)
+    void add_pin(const std::string& hostname, const std::string& sha256_hash,
+                 bool is_backup = false,
+                 std::chrono::seconds max_age = std::chrono::seconds{0});
     void add_pins(const std::vector<PinnedCert>& pins);
+    
+    // TOFU: add pin on first connection if no pins exist for hostname
+    bool trust_on_first_use(const std::string& hostname, const std::string& cert_hash,
+                            std::chrono::seconds max_age = std::chrono::seconds{86400 * 30});
     
     // Load default pins for known DoH providers
     void load_default_pins();
     
-    // Verify certificate against pins
+    // Verify certificate against pins (checks expiry, tries backup on mismatch)
     bool verify_certificate(const std::string& hostname, const std::string& cert_hash) const;
     
     // Get pins for hostname
     std::vector<PinnedCert> get_pins(const std::string& hostname) const;
+    
+    // Pin maintenance
+    void remove_expired_pins();
+    bool is_pin_expired(const PinnedCert& pin) const;
+    
+    // Set callback for pin mismatch reporting (report-uri analogue)
+    void set_mismatch_callback(MismatchCallback callback);
     
     // Clear all pins
     void clear_pins();
 
 private:
     std::vector<PinnedCert> pins_;
+    MismatchCallback mismatch_callback_;
     mutable std::mutex mutex_;
+    
+    void report_mismatch(const std::string& hostname, const std::string& expected,
+                         const std::string& actual, bool backup_matched) const;
 };
 
 // ==================== Latency Monitoring ====================
@@ -81,7 +113,10 @@ public:
         uint32_t min_ms;
         uint32_t max_ms;
         uint32_t avg_ms;
-        uint32_t stddev_ms;
+        uint32_t std_dev_ms;  // Standard deviation
+        uint32_t p50_ms;      // 50th percentile (median)
+        uint32_t p95_ms;      // 95th percentile
+        uint32_t p99_ms;      // 99th percentile
         uint64_t sample_count;
         std::chrono::system_clock::time_point last_update;
     };
@@ -103,7 +138,7 @@ public:
     void record_latency(const std::string& provider, uint32_t latency_ms);
     
     // Get statistics for a provider
-    LatencyStats get_stats(const std::string& provider) const;
+    LatencyStats get_latency_stats(const std::string& provider) const;
     
     // Set alert threshold
     void set_threshold(uint32_t threshold_ms);
@@ -115,13 +150,65 @@ public:
     // Check if latency is anomalous
     bool is_anomalous(const std::string& provider, uint32_t latency_ms) const;
     
-    // Reset statistics
-    void reset_stats();
+    // Clear history
+    void clear_history();
+    
+    // Get list of monitored providers
+    std::vector<std::string> get_monitored_providers() const;
 
 private:
     uint32_t threshold_ms_;
     std::map<std::string, std::vector<uint32_t>> latency_history_;
     AlertCallback alert_callback_;
+    mutable std::mutex mutex_;
+};
+
+// ==================== Connection Monitoring ====================
+
+/**
+ * @brief Monitor connection attempts and track statistics
+ */
+class ConnectionMonitor {
+public:
+    struct ConnectionInfo {
+        std::string host;
+        uint16_t port;
+        std::chrono::system_clock::time_point timestamp;
+        bool successful;
+        uint32_t duration_ms;
+    };
+
+    struct HostStats {
+        uint32_t total_attempts = 0;
+        uint32_t successful_attempts = 0;
+        uint32_t failed_attempts = 0;
+        uint64_t total_duration_ms = 0;
+        std::chrono::system_clock::time_point last_attempt;
+    };
+
+    ConnectionMonitor();
+    ~ConnectionMonitor();
+
+    // Record a connection attempt
+    void record_connection(
+        const std::string& host,
+        uint16_t port,
+        bool successful,
+        uint32_t duration_ms
+    );
+
+    // Get statistics for a host
+    HostStats get_host_stats(const std::string& host) const;
+
+    // Get recent connections
+    std::vector<ConnectionInfo> get_recent_connections(size_t count = 100) const;
+
+    // Clear history
+    void clear_history();
+
+private:
+    std::vector<ConnectionInfo> connection_history_;
+    std::map<std::string, HostStats> connection_stats_;
     mutable std::mutex mutex_;
 };
 
@@ -151,7 +238,7 @@ public:
 private:
     uint32_t min_size_;
     uint32_t max_size_;
-    std::mt19937 rng_;
+    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     std::mutex mutex_;
 };
 
@@ -380,11 +467,23 @@ public:
 
 private:
     Config config_;
+    CertificatePinner cert_pinner_;
+    LatencyMonitor latency_monitor_;
+    TrafficPadder traffic_padder_;
+    ForensicLogger forensic_logger_;
+    AutoRouteSwitch auto_route_switch_;
+    CanaryTokens canary_tokens_;
+};
 
 // ===================== Anti-Forensics & Advanced Security =====================
 
 /**
  * @brief Anti-forensics manager to prevent evidence collection
+ * 
+ * Note: secure_delete_file() uses storage-aware deletion:
+ * - HDD: multi-pass pattern overwrite
+ * - SSD: attempts TRIM/SECURE ERASE via ioctl, falls back to overwrite + warning
+ * - CoW FS (btrfs, ZFS): logs warning about ineffective overwrite
  */
 class AntiForensics {
 public:
@@ -398,12 +497,23 @@ public:
         bool clear_logs = false;            // Clear application logs
     };
     
+    /// Storage type classification for secure deletion strategy
+    enum class StorageType {
+        HDD,        // Traditional spinning disk — overwrite is effective
+        SSD,        // Solid state — needs TRIM/SECURE ERASE
+        COW_FS,     // Copy-on-write FS (btrfs, ZFS) — overwrite is ineffective
+        UNKNOWN     // Could not detect — treat as SSD (conservative)
+    };
+    
     AntiForensics();
     explicit AntiForensics(const Config& config);
     
-    // Secure file operations
+    // Secure file operations (storage-aware)
     bool secure_delete_file(const std::string& path);
     bool secure_delete_directory(const std::string& path);
+    
+    // Detect storage type for a given path
+    StorageType detect_storage_type(const std::string& path) const;
     
     // Memory protection
     bool lock_memory(void* ptr, size_t size);     // Prevent swapping
@@ -415,13 +525,20 @@ public:
     bool enable_aslr();                            // Address space randomization
     bool set_process_dumpable(bool dumpable);
     
-    // Cleanup
+    // Cleanup — clears bash, zsh, and fish history; also unsets HISTFILE
+    bool clear_shell_history();
+    [[deprecated("Use clear_shell_history() instead")]]
     bool clear_bash_history();
     bool clear_system_logs();
     bool clear_browser_cache();
     
 private:
     Config config_;
+    
+    // Storage-specific secure deletion
+    bool secure_delete_hdd(const std::string& path);
+    bool secure_delete_ssd(const std::string& path);
+    bool secure_delete_cow(const std::string& path);
 };
 
 /**
@@ -481,15 +598,6 @@ public:
 private:
     Config config_;
     std::string original_name_;
-};
-
-
-    CertificatePinner cert_pinner_;
-    LatencyMonitor latency_monitor_;
-    TrafficPadder traffic_padder_;
-    ForensicLogger forensic_logger_;
-    AutoRouteSwitch auto_route_switch_;
-    CanaryTokens canary_tokens_;
 };
 
 } // namespace ncp

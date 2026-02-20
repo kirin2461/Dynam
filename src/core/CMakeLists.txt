@@ -6,7 +6,6 @@ cmake_minimum_required(VERSION 3.20)
 # Source files in root of core/
 set(NCP_CORE_ROOT_SOURCES
     NetworkManager.cpp
-    ConnectionMonitor.cpp
     InterfaceSelector.cpp
 )
 
@@ -27,9 +26,9 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_dpi.cpp
     src/tls_fingerprint.cpp
     src/dpi_advanced.cpp
-        src/secure_buffer.cpp
-            src/ncp_arp.cpp
-                    src/ncp_thread_pool.cpp
+    src/secure_buffer.cpp
+    src/ncp_arp.cpp
+    src/ncp_thread_pool.cpp
     src/ncp_dummy.cpp
     src/ncp_timing.cpp
     src/ncp_identity.cpp
@@ -37,12 +36,39 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_geneva_engine.cpp
     src/ncp_paranoid.cpp
     src/ncp_secure_memory.cpp
-        include/ncp_arp.hpp
+    # Anti ML-TSPU modules (Phase 1-5)
+    src/ncp_adversarial.cpp      # Phase 1: adversarial padding
+    src/ncp_flow_shaper.cpp      # Phase 2: flow-level traffic shaping
+    src/ncp_probe_resist.cpp     # Phase 3: active probing resistance
+    src/ncp_orchestrator.cpp     # Phase 4: unified pipeline orchestrator
+    src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
+    # L3/L2 Stealth modules (Anti-ISP fingerprinting)
+    src/ncp_l3_stealth.cpp       # Phase 1: IPID/TTL/MSS/FlowLabel normalization
+    src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WFP packet interception + tunneling
+    src/ncp_l2_stealth.cpp       # Phase 3: ARP/LLDP/VLAN (Npcap-optional)
+    # Hybrid network backend sources
+    src/network_raw_socket.cpp
+    src/dhcp_spoofer.cpp
+    src/smbios_hook.cpp
+    # ECH (Encrypted Client Hello) sources
+    src/ncp_ech.cpp
+    src/ncp_ech_cache.cpp
+    src/ncp_ech_fetch.cpp
+    src/ncp_ech_retry.cpp
+    # NOTE: ncp_mimicry.cpp removed — mimicry.cpp is the canonical implementation
+    #       with Russian TSPU/Roskomnadzor whitelist domains
+    # Headers bundled with src
+    include/ncp_arp.hpp
     include/ncp_dummy.hpp
     include/ncp_timing.hpp
     include/ncp_identity.hpp
     include/ncp_entropy_masking.hpp
     include/ncp_geneva_engine.hpp
+    include/ncp_adversarial.hpp
+    include/ncp_flow_shaper.hpp
+    include/ncp_probe_resist.hpp
+    include/ncp_orchestrator.hpp
+    include/ncp_port_knock.hpp
 )
 
 # Conditionally add sources that depend on optional libraries
@@ -51,10 +77,18 @@ if(ENABLE_LIBOQS OR HAVE_LIBOQS)
 endif()
 
 if(ENABLE_WEBSOCKETS OR HAVE_LIBWEBSOCKETS)
-    # mimicry.cpp uses libwebsockets
+    # WebSocket Tunnel Transport (Phase 3)
+    list(APPEND NCP_CORE_SRC_SOURCES
+        src/ncp_ws_tunnel.cpp
+    )
+    list(APPEND NCP_CORE_INCLUDE_HEADERS
+        include/ncp_ws_tunnel.hpp
+    )
 endif()
 
 # Always compile these with #ifdef guards inside
+# NOTE: ConnectionMonitor.cpp removed — security.cpp is the canonical source
+#       for ncp::ConnectionMonitor
 list(APPEND NCP_CORE_SRC_SOURCES
     src/e2e.cpp
     src/mimicry.cpp
@@ -65,6 +99,8 @@ list(APPEND NCP_CORE_SRC_SOURCES
 # Header files in include/ subdirectory
 set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_crypto.hpp
+    include/ncp_crypto_constants.hpp
+    include/ncp_csprng.hpp
     include/ncp_doh.hpp
     include/ncp_db.hpp
     include/ncp_license.hpp
@@ -79,9 +115,29 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_security.hpp
     include/ncp_config.hpp
     include/ncp_logger.hpp
-        include/ncp_paranoid.hpp
-            include/ncp_secure_memory.hpp
-                    include/ncp_secure_buffer.hpp
+    include/ncp_paranoid.hpp
+    include/ncp_secure_memory.hpp
+    include/ncp_secure_buffer.hpp
+    include/ncp_thread_pool.hpp
+    # Anti ML-TSPU headers (Phase 1-5)
+    include/ncp_adversarial.hpp
+    include/ncp_flow_shaper.hpp
+    include/ncp_probe_resist.hpp
+    include/ncp_orchestrator.hpp
+    include/ncp_port_knock.hpp
+    # L3/L2 Stealth headers
+    include/ncp_l3_stealth.hpp
+    include/ncp_packet_interceptor.hpp
+    include/ncp_l2_stealth.hpp
+    # Hybrid network backend headers
+    include/ncp_network_backend.hpp
+    include/ncp_winsock_raii.hpp
+    src/ncp_dhcp_spoofer.hpp
+    # ECH headers
+    include/ncp_ech.hpp
+    include/ncp_ech_cache.hpp
+    include/ncp_ech_fetch.hpp
+    include/ncp_ech_retry.hpp
 )
 
 # Combine all sources and headers
@@ -141,7 +197,7 @@ if(UNIX)
             target_include_directories(ncp_core PUBLIC ${PCAP_INCLUDE_DIRS})
             message(STATUS "Found libpcap: ${PCAP_LIBRARIES}")
         else()
-            message(STATUS "libpcap not found - packet capture disabled")
+            message(STATUS "libpcap not found - L2 raw packet features disabled")
         endif()
     endif()
 
@@ -149,6 +205,7 @@ if(UNIX)
     if(Threads_FOUND)
         target_link_libraries(ncp_core PUBLIC Threads::Threads)
     endif()
+
 elseif(WIN32)
     # Windows: use Npcap SDK if available
     if(DEFINED NPCAP_SDK_DIR AND EXISTS "${NPCAP_SDK_DIR}/Include")
@@ -162,19 +219,27 @@ elseif(WIN32)
         target_compile_definitions(ncp_core PUBLIC HAVE_PCAP)
         message(STATUS "Found Npcap SDK at ${NPCAP_SDK_DIR}")
     else()
-        message(STATUS "Npcap SDK not found - packet capture disabled on Windows")
+        message(STATUS "Npcap SDK not found - using raw socket fallback on Windows (L2 features limited)")
     endif()
+
+    # Windows networking libraries for hybrid backend (always needed)
+    target_link_libraries(ncp_core PUBLIC ws2_32 iphlpapi)
+
+    # bcrypt.lib for CSPRNG in anti-TSPU modules
+    target_link_libraries(ncp_core PUBLIC bcrypt)
 endif()
 
 # ==================== Optional: libnetfilter_queue ====================
 if(UNIX AND NOT APPLE)
     find_library(NFQ_LIBRARY NAMES netfilter_queue)
-    if(NFQ_LIBRARY)
+    find_path(NFQ_INCLUDE_DIR NAMES libnetfilter_queue/libnetfilter_queue.h)
+    if(NFQ_LIBRARY AND NFQ_INCLUDE_DIR)
         target_link_libraries(ncp_core PUBLIC ${NFQ_LIBRARY})
+        target_include_directories(ncp_core PRIVATE ${NFQ_INCLUDE_DIR})
         target_compile_definitions(ncp_core PRIVATE HAVE_NFQUEUE)
         message(STATUS "Found libnetfilter_queue: ${NFQ_LIBRARY}")
     else()
-        message(STATUS "libnetfilter_queue not found - DPI driver mode disabled")
+        message(STATUS "libnetfilter_queue not found - NFQUEUE packet interception disabled")
     endif()
 endif()
 
@@ -201,10 +266,11 @@ if(ENABLE_WEBSOCKETS AND Libwebsockets_FOUND)
 endif()
 
 # Include directories
-target_include_directories(ncp_core PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/src
+target_include_directories(ncp_core
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src
 )
 
 # Set target properties
@@ -236,7 +302,6 @@ install(DIRECTORY include/
     FILES_MATCHING PATTERN "*.hpp"
 )
 
-install(FILES
-    ${NCP_CORE_ROOT_HEADERS}
+install(FILES ${NCP_CORE_ROOT_HEADERS}
     DESTINATION include/ncp
 )

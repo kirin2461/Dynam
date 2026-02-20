@@ -262,7 +262,5 @@ TEST_F(SecureMemoryTest, CompareMemory) {
     EXPECT_NE(std::memcmp(mem1.data(), mem2.data(), 16), 0);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// NOTE: main() removed - tests use gtest_main from CMakeLists linkage
+// Note: main() is NOT defined here - GTest provides it when linking

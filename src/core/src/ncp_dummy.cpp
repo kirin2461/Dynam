@@ -15,8 +15,8 @@
 #include <cstring>
 #include <mutex>
 #include <numeric>
-#include <random>
 #include <vector>
+#include <sodium.h>
 
 namespace ncp {
 namespace DPI {
@@ -37,26 +37,54 @@ static constexpr std::array<uint8_t, 4> ENCRYPTED_MARKER = {
 static constexpr size_t MARKER_OFFSET = 0;
 static constexpr size_t MARKER_SIZE   = ENCRYPTED_MARKER.size();
 
+// --- CSPRNG helpers ----------------------------------------------------------
+
+static uint32_t csprng_uniform(uint32_t upper_bound) {
+    if (upper_bound <= 1) return 0;
+    return randombytes_uniform(upper_bound);
+}
+
+static void fisher_yates_shuffle(std::vector<uint8_t>::iterator begin,
+                                  std::vector<uint8_t>::iterator end) {
+    const size_t n = static_cast<size_t>(end - begin);
+    if (n <= 1) return;
+    for (size_t i = n - 1; i > 0; --i) {
+        size_t j = csprng_uniform(static_cast<uint32_t>(i + 1));
+        std::swap(*(begin + i), *(begin + j));
+    }
+}
+
+template<typename T>
+static void fisher_yates_shuffle_vec(std::vector<T>& vec) {
+    const size_t n = vec.size();
+    if (n <= 1) return;
+    for (size_t i = n - 1; i > 0; --i) {
+        size_t j = csprng_uniform(static_cast<uint32_t>(i + 1));
+        std::swap(vec[i], vec[j]);
+    }
+}
+
 // --- Impl --------------------------------------------------------------------
 
 struct DummyPacketInjector::Impl {
     DummyProfile              profile;
     DummyStats                stats{};
     mutable std::mutex        mu;
-    std::mt19937              rng;
 
     explicit Impl(const DummyProfile& prof)
         : profile(prof)
-        , rng(std::random_device{}())
     {}
 
     // -- Generate a single dummy packet ---------------------------------------
     std::vector<uint8_t> generate_dummy() {
-        std::uniform_int_distribution<size_t> size_dist(
-            std::max(profile.min_size, MARKER_SIZE),
-            std::max(profile.max_size, MARKER_SIZE + 1)
-        );
-        const size_t pkt_size = size_dist(rng);
+        // SECURITY FIX: Use unbiased randombytes_uniform() instead of std::uniform_int_distribution with mt19937
+        const size_t min_sz = std::max(profile.min_size, MARKER_SIZE);
+        const size_t max_sz = std::max(profile.max_size, MARKER_SIZE + 1);
+        const size_t range = max_sz - min_sz;
+        const size_t pkt_size = (range > 0)
+            ? min_sz + csprng_uniform(static_cast<uint32_t>(range))
+            : min_sz;
+
         std::vector<uint8_t> pkt(pkt_size);
 
         // Write encrypted marker at offset 0
@@ -68,19 +96,20 @@ struct DummyPacketInjector::Impl {
         const size_t payload_len   = pkt_size - payload_start;
         const size_t ascii_count   = static_cast<size_t>(payload_len * 0.7);
 
-        std::uniform_int_distribution<int> ascii_dist(0x20, 0x7E);
-        std::uniform_int_distribution<int> byte_dist(0x00, 0xFF);
-
         for (size_t i = 0; i < payload_len; ++i) {
             if (i < ascii_count) {
-                pkt[payload_start + i] = static_cast<uint8_t>(ascii_dist(rng));
+                // ASCII range: 0x20 to 0x7E (95 characters)
+                pkt[payload_start + i] = static_cast<uint8_t>(
+                    0x20 + csprng_uniform(0x7E - 0x20 + 1)
+                );
             } else {
-                pkt[payload_start + i] = static_cast<uint8_t>(byte_dist(rng));
+                pkt[payload_start + i] = static_cast<uint8_t>(csprng_uniform(256));
             }
         }
 
         // Shuffle payload bytes to avoid obvious boundary between ASCII/random
-        std::shuffle(pkt.begin() + payload_start, pkt.end(), rng);
+        // SECURITY FIX: Use Fisher-Yates with unbiased randombytes_uniform()
+        fisher_yates_shuffle(pkt.begin() + payload_start, pkt.end());
         return pkt;
     }
 
@@ -145,7 +174,8 @@ DummyPacketInjector::inject(
     }
 
     // Interleave: shuffle the combined vector so dummies are spread out
-    std::shuffle(mixed.begin(), mixed.end(), impl_->rng);
+    // SECURITY FIX: Use Fisher-Yates with unbiased randombytes_uniform()
+    fisher_yates_shuffle_vec(mixed);
 
     // Update stats
     impl_->stats.real_packets  += real_count;
