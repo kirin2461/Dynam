@@ -87,6 +87,7 @@ struct OrchestratorStrategy {
 
     // Presets
     static OrchestratorStrategy stealth();       // max protection, higher overhead
+    static OrchestratorStrategy paranoid();      // CRITICAL: max entropy + constant rate
     static OrchestratorStrategy balanced();      // good protection, moderate overhead
     static OrchestratorStrategy performance();   // min overhead, basic protection
     static OrchestratorStrategy max_compat();    // maximum compatibility
@@ -280,6 +281,14 @@ private:
     OrchestratorStrategy strategy_for_threat(ThreatLevel level);
     void health_monitor_func();
     void update_overhead_stats();
+
+    // FIX #73: Unified send pipeline — snapshots strategy under lock
+    std::vector<uint8_t> prepare_payload(
+        const std::vector<uint8_t>& payload,
+        OrchestratorStrategy& snapshot);
+
+    // FIX #74: Lock-free inner impl (must be called with strategy_mutex_ held)
+    void report_success_locked();
 
     OrchestratorConfig config_;
     OrchestratorStats stats_;
