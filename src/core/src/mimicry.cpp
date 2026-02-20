@@ -113,6 +113,24 @@ TrafficMimicry::~TrafficMimicry() {
     }
 }
 
+// ==================== TLS session key management ====================
+void TrafficMimicry::set_tls_session_key(const std::vector<uint8_t>& key) {
+    if (key.size() != crypto_aead_xchacha20poly1305_ietf_KEYBYTES) {
+        // Wrong key size — silently ignore to avoid undefined behavior.
+        // Caller must provide exactly 32 bytes.
+        return;
+    }
+    // Wipe old key before replacing
+    if (!tls_session_key_.empty()) {
+        sodium_memzero(tls_session_key_.data(), tls_session_key_.size());
+    }
+    tls_session_key_ = key;
+}
+
+std::vector<uint8_t> TrafficMimicry::get_tls_session_key() const {
+    return tls_session_key_;
+}
+
 // ==================== wrap / unwrap with stats ====================
 std::vector<uint8_t> TrafficMimicry::wrap_payload(
         const std::vector<uint8_t>& payload, MimicProfile profile) {
