@@ -17,7 +17,8 @@ namespace DPI {
 enum class DPIMode {
     DRIVER,
     PROXY,
-    PASSIVE
+    PASSIVE,
+    WS_TUNNEL   // WebSocket tunnel mode (requires HAVE_LIBWEBSOCKETS)
 };
 
 enum class DPIPreset {
@@ -89,6 +90,14 @@ struct DPIConfig {
     bool enable_adaptive_fragmentation = true;  // Adapt fragmentation based on detection
     int max_fragment_retries = 3;  // Max retries before changing strategy
 
+    // WebSocket tunnel settings (used when mode == WS_TUNNEL)
+    std::string ws_server_url;        // wss://relay.example.com/tunnel
+    std::string ws_sni_override;      // domain fronting SNI
+    uint16_t ws_local_port = 8081;    // local proxy port for WS tunnel
+    int ws_ping_interval_sec = 30;
+    int ws_reconnect_delay_ms = 1000;
+    int ws_max_reconnect_attempts = 10;
+
     ValidationError validate() const noexcept {
         if (fragment_size < 1 || fragment_size > 1460) return ValidationError::INVALID_FRAGMENT_SIZE;
         if (fragment_offset < 0) return ValidationError::INVALID_FRAGMENT_OFFSET;
@@ -145,7 +154,17 @@ struct DPIConfig {
                 enable_decoy_sni == other.enable_decoy_sni &&
                 decoy_sni_domains == other.decoy_sni_domains &&
                 enable_adaptive_fragmentation == other.enable_adaptive_fragmentation &&
-                max_fragment_retries == other.max_fragment_retries;
+                max_fragment_retries == other.max_fragment_retries &&
+                // WS tunnel fields
+                ws_server_url == other.ws_server_url &&
+                ws_sni_override == other.ws_sni_override &&
+                ws_local_port == other.ws_local_port &&
+                ws_ping_interval_sec == other.ws_ping_interval_sec &&
+                ws_reconnect_delay_ms == other.ws_reconnect_delay_ms &&
+                ws_max_reconnect_attempts == other.ws_max_reconnect_attempts;
+    }
+
+    bool operator!=(const DPIConfig& other) const noexcept {
         return !(*this == other);
     }
 
@@ -184,7 +203,14 @@ struct DPIConfig {
             << "  enable_multi_layer_split: " << enable_multi_layer_split << ",\n"
             << "  enable_decoy_sni: " << enable_decoy_sni << ",\n"
             << "  enable_adaptive_fragmentation: " << enable_adaptive_fragmentation << ",\n"
-            << "  max_fragment_retries: " << max_fragment_retries << "\n"
+            << "  max_fragment_retries: " << max_fragment_retries << ",\n"
+            << "  // WS tunnel fields\n"
+            << "  ws_server_url: \"" << ws_server_url << "\",\n"
+            << "  ws_sni_override: \"" << ws_sni_override << "\",\n"
+            << "  ws_local_port: " << ws_local_port << ",\n"
+            << "  ws_ping_interval_sec: " << ws_ping_interval_sec << ",\n"
+            << "  ws_reconnect_delay_ms: " << ws_reconnect_delay_ms << ",\n"
+            << "  ws_max_reconnect_attempts: " << ws_max_reconnect_attempts << "\n"
             << "}";
         return oss.str();
     }
@@ -205,7 +231,11 @@ struct DPIConfig {
                 << "|" << enable_timing_jitter << "|" << timing_jitter_min_us << "|" << timing_jitter_max_us
                 << "|" << enable_multi_layer_split
                 << "|" << enable_decoy_sni
-                << "|" << enable_adaptive_fragmentation << "|" << max_fragment_retries;
+                << "|" << enable_adaptive_fragmentation << "|" << max_fragment_retries
+                // WS tunnel fields
+                << "|" << ws_server_url << "|" << ws_sni_override
+                << "|" << ws_local_port << "|" << ws_ping_interval_sec
+                << "|" << ws_reconnect_delay_ms << "|" << ws_max_reconnect_attempts;
         return oss.str();
     }
 
@@ -279,6 +309,18 @@ struct DPIConfig {
                 cfg.enable_adaptive_fragmentation = std::stoi(token);
                 if (!std::getline(iss, token, '|')) return cfg;
                 cfg.max_fragment_retries = std::stoi(token);
+                // WS tunnel fields (optional - backward compatible)
+                if (std::getline(iss, cfg.ws_server_url, '|')) {
+                    if (!std::getline(iss, cfg.ws_sni_override, '|')) return cfg;
+                    if (!std::getline(iss, token, '|')) return cfg;
+                    cfg.ws_local_port = static_cast<uint16_t>(std::stoi(token));
+                    if (!std::getline(iss, token, '|')) return cfg;
+                    cfg.ws_ping_interval_sec = std::stoi(token);
+                    if (!std::getline(iss, token, '|')) return cfg;
+                    cfg.ws_reconnect_delay_ms = std::stoi(token);
+                    if (!std::getline(iss, token, '|')) return cfg;
+                    cfg.ws_max_reconnect_attempts = std::stoi(token);
+                }
             }
                     } catch (...) {
             return std::nullopt;

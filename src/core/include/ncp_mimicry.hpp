@@ -7,6 +7,8 @@
 #include <chrono>
 #include <map>
 #include <functional>
+#include <atomic>
+#include <mutex>
 #include "ncp_csprng.hpp"
 
 namespace ncp {
@@ -57,12 +59,34 @@ public:
     };
     
     struct MimicStats {
-        uint64_t packets_wrapped = 0;
-        uint64_t packets_unwrapped = 0;
-        uint64_t bytes_original = 0;
-        uint64_t bytes_mimicked = 0;
+        std::atomic<uint64_t> packets_wrapped{0};
+        std::atomic<uint64_t> packets_unwrapped{0};
+        std::atomic<uint64_t> bytes_original{0};
+        std::atomic<uint64_t> bytes_mimicked{0};
+        // average_overhead_percent requires mutex (non-atomic double)
         double average_overhead_percent = 0.0;
+
+        MimicStats() = default;
+        MimicStats(const MimicStats& o)
+            : packets_wrapped(o.packets_wrapped.load()),
+              packets_unwrapped(o.packets_unwrapped.load()),
+              bytes_original(o.bytes_original.load()),
+              bytes_mimicked(o.bytes_mimicked.load()),
+              average_overhead_percent(o.average_overhead_percent) {}
+        MimicStats& operator=(const MimicStats& o) {
+            if (this != &o) {
+                packets_wrapped.store(o.packets_wrapped.load());
+                packets_unwrapped.store(o.packets_unwrapped.load());
+                bytes_original.store(o.bytes_original.load());
+                bytes_mimicked.store(o.bytes_mimicked.load());
+                average_overhead_percent = o.average_overhead_percent;
+            }
+            return *this;
+        }
     };
+
+    // Maximum payload size for DNS tunnel (fits in valid DNS QNAME)
+    static constexpr size_t MAX_DNS_PAYLOAD = 100;
     
     TrafficMimicry();
     explicit TrafficMimicry(const MimicConfig& config);
@@ -155,12 +179,15 @@ private:
     
     MimicConfig config_;
     MimicStats stats_;
-    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
+    mutable std::mutex stats_overhead_mutex_;  // Protects average_overhead_percent
     std::chrono::steady_clock::time_point last_packet_time_;
     
-    // Protocol-specific state
-    uint32_t tls_sequence_number_;
+    // Protocol-specific state — separate counters per protocol
+    uint32_t tls_seq_;
+    uint32_t skype_seq_;
+    uint32_t zoom_seq_;
     uint16_t dns_transaction_id_;
+    int      dns_last_domain_idx_;  // Track query domain for response matching
     uint64_t quic_packet_number_;
 
     /// Symmetric key for XChaCha20-Poly1305 encryption in TLS ClientHello wrapper.
