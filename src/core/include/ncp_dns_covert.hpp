@@ -153,25 +153,26 @@ struct DNSChunkHeader {
 // ===== Subdomain Encoder =====
 
 /**
- * Encodes binary data into DNS-safe subdomain labels.
- * Uses base32 (RFC 4648 extended hex, no padding) for maximum
- * compatibility with DNS resolvers and minimal overhead.
+ * Encodes raw binary data into DNS-safe subdomain labels.
  *
- * Example: encode({0xDE, 0xAD}) -> "36wq" (base32hex, lowercase)
- * Full query: "36wq.s0001.data.yourdomain.com"
- *   - "36wq"  = encoded payload
- *   - "s0001" = sequence label
+ * IMPORTANT: This is a PURE encoder — it does NOT add chunk headers or CRC.
+ * Framing (header + CRC) is done exclusively in DNSCovertChannel::send_chunk().
+ *
+ * encode_upstream_raw():  raw bytes → base32hex labels → FQDN query names
+ * decode_upstream_raw():  FQDN query name → strip zone/seq → base32hex decode → raw bytes
+ *
+ * Example: encode_upstream_raw({0xDE, 0xAD}) → ["36wq.s0000.data.yourdomain.com"]
  */
 class SubdomainEncoder {
 public:
     explicit SubdomainEncoder(const DNSCovertConfig& config);
 
-    // Encode payload into a list of DNS query names
-    std::vector<std::string> encode_upstream(
-        const uint8_t* data, size_t len, uint16_t session_id);
+    // Pure encoding: raw bytes → DNS query names (NO framing added)
+    std::vector<std::string> encode_upstream_raw(
+        const uint8_t* data, size_t len, uint16_t sequence_base);
 
-    // Decode DNS query name back to payload
-    std::vector<uint8_t> decode_upstream(const std::string& query_name);
+    // Pure decoding: DNS query name → raw bytes (NO framing stripped)
+    std::vector<uint8_t> decode_upstream_raw(const std::string& query_name);
 
     // Encode payload into DNS response records (TXT/CNAME/A/AAAA)
     std::vector<std::vector<uint8_t>> encode_downstream(
@@ -181,7 +182,7 @@ public:
     std::vector<uint8_t> decode_downstream(
         const std::vector<std::string>& records, DNSEncodingScheme scheme);
 
-    // Capacity calculation
+    // Capacity: max raw bytes that fit in one DNS query name
     size_t max_payload_per_query() const;
     size_t max_payload_per_response(DNSEncodingScheme scheme) const;
 
@@ -193,10 +194,7 @@ private:
     std::string base64url_encode(const uint8_t* data, size_t len) const;
     std::vector<uint8_t> base64url_decode(const std::string& encoded) const;
 
-    // Split encoded data into DNS-safe labels (max 63 chars each)
     std::vector<std::string> split_into_labels(const std::string& data) const;
-
-    // Apply DNS 0x20 randomization for stealth
     std::string randomize_case(const std::string& name) const;
 };
 
@@ -206,22 +204,19 @@ class ChunkReassembler {
 public:
     explicit ChunkReassembler(size_t max_buffer_size = 65536);
 
-    // Add a received chunk
+    // Add a received chunk. Returns false on error (OOM cap, bad seq, etc.)
     bool add_chunk(const DNSChunkHeader& header, const uint8_t* payload, size_t len);
 
-    // Check if a complete message is ready
     bool is_complete() const;
-
-    // Extract reassembled message (resets state)
     std::vector<uint8_t> extract();
-
-    // Reset state
     void reset();
 
-    // Stats
     size_t chunks_received() const;
     size_t chunks_expected() const;
     size_t bytes_buffered() const;
+
+    // Max total_chunks we accept from wire (OOM protection)
+    static constexpr uint16_t MAX_TOTAL_CHUNKS = 1024;
 
 private:
     struct ChunkSlot {
@@ -243,7 +238,6 @@ public:
     explicit DNSCovertChannel(const DNSCovertConfig& config);
     ~DNSCovertChannel() override;
 
-    // Non-copyable
     DNSCovertChannel(const DNSCovertChannel&) = delete;
     DNSCovertChannel& operator=(const DNSCovertChannel&) = delete;
 
@@ -264,42 +258,35 @@ public:
     void on_detection(const CovertDetectionEvent& event) override;
 
     // === DNS-specific API ===
-    void set_config(const DNSCovertConfig& config);
+
+    // Reconfigure channel. MUST be CLOSED — returns false if open.
+    bool set_config(const DNSCovertConfig& config);
     DNSCovertConfig get_config() const;
     DNSCovertStats get_dns_stats() const;
 
-    // Manual cover traffic generation
     void send_cover_query();
 
-    // Authoritative server mode (for receiving upstream data)
     void set_server_mode(bool enabled);
     bool is_server_mode() const;
 
-    // Session management
     uint16_t session_id() const;
     void rotate_session();
 
 private:
-    // Internal send/receive workers
     void tx_worker_func();
     void rx_worker_func();
     void cover_traffic_func();
 
-    // Encode and send a single chunk via DNS query
+    // THE SINGLE framing point: [hdr][payload][crc32] → encode → DNS queries
     bool send_chunk(const DNSChunkHeader& header, const uint8_t* payload, size_t len);
 
-    // Process incoming DNS response for covert data
     bool process_response(const DoHClient::DNSResult& result);
 
-    // Payload encryption/decryption
     std::vector<uint8_t> encrypt_payload(const uint8_t* data, size_t len) const;
     std::vector<uint8_t> decrypt_payload(const uint8_t* data, size_t len) const;
 
-    // Stealth monitoring
     void update_stealth_score();
     double calculate_query_entropy() const;
-
-    // Flow-shaped delay
     std::chrono::milliseconds next_query_delay() const;
 
     // Config & state
@@ -308,7 +295,7 @@ private:
     uint16_t session_id_ = 0;
     bool server_mode_ = false;
 
-    // Components (reuse existing NCP modules)
+    // Components
     std::unique_ptr<DoHClient> doh_client_;
     std::unique_ptr<SubdomainEncoder> encoder_;
     std::unique_ptr<ChunkReassembler> reassembler_;
@@ -316,7 +303,7 @@ private:
     // TX queue
     struct TxItem {
         DNSChunkHeader header;
-        std::vector<uint8_t> payload;
+        std::vector<uint8_t> payload;  // raw payload, NO framing
     };
     std::queue<TxItem> tx_queue_;
     mutable std::mutex tx_mutex_;
@@ -333,18 +320,19 @@ private:
     std::thread cover_thread_;
     std::atomic<bool> running_{false};
 
-    // Stats
+    // Stats — LOCK ORDER: tx_mutex_ first, then stats_mutex_ (never reverse)
     mutable std::mutex stats_mutex_;
     DNSCovertStats dns_stats_;
     ChannelStats base_stats_;
+    uint64_t stealth_update_counter_ = 0; // update_stealth_score every N queries
 
     // Detection
     DetectionCallback detection_cb_;
     std::mutex detection_mutex_;
 
-    // Timing state for flow shaping
+    // Timing
     std::chrono::steady_clock::time_point last_query_time_;
-    std::vector<double> recent_intervals_; // for entropy calculation
+    std::vector<double> recent_intervals_;
 };
 
 } // namespace covert
