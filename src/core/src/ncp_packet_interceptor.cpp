@@ -26,8 +26,14 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <fwpmu.h>
+#ifdef HAVE_WINDIVERT
+#include <windivert.h>
+#endif
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "fwpuclnt.lib")
+#ifdef HAVE_WINDIVERT
+#pragma comment(lib, "WinDivert.lib")
+#endif
 #endif
 
 namespace ncp {
@@ -376,8 +382,161 @@ private:
 };
 #endif // __linux__ && HAVE_NFQUEUE
 
+// ==================== FIX #83: WinDivert Backend (Windows) ====================
+//
+// Replaces the WFP placeholder with a functional WinDivert-based backend.
+// WinDivert provides userspace packet interception on Windows without
+// requiring a custom kernel-mode driver.
+//
+// Architecture mirrors NFQUEUEBackend:
+//   initialize() -> open WinDivert handle
+//   start()      -> spawn worker thread calling WinDivertRecv() in a loop
+//   packet_callback() -> call parent->packet_handler_ or default_packet_handler()
+//   stop()       -> close handle, join worker thread
+
+#if defined(_WIN32) && defined(HAVE_WINDIVERT)
+class WinDivertBackend : public PacketInterceptor::Impl {
+public:
+    WinDivertBackend() = default;
+    ~WinDivertBackend() override { stop(); }
+
+    bool initialize(const Config& cfg) override {
+        config_ = cfg;
+
+        // Open WinDivert handle with the configured filter
+        handle_ = WinDivertOpen(
+            cfg.windivert_filter.c_str(),
+            WINDIVERT_LAYER_NETWORK,    // Intercept at network (IP) layer
+            cfg.windivert_priority,
+            cfg.windivert_flags
+        );
+
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            parent->log("[WinDivert] WinDivertOpen failed, error=" + std::to_string(err));
+            if (err == ERROR_FILE_NOT_FOUND) {
+                parent->log("[WinDivert] WinDivert driver not found. "
+                           "Ensure WinDivert.sys and WinDivert.dll are in PATH or application directory.");
+            } else if (err == ERROR_ACCESS_DENIED) {
+                parent->log("[WinDivert] Access denied. Run as Administrator.");
+            }
+            return false;
+        }
+
+        // Set queue parameters for high throughput
+        WinDivertSetParam(handle_, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
+        WinDivertSetParam(handle_, WINDIVERT_PARAM_QUEUE_TIME, 1024);   // ms
+        WinDivertSetParam(handle_, WINDIVERT_PARAM_QUEUE_SIZE, 4194304); // 4MB
+
+        parent->log("[WinDivert] Initialized with filter: " + cfg.windivert_filter);
+        return true;
+    }
+
+    bool start() override {
+        if (running_) return true;
+        running_ = true;
+
+        worker_thread_ = std::thread([this]() {
+            // Buffer for received packets (max jumbo frame)
+            std::vector<uint8_t> recv_buf(65535 + 40); // max IP packet + WINDIVERT_ADDRESS
+            WINDIVERT_ADDRESS addr;
+            UINT recv_len = 0;
+
+            parent->log("[WinDivert] Worker thread started");
+
+            while (running_) {
+                // Blocking receive — returns when a packet matches the filter
+                if (!WinDivertRecv(handle_, recv_buf.data(),
+                                   static_cast<UINT>(recv_buf.size()),
+                                   &recv_len, &addr))
+                {
+                    DWORD err = GetLastError();
+                    if (!running_) break; // Graceful shutdown
+                    if (err == ERROR_NO_DATA || err == ERROR_INSUFFICIENT_BUFFER) continue;
+                    parent->log("[WinDivert] WinDivertRecv failed, error=" + std::to_string(err));
+                    break;
+                }
+
+                // Copy packet data into a vector for processing
+                std::vector<uint8_t> packet(recv_buf.begin(), recv_buf.begin() + recv_len);
+                bool is_outbound = (addr.Outbound != 0);
+
+                parent->stats_.packets_intercepted++;
+                parent->stats_.bytes_processed += packet.size();
+
+                // Call packet handler (same pattern as NFQUEUEBackend)
+                PacketInterceptor::Verdict verdict;
+                if (parent->packet_handler_) {
+                    verdict = parent->packet_handler_(packet, is_outbound);
+                } else {
+                    verdict = parent->default_packet_handler(packet, is_outbound);
+                }
+
+                // Apply verdict
+                switch (verdict) {
+                    case PacketInterceptor::Verdict::ACCEPT:
+                        // Re-inject original packet
+                        WinDivertSend(handle_, recv_buf.data(), recv_len, nullptr, &addr);
+                        break;
+
+                    case PacketInterceptor::Verdict::DROP:
+                        // Don't re-inject — packet is silently dropped
+                        parent->stats_.packets_dropped++;
+                        break;
+
+                    case PacketInterceptor::Verdict::MODIFIED:
+                        // Re-inject modified packet; recalculate checksums
+                        WinDivertHelperCalcChecksums(packet.data(),
+                                                     static_cast<UINT>(packet.size()),
+                                                     &addr, 0);
+                        WinDivertSend(handle_, packet.data(),
+                                      static_cast<UINT>(packet.size()),
+                                      nullptr, &addr);
+                        parent->stats_.packets_modified++;
+                        break;
+
+                    case PacketInterceptor::Verdict::QUEUE:
+                        // Re-inject and let the system re-process
+                        WinDivertSend(handle_, recv_buf.data(), recv_len, nullptr, &addr);
+                        break;
+                }
+            }
+
+            parent->log("[WinDivert] Worker thread stopped");
+        });
+
+        parent->log("[WinDivert] Started");
+        return true;
+    }
+
+    void stop() override {
+        if (!running_) return;
+        running_ = false;
+
+        // Close handle — this unblocks WinDivertRecv() in the worker thread
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            WinDivertClose(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+
+        if (worker_thread_.joinable()) {
+            worker_thread_.join();
+        }
+    }
+
+    bool is_running() const override { return running_; }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    std::atomic<bool> running_{false};
+    std::thread worker_thread_;
+    Config config_;
+};
+#endif // _WIN32 && HAVE_WINDIVERT
+
 #ifdef _WIN32
-// ==================== WFP Backend (Windows) ====================
+// ==================== WFP Backend (Windows, legacy placeholder) ====================
+// Kept for backward compatibility. Prefer WinDivertBackend for actual packet interception.
 
 class WFPBackend : public PacketInterceptor::Impl {
 public:
@@ -401,14 +560,16 @@ public:
         // This is a placeholder showing the structure.
         // Real implementation needs a signed kernel driver.
 
-        parent->log("[WFP] Initialized (Note: Full packet modification requires kernel callout driver)");
+        parent->log("[WFP] Initialized (legacy placeholder — use WINDIVERT backend for packet interception)");
         return true;
     }
 
     bool start() override {
         if (running_) return true;
         running_ = true;
-        parent->log("[WFP] Started (Note: Userspace WFP has limited packet interception)");
+        parent->log("[WFP] Started (WARNING: WFP backend is a placeholder, "
+                    "packet interception is NOT functional. "
+                    "Use Backend::WINDIVERT or Backend::AUTO for actual packet processing)");
         return true;
     }
 
@@ -467,6 +628,26 @@ bool PacketInterceptor::initialize(const Config& config) {
     }
 #endif
 
+#if defined(_WIN32) && defined(HAVE_WINDIVERT)
+    // FIX #83: Prefer WinDivert for actual packet interception on Windows
+    if (backend == Backend::WINDIVERT || backend == Backend::AUTO) {
+        impl_ = std::make_unique<WinDivertBackend>();
+        impl_->parent = this;
+        if (!impl_->initialize(config)) {
+            impl_.reset();
+            // Fall through to WFP if WinDivert fails
+            if (backend == Backend::AUTO) {
+                log("[PacketInterceptor] WinDivert failed, falling back to WFP (limited)");
+            } else {
+                return false;
+            }
+        } else {
+            initialized_ = true;
+            return true;
+        }
+    }
+#endif
+
 #ifdef _WIN32
     if (backend == Backend::WFP) {
         impl_ = std::make_unique<WFPBackend>();
@@ -515,7 +696,7 @@ bool PacketInterceptor::is_running() const {
 bool PacketInterceptor::update_config(const Config& config) {
     std::lock_guard<std::mutex> lock(config_mutex_);
     config_ = config;
-    config_version_++;  // FIX #30: bump version so threads detect the change
+    config_version_++;  // FIX #30: bump version so L3Stealth re-initializes
     return true;
 }
 
@@ -551,6 +732,34 @@ void PacketInterceptor::log(const std::string& msg) {
     }
 }
 
+// ==================== FIX #84: Shared L3Stealth initialization ====================
+//
+// Replaces the per-thread `static thread_local L3Stealth` with a single
+// shared instance. L3Stealth already uses internal mutexes for thread safety
+// (dest_ipid_mutex_, flow_label_mutex_, config_mutex_, atomic global_ipid_counter_),
+// so a shared instance is safe and ensures consistent state:
+//   - Per-destination IPID cache shared across threads (no IPID collisions)
+//   - Global IPID counter monotonicity preserved
+//   - IPv6 flow labels consistent per 5-tuple (RFC 6437)
+//   - TCP timestamp epoch/offset consistent across connections
+//   - Statistics aggregated in one place
+
+void PacketInterceptor::ensure_l3stealth_initialized(const Config& cfg, uint64_t current_version) {
+    std::lock_guard<std::mutex> lock(l3stealth_mutex_);
+    if (!l3stealth_ || l3stealth_config_version_ != current_version) {
+        if (!l3stealth_) {
+            l3stealth_ = std::make_unique<L3Stealth>();
+        }
+        L3Stealth::Config l3cfg;
+        l3cfg.enable_ipid_randomization = true;
+        l3cfg.enable_ttl_normalization = true;
+        l3cfg.enable_mss_clamping = true;
+        l3cfg.enable_tcp_timestamp_normalization = true;
+        l3stealth_->initialize(l3cfg);
+        l3stealth_config_version_ = current_version;
+    }
+}
+
 // ==================== Default Packet Handler ====================
 
 PacketInterceptor::Verdict PacketInterceptor::default_packet_handler(
@@ -569,31 +778,20 @@ PacketInterceptor::Verdict PacketInterceptor::default_packet_handler(
     bool modified = false;
 
     // 1. L3Stealth integration
-    // FIX #30: Track config version per thread; re-initialize when config changes
+    // FIX #84: Use shared L3Stealth instance instead of thread_local.
+    // This ensures all threads share the same IPID cache, flow label cache,
+    // timestamp epoch, and statistics — preventing DPI-detectable inconsistencies.
     if (cfg.integrate_l3_stealth) {
-        static thread_local L3Stealth l3stealth;
-        static thread_local bool l3_initialized = false;
-        static thread_local uint64_t l3_config_version = 0;
+        ensure_l3stealth_initialized(cfg, current_version);
 
-        if (!l3_initialized || l3_config_version != current_version) {
-            L3Stealth::Config l3cfg;
-            l3cfg.enable_ipid_randomization = true;
-            l3cfg.enable_ttl_normalization = true;
-            l3cfg.enable_mss_clamping = true;
-            l3cfg.enable_tcp_timestamp_normalization = true;
-            l3stealth.initialize(l3cfg);
-            l3_initialized = true;
-            l3_config_version = current_version;
-        }
-
-        if (packet.size() >= 20) {
+        if (packet.size() >= 20 && l3stealth_) {
             uint8_t ver = (packet[0] >> 4) & 0x0F;
             if (ver == 4) {
-                if (l3stealth.process_ipv4_packet(packet)) {
+                if (l3stealth_->process_ipv4_packet(packet)) {
                     modified = true;
                 }
             } else if (ver == 6) {
-                if (l3stealth.process_ipv6_packet(packet)) {
+                if (l3stealth_->process_ipv6_packet(packet)) {
                     modified = true;
                 }
             }
@@ -813,6 +1011,21 @@ bool PacketInterceptor::is_nfqueue_available() {
 #endif
 }
 
+// FIX #83: WinDivert availability check
+bool PacketInterceptor::is_windivert_available() {
+#if defined(_WIN32) && defined(HAVE_WINDIVERT)
+    // Try opening a WinDivert handle with a minimal filter to check availability
+    HANDLE h = WinDivertOpen("false", WINDIVERT_LAYER_NETWORK, 0, WINDIVERT_FLAG_SNIFF);
+    if (h != INVALID_HANDLE_VALUE) {
+        WinDivertClose(h);
+        return true;
+    }
+    return false;
+#else
+    return false;
+#endif
+}
+
 bool PacketInterceptor::is_wfp_available() {
 #ifdef _WIN32
     HANDLE engine;
@@ -832,6 +1045,10 @@ PacketInterceptor::Backend PacketInterceptor::detect_backend() {
 #if defined(__linux__) && defined(HAVE_NFQUEUE)
     if (is_nfqueue_available()) return Backend::NFQUEUE;
 #elif defined(_WIN32)
+    // FIX #83: Prefer WinDivert over WFP on Windows
+#ifdef HAVE_WINDIVERT
+    if (is_windivert_available()) return Backend::WINDIVERT;
+#endif
     if (is_wfp_available()) return Backend::WFP;
 #endif
     return Backend::NONE;
