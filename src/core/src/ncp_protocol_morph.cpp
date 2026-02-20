@@ -25,25 +25,57 @@ public:
     uint64_t connection_count_ = 0;
     uint64_t mutation_epoch_ = 0;
 
-    // Current mutation state
+    // Current mutation state (persisted across connections)
     BrowserType current_browser_ = BrowserType::CHROME;
     size_t browser_pool_idx_ = 0;
 
+    // FIX: Persist wire mutation state in Impl so force_mutation() and
+    // non-mutation-tick connections inherit the latest mutation result.
+    std::vector<uint16_t> current_cipher_suites_;
+    std::vector<uint16_t> current_extensions_;
+    std::vector<std::string> current_alpn_;
+
     void initialize(const Config& cfg) {
+        // FIX: On re-init with same seed, derive new key from
+        // hash(old_counter || new_seed) to avoid nonce/sequence reuse.
+        bool reseeding = deterministic_mode_ &&
+                         !cfg.shared_seed.empty() &&
+                         cfg.shared_seed.size() >= 32;
+
         config_ = cfg;
 
         if (!cfg.shared_seed.empty() && cfg.shared_seed.size() >= 32) {
-            std::memcpy(prng_key_, cfg.shared_seed.data(), 32);
+            if (reseeding && prng_counter_ > 0) {
+                // Derive new key: BLAKE2b(old_key || counter || new_seed)
+                crypto_generichash_state st;
+                crypto_generichash_init(&st, nullptr, 0, 32);
+                crypto_generichash_update(&st, prng_key_, 32);
+                uint8_t ctr_bytes[8];
+                std::memcpy(ctr_bytes, &prng_counter_, 8);
+                crypto_generichash_update(&st, ctr_bytes, 8);
+                crypto_generichash_update(&st, cfg.shared_seed.data(),
+                                          std::min(cfg.shared_seed.size(), size_t(64)));
+                crypto_generichash_final(&st, prng_key_, 32);
+            } else {
+                std::memcpy(prng_key_, cfg.shared_seed.data(), 32);
+            }
             deterministic_mode_ = true;
         } else {
             randombytes_buf(prng_key_, sizeof(prng_key_));
             deterministic_mode_ = false;
         }
 
+        // Counter starts fresh only on first init; re-init with same seed
+        // keeps the derived key (above) which encodes the old counter.
         prng_counter_ = 0;
         connection_count_ = 0;
         mutation_epoch_ = 0;
         browser_pool_idx_ = 0;
+
+        // Clear persisted mutation state
+        current_cipher_suites_.clear();
+        current_extensions_.clear();
+        current_alpn_.clear();
 
         if (!cfg.mutation.browser_pool.empty()) {
             current_browser_ = cfg.mutation.browser_pool[0];
@@ -65,6 +97,25 @@ public:
                (static_cast<uint32_t>(out[1]) << 16) |
                (static_cast<uint32_t>(out[2]) << 8) |
                 static_cast<uint32_t>(out[3]);
+    }
+
+    // FIX: Unbiased random in range [0, upper_bound) via rejection sampling.
+    // In deterministic mode uses our stream; otherwise delegates to libsodium.
+    uint32_t uniform_random(uint32_t upper_bound) {
+        if (upper_bound <= 1) return 0;
+
+        if (!deterministic_mode_) {
+            // libsodium's randombytes_uniform already does rejection sampling
+            return randombytes_uniform(upper_bound);
+        }
+
+        // Rejection sampling: discard values that would cause modulo bias
+        uint32_t threshold = (UINT32_MAX - upper_bound + 1) % upper_bound;
+        uint32_t r;
+        do {
+            r = next_random();
+        } while (r < threshold);
+        return r % upper_bound;
     }
 
     // Get current local hour (0-23) accounting for UTC offset
@@ -107,6 +158,10 @@ public:
         if (config_.schedule.enabled) {
             uint8_t hour = get_local_hour();
 
+            // FIX: Track whether any slot matched — increment counter once,
+            // not per-slot, so schedule_overrides reflects actual connection count.
+            bool boosted = false;
+
             for (const auto& slot : config_.schedule.slots) {
                 if (hour_in_slot(hour, slot.hour_start, slot.hour_end)) {
                     // Find or add this profile
@@ -121,15 +176,19 @@ public:
                     if (!found && slot.weight_boost > 0) {
                         weights.push_back({slot.profile, slot.weight_boost});
                     }
-                    stats_.schedule_overrides++;
+                    boosted = true;
                 }
+            }
+
+            if (boosted) {
+                stats_.schedule_overrides++;
             }
         }
 
         return weights;
     }
 
-    // Weighted random selection from effective weights
+    // Weighted random selection from effective weights (unbiased)
     TrafficMimicry::MimicProfile select_weighted(
         const std::vector<std::pair<TrafficMimicry::MimicProfile, uint32_t>>& weights
     ) {
@@ -145,7 +204,8 @@ public:
             return weights[0].first;
         }
 
-        uint32_t roll = next_random() % total;
+        // FIX: Use rejection sampling instead of raw modulo to eliminate bias
+        uint32_t roll = uniform_random(total);
         uint32_t cumulative = 0;
         for (const auto& w : weights) {
             cumulative += w.second;
@@ -157,7 +217,7 @@ public:
         return weights.back().first;
     }
 
-    // Perform wire format mutation
+    // Perform wire format mutation — updates both cp AND persistent impl_ state
     void perform_mutation(ConnectionProfile& cp) {
         mutation_epoch_++;
         stats_.mutations_performed++;
@@ -171,21 +231,21 @@ public:
         // Generate new cipher suite order
         if (config_.mutation.rotate_cipher_priority) {
             // Start with common TLS 1.3 + 1.2 suites, shuffle order
-            cp.tls_cipher_suites = {
+            current_cipher_suites_ = {
                 0x1301, 0x1302, 0x1303,  // TLS 1.3
                 0xC02F, 0xC030, 0xCCA8,  // ECDHE-RSA
                 0xC02B, 0xC02C           // ECDHE-ECDSA
             };
-            // Fisher-Yates shuffle using our PRNG
-            for (size_t i = cp.tls_cipher_suites.size() - 1; i > 0; --i) {
-                size_t j = next_random() % (i + 1);
-                std::swap(cp.tls_cipher_suites[i], cp.tls_cipher_suites[j]);
+            // Fisher-Yates shuffle using our PRNG (unbiased)
+            for (size_t i = current_cipher_suites_.size() - 1; i > 0; --i) {
+                size_t j = uniform_random(static_cast<uint32_t>(i + 1));
+                std::swap(current_cipher_suites_[i], current_cipher_suites_[j]);
             }
         }
 
         // Shuffle TLS extension order
         if (config_.mutation.shuffle_extension_order) {
-            cp.tls_extensions = {
+            current_extensions_ = {
                 0,   // server_name
                 10,  // supported_groups
                 11,  // ec_point_formats
@@ -197,9 +257,9 @@ public:
                 45,  // psk_key_exchange_modes
                 51   // key_share
             };
-            for (size_t i = cp.tls_extensions.size() - 1; i > 0; --i) {
-                size_t j = next_random() % (i + 1);
-                std::swap(cp.tls_extensions[i], cp.tls_extensions[j]);
+            for (size_t i = current_extensions_.size() - 1; i > 0; --i) {
+                size_t j = uniform_random(static_cast<uint32_t>(i + 1));
+                std::swap(current_extensions_[i], current_extensions_[j]);
             }
         }
 
@@ -213,10 +273,14 @@ public:
                 {"h2", "http/1.1", "http/1.0"},
                 {"h3", "h2", "http/1.1"},
             };
-            size_t idx = next_random() % alpn_sets.size();
-            cp.alpn_protocols = alpn_sets[idx];
+            size_t idx = uniform_random(static_cast<uint32_t>(alpn_sets.size()));
+            current_alpn_ = alpn_sets[idx];
         }
 
+        // FIX: Write persistent state into ConnectionProfile
+        cp.tls_cipher_suites = current_cipher_suites_;
+        cp.tls_extensions = current_extensions_;
+        cp.alpn_protocols = current_alpn_;
         cp.browser_profile = current_browser_;
         cp.mutation_epoch = mutation_epoch_;
 
@@ -296,7 +360,7 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
     // 1. Build effective weights (base + schedule boosts)
     auto weights = impl_->build_effective_weights();
 
-    // 2. Weighted random selection
+    // 2. Weighted random selection (unbiased)
     cp.mimic_profile = impl_->select_weighted(weights);
 
     // 3. Apply wire mutation if threshold reached
@@ -306,7 +370,10 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
     if (should_mutate) {
         impl_->perform_mutation(cp);
     } else {
-        // Use current mutation state
+        // FIX: Inherit persistent mutation state from Impl
+        cp.tls_cipher_suites = impl_->current_cipher_suites_;
+        cp.tls_extensions = impl_->current_extensions_;
+        cp.alpn_protocols = impl_->current_alpn_;
         cp.browser_profile = impl_->current_browser_;
         cp.mutation_epoch = impl_->mutation_epoch_;
     }
@@ -323,6 +390,12 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
         cp.mimic_config.tls_cipher_suites = cp.tls_cipher_suites;
     }
 
+    // FIX: Auto-increment connection counter so caller doesn't need
+    // separate on_connection_opened() call. on_connection_opened() is
+    // kept for backward compatibility but is now optional.
+    impl_->connection_count_++;
+    impl_->stats_.connections_total++;
+
     // Track usage
     impl_->stats_.profile_usage[cp.mimic_profile]++;
 
@@ -334,9 +407,10 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
 }
 
 void ProtocolMorph::on_connection_opened() {
+    // NOTE: Now a no-op — select_profile_for_connection() auto-increments.
+    // Kept for API compatibility. Callers may safely remove this call.
+    // If called, it harmlessly acquires and releases the lock.
     std::lock_guard<std::mutex> lock(impl_->mutex_);
-    impl_->connection_count_++;
-    impl_->stats_.connections_total++;
 }
 
 TrafficMimicry::MimicProfile ProtocolMorph::get_scheduled_profile() const {
@@ -359,6 +433,8 @@ TrafficMimicry::MimicProfile ProtocolMorph::get_scheduled_profile() const {
 
 void ProtocolMorph::force_mutation() {
     std::lock_guard<std::mutex> lock(impl_->mutex_);
+    // FIX: perform_mutation now writes to impl_ persistent state,
+    // so even a discarded cp is fine — the state is stored in Impl.
     ConnectionProfile cp;
     impl_->perform_mutation(cp);
 }
