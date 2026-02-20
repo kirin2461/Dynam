@@ -168,11 +168,9 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
     // Initialize ECH config once in constructor
     if (config_.ech_enabled) {
         if (!config_.ech_config_data.empty()) {
-            // Parse provided ECHConfig
             if (ECH::parse_ech_config(config_.ech_config_data, ech_config_)) {
                 ech_initialized_ = true;
             } else {
-                // Fallback to test config on parse failure
                 std::string public_name = (current_strategy_.tls_browser_profile == ncp::BrowserType::SAFARI)
                                           ? "apple.com" : "cloudflare.com";
                 ech_config_ = ECH::create_test_ech_config(
@@ -183,7 +181,6 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
                 ech_initialized_ = true;
             }
         } else {
-            // Generate test ECHConfig for development/testing
             std::string public_name = (current_strategy_.tls_browser_profile == ncp::BrowserType::SAFARI)
                                       ? "apple.com" : "cloudflare.com";
             ech_config_ = ECH::create_test_ech_config(
@@ -232,6 +229,9 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
 void ProtocolOrchestrator::stop() {
     running_.store(false);
     flow_shaper_.stop();
+    if (advanced_dpi_) {
+        advanced_dpi_->stop();
+    }
     if (health_thread_.joinable()) {
         health_thread_.join();
     }
@@ -273,14 +273,40 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         stats_.tls_fingerprints_applied.fetch_add(1);
     }
 
-    // Phase 2+: Apply ECH if configured and ClientHello detected
-    if (config_.ech_enabled && ech_initialized_ && is_client_hello) {
+    // Phase 4A: Route ClientHello through AdvancedDPIBypass (multi-segment)
+    // ECH is handled inside AdvancedDPIBypass — no double application
+    if (is_client_hello && current_strategy_.enable_advanced_dpi && advanced_dpi_) {
+        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+        stats_.advanced_dpi_segments.fetch_add(segments.size());
+
+        std::vector<OrchestratedPacket> result;
+        for (size_t i = 0; i < segments.size(); ++i) {
+            auto packets = process_single_segment_(
+                std::move(segments[i]), (i == 0));
+            for (auto& pkt : packets) {
+                result.push_back(std::move(pkt));
+            }
+        }
+        update_overhead_stats();
+        return result;
+    }
+
+    // Fallback ECH: only when advanced DPI is disabled
+    if (config_.ech_enabled && ech_initialized_ && is_client_hello &&
+        !current_strategy_.enable_advanced_dpi) {
         auto ech_result = ECH::apply_ech(data, ech_config_);
         if (!ech_result.empty() && ech_result.size() > data.size()) {
             data = std::move(ech_result);
             stats_.ech_encryptions.fetch_add(1);
         }
     }
+
+    // Non-advanced path: single segment pipeline
+    return process_single_segment_(std::move(data), true);
+}
+
+std::vector<OrchestratedPacket> ProtocolOrchestrator::process_single_segment_(
+    std::vector<uint8_t> data, bool is_first_segment) {
 
     // Step 1: Adversarial Padding (Phase 1)
     if (current_strategy_.enable_adversarial) {
@@ -292,8 +318,8 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
     }
 
-    // Step 3: Prepend auth token (Phase 3 client-side)
-    if (current_strategy_.enable_probe_resist && !config_.is_server) {
+    // Step 3: Prepend auth token (Phase 3 client-side, first segment only)
+    if (current_strategy_.enable_probe_resist && !config_.is_server && is_first_segment) {
         auto token = probe_resist_.generate_client_auth();
         data.insert(data.begin(), token.begin(), token.end());
     }
@@ -310,14 +336,12 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
             stats_.bytes_on_wire.fetch_add(op.data.size());
             result.push_back(std::move(op));
         }
-        update_overhead_stats();
         return result;
     }
 
     OrchestratedPacket op;
+    stats_.bytes_on_wire.fetch_add(data.size());
     op.data = std::move(data);
-    stats_.bytes_on_wire.fetch_add(op.data.size());
-    update_overhead_stats();
     return {op};
 }
 
@@ -414,6 +438,9 @@ std::vector<uint8_t> ProtocolOrchestrator::generate_cover_response() {
 }
 
 // ===== Adaptive Control =====
+// FIX: Deadlock — report_detection() held strategy_mutex_ then called
+// report_success() which also locked strategy_mutex_.
+// Solution: report_success_locked_() assumes caller already holds the lock.
 
 void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
     stats_.detection_events.fetch_add(1);
@@ -424,7 +451,8 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
 
     switch (event.type) {
         case DetectionEvent::Type::SUCCESS:
-            report_success();
+            // Delegate to lock-free version — we already hold strategy_mutex_
+            report_success_locked_();
             return;
 
         case DetectionEvent::Type::CONNECTION_RESET:
@@ -466,6 +494,12 @@ void ProtocolOrchestrator::report_success() {
     if (!config_.adaptive) return;
 
     std::lock_guard<std::mutex> lock(strategy_mutex_);
+    report_success_locked_();
+}
+
+void ProtocolOrchestrator::report_success_locked_() {
+    // NOTE: Caller MUST hold strategy_mutex_
+    stats_.successful_sends.fetch_add(1);
 
     consecutive_successes_++;
     consecutive_failures_ = (std::max)(0, consecutive_failures_ - 1);
@@ -580,6 +614,9 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
     if (strategy.enable_tls_fingerprint) {
         tls_fingerprint_.set_profile(strategy.tls_browser_profile);
     }
+
+    // Phase 4A: Rebuild AdvancedDPIBypass on strategy change
+    rebuild_advanced_dpi_();
 }
 
 void ProtocolOrchestrator::set_strategy(const OrchestratorStrategy& strategy) {
@@ -599,6 +636,83 @@ void ProtocolOrchestrator::apply_preset(const std::string& name) {
     else if (name == "max_compat") apply_strategy(OrchestratorStrategy::max_compat());
 }
 
+// ===== Phase 4A: AdvancedDPIBypass management =====
+
+void ProtocolOrchestrator::init_advanced_dpi_() {
+    if (!current_strategy_.enable_advanced_dpi) {
+        advanced_dpi_.reset();
+        return;
+    }
+
+    advanced_dpi_ = std::make_unique<AdvancedDPIBypass>();
+
+    AdvancedDPIConfig adv_cfg;
+    adv_cfg.base_config.target_host = "";
+    adv_cfg.tspu_bypass = (current_strategy_.dpi_preset == AdvancedDPIBypass::BypassPreset::STEALTH);
+
+    // Map preset to techniques
+    switch (current_strategy_.dpi_preset) {
+        case AdvancedDPIBypass::BypassPreset::STEALTH:
+            adv_cfg.techniques = {
+                EvasionTechnique::SNI_SPLIT,
+                EvasionTechnique::TCP_SEGMENTATION,
+                EvasionTechnique::IP_TTL_TRICKS,
+                EvasionTechnique::FAKE_SNI,
+                EvasionTechnique::TLS_GREASE,
+                EvasionTechnique::TIMING_JITTER,
+                EvasionTechnique::TCP_DISORDER
+            };
+            adv_cfg.enable_ech = (config_.ech_enabled && ech_initialized_);
+            break;
+        case AdvancedDPIBypass::BypassPreset::MODERATE:
+            adv_cfg.techniques = {
+                EvasionTechnique::SNI_SPLIT,
+                EvasionTechnique::TCP_SEGMENTATION,
+                EvasionTechnique::TLS_GREASE
+            };
+            adv_cfg.enable_ech = (config_.ech_enabled && ech_initialized_);
+            break;
+        case AdvancedDPIBypass::BypassPreset::MINIMAL:
+        default:
+            adv_cfg.techniques = {
+                EvasionTechnique::SNI_SPLIT
+            };
+            break;
+    }
+
+    // Forward ECH config if available
+    if (adv_cfg.enable_ech && ech_initialized_) {
+        adv_cfg.ech_config_list = config_.ech_config_data;
+    }
+
+    // Forward TLS fingerprint
+    advanced_dpi_->set_tls_fingerprint(&tls_fingerprint_);
+
+    if (advanced_dpi_->initialize(adv_cfg)) {
+        advanced_dpi_->set_tls_fingerprint(&tls_fingerprint_);
+        if (ech_initialized_) {
+            advanced_dpi_->set_ech_config(config_.ech_config_data);
+        }
+        advanced_dpi_->start();
+    } else {
+        advanced_dpi_.reset();
+    }
+}
+
+void ProtocolOrchestrator::rebuild_advanced_dpi_() {
+    if (current_strategy_.enable_advanced_dpi) {
+        if (advanced_dpi_) {
+            advanced_dpi_->stop();
+        }
+        init_advanced_dpi_();
+    } else {
+        if (advanced_dpi_) {
+            advanced_dpi_->stop();
+            advanced_dpi_.reset();
+        }
+    }
+}
+
 // ===== Component Access =====
 
 AdversarialPadding& ProtocolOrchestrator::adversarial() { return adversarial_; }
@@ -613,6 +727,9 @@ const TrafficMimicry& ProtocolOrchestrator::mimicry() const { return mimicry_; }
 
 ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() { return tls_fingerprint_; }
 const ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() const { return tls_fingerprint_; }
+
+AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() { return advanced_dpi_.get(); }
+const AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() const { return advanced_dpi_.get(); }
 
 const ECH::ECHConfig& ProtocolOrchestrator::ech_config() const { return ech_config_; }
 bool ProtocolOrchestrator::is_ech_initialized() const { return ech_initialized_; }

@@ -46,7 +46,6 @@ bool Database::open(const std::string& db_path, const std::string& password) {
     }
 
     // Enable SQLCipher encryption if password provided
-        // Enable SQLCipher encryption if password provided
     if (!password.empty()) {
         // Use sqlite3_key_v2 API instead of SQL injection-prone PRAGMA
         rc = sqlite3_key_v2(db_handle_, "main", password.c_str(), password.length());
@@ -57,7 +56,12 @@ bool Database::open(const std::string& db_path, const std::string& password) {
             return false;
         }
     }
-return true;
+
+    // FIX: Set is_connected_ = true in SQLite branch (was missing!)
+    // Without this, all execute()/query() calls that check is_connected_ would fail
+    is_connected_ = true;
+    db_path_ = db_path;
+    return true;
 #else
     (void)password;  // Suppress unused parameter warning in fallback mode
     // Fallback: use file-based storage
@@ -111,7 +115,6 @@ bool Database::execute(const std::string& sql) {
     }
     std::ofstream log(db_path_ + ".log", std::ios::app);
     log << sql << std::endl;
-    (void)sql;  // Parameter used in log, but mark as intentionally unused for warning suppression
     return true;
 #endif
 }
@@ -227,7 +230,7 @@ bool Database::table_exists(const std::string& table_name) {
     (void)table_name;  // Suppress unused parameter warning in fallback mode
     return true; // Assume exists in fallback mode
 #endif
-    }
+}
 
 // ==================== Data Operations ====================
 
@@ -329,12 +332,11 @@ bool Database::update(const std::string& table_name,
         first = false;
     }
     
-        // Add parameterized WHERE clause
+    // Add parameterized WHERE clause
     if (!where_column.empty()) {
         sql << " WHERE " << where_column << " = ?";
         values.push_back(where_value);
     }
-
 
     // Prepare statement
     sqlite3_stmt* stmt = nullptr;
@@ -382,8 +384,7 @@ bool Database::remove(const std::string& table_name,
         return false;
     }
     
-    // Build DELETE SQL
-        // Build parameterized DELETE SQL
+    // Build parameterized DELETE SQL
     std::ostringstream sql;
     sql << "DELETE FROM " << table_name;
     
@@ -391,7 +392,6 @@ bool Database::remove(const std::string& table_name,
     if (!where_column.empty()) {
         sql << " WHERE " << where_column << " = ?";
     }
-
 
     // Use prepared statement for execution
     sqlite3_stmt* stmt = nullptr;
@@ -405,7 +405,6 @@ bool Database::remove(const std::string& table_name,
     if (!where_column.empty()) {
         sqlite3_bind_text(stmt, 1, where_value.c_str(), -1, SQLITE_TRANSIENT);
     }
-
     
     rc = sqlite3_step(stmt);
     sqlite3_finalize(stmt);
