@@ -37,7 +37,11 @@ enum class DPIPreset {
     INVALID_DISORDER_DELAY,
     INVALID_LISTEN_PORT,
     INVALID_NFQUEUE_NUM,
-    PROXY_MISSING_HOST
+    PROXY_MISSING_HOST,
+    // FIX: New validation errors for advanced fields
+    INVALID_SPLIT_RANGE,         // split_position_min > split_position_max
+    INVALID_JITTER_RANGE,        // timing_jitter_min_us > timing_jitter_max_us
+    WS_TUNNEL_MISSING_URL        // ws_server_url empty when mode == WS_TUNNEL
 };
 
 struct DPIConfig {
@@ -75,7 +79,7 @@ struct DPIConfig {
     
     bool enable_pattern_obfuscation = true;  // Obfuscate TLS/HTTP patterns
     bool randomize_fake_ttl = false;  // Randomize fake packet TTL (1-8)
-    bool enable_tcp_options_randomization = false;  // Randomize TCP options
+    bool enable_tcp_options_randomization = false;  // Randomize TCP options (delegated to AdvancedDPIBypass)
     
     bool enable_timing_jitter = false;  // Add timing jitter to packets
     int timing_jitter_min_us = 0;  // Min jitter in microseconds
@@ -98,6 +102,7 @@ struct DPIConfig {
     int ws_reconnect_delay_ms = 1000;
     int ws_max_reconnect_attempts = 10;
 
+    // FIX: Extended validation covering advanced fields
     ValidationError validate() const noexcept {
         if (fragment_size < 1 || fragment_size > 1460) return ValidationError::INVALID_FRAGMENT_SIZE;
         if (fragment_offset < 0) return ValidationError::INVALID_FRAGMENT_OFFSET;
@@ -108,6 +113,13 @@ struct DPIConfig {
         if (listen_port == 0) return ValidationError::INVALID_LISTEN_PORT;
         if (nfqueue_num < 0 || nfqueue_num > 65535) return ValidationError::INVALID_NFQUEUE_NUM;
         if (mode == DPIMode::PROXY && target_host.empty()) return ValidationError::PROXY_MISSING_HOST;
+        // FIX: Validate advanced ranges
+        if (randomize_split_position && split_position_min > split_position_max)
+            return ValidationError::INVALID_SPLIT_RANGE;
+        if (enable_timing_jitter && timing_jitter_min_us > timing_jitter_max_us)
+            return ValidationError::INVALID_JITTER_RANGE;
+        if (mode == DPIMode::WS_TUNNEL && ws_server_url.empty())
+            return ValidationError::WS_TUNNEL_MISSING_URL;
         return ValidationError::NONE;
     }
 
@@ -457,8 +469,7 @@ private:
     class Impl;
     std::unique_ptr<Impl> impl_;
 
-    mutable std::shared_mutex config_mutex_;
-    DPIConfig config_;
+    // FIX: Removed dead outer config_ / config_mutex_ -- all config lives in Impl
 
     mutable std::mutex log_mutex_;
     LogCallback log_callback_;
