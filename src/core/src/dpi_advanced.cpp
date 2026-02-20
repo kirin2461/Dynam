@@ -410,7 +410,6 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
     auto& fp = impl_->active_fp();
 
     // For decoy hellos: randomize profile to avoid fingerprint correlation
-    // (only when using internal fp — external fp is caller-controlled)
     if (!impl_->external_fp_) {
         static const ncp::BrowserType profiles[] = {
             ncp::BrowserType::CHROME, ncp::BrowserType::FIREFOX,
@@ -527,9 +526,9 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
                 alist.push_back(static_cast<uint8_t>(p.size()));
                 alist.insert(alist.end(), p.begin(), p.end());
             }
-            uint16_t all = static_cast<uint16_t>(alist.size());
-            al.push_back(static_cast<uint8_t>((all >> 8) & 0xFF));
-            al.push_back(static_cast<uint8_t>(al all & 0xFF));
+            uint16_t alpn_total_len = static_cast<uint16_t>(alist.size());
+            al.push_back(static_cast<uint8_t>((alpn_total_len >> 8) & 0xFF));
+            al.push_back(static_cast<uint8_t>(alpn_total_len & 0xFF));
             al.insert(al.end(), alist.begin(), alist.end());
             append_ext(16, al);
             break;
@@ -740,7 +739,6 @@ bool AdvancedDPIBypass::initialize(const AdvancedDPIConfig& config) {
 
 void AdvancedDPIBypass::set_tls_fingerprint(ncp::TLSFingerprint* fp) {
     impl_->external_fp_ = fp;
-    // Forward to TLSManipulator if already created
     if (impl_->tls_manip) {
         impl_->tls_manip->set_tls_fingerprint(fp);
     }
@@ -800,7 +798,6 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     if (cfg.enable_ech && is_client_hello && impl_->ech_config_valid_) {
         auto ech_hello = ECH::apply_ech(working_data, impl_->ech_config_);
         if (ech_hello.size() > working_data.size()) {
-            // ECH extension was added — update working_data
             working_data = std::move(ech_hello);
             std::lock_guard<std::mutex> lock(impl_->stats_mutex);
             impl_->stats.ech_applied++;
