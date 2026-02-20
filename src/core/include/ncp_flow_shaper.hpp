@@ -19,12 +19,14 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <array>
 #include <atomic>
 #include <string>
 #include <functional>
 #include <chrono>
 #include <queue>
 #include <mutex>
+#include <shared_mutex>
 #include <thread>
 #include <memory>
 #include "ncp_csprng.hpp"
@@ -48,18 +50,13 @@ FlowProfile flow_profile_from_string(const std::string& name) noexcept;
 
 // ===== Size Distribution Model =====
 
-/// Describes the target packet size distribution for a profile.
-/// ML classifiers build histograms of packet sizes — we must match them.
 struct SizeDistribution {
-    /// Weighted buckets: each pair is (size, weight).
-    /// Packets will be padded/split to match this distribution.
     struct Bucket {
-        size_t size;      // target packet size
-        double weight;    // relative frequency (0.0 - 1.0)
+        size_t size;
+        double weight;
     };
     std::vector<Bucket> buckets;
 
-    /// Pre-built distributions for known profiles
     static SizeDistribution web_browsing();
     static SizeDistribution video_stream();
     static SizeDistribution messenger();
@@ -69,27 +66,23 @@ struct SizeDistribution {
 
 // ===== Burst Model =====
 
-/// Describes burst/pause timing patterns.
 struct BurstModel {
-    // Burst phase
-    int burst_packets_min = 5;       // min packets in a burst
-    int burst_packets_max = 30;      // max packets in a burst
-    double burst_inter_ms_min = 1.0; // min delay between packets in burst
-    double burst_inter_ms_max = 20.0;// max delay between packets in burst
+    int burst_packets_min = 5;
+    int burst_packets_max = 30;
+    double burst_inter_ms_min = 1.0;
+    double burst_inter_ms_max = 20.0;
 
-    // Pause phase (between bursts)
-    double pause_ms_min = 500.0;     // min pause after burst
-    double pause_ms_max = 8000.0;    // max pause after burst
+    double pause_ms_min = 500.0;
+    double pause_ms_max = 8000.0;
 
-    // Distribution type for inter-arrival times
     enum class Distribution {
-        UNIFORM,    // flat random
-        GAUSSIAN,   // normal
-        PARETO,     // heavy tail — most realistic for web traffic
-        EXPONENTIAL // memoryless
+        UNIFORM,
+        GAUSSIAN,
+        PARETO,
+        EXPONENTIAL
     };
     Distribution timing_distribution = Distribution::PARETO;
-    double pareto_alpha = 1.5;  // shape parameter for Pareto
+    double pareto_alpha = 1.5;
 
     static BurstModel web_browsing();
     static BurstModel video_stream();
@@ -104,33 +97,26 @@ struct FlowShaperConfig {
     bool enabled = true;
     FlowProfile profile = FlowProfile::WEB_BROWSING;
 
-    // Size shaping
     bool enable_size_shaping = true;
-    SizeDistribution size_dist;         // auto-set from profile if empty
+    SizeDistribution size_dist;
 
-    // Timing shaping
     bool enable_timing_shaping = true;
-    BurstModel burst_model;             // auto-set from profile if empty
+    BurstModel burst_model;
 
-    // Upload/Download ratio enforcement
     bool enable_ratio_shaping = true;
-    double target_upload_ratio = 0.15;  // target: 15% upload, 85% download
-    double ratio_tolerance = 0.05;      // ±5% tolerance
+    double target_upload_ratio = 0.15;
+    double ratio_tolerance = 0.05;
 
-    // Idle period injection
     bool enable_idle_keepalive = true;
-    double keepalive_interval_ms = 5000.0;  // send keepalive every 5s during idle
-    size_t keepalive_size = 52;             // TCP ACK size
+    double keepalive_interval_ms = 5000.0;
+    size_t keepalive_size = 52;
 
-    // Dummy traffic injection (flow-level)
     bool enable_flow_dummy = true;
-    double dummy_ratio = 0.05;           // 5% of flow packets are dummy
+    double dummy_ratio = 0.05;
 
-    // Performance
     double max_overhead_percent = 8.0;
     size_t max_queue_depth = 1024;
 
-    // Presets
     static FlowShaperConfig web_browsing();
     static FlowShaperConfig video_stream();
     static FlowShaperConfig messenger();
@@ -188,18 +174,20 @@ struct FlowShaperStats {
 
 // ===== Shaped Packet =====
 
-/// A single packet output from the shaper with associated delay.
 struct ShapedPacket {
     std::vector<uint8_t> data;
-    std::chrono::microseconds delay_before_send{0}; // wait this long before sending
-    bool is_dummy = false;        // receiver should discard
-    bool is_keepalive = false;    // idle keepalive
-    bool is_upload = true;        // direction
+    std::chrono::microseconds delay_before_send{0};
+    bool is_dummy = false;
+    bool is_keepalive = false;
+    bool is_upload = true;
 };
 
-// ===== Packet Send Callback =====
-
 using FlowSendCallback = std::function<void(const ShapedPacket&)>;
+
+// ===== Chunk header format (FIX #35) =====
+// 8 bytes: [total_len:32 big-endian][chunk_offset:32 big-endian]
+// Supports packets up to 4GB (was 64KB with uint16_t)
+static constexpr size_t CHUNK_HEADER_SIZE = 8;
 
 // ===== Main Class =====
 
@@ -215,71 +203,39 @@ public:
     FlowShaper& operator=(FlowShaper&&) noexcept;
 
     // ===== Lifecycle =====
-
-    /// Start the flow shaper background thread.
-    /// Callback is invoked when a shaped packet is ready to send.
     void start(FlowSendCallback callback);
-
-    /// Stop the flow shaper, flush remaining packets.
     void stop();
-
     bool is_running() const;
 
     // ===== Core Operations =====
-
-    /// Enqueue an outgoing packet for shaping.
-    /// The shaper will buffer it and release shaped versions via callback.
     void enqueue(const std::vector<uint8_t>& packet, bool is_upload = true);
-
-    /// Enqueue multiple packets.
     void enqueue_batch(const std::vector<std::vector<uint8_t>>& packets, bool is_upload = true);
-
-    /// Shape a single packet synchronously (no background thread).
-    /// Returns one or more shaped packets (may split or merge).
     std::vector<ShapedPacket> shape_sync(const std::vector<uint8_t>& packet, bool is_upload = true);
 
     // ===== Size Shaping =====
-
-    /// Reshape packet to match target size distribution.
-    /// May split large packets or pad small ones.
     std::vector<std::vector<uint8_t>> reshape_size(const std::vector<uint8_t>& packet);
-
-    /// Select target size from distribution using weighted random.
     size_t select_target_size();
 
     // ===== Timing =====
-
-    /// Calculate next inter-packet delay based on burst model.
     std::chrono::microseconds next_delay();
-
-    /// Check if we should start a new burst or continue pause.
     bool should_burst() const;
 
     // ===== Dummy / Keepalive =====
-
-    /// Generate a flow-level dummy packet matching current profile.
     ShapedPacket generate_dummy();
-
-    /// Generate an idle keepalive packet.
     ShapedPacket generate_keepalive();
 
-    /// Check if packet is a flow shaper dummy (for receiver discard).
-    static bool is_flow_dummy(const uint8_t* data, size_t len);
+    /// Check if packet is a flow shaper dummy.
+    /// FIX #36: Now uses HMAC-based marker that rotates per session.
+    bool is_flow_dummy(const uint8_t* data, size_t len) const;
 
     // ===== Ratio Shaping =====
-
-    /// Get current upload/download ratio.
     double current_ratio() const;
-
-    /// Check if ratio is within target range; may inject balancing traffic.
     bool needs_ratio_balance() const;
 
     // ===== Config & Stats =====
-
     void set_config(const FlowShaperConfig& config);
     FlowShaperConfig get_config() const;
     void set_profile(FlowProfile profile);
-
     FlowShaperStats get_stats() const;
     void reset_stats();
 
@@ -301,16 +257,19 @@ private:
     void track_bytes(size_t bytes, bool is_upload);
     ShapedPacket generate_ratio_balance_packet();
 
-    // Dummy magic
-    static constexpr uint8_t FLOW_DUMMY_MAGIC_0 = 0xF1;
-    static constexpr uint8_t FLOW_DUMMY_MAGIC_1 = 0x0A;
-    static constexpr uint8_t FLOW_DUMMY_MAGIC_2 = 0xD5;
-    static constexpr uint8_t FLOW_DUMMY_MAGIC_3 = 0xEE;
+    // FIX #36: HMAC-based dummy marker instead of fixed magic bytes
+    // 4-byte marker derived from session_key_ via HMAC-BLAKE2b.
+    // Rotated every session — DPI cannot build a static fingerprint.
+    std::array<uint8_t, 4> dummy_marker_;
+    std::array<uint8_t, 32> session_key_;  // random per-instance
+    void derive_dummy_marker();
+    void write_dummy_marker(uint8_t* dst) const;
 
+    // FIX #34: config_ protected by shared_mutex (readers‖writers)
     FlowShaperConfig config_;
-    FlowShaperStats stats_;
+    mutable std::shared_mutex config_mutex_;
 
-    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
+    FlowShaperStats stats_;
 
     // Burst state machine
     enum class BurstState { BURSTING, PAUSING, IDLE };
@@ -320,9 +279,9 @@ private:
     std::chrono::steady_clock::time_point last_packet_time_;
     std::chrono::steady_clock::time_point pause_end_time_;
 
-    // Ratio tracking
-    uint64_t upload_bytes_ = 0;
-    uint64_t download_bytes_ = 0;
+    // FIX #37: atomic byte counters for thread-safe ratio tracking
+    std::atomic<uint64_t> upload_bytes_{0};
+    std::atomic<uint64_t> download_bytes_{0};
 
     // Background thread
     struct QueueEntry {
