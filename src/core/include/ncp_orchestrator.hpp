@@ -11,6 +11,7 @@
  *   +        TrafficMimicry       — protocol wrapping (HTTPS/DNS/QUIC)
  *   Phase 2+: TLSFingerprint     — realistic TLS fingerprinting (JA3/JA4)
  *   Phase 2+: AdvancedDPIBypass   — multi-technique DPI evasion
+ *   Phase 3D: ECH                — Encrypted Client Hello
  *
  * into a single send()/receive() API with automatic strategy selection.
  */
@@ -21,6 +22,7 @@
 #include "ncp_mimicry.hpp"
 #include "ncp_tls_fingerprint.hpp"
 #include "ncp_dpi_advanced.hpp"
+#include "ncp_ech.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -98,6 +100,9 @@ struct OrchestratorStrategy {
     bool enable_advanced_dpi = false;
     AdvancedDPIBypass::BypassPreset dpi_preset = AdvancedDPIBypass::BypassPreset::MODERATE;
 
+    // Phase 3D: ECH (only used when advanced_dpi is disabled as fallback)
+    bool enable_ech_fallback = false;
+
     // Presets
     static OrchestratorStrategy stealth();
     static OrchestratorStrategy balanced();
@@ -151,6 +156,9 @@ struct OrchestratorStats {
     std::atomic<uint64_t> tls_fingerprints_applied{0};
     std::atomic<uint64_t> ech_encryptions{0};
 
+    // Phase 4A: Advanced DPI stats
+    std::atomic<uint64_t> advanced_dpi_segments{0};
+
     ThreatLevel current_threat = ThreatLevel::NONE;
     std::string current_strategy_name;
 
@@ -165,6 +173,7 @@ struct OrchestratorStats {
         escalations.store(0); deescalations.store(0);
         detection_events.store(0); successful_sends.store(0);
         tls_fingerprints_applied.store(0); ech_encryptions.store(0);
+        advanced_dpi_segments.store(0);
     }
 
     OrchestratorStats() = default;
@@ -179,6 +188,7 @@ struct OrchestratorStats {
           successful_sends(o.successful_sends.load()),
           tls_fingerprints_applied(o.tls_fingerprints_applied.load()),
           ech_encryptions(o.ech_encryptions.load()),
+          advanced_dpi_segments(o.advanced_dpi_segments.load()),
           current_threat(o.current_threat),
           current_strategy_name(o.current_strategy_name),
           adversarial_overhead_pct(o.adversarial_overhead_pct),
@@ -247,6 +257,14 @@ public:
     ncp::TLSFingerprint& tls_fingerprint();
     const ncp::TLSFingerprint& tls_fingerprint() const;
 
+    // Phase 4A: Advanced DPI bypass access (may be nullptr if disabled)
+    AdvancedDPIBypass* advanced_dpi();
+    const AdvancedDPIBypass* advanced_dpi() const;
+
+    // Phase 3D: ECH config access
+    const ECH::ECHConfig& ech_config() const;
+    bool is_ech_initialized() const;
+
     void set_config(const OrchestratorConfig& config);
     OrchestratorConfig get_config() const;
     OrchestratorStats get_stats() const;
@@ -259,6 +277,15 @@ private:
     OrchestratorStrategy strategy_for_threat(ThreatLevel level);
     void health_monitor_func();
     void update_overhead_stats();
+
+    // Phase 4A: Initialize/rebuild AdvancedDPIBypass from current strategy
+    void init_advanced_dpi_();
+    void rebuild_advanced_dpi_();
+
+    // Phase 4A: Process a single data buffer through post-DPI pipeline
+    //           (adversarial → mimicry → probe auth → flow shaping)
+    std::vector<OrchestratedPacket> process_single_segment_(
+        std::vector<uint8_t> data, bool is_first_segment);
 
     OrchestratorConfig config_;
     OrchestratorStats stats_;
@@ -273,6 +300,14 @@ private:
 
     // Phase 2+: TLS Fingerprint component
     ncp::TLSFingerprint tls_fingerprint_;
+
+    // Phase 4A: Advanced DPI bypass component (owned)
+    std::unique_ptr<AdvancedDPIBypass> advanced_dpi_;
+
+    // Phase 3D: ECH state
+    ECH::ECHConfig ech_config_;
+    bool ech_initialized_ = false;
+    std::vector<uint8_t> ech_private_key_;
 
     int consecutive_failures_ = 0;
     int consecutive_successes_ = 0;
