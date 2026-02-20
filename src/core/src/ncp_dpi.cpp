@@ -192,6 +192,32 @@ public:
     std::atomic<int> active_connections_{0};
     static constexpr int MAX_CONNECTIONS = 256;
 
+    // Phase 4: Transform callback for orchestrator integration.
+    // Invoked on outgoing payload BEFORE fragmentation/advanced pipeline.
+    mutable std::mutex transform_cb_mutex_;
+    TransformCallback transform_callback_;
+
+    TransformCallback snapshot_transform_cb() const {
+        std::lock_guard<std::mutex> lock(transform_cb_mutex_);
+        return transform_callback_;
+    }
+
+    void set_transform_cb(TransformCallback cb) {
+        std::lock_guard<std::mutex> lock(transform_cb_mutex_);
+        transform_callback_ = std::move(cb);
+    }
+
+    // Apply transform callback to a buffer.  Returns transformed data
+    // (or empty vector if no callback / callback returned empty).
+    std::vector<uint8_t> apply_transform(
+        const uint8_t* data, size_t len) {
+        auto xform = snapshot_transform_cb();
+        if (!xform) return {};
+        std::vector<uint8_t> input(data, data + len);
+        auto result = xform(input);
+        return result;  // empty means "use original"
+    }
+
 #ifdef HAVE_LIBWEBSOCKETS
     std::unique_ptr<ncp::WSTunnel> ws_tunnel_;
     std::mutex ws_client_mutex_;
@@ -495,6 +521,7 @@ public:
     }
 
     // FIX #39: cfg_snap passed by value -- no concurrent access to shared config
+    // Phase 4: Transform callback applied before fragmentation/advanced pipeline.
     void pipe_client_to_server(SOCKET client_sock, SOCKET server_sock, DPIConfig cfg_snap) {
         std::vector<uint8_t> buffer(8192);
         bool client_hello_processed = false;
@@ -524,20 +551,29 @@ public:
                 stats.packets_total++;
             }
 
+            // Phase 4: Apply transform callback before any DPI processing
+            const uint8_t* send_data = buffer.data();
+            size_t send_len = static_cast<size_t>(received);
+            std::vector<uint8_t> transformed = apply_transform(send_data, send_len);
+            if (!transformed.empty()) {
+                send_data = transformed.data();
+                send_len = transformed.size();
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                stats.packets_modified++;
+            }
+
             bool is_ch = false;
             if (!client_hello_processed &&
-                is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
+                is_tls_client_hello(send_data, send_len)) {
                 is_ch = true;
                 client_hello_processed = true;
             }
 
             // Phase 2: Route ClientHello through AdvancedDPIBypass
             if (is_ch && advanced_enabled_ && advanced_bypass_) {
-                send_via_advanced(server_sock, buffer.data(),
-                                 static_cast<size_t>(received));
+                send_via_advanced(server_sock, send_data, send_len);
             } else {
-                send_with_fragmentation(server_sock, buffer.data(),
-                                        static_cast<size_t>(received), is_ch, cfg_snap);
+                send_with_fragmentation(server_sock, send_data, send_len, is_ch, cfg_snap);
             }
         }
 #else
@@ -562,20 +598,29 @@ public:
                 stats.packets_total++;
             }
 
+            // Phase 4: Apply transform callback before any DPI processing
+            const uint8_t* send_data = buffer.data();
+            size_t send_len = static_cast<size_t>(received);
+            std::vector<uint8_t> transformed = apply_transform(send_data, send_len);
+            if (!transformed.empty()) {
+                send_data = transformed.data();
+                send_len = transformed.size();
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                stats.packets_modified++;
+            }
+
             bool is_ch = false;
             if (!client_hello_processed &&
-                is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
+                is_tls_client_hello(send_data, send_len)) {
                 is_ch = true;
                 client_hello_processed = true;
             }
 
             // Phase 2: Route ClientHello through AdvancedDPIBypass
             if (is_ch && advanced_enabled_ && advanced_bypass_) {
-                send_via_advanced(server_sock, buffer.data(),
-                                 static_cast<size_t>(received));
+                send_via_advanced(server_sock, send_data, send_len);
             } else {
-                send_with_fragmentation(server_sock, buffer.data(),
-                                        static_cast<size_t>(received), is_ch, cfg_snap);
+                send_with_fragmentation(server_sock, send_data, send_len, is_ch, cfg_snap);
             }
         }
 #endif
@@ -971,16 +1016,27 @@ public:
                 stats.packets_total++;
             }
 
+            // Phase 4: Apply transform callback in WS tunnel path
+            const uint8_t* send_data = buffer.data();
+            size_t send_len = static_cast<size_t>(received);
+            std::vector<uint8_t> transformed = apply_transform(send_data, send_len);
+            if (!transformed.empty()) {
+                send_data = transformed.data();
+                send_len = transformed.size();
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                stats.packets_modified++;
+            }
+
             bool is_ch = false;
             if (!client_hello_processed &&
-                is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
+                is_tls_client_hello(send_data, send_len)) {
                 is_ch = true;
                 client_hello_processed = true;
             }
 
             // FIX #41: Each frame sent as separate WebSocket message
             auto frames = process_outgoing_for_ws(
-                buffer.data(), static_cast<size_t>(received), is_ch, cfg_snap);
+                send_data, send_len, is_ch, cfg_snap);
 
             if (ws_tunnel_) {
                 for (const auto& frame : frames) {
@@ -1317,6 +1373,15 @@ void DPIBypass::reset_stats() {
 void DPIBypass::set_config_change_callback(ConfigChangeCallback callback) {
     std::lock_guard<std::mutex> lock(config_cb_mutex_);
     config_change_callback_ = std::move(callback);
+}
+
+void DPIBypass::set_transform_callback(TransformCallback callback) {
+    {
+        std::lock_guard<std::mutex> lock(transform_cb_mutex_);
+        transform_callback_ = callback;
+    }
+    // Forward to Impl so proxy threads can snapshot it
+    impl_->set_transform_cb(std::move(callback));
 }
 
 void DPIBypass::log(LogLevel level, const std::string& message) {
