@@ -6,6 +6,7 @@
 #include <sstream>
 #include <iomanip>
 #include <numeric>
+#include <sodium.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -16,11 +17,6 @@
 #else
 #  include <fcntl.h>
 #  include <unistd.h>
-#endif
-
-#ifdef HAVE_OPENSSL
-#  include <openssl/hmac.h>
-#  include <openssl/evp.h>
 #endif
 
 namespace ncp {
@@ -124,26 +120,40 @@ PortKnock::PortKnock(const PortKnockConfig& config)
 PortKnock::~PortKnock() = default;
 
 // ===== HMAC =====
+// FIX: Replaced XOR-based MAC fallback with libsodium crypto_auth().
+// The old fallback was trivially forgeable (XOR of first 32 bytes).
+// libsodium is already a project dependency — no new deps required.
+//
+// crypto_auth() uses HMAC-SHA-512-256 (keyed MAC, 32-byte output,
+// 32-byte key). If shared_secret is not exactly crypto_auth_KEYBYTES,
+// we derive a proper key via crypto_generichash (BLAKE2b).
 
 std::array<uint8_t, 32> PortKnock::compute_hmac(
     const uint8_t* data, size_t data_len) const {
 
     std::array<uint8_t, 32> result{};
 
-#ifdef HAVE_OPENSSL
-    unsigned int out_len = 32;
-    HMAC(EVP_sha256(),
-         config_.shared_secret.data(),
-         static_cast<int>(config_.shared_secret.size()),
-         data, data_len, result.data(), &out_len);
-#else
-    // Fallback: XOR-based MAC (use OpenSSL in production)
-    for (size_t i = 0; i < 32 && i < data_len; ++i) {
-        result[i] = data[i];
-        if (i < config_.shared_secret.size())
-            result[i] ^= config_.shared_secret[i];
+    // Read config under shared lock
+    std::shared_lock<std::shared_mutex> lock(config_mutex_);
+    const auto& secret = config_.shared_secret;
+
+    // Derive a crypto_auth key from shared_secret (handles any secret length)
+    uint8_t key[crypto_auth_KEYBYTES];
+    if (secret.size() == crypto_auth_KEYBYTES) {
+        std::memcpy(key, secret.data(), crypto_auth_KEYBYTES);
+    } else {
+        // Hash the secret into exactly crypto_auth_KEYBYTES bytes
+        crypto_generichash(key, crypto_auth_KEYBYTES,
+                           secret.data(), secret.size(),
+                           nullptr, 0);
     }
-#endif
+    lock.unlock();
+
+    // Compute HMAC-SHA-512-256 (crypto_auth)
+    crypto_auth(result.data(), data, data_len, key);
+
+    // Wipe derived key
+    sodium_memzero(key, sizeof(key));
 
     return result;
 }
@@ -175,6 +185,7 @@ uint16_t PortKnock::derive_port(uint64_t counter, size_t index) const {
                     (static_cast<uint32_t>(hmac[offset + 2]) << 8) |
                      static_cast<uint32_t>(hmac[offset + 3]);
 
+    std::shared_lock<std::shared_mutex> lock(config_mutex_);
     uint16_t range = config_.port_range_max - config_.port_range_min + 1;
     return config_.port_range_min + static_cast<uint16_t>(code % range);
 }
@@ -182,13 +193,16 @@ uint16_t PortKnock::derive_port(uint64_t counter, size_t index) const {
 // ===== Generate TOTP Sequence =====
 
 std::vector<uint16_t> PortKnock::generate_totp_sequence(int64_t time_offset) const {
+    std::shared_lock<std::shared_mutex> lock(config_mutex_);
     uint64_t now = static_cast<uint64_t>(std::time(nullptr));
     uint64_t counter = (now / config_.totp_interval_sec) + time_offset;
+    size_t seq_len = config_.sequence_length;
+    lock.unlock();
 
     std::vector<uint16_t> sequence;
-    sequence.reserve(config_.sequence_length);
+    sequence.reserve(seq_len);
 
-    for (size_t i = 0; i < config_.sequence_length; ++i) {
+    for (size_t i = 0; i < seq_len; ++i) {
         sequence.push_back(derive_port(counter, i));
     }
 
@@ -198,8 +212,12 @@ std::vector<uint16_t> PortKnock::generate_totp_sequence(int64_t time_offset) con
 // ===== Generate SPA Packet =====
 
 std::vector<uint8_t> PortKnock::generate_spa_packet() const {
+    std::shared_lock<std::shared_mutex> lock(config_mutex_);
+    size_t pkt_size = config_.spa_packet_size;
+    lock.unlock();
+
     // SPA format: [random_nonce(16) | timestamp(8) | hmac(32) | padding]
-    std::vector<uint8_t> packet(config_.spa_packet_size, 0);
+    std::vector<uint8_t> packet(pkt_size, 0);
 
     // Random nonce
     csprng_fill(packet.data(), 16);
@@ -273,19 +291,34 @@ KnockResult PortKnock::process_knock(
         return KnockResult::RATE_LIMITED;
     }
 
+    // Snapshot config under shared lock
+    KnockMode mode;
+    uint32_t totp_tolerance;
+    uint32_t knock_timeout_sec;
+    uint32_t gate_duration_sec;
+    std::vector<uint16_t> static_sequence;
+    {
+        std::shared_lock<std::shared_mutex> lock(config_mutex_);
+        mode = config_.mode;
+        totp_tolerance = config_.totp_tolerance;
+        knock_timeout_sec = config_.knock_timeout_sec;
+        gate_duration_sec = config_.gate_duration_sec;
+        static_sequence = config_.static_sequence;
+    }
+
     // Get expected sequence(s) — check current and ±tolerance windows
     std::vector<std::vector<uint16_t>> valid_sequences;
-    if (config_.mode == KnockMode::TOTP_SEQUENCE) {
-        for (int64_t offset = -static_cast<int64_t>(config_.totp_tolerance);
-             offset <= static_cast<int64_t>(config_.totp_tolerance); ++offset) {
+    if (mode == KnockMode::TOTP_SEQUENCE) {
+        for (int64_t offset = -static_cast<int64_t>(totp_tolerance);
+             offset <= static_cast<int64_t>(totp_tolerance); ++offset) {
             valid_sequences.push_back(generate_totp_sequence(offset));
         }
-    } else if (config_.mode == KnockMode::STATIC_SEQUENCE) {
-        valid_sequences.push_back(config_.static_sequence);
-    } else if (config_.mode == KnockMode::COVERT_TCP) {
+    } else if (mode == KnockMode::STATIC_SEQUENCE) {
+        valid_sequences.push_back(static_sequence);
+    } else if (mode == KnockMode::COVERT_TCP) {
         // Covert mode uses process_covert_knock instead
-        for (int64_t offset = -static_cast<int64_t>(config_.totp_tolerance);
-             offset <= static_cast<int64_t>(config_.totp_tolerance); ++offset) {
+        for (int64_t offset = -static_cast<int64_t>(totp_tolerance);
+             offset <= static_cast<int64_t>(totp_tolerance); ++offset) {
             valid_sequences.push_back(generate_totp_sequence(offset));
         }
     }
@@ -304,7 +337,7 @@ KnockResult PortKnock::process_knock(
         now - prog.first_knock).count();
 
     if (!prog.received_ports.empty() &&
-        elapsed > static_cast<int64_t>(config_.knock_timeout_sec)) {
+        elapsed > static_cast<int64_t>(knock_timeout_sec)) {
         // Sequence expired — reset
         stats_.expired_sequences.fetch_add(1);
         prog.received_ports.clear();
@@ -357,12 +390,12 @@ KnockResult PortKnock::process_knock(
                     prog.received_ports.clear();
 
                     // Open gate!
-                    open_gate(source_ip, config_.gate_duration_sec);
+                    open_gate(source_ip, gate_duration_sec);
                     stats_.gates_opened.fetch_add(1);
 
                     event.result = KnockResult::GATE_OPENED;
                     event.details = "Sequence complete — gate opened for " +
-                        std::to_string(config_.gate_duration_sec) + "s";
+                        std::to_string(gate_duration_sec) + "s";
                     emit_event(event);
                     return KnockResult::GATE_OPENED;
                 }
@@ -423,6 +456,17 @@ KnockResult PortKnock::process_spa(
         return KnockResult::SPA_INVALID;
     }
 
+    // Snapshot config for timestamp validation
+    uint32_t totp_interval;
+    uint32_t totp_tol;
+    uint32_t gate_dur;
+    {
+        std::shared_lock<std::shared_mutex> lock(config_mutex_);
+        totp_interval = config_.totp_interval_sec;
+        totp_tol = config_.totp_tolerance;
+        gate_dur = config_.gate_duration_sec;
+    }
+
     // Verify timestamp
     uint64_t pkt_ts = 0;
     for (int i = 0; i < 8; ++i) {
@@ -431,7 +475,7 @@ KnockResult PortKnock::process_spa(
     uint64_t now_ts = static_cast<uint64_t>(std::time(nullptr));
     uint64_t diff = (pkt_ts > now_ts) ? (pkt_ts - now_ts) : (now_ts - pkt_ts);
 
-    if (diff > config_.totp_interval_sec * (config_.totp_tolerance + 1)) {
+    if (diff > totp_interval * (totp_tol + 1)) {
         stats_.spa_rejected.fetch_add(1);
         event.result = KnockResult::SPA_INVALID;
         event.details = "Timestamp out of range: delta=" + std::to_string(diff) + "s";
@@ -442,12 +486,8 @@ KnockResult PortKnock::process_spa(
     // Verify HMAC over [nonce(16) | timestamp(8)]
     auto expected_hmac = compute_hmac(data, 24);
 
-    volatile uint8_t accum = 0;
-    for (size_t i = 0; i < 32; ++i) {
-        accum |= data[24 + i] ^ expected_hmac[i];
-    }
-
-    if (accum != 0) {
+    // Constant-time comparison (sodium_memcmp returns 0 on match)
+    if (sodium_memcmp(data + 24, expected_hmac.data(), 32) != 0) {
         stats_.spa_rejected.fetch_add(1);
         event.result = KnockResult::SPA_INVALID;
         event.details = "HMAC mismatch";
@@ -471,13 +511,13 @@ KnockResult PortKnock::process_spa(
     record_completed_sequence(nonce_as_ports);
 
     // Authenticated!
-    open_gate(source_ip, config_.gate_duration_sec);
+    open_gate(source_ip, gate_dur);
     stats_.spa_authenticated.fetch_add(1);
     stats_.gates_opened.fetch_add(1);
 
     event.result = KnockResult::SPA_AUTHENTICATED;
     event.details = "SPA verified — gate opened for " +
-        std::to_string(config_.gate_duration_sec) + "s";
+        std::to_string(gate_dur) + "s";
     emit_event(event);
     return KnockResult::SPA_AUTHENTICATED;
 }
@@ -491,10 +531,15 @@ KnockResult PortKnock::process_covert_knock(
     uint8_t ttl) {
 
     // Decode the knock value from TCP header fields
+    std::shared_lock<std::shared_mutex> lock(config_mutex_);
+    bool use_window = config_.covert_use_window;
+    bool use_ipid = config_.covert_use_ipid;
+    lock.unlock();
+
     uint16_t decoded_port = 0;
-    if (config_.covert_use_window) {
+    if (use_window) {
         decoded_port = tcp_window;
-    } else if (config_.covert_use_ipid) {
+    } else if (use_ipid) {
         decoded_port = ip_id ^ 0xA5A5;  // reverse XOR obfuscation
     }
     (void)ttl; // TTL used as secondary validation in future
@@ -520,7 +565,10 @@ bool PortKnock::is_gate_open(const std::string& ip) const {
 void PortKnock::open_gate(const std::string& ip, uint32_t duration_sec) {
     std::lock_guard<std::mutex> lock(gate_mutex_);
 
-    if (duration_sec == 0) duration_sec = config_.gate_duration_sec;
+    if (duration_sec == 0) {
+        std::shared_lock<std::shared_mutex> cfg_lock(config_mutex_);
+        duration_sec = config_.gate_duration_sec;
+    }
 
     auto now = std::chrono::steady_clock::now();
     GateEntry& gate = gates_[ip];
@@ -532,7 +580,11 @@ void PortKnock::open_gate(const std::string& ip, uint32_t duration_sec) {
     stats_.active_gates.store(gates_.size());
 
     // Evict if too many
-    if (gates_.size() > config_.max_active_gates) {
+    std::shared_lock<std::shared_mutex> cfg_lock(config_mutex_);
+    size_t max_gates = config_.max_active_gates;
+    cfg_lock.unlock();
+
+    if (gates_.size() > max_gates) {
         // Remove oldest expired
         for (auto it = gates_.begin(); it != gates_.end();) {
             if (!it->second.is_open || now > it->second.expires_at) {
@@ -577,10 +629,19 @@ void PortKnock::cleanup_expired_gates() {
     }
     stats_.active_gates.store(gates_.size());
 
+    // Snapshot config values for cleanup thresholds
+    uint32_t knock_timeout;
+    uint32_t attempt_window;
+    {
+        std::shared_lock<std::shared_mutex> cfg_lock(config_mutex_);
+        knock_timeout = config_.knock_timeout_sec;
+        attempt_window = config_.attempt_window_sec;
+    }
+
     // Also clean progress
     {
         std::lock_guard<std::mutex> plock(progress_mutex_);
-        auto cutoff = now - std::chrono::seconds(config_.knock_timeout_sec * 3);
+        auto cutoff = now - std::chrono::seconds(knock_timeout * 3);
         for (auto it = progress_.begin(); it != progress_.end();) {
             if (it->second.last_knock < cutoff || it->second.received_ports.empty()) {
                 it = progress_.erase(it);
@@ -593,7 +654,7 @@ void PortKnock::cleanup_expired_gates() {
     // Clean rate limits
     {
         std::lock_guard<std::mutex> rlock(rate_mutex_);
-        auto window = std::chrono::seconds(config_.attempt_window_sec * 2);
+        auto window = std::chrono::seconds(attempt_window * 2);
         for (auto it = rate_limits_.begin(); it != rate_limits_.end();) {
             if (now - it->second.window_start > window) {
                 it = rate_limits_.erase(it);
@@ -620,14 +681,18 @@ bool PortKnock::check_rate_limit(const std::string& ip) {
     auto now = std::chrono::steady_clock::now();
     auto& entry = rate_limits_[ip];
 
+    std::shared_lock<std::shared_mutex> cfg_lock(config_mutex_);
     auto window = std::chrono::seconds(config_.attempt_window_sec);
+    uint32_t max_attempts = config_.max_attempts_per_ip;
+    cfg_lock.unlock();
+
     if (now - entry.window_start > window) {
         entry.count = 0;
         entry.window_start = now;
     }
 
     entry.count++;
-    return entry.count <= config_.max_attempts_per_ip;
+    return entry.count <= max_attempts;
 }
 
 // ===== Replay Protection =====
@@ -660,15 +725,24 @@ void PortKnock::record_completed_sequence(const std::vector<uint16_t>& sequence)
         replay_window_.pop_front();
     }
 
+    // Snapshot config for replay limits
+    size_t replay_win_size;
+    uint32_t replay_expiry;
+    {
+        std::shared_lock<std::shared_mutex> cfg_lock(config_mutex_);
+        replay_win_size = config_.replay_window_size;
+        replay_expiry = config_.replay_expiry_sec;
+    }
+
     // Evict oldest if at capacity
-    while (replay_window_.size() >= config_.replay_window_size) {
+    while (replay_window_.size() >= replay_win_size) {
         replay_set_.erase(replay_window_.front().sequence_key);
         replay_window_.pop_front();
     }
 
     ReplayEntry entry;
     entry.sequence_key = key;
-    entry.expiry = now + std::chrono::seconds(config_.replay_expiry_sec);
+    entry.expiry = now + std::chrono::seconds(replay_expiry);
     replay_window_.push_back(entry);
     replay_set_.insert(key);
 }
@@ -686,10 +760,12 @@ void PortKnock::set_event_callback(KnockEventCallback callback) {
 }
 
 void PortKnock::set_config(const PortKnockConfig& config) {
+    std::unique_lock<std::shared_mutex> lock(config_mutex_);
     config_ = config;
 }
 
 PortKnockConfig PortKnock::get_config() const {
+    std::shared_lock<std::shared_mutex> lock(config_mutex_);
     return config_;
 }
 
