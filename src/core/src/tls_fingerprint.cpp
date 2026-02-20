@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <mutex>
 #include <numeric>
+#include <cassert>
 
 namespace ncp {
 
@@ -17,6 +18,9 @@ namespace ncp {
 // ============================================================================
 
 // Cryptographically secure Fisher-Yates shuffle using libsodium
+// NOTE: Only used internally for profile-reset scenarios. Public API methods
+// (randomize_ciphers, randomize_extensions, shuffle_order) now use
+// minor_permute / minor_permute_extensions to avoid unique fingerprints.
 template<typename RandomIt>
 static void secure_shuffle(RandomIt first, RandomIt last) {
     auto n = std::distance(first, last);
@@ -134,12 +138,16 @@ static std::string ja3_hash_to_hex(const std::string& input) {
     return oss.str();
 }
 
-// BLAKE2b-128 hash for JA4 and internal use (JA4 does NOT use MD5)
-static std::string blake2b_hash_to_hex(const std::string& input) {
-    uint8_t hash[16];
-    crypto_generichash(hash, sizeof(hash),
+// FIX #15: SHA256 truncated hash for JA4 — per FoxIO JA4 specification
+// The JA4 standard from FoxIO mandates SHA256 (first 12 hex chars of the
+// full SHA256 digest). Previous code used BLAKE2b which works internally
+// but produces hashes incompatible with external JA4 databases (ja4db.com,
+// GreyNoise, Censys, etc.). Using SHA256 ensures cross-system matching.
+static std::string sha256_hash_to_hex(const std::string& input) {
+    uint8_t hash[crypto_hash_sha256_BYTES]; // 32 bytes
+    crypto_hash_sha256(hash,
                        reinterpret_cast<const uint8_t*>(input.data()),
-                       input.size(), nullptr, 0);
+                       input.size());
     std::ostringstream oss;
     for (auto b : hash) {
         oss << std::hex << std::setw(2) << std::setfill('0')
@@ -581,8 +589,10 @@ std::string TLSFingerprint::get_ja4_string() const {
     return ja4.to_string();
 }
 
-// JA4Fingerprint serialization — uses BLAKE2b (JA4 spec uses SHA256 truncated,
-// BLAKE2b is acceptable as JA4 doesn't have cross-system matching like JA3)
+// FIX #15: JA4 now uses SHA256 truncated per FoxIO specification
+// https://github.com/FoxIO-LLC/ja4/blob/main/technical_details/JA4.md
+// This ensures fingerprints match external JA4 databases (ja4db.com,
+// GreyNoise, Censys, Hunt.io, etc.)
 std::string TLSFingerprint::JA4Fingerprint::to_string() const {
     // JA4_a: t{version}{sni}{cipherCount:02}{extCount:02}
     std::ostringstream a;
@@ -590,21 +600,21 @@ std::string TLSFingerprint::JA4Fingerprint::to_string() const {
     a << std::setw(2) << std::setfill('0') << cipher_suites.size();
     a << std::setw(2) << std::setfill('0') << extensions_count;
 
-    // JA4_b: sorted cipher suites hash (first 12 chars)
+    // JA4_b: sorted cipher suites hash (first 12 chars of SHA256)
     auto sorted_ciphers = cipher_suites;
     std::sort(sorted_ciphers.begin(), sorted_ciphers.end());
-    std::string b_hash = blake2b_hash_to_hex(join_u16(sorted_ciphers, ',')).substr(0, 12);
+    std::string b_hash = sha256_hash_to_hex(join_u16(sorted_ciphers, ',')).substr(0, 12);
 
-    // JA4_c: sorted extensions hash (first 12 chars)
+    // JA4_c: sorted extensions hash (first 12 chars of SHA256)
     auto sorted_exts = extensions;
     std::sort(sorted_exts.begin(), sorted_exts.end());
-    std::string c_hash = blake2b_hash_to_hex(join_u16(sorted_exts, ',')).substr(0, 12);
+    std::string c_hash = sha256_hash_to_hex(join_u16(sorted_exts, ',')).substr(0, 12);
 
     return a.str() + "_" + b_hash + "_" + c_hash;
 }
 
 std::string TLSFingerprint::JA4Fingerprint::hash() const {
-    return blake2b_hash_to_hex(to_string());
+    return sha256_hash_to_hex(to_string());
 }
 
 // ============================================================================
@@ -615,6 +625,12 @@ std::string TLSFingerprint::JA4Fingerprint::hash() const {
 // limited adjacent-pair swaps within TLS 1.2 cipher groups only (TLS 1.3
 // ciphers stay at the top in original order, as all browsers do this).
 // This produces variation while keeping the fingerprint plausibly browser-like.
+//
+// FIX #16: randomize_ciphers(), randomize_extensions(), shuffle_order() now
+// also use minor permutations instead of full Fisher-Yates shuffle. Previously
+// these methods still called secure_shuffle() which produced completely random
+// orderings — creating unique fingerprints detectable by DPI. All public
+// randomization methods now produce browser-plausible orderings.
 // ============================================================================
 
 // Apply minor permutation: swap a small number of adjacent pairs in the
@@ -691,33 +707,43 @@ void TLSFingerprint::randomize_all() {
     pImpl->stats.fingerprints_randomized++;
 }
 
+// FIX #16: randomize_ciphers() — use minor_permute instead of secure_shuffle
+// Full Fisher-Yates shuffle produces a cipher order that matches no real
+// browser, making the connection trivially fingerprintable by DPI systems.
 void TLSFingerprint::randomize_ciphers() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
-    auto c = get_profile_ciphers(pImpl->profile);
-    if (c.size() > 1) secure_shuffle(c.begin(), c.end());
-    pImpl->ciphers = std::move(c);
+    // Reload canonical profile ciphers, then apply minor permutation
+    pImpl->ciphers = get_profile_ciphers(pImpl->profile);
+    minor_permute(pImpl->ciphers, 2);
+    pImpl->stats.fingerprints_randomized++;
 }
 
+// FIX #16: randomize_extensions() — use minor_permute_extensions instead of
+// secure_shuffle. Same rationale: full shuffle creates unique fingerprints.
 void TLSFingerprint::randomize_extensions() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
-    auto e = get_profile_extensions(pImpl->profile);
-    if (e.size() > 1) secure_shuffle(e.begin(), e.end());
-    pImpl->extensions = std::move(e);
+    // Reload canonical profile extensions, then apply minor permutation
+    pImpl->extensions = get_profile_extensions(pImpl->profile);
+    minor_permute_extensions(pImpl->extensions, 2);
+    pImpl->stats.fingerprints_randomized++;
 }
 
 void TLSFingerprint::randomize_curves() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
-    auto c = get_profile_curves(pImpl->profile);
-    if (c.size() > 1) secure_shuffle(c.begin(), c.end());
-    pImpl->curves = std::move(c);
+    pImpl->curves = get_profile_curves(pImpl->profile);
+    // Minor permutation: swap one adjacent pair in curves list
+    if (pImpl->curves.size() > 2) {
+        auto idx = 1 + randombytes_uniform(
+            static_cast<uint32_t>(pImpl->curves.size() - 2));
+        std::swap(pImpl->curves[idx], pImpl->curves[idx - 1]);
+    }
 }
 
+// FIX #16: shuffle_order() — use minor permutations instead of secure_shuffle
 void TLSFingerprint::shuffle_order() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
-    if (pImpl->ciphers.size() > 1)
-        secure_shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end());
-    if (pImpl->extensions.size() > 1)
-        secure_shuffle(pImpl->extensions.begin(), pImpl->extensions.end());
+    minor_permute(pImpl->ciphers, 2);
+    minor_permute_extensions(pImpl->extensions, 2);
 }
 
 // ============================================================================
@@ -795,7 +821,7 @@ std::string TLSFingerprint::get_sni() const {
 // Previous implementation used raw NaCl crypto_box_easy() which no ECH server
 // can decrypt. Now implements HPKE-compatible flow:
 //   KEM:  X25519 (DHKEM)
-//   KDF:  HKDF-SHA256 (via libsodium crypto_kdf / crypto_auth_hmacsha256)
+//   KDF:  HKDF-SHA256 (via libsodium crypto_auth_hmacsha256)
 //   AEAD: XChaCha20-Poly1305 (libsodium crypto_aead_xchacha20poly1305_ietf)
 //
 // Output wire format:
@@ -809,15 +835,31 @@ std::string TLSFingerprint::get_sni() const {
 // can derive the same shared secret and decrypt.
 // ============================================================================
 
-// HKDF-Extract: PRK = HMAC-SHA256(salt, IKM)
+// FIX #17: HKDF-Extract with salt size guard
+// crypto_auth_hmacsha256_init() accepts key up to crypto_auth_hmacsha256_KEYBYTES
+// (32 bytes). Larger salts would be silently truncated, which violates RFC 5869.
+// We now throw on salt > 32 bytes and document the constraint.
+// For HKDF per RFC 5869, when salt is absent it defaults to HashLen zero bytes
+// (32 for SHA256), which is always safe.
 static void hkdf_extract(const uint8_t* salt, size_t salt_len,
                           const uint8_t* ikm, size_t ikm_len,
                           uint8_t prk[32]) {
     crypto_auth_hmacsha256_state st;
-    // If salt is empty, use zeros
+    // If salt is empty, use HashLen zero bytes per RFC 5869 Section 2.2
     uint8_t zero_salt[32] = {0};
     const uint8_t* actual_salt = (salt && salt_len > 0) ? salt : zero_salt;
     size_t actual_salt_len = (salt && salt_len > 0) ? salt_len : 32;
+
+    // Guard: crypto_auth_hmacsha256_init silently truncates keys > 32 bytes.
+    // This would produce incorrect HKDF output. Fail loudly to prevent
+    // subtle cryptographic bugs during refactoring.
+    if (actual_salt_len > crypto_auth_hmacsha256_KEYBYTES) {
+        throw std::invalid_argument(
+            "HKDF-Extract: salt length (" + std::to_string(actual_salt_len) +
+            ") exceeds crypto_auth_hmacsha256 key limit (" +
+            std::to_string(crypto_auth_hmacsha256_KEYBYTES) + " bytes). "
+            "Use a pre-hashed salt or switch to a full HMAC-SHA256 implementation.");
+    }
 
     crypto_auth_hmacsha256_init(&st, actual_salt, actual_salt_len);
     crypto_auth_hmacsha256_update(&st, ikm, ikm_len);
@@ -881,6 +923,7 @@ void TLSFingerprint::encrypt_sni(const std::vector<uint8_t>& public_key) {
 
     // --- KDF: HKDF-SHA256 ---
     // Extract: PRK = HKDF-Extract(salt="", IKM=dh_result)
+    // Note: empty salt -> 32 zero bytes (safe, within crypto_auth_hmacsha256 limit)
     uint8_t prk[32];
     hkdf_extract(nullptr, 0, dh_result, sizeof(dh_result), prk);
     sodium_memzero(dh_result, sizeof(dh_result));
