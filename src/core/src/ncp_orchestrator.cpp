@@ -388,6 +388,41 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
     OrchestratorStrategy snapshot;
     std::vector<uint8_t> data = prepare_payload(payload, snapshot);
 
+    // Step 2.5: Advanced DPI processing (segmentation/obfuscation)
+    // process_outgoing() may split data into multiple segments for evasion.
+    // Each segment is then individually flow-shaped or sent directly.
+    if (snapshot.enable_advanced_dpi && advanced_dpi_ && advanced_dpi_->is_running()) {
+        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+        if (!segments.empty() && segments.size() > 1) {
+            // Multiple segments -- each becomes an OrchestratedPacket
+            std::vector<OrchestratedPacket> result;
+            for (auto& seg : segments) {
+                if (snapshot.enable_flow_shaping) {
+                    auto shaped = flow_shaper_.shape_sync(seg, true);
+                    for (auto& sp : shaped) {
+                        OrchestratedPacket op;
+                        op.data = std::move(sp.data);
+                        op.delay = sp.delay_before_send;
+                        op.is_dummy = sp.is_dummy;
+                        stats_.bytes_on_wire.fetch_add(op.data.size());
+                        result.push_back(std::move(op));
+                    }
+                } else {
+                    OrchestratedPacket op;
+                    stats_.bytes_on_wire.fetch_add(seg.size());
+                    op.data = std::move(seg);
+                    result.push_back(std::move(op));
+                }
+            }
+            update_overhead_stats();
+            return result;
+        } else if (segments.size() == 1) {
+            // Single segment -- replace data and continue normal path
+            data = std::move(segments[0]);
+        }
+        // If segments empty, fall through with original data
+    }
+
     // Step 4: Flow Shaping (Phase 2)
     if (snapshot.enable_flow_shaping) {
         auto shaped = flow_shaper_.shape_sync(data, true);
@@ -420,6 +455,23 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
     OrchestratorStrategy snapshot;
     std::vector<uint8_t> data = prepare_payload(payload, snapshot);
 
+    // Step 2.5: Advanced DPI processing for async path
+    if (snapshot.enable_advanced_dpi && advanced_dpi_ && advanced_dpi_->is_running()) {
+        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+        if (!segments.empty()) {
+            for (auto& seg : segments) {
+                if (snapshot.enable_flow_shaping && flow_shaper_.is_running()) {
+                    flow_shaper_.enqueue(seg, true);
+                } else if (send_callback_) {
+                    OrchestratedPacket op;
+                    op.data = std::move(seg);
+                    send_callback_(op);
+                }
+            }
+            return;
+        }
+    }
+
     if (snapshot.enable_flow_shaping && flow_shaper_.is_running()) {
         flow_shaper_.enqueue(data, true);
     } else if (send_callback_) {
@@ -435,6 +487,7 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 //   2. Flow dummy check
 //   3. Adversarial dummy check (now uses instance method with HMAC marker)
 //   4. Mimicry unwrap
+//   4.5. Advanced DPI deobfuscation (Phase 4)
 //   5. Adversarial unpad (innermost layer)
 
 std::vector<uint8_t> ProtocolOrchestrator::receive(
@@ -519,6 +572,16 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
     // Step 4: Protocol unwrap (mimicry)
     if (snapshot.enable_mimicry) {
         data = mimicry_.unwrap_payload(data);
+    }
+
+    // Step 4.5: Advanced DPI deobfuscation (Phase 4)
+    // Reverse any obfuscation applied by the sender's advanced DPI pipeline.
+    // Must happen after mimicry unwrap but before adversarial unpad.
+    if (snapshot.enable_advanced_dpi && advanced_dpi_ && advanced_dpi_->is_running()) {
+        auto deobf = advanced_dpi_->process_incoming(data.data(), data.size());
+        if (!deobf.empty()) {
+            data = std::move(deobf);
+        }
     }
 
     // Step 5: Adversarial unpad
