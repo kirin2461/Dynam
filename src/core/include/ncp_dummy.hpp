@@ -5,12 +5,10 @@
 #include <cstddef>
 #include <vector>
 #include <memory>
+#include <string>
 
 namespace ncp {
 namespace DPI {
-
-/// Dummy packet marker (encrypted per-session, checked on filter)
-static constexpr uint32_t DUMMY_MARKER = 0xDEADBEEF;
 
 /**
  * @brief Dummy packet injection profile
@@ -42,11 +40,19 @@ struct DummyStats {
  * @brief Injects dummy (decoy) packets into an outgoing stream and
  *        filters them out on the receiving side.
  *
- * Dummy packets carry a 4-byte encrypted marker (DUMMY_MARKER)
- * followed by a mix of ASCII-printable bytes (~70 %) and random
- * bytes (~30 %) so that they look like realistic traffic to a DPI
- * system.  The marker is XOR-encrypted with a per-session key so
- * that a passive observer cannot trivially identify dummies.
+ * Dummy packets carry a 12-byte HMAC-based marker:
+ *   [8-byte random nonce][4-byte HMAC-SHA256 tag]
+ *
+ * The tag is computed as HMAC-SHA256(session_key, nonce) truncated
+ * to 4 bytes. Each dummy gets a unique nonce so there is no repeated
+ * byte pattern for DPI to match. Both the injecting and filtering
+ * sides must share the same session key (set via set_session_key()).
+ *
+ * If no session key is explicitly set, a random key is generated at
+ * construction time. This works when the same DummyPacketInjector
+ * instance handles both inject() and filter().
+ *
+ * Payload composition: 70% ASCII printable (0x20-0x7E), 30% random.
  */
 class DummyPacketInjector {
 public:
@@ -60,6 +66,18 @@ public:
     // Move semantics
     DummyPacketInjector(DummyPacketInjector&&) noexcept;
     DummyPacketInjector& operator=(DummyPacketInjector&&) noexcept;
+
+    /**
+     * @brief Set the session key used for HMAC-based dummy markers.
+     *
+     * Both the sending and receiving sides must call this with the
+     * same key before inject() / filter(). The key should be at
+     * least 16 bytes; it will be used as-is for HMAC-SHA256.
+     *
+     * If never called, a random 32-byte key is generated at construction.
+     */
+    void set_session_key(const std::vector<uint8_t>& key);
+    void set_session_key(const uint8_t* key, size_t len);
 
     /**
      * @brief Inject dummy packets among real packets.
@@ -82,8 +100,19 @@ public:
     );
 
     /**
-     * @brief Check if a single packet is a dummy.
+     * @brief Check if a single packet is a dummy (instance method).
+     *
+     * Uses the current session key for HMAC verification.
      */
+    bool is_dummy_packet(const std::vector<uint8_t>& packet) const;
+
+    /**
+     * @brief Legacy static check - DEPRECATED.
+     *
+     * Cannot verify HMAC without session key. Always returns false.
+     * Use is_dummy_packet() instance method instead.
+     */
+    [[deprecated("Use is_dummy_packet() instance method with session key")]]
     static bool is_dummy(const std::vector<uint8_t>& packet);
 
     DummyStats get_stats() const;
