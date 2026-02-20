@@ -9,6 +9,11 @@
 #include <chrono>
 #include <cstdint>
 
+// Forward declaration to avoid circular include
+namespace ncp {
+    class TLSFingerprint;
+}
+
 namespace ncp {
 namespace DPI {
 
@@ -17,131 +22,100 @@ namespace DPI {
  */
 enum class EvasionTechnique {
     // TCP-level techniques
-    TCP_SEGMENTATION,       // Split TCP segments
-    TCP_DISORDER,           // Out-of-order packet delivery
-    TCP_OVERLAP,            // Overlapping TCP segments
-    TCP_OOB_DATA,           // Out-of-band urgent data
-    TCP_WINDOW_SIZE,        // TCP window size manipulation
-    TCP_TIMESTAMP_EDIT,     // TCP timestamp option editing
-    TCP_RST_CONFUSION,      // RST packet injection for DPI confusion
+    TCP_SEGMENTATION,
+    TCP_DISORDER,
+    TCP_OVERLAP,
+    TCP_OOB_DATA,
+    TCP_WINDOW_SIZE,
+    TCP_TIMESTAMP_EDIT,
+    TCP_RST_CONFUSION,
     
     // TLS-level techniques
-    TLS_RECORD_SPLIT,       // Split TLS records
-    TLS_PADDING,            // TLS record padding
-    TLS_FAKE_EXTENSION,     // Inject fake TLS extensions
-    TLS_VERSION_CONFUSION,  // TLS version field manipulation
-    TLS_GREASE,             // GREASE values for extension randomization
+    TLS_RECORD_SPLIT,
+    TLS_PADDING,
+    TLS_FAKE_EXTENSION,
+    TLS_VERSION_CONFUSION,
+    TLS_GREASE,
     
     // HTTP/HTTPS techniques
-    HTTP_HEADER_SPLIT,      // Split HTTP headers
-    HTTP_SPACE_TRICK,       // Space before colon in headers
-    SNI_SPLIT,            // Split SNI extension in ClientHello
-    GREASE_INJECTION,     // Inject GREASE extensions
-    FAKE_SNI,             // Send fake SNI before real
-    HTTP_CASE_VARIATION,    // Mixed case in method/headers
-    HTTP_HOST_CONFUSION,    // Host header obfuscation
+    HTTP_HEADER_SPLIT,
+    HTTP_SPACE_TRICK,
+    SNI_SPLIT,
+    GREASE_INJECTION,
+    FAKE_SNI,
+    HTTP_CASE_VARIATION,
+    HTTP_HOST_CONFUSION,
     
     // IP-level techniques
-    IP_FRAGMENTATION,       // IP-level fragmentation
-    IP_TTL_TRICKS,          // TTL manipulation (fake packets)
-    IP_ID_RANDOMIZATION,    // IP ID field randomization
-    IP_OPTIONS_PADDING,     // IP options for length confusion
+    IP_FRAGMENTATION,
+    IP_TTL_TRICKS,
+    IP_ID_RANDOMIZATION,
+    IP_OPTIONS_PADDING,
     
     // Timing techniques  
-    TIMING_JITTER,          // Random timing between packets
-    TIMING_THROTTLE,        // Slow packet sending
-    TIMING_BURST,           // Burst then pause patterns
+    TIMING_JITTER,
+    TIMING_THROTTLE,
+    TIMING_BURST,
 };
 
 /**
  * @brief Protocol obfuscation modes
  */
 enum class ObfuscationMode {
-    NONE,                   // No obfuscation
-    XOR_SIMPLE,             // Simple XOR cipher (weak, for testing)
-    XOR_ROLLING,            // Rolling XOR with changing key
-    AES_STREAM,             // AES-CTR stream cipher
-    CHACHA20,               // ChaCha20 stream cipher
-    SHADOWSOCKS,            // Shadowsocks-compatible
-    OBFS4,                  // obfs4 compatible
-    WEBSOCKET_TUNNEL,       // WebSocket encapsulation
-    HTTP_CAMOUFLAGE,        // Make traffic look like HTTP
-    DNS_TUNNEL,             // DNS tunneling
+    NONE,
+    XOR_SIMPLE,
+    XOR_ROLLING,
+    AES_STREAM,
+    CHACHA20,
+    SHADOWSOCKS,
+    OBFS4,
+    WEBSOCKET_TUNNEL,
+    HTTP_CAMOUFLAGE,
+    DNS_TUNNEL,
 };
 
-/**
- * @brief Traffic padding configuration
- */
 struct PaddingConfig {
     bool enabled = false;
-    size_t min_padding = 0;         // Minimum padding bytes
-    size_t max_padding = 256;       // Maximum padding bytes
-    bool random_padding = true;     // Randomize padding size
-    uint8_t padding_byte = 0x00;    // Padding byte value (0x00 or random)
+    size_t min_padding = 0;
+    size_t max_padding = 256;
+    bool random_padding = true;
+    uint8_t padding_byte = 0x00;
 };
 
-/**
- * @brief Traffic shaping configuration
- */
 struct TrafficShapingConfig {
     bool enabled = false;
-    
-    // Bandwidth limiting
-    uint64_t max_bandwidth_bps = 0; // 0 = unlimited
-    
-    // Timing patterns
-    uint32_t min_delay_ms = 0;      // Minimum inter-packet delay
-    uint32_t max_delay_ms = 100;    // Maximum inter-packet delay
-    bool random_timing = true;      // Randomize delays
-    
-    // Burst patterns
-    bool burst_mode = false;        // Enable burst sending
-    uint32_t burst_size = 10;       // Packets per burst
-    uint32_t burst_delay_ms = 50;   // Delay between bursts
+    uint64_t max_bandwidth_bps = 0;
+    uint32_t min_delay_ms = 0;
+    uint32_t max_delay_ms = 100;
+    bool random_timing = true;
+    bool burst_mode = false;
+    uint32_t burst_size = 10;
+    uint32_t burst_delay_ms = 50;
 };
 
-/**
- * @brief Protocol mimicry configuration
- */
 struct MimicryConfig {
     bool enabled = false;
-    std::string protocol = "https";  // Protocol to mimic
-    std::string fake_host = "";      // Fake Host header
-    std::string fake_sni = "";       // Fake SNI (innocent domain)
-    bool add_http_headers = false;   // Add innocent HTTP headers
+    std::string protocol = "https";
+    std::string fake_host = "";
+    std::string fake_sni = "";
+    bool add_http_headers = false;
     std::vector<std::pair<std::string, std::string>> custom_headers;
 };
 
-/**
- * @brief Advanced DPI configuration
- */
 struct AdvancedDPIConfig {
-    // Inherit from basic config
     DPIConfig base_config;
-    
-    // Enabled evasion techniques
     std::vector<EvasionTechnique> techniques;
-    
-    // Obfuscation settings
     ObfuscationMode obfuscation = ObfuscationMode::NONE;
-    std::vector<uint8_t> obfuscation_key;  // Key for encryption-based obfuscation
-    
-    // Padding and shaping
+    std::vector<uint8_t> obfuscation_key;
     PaddingConfig padding;
     TrafficShapingConfig shaping;
-    
-    // Protocol mimicry
     MimicryConfig mimicry;
-    
-    // TCP-level settings
     bool enable_tcp_keepalive_tricks = false;
     bool enable_nagle_manipulation = true;
-    int tcp_window_scale = -1;      // -1 = auto
-    
-    // Fingerprint randomization
+    int tcp_window_scale = -1;
     bool randomize_tcp_options = true;
     bool randomize_ip_id = true;
-    bool randomize_ttl = false;     // Can break connectivity
+    bool randomize_ttl = false;
     int ttl_range_min = 64;
     int ttl_range_max = 128;
     
@@ -164,15 +138,17 @@ struct AdvancedDPIConfig {
     //   - apply padding / obfuscation
     //   - apply timing jitter
     bool mimicry_managed_tls = false;
+    bool enable_multipath = false;
+    bool tspu_bypass = true;
+    bool china_gfw_bypass = false;
+
+    // === Phase 3D: ECH (Encrypted Client Hello) support ===
+    bool enable_ech = false;
+    std::vector<uint8_t> ech_config_list;  // Serialized ECHConfig (from DNS or manual)
 };
 
-/**
- * @brief Advanced DPI evasion statistics
- */
 struct AdvancedDPIStats {
     DPIStats base_stats;
-    
-    // Technique-specific counters
     uint64_t tcp_segments_split = 0;
     uint64_t tcp_overlaps_sent = 0;
     uint64_t tcp_oob_sent = 0;
@@ -182,145 +158,102 @@ struct AdvancedDPIStats {
     uint64_t bytes_padding = 0;
     uint64_t timing_delays_applied = 0;
     uint64_t fake_packets_injected = 0;
-    
-    // Obfuscation stats
     uint64_t bytes_obfuscated = 0;
     uint64_t bytes_deobfuscated = 0;
-    
-    // Detection evasion
-    uint64_t dpi_signatures_evaded = 0;  // Estimated
+    uint64_t dpi_signatures_evaded = 0;
+    uint64_t ech_applied = 0;  // Phase 3D: Count successful ECH applications
 };
 
-/**
- * @brief Packet transformer interface
- */
 class PacketTransformer {
 public:
     virtual ~PacketTransformer() = default;
-    
-    // Transform outgoing packet
     virtual std::vector<std::vector<uint8_t>> transform(
-        const uint8_t* data,
-        size_t len,
-        bool is_client_hello
-    ) = 0;
-    
-    // Reverse transform for incoming packets (if applicable)
+        const uint8_t* data, size_t len, bool is_client_hello) = 0;
     virtual std::vector<uint8_t> reverse_transform(
-        const uint8_t* data,
-        size_t len
-    ) = 0;
+        const uint8_t* data, size_t len) = 0;
 };
 
-/**
- * @brief TCP segment manipulator for DPI evasion
- */
 class TCPManipulator {
 public:
     TCPManipulator();
     ~TCPManipulator();
     
-    // Split data at specific positions
     std::vector<std::vector<uint8_t>> split_segments(
-        const uint8_t* data,
-        size_t len,
-        const std::vector<size_t>& split_points
-    );
+        const uint8_t* data, size_t len,
+        const std::vector<size_t>& split_points);
     
-    // Create overlapping segments
     std::vector<std::vector<uint8_t>> create_overlap(
-        const uint8_t* data,
-        size_t len,
-        size_t overlap_size
-    );
+        const uint8_t* data, size_t len, size_t overlap_size);
     
-    // Add TCP out-of-band data
     std::vector<uint8_t> add_oob_marker(
-        const uint8_t* data,
-        size_t len,
-        size_t urgent_position
-    );
+        const uint8_t* data, size_t len, size_t urgent_position);
     
-    // Reorder segments for disorder effect
-    // Phase 0: unused_param kept for API compatibility (libsodium used internally)
+    /**
+     * @brief Reorder segments using Fisher-Yates shuffle (libsodium CSPRNG)
+     *
+     * Uses cryptographically secure randomness from libsodium internally.
+     * No external RNG state is needed.
+     */
+    void shuffle_segments(
+        std::vector<std::vector<uint8_t>>& segments
+    );
     void shuffle_segments(
         std::vector<std::vector<uint8_t>>& segments,
-        void* unused_param = nullptr
-    );
+        void* unused_param = nullptr);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-/**
- * @brief TLS record manipulator
- */
 class TLSManipulator {
 public:
     TLSManipulator();
     ~TLSManipulator();
     
-    // Find SNI in ClientHello and return split points
     std::vector<size_t> find_sni_split_points(
-        const uint8_t* data,
-        size_t len
-    );
+        const uint8_t* data, size_t len);
     
-    // Split TLS record into multiple records
     std::vector<std::vector<uint8_t>> split_tls_record(
-        const uint8_t* data,
-        size_t len,
-        size_t max_fragment_size
-    );
+        const uint8_t* data, size_t len, size_t max_fragment_size);
     
-    // Add padding to TLS record
     std::vector<uint8_t> add_tls_padding(
-        const uint8_t* data,
-        size_t len,
-        size_t padding_size
-    );
+        const uint8_t* data, size_t len, size_t padding_size);
     
-    // Inject GREASE values
     std::vector<uint8_t> inject_grease(
-        const uint8_t* data,
-        size_t len
-    );
+        const uint8_t* data, size_t len);
     
-    // Create fake ClientHello with innocent SNI
     std::vector<uint8_t> create_fake_client_hello(
-        const std::string& fake_sni
-    );
+        const std::string& fake_sni);
+
+    /**
+     * @brief Set TLS fingerprint for realistic ClientHello generation.
+     * @param fp Pointer to TLSFingerprint (not owned, caller must keep alive).
+     */
+    void set_tls_fingerprint(ncp::TLSFingerprint* fp);
+
+    /**
+     * @brief Create a ClientHello using the currently set TLS fingerprint.
+     *        Falls back to create_fake_client_hello() if no fingerprint set.
+     * @param sni  Server Name Indication hostname.
+     * @return Complete TLS record containing a fingerprinted ClientHello.
+     */
+    std::vector<uint8_t> create_fingerprinted_client_hello(
+        const std::string& sni);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-/**
- * @brief Traffic obfuscator
- */
 class TrafficObfuscator {
 public:
     TrafficObfuscator(ObfuscationMode mode, const std::vector<uint8_t>& key = {});
     ~TrafficObfuscator();
     
-    // Obfuscate data
-    std::vector<uint8_t> obfuscate(
-        const uint8_t* data,
-        size_t len
-    );
-    
-    // De-obfuscate data
-    std::vector<uint8_t> deobfuscate(
-        const uint8_t* data,
-        size_t len
-    );
-    
-    // Get current mode
+    std::vector<uint8_t> obfuscate(const uint8_t* data, size_t len);
+    std::vector<uint8_t> deobfuscate(const uint8_t* data, size_t len);
     ObfuscationMode get_mode() const;
-    
-    // Rotate key (for modes that support it)
     void rotate_key();
 
 private:
@@ -328,72 +261,28 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-/**
- * @brief Advanced DPI Bypass with enhanced evasion
- */
 class AdvancedDPIBypass {
 public:
     AdvancedDPIBypass();
     ~AdvancedDPIBypass();
     
-    // Non-copyable
     AdvancedDPIBypass(const AdvancedDPIBypass&) = delete;
     AdvancedDPIBypass& operator=(const AdvancedDPIBypass&) = delete;
     
-    /**
-     * @brief Initialize with advanced configuration
-     */
     bool initialize(const AdvancedDPIConfig& config);
-    
-    /**
-     * @brief Start bypass
-     */
     bool start();
-    
-    /**
-     * @brief Stop bypass
-     */
     void stop();
-    
-    /**
-     * @brief Check if running
-     */
     bool is_running() const;
-    
-    /**
-     * @brief Get statistics
-     */
     AdvancedDPIStats get_stats() const;
     
-    /**
-     * @brief Process and transform data for evasion
-     */
     std::vector<std::vector<uint8_t>> process_outgoing(
-        const uint8_t* data,
-        size_t len
-    );
+        const uint8_t* data, size_t len);
     
-    /**
-     * @brief Process incoming data (reverse transform)
-     */
     std::vector<uint8_t> process_incoming(
-        const uint8_t* data,
-        size_t len
-    );
+        const uint8_t* data, size_t len);
     
-    /**
-     * @brief Set log callback
-     */
     void set_log_callback(std::function<void(const std::string&)> callback);
-    
-    /**
-     * @brief Enable/disable specific technique at runtime
-     */
     void set_technique_enabled(EvasionTechnique technique, bool enabled);
-    
-    /**
-     * @brief Get currently active techniques
-     */
     std::vector<EvasionTechnique> get_active_techniques() const;
 
     enum class BypassPreset {
@@ -413,49 +302,45 @@ public:
      * handles TLS framing.
      */
     void set_mimicry_managed_tls(bool managed);
+     * @brief Set TLS fingerprint for the advanced bypass pipeline.
+     *        The fingerprint is forwarded to internal TLSManipulator
+     *        so that fake/real ClientHello use realistic browser profiles.
+     * @param fp Pointer to TLSFingerprint (not owned, caller keeps alive).
+     */
+    void set_tls_fingerprint(ncp::TLSFingerprint* fp);
+
+    /**
+     * @brief Set ECH config for ClientHello encryption (Phase 3D).
+     *        When enable_ech is true and this is set, process_outgoing()
+     *        will apply ECH to ClientHello before splitting/obfuscation.
+     * @param config_list Serialized ECHConfigList (from DNS HTTPS record or manual config).
+     */
+    void set_ech_config(const std::vector<uint8_t>& config_list);
 
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
 
-/**
- * @brief DPI evasion utility class for ECH and domain fronting
- */
 class DPIEvasion {
 public:
     static std::vector<uint8_t> apply_ech(
         const std::vector<uint8_t>& client_hello,
-        const std::vector<uint8_t>& ech_config
-    );
+        const std::vector<uint8_t>& ech_config);
 
     static std::vector<uint8_t> apply_domain_fronting(
         const std::vector<uint8_t>& data,
         const std::string& front_domain,
-        const std::string& real_domain
-    );
+        const std::string& real_domain);
 };
 
-/**
- * @brief Preset configurations for different DPI systems
- */
 namespace Presets {
     // Russian TSPU bypass preset
     AdvancedDPIConfig create_tspu_preset();
-    
-    // China GFW bypass preset  
     AdvancedDPIConfig create_gfw_preset();
-    
-    // Iran DPI bypass preset
     AdvancedDPIConfig create_iran_preset();
-    
-    // Generic aggressive preset
     AdvancedDPIConfig create_aggressive_preset();
-    
-    // Minimal footprint preset (less detectable)
     AdvancedDPIConfig create_stealth_preset();
-    
-    // Maximum compatibility preset
     AdvancedDPIConfig create_compatible_preset();
 }
 

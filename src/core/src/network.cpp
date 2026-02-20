@@ -199,10 +199,12 @@ bool Network::initialize_capture(const std::string& interface_name) {
     current_interface_ = interface_name;
     return true;
 #else
+    (void)interface_name;  // Suppress unused parameter warning - used in non-Windows
     // Windows: use Npcap/WinPcap
     return false;
 #endif
 #else
+    (void)interface_name;  // Suppress unused parameter warning - used when HAVE_PCAP defined
     (void)interface_name; // Suppress unused parameter warning
     last_error_ = "Packet capture not supported (HAVE_PCAP not defined)";
     return false;
@@ -343,10 +345,17 @@ bool Network::send_raw_packet(const std::string& dest_ip, const std::vector<uint
     // TODO: Implement raw packet sending
     return false;
 #else
+    (void)dest_ip;  // Suppress unused parameter warning - used in non-Windows
+    (void)data;     // Suppress unused parameter warning - used in non-Windows
     return false;
 #endif
 }
 
+bool Network::send_tcp_packet(const std::string& dest_ip, uint16_t dest_port, const std::vector<uint8_t>& payload, uint8_t flags) {
+    (void)dest_ip;    // Suppress unused parameter warning - stub function
+    (void)dest_port;  // Suppress unused parameter warning - stub function
+    (void)payload;    // Suppress unused parameter warning - stub function
+    (void)flags;      // Suppress unused parameter warning - stub function
 bool Network::send_tcp_packet(
     const std::string& dest_ip,
     uint16_t dest_port,
@@ -361,6 +370,16 @@ bool Network::send_tcp_packet(
 }
 
 void Network::apply_bypass_to_packet(std::vector<uint8_t>& packet) {
+    (void)packet;  // Suppress unused parameter warning - stub function
+}
+
+void Network::fragment_packet(std::vector<uint8_t>& packet) {
+    (void)packet;  // Suppress unused parameter warning - stub function
+}
+
+bool Network::inject_fragmented_packets(const std::vector<std::vector<uint8_t>>& packets, int delay_ms) {
+    (void)packets;   // Suppress unused parameter warning - stub function
+    (void)delay_ms;  // Suppress unused parameter warning - stub function
     (void)packet;  // suppress MSVC C4100 (unreferenced parameter)
 }
 
@@ -378,6 +397,7 @@ bool Network::inject_fragmented_packets(
 }
 
 void Network::set_tcp_window_size(uint16_t size) {
+    (void)size;  // Suppress unused parameter warning - stub function
     (void)size;  // suppress MSVC C4100 (unreferenced parameter)
 }
 
@@ -405,6 +425,7 @@ std::string Network::resolve_dns(const std::string& hostname, bool use_doh) {
 }
 
 std::string Network::resolve_dns_over_https(const std::string& hostname) {
+    (void)hostname;  // Suppress unused parameter warning - stub function for future HTTPS DNS implementation
     (void)hostname;  // suppress MSVC C4100 (unreferenced parameter)
     return "";
 }

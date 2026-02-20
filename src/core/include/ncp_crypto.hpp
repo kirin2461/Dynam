@@ -62,7 +62,10 @@ public:
         const SecureMemory& public_key
     );
     
-    // Encryption/Decryption (ChaCha20-Poly1305)
+    // Symmetric encryption: ChaCha20-Poly1305 IETF (RFC 8439)
+    // Uses crypto_aead_chacha20poly1305_ietf internally.
+    // Key: 32 bytes. Nonce: 12 bytes (auto-generated, prepended).
+    // Wire format: [nonce:12][ciphertext+tag:N+16]
     SecureMemory encrypt_chacha20(
         const SecureMemory& plaintext,
         const SecureMemory& key
@@ -92,7 +95,11 @@ public:
         const SecureMemory& public_key
     );
 
-    // AEAD encryption (XChaCha20-Poly1305)
+    // AEAD encryption: XChaCha20-Poly1305 (extended nonce variant)
+    // Uses crypto_aead_xchacha20poly1305_ietf internally.
+    // Key: 32 bytes. Nonce: 24 bytes (auto-generated, prepended).
+    // Supports additional authenticated data (AAD).
+    // Wire format: [nonce:24][ciphertext+tag:N+16]
     SecureMemory encrypt_aead(
         const SecureMemory& plaintext,
         const SecureMemory& key,
