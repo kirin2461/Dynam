@@ -346,6 +346,23 @@ enum class LogLevel {
 using LogCallback = std::function<void(LogLevel, const std::string&)>;
 using ConfigChangeCallback = std::function<void(const DPIConfig&, const DPIConfig&)>;
 
+/**
+ * @brief Callback type for external packet transformation (Step 2A).
+ *
+ * When set on DPIBypass, pipe_client_to_server() invokes this callback
+ * instead of the built-in splitting logic.  The callback receives raw
+ * outbound data and returns a vector of segments to send sequentially.
+ *
+ * Typical usage: the orchestrator wires AdvancedDPIBypass::process_outgoing
+ * as the transform callback, so all 7 evasion stages run on every packet.
+ *
+ * @param data  Pointer to raw outbound bytes
+ * @param len   Number of bytes
+ * @return Vector of byte-segments to send in order
+ */
+using TransformCallback = std::function<
+    std::vector<std::vector<uint8_t>>(const uint8_t* data, size_t len)>;
+
 struct DPIStats {
     std::atomic<uint64_t> packets_total{0};
     std::atomic<uint64_t> packets_modified{0};
@@ -422,6 +439,20 @@ public:
 
     void set_log_callback(LogCallback callback);
     void set_config_change_callback(ConfigChangeCallback callback);
+
+    /**
+     * @brief Set an external transform callback for outbound packets (Step 2A).
+     *
+     * When set, pipe_client_to_server() calls this callback instead of the
+     * default SNI-splitting logic.  This allows AdvancedDPIBypass (or any
+     * other external processor) to be plugged into the send path without
+     * circular header dependencies.
+     *
+     * Thread-safe: guarded by transform_cb_mutex_ in Impl.
+     *
+     * @param cb  Transform callback, or nullptr to revert to default splitting.
+     */
+    void set_transform_callback(TransformCallback cb);
 
 private:
     void log(LogLevel level, const std::string& message);
