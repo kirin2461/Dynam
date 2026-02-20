@@ -214,8 +214,9 @@ public:
 
     // ===== Gate Management =====
 
-    /// Check if IP has an open gate.
-    bool is_gate_open(const std::string& ip) const;
+    /// Check if IP has an open gate (lazy-evicts expired entries).
+    /// Issue #66: changed from const — expired gates are now removed in-place.
+    bool is_gate_open(const std::string& ip);
 
     /// Manually open/close gate for an IP.
     void open_gate(const std::string& ip, uint32_t duration_sec = 0);
@@ -262,11 +263,12 @@ private:
     /// Derive port from HMAC(secret, counter) in [port_min, port_max].
     uint16_t derive_port(uint64_t counter, size_t index) const;
 
-    /// Compute HMAC-SHA256.
+    /// Compute HMAC-SHA256 (or crypto_auth via libsodium as fallback).
     std::array<uint8_t, 32> compute_hmac(
         const uint8_t* data, size_t data_len) const;
 
     PortKnockConfig config_;
+    mutable std::mutex config_mutex_;  // Issue #65: protects config_
     PortKnockStats stats_;
     KnockEventCallback event_callback_;
 

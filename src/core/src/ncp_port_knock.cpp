@@ -1,5 +1,7 @@
 #include "ncp_port_knock.hpp"
 
+#include <sodium.h>  // Issue #64 + #68: libsodium for HMAC and CSPRNG
+
 #include <algorithm>
 #include <cstring>
 #include <ctime>
@@ -8,14 +10,9 @@
 #include <numeric>
 
 #ifdef _WIN32
-#  include <windows.h>
-#  include <bcrypt.h>
 #  undef min
 #  undef max
 #  undef ERROR
-#else
-#  include <fcntl.h>
-#  include <unistd.h>
 #endif
 
 #ifdef HAVE_OPENSSL
@@ -51,25 +48,6 @@ const char* knock_result_to_string(KnockResult r) noexcept {
         case KnockResult::SPA_INVALID:       return "SPA_INVALID";
         default: return "UNKNOWN";
     }
-}
-
-// ===== CSPRNG =====
-
-static void csprng_fill(uint8_t* buf, size_t len) {
-#ifdef _WIN32
-    BCryptGenRandom(nullptr, buf, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-#else
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        size_t off = 0;
-        while (off < len) {
-            ssize_t r = read(fd, buf + off, len - off);
-            if (r <= 0) break;
-            off += static_cast<size_t>(r);
-        }
-        close(fd);
-    }
-#endif
 }
 
 // ===== Config Presets =====
@@ -124,25 +102,44 @@ PortKnock::PortKnock(const PortKnockConfig& config)
 PortKnock::~PortKnock() = default;
 
 // ===== HMAC =====
+// Issue #64: Fallback now uses libsodium crypto_auth (Poly1305-based)
+// instead of broken XOR-MAC.  OpenSSL path unchanged.
 
 std::array<uint8_t, 32> PortKnock::compute_hmac(
     const uint8_t* data, size_t data_len) const {
 
     std::array<uint8_t, 32> result{};
 
+    // Snapshot secret under lock (#65)
+    std::vector<uint8_t> secret;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        secret = config_.shared_secret;
+    }
+
 #ifdef HAVE_OPENSSL
     unsigned int out_len = 32;
     HMAC(EVP_sha256(),
-         config_.shared_secret.data(),
-         static_cast<int>(config_.shared_secret.size()),
+         secret.data(),
+         static_cast<int>(secret.size()),
          data, data_len, result.data(), &out_len);
 #else
-    // Fallback: XOR-based MAC (use OpenSSL in production)
-    for (size_t i = 0; i < 32 && i < data_len; ++i) {
-        result[i] = data[i];
-        if (i < config_.shared_secret.size())
-            result[i] ^= config_.shared_secret[i];
+    // Libsodium crypto_auth: HMAC-SHA-512-256 (32-byte key → 32-byte tag).
+    // If secret is not exactly 32 bytes, derive a 32-byte key via
+    // crypto_generichash (BLAKE2b) keyed with whatever we have.
+    uint8_t key[crypto_auth_KEYBYTES]; // 32
+    if (secret.size() == crypto_auth_KEYBYTES) {
+        std::memcpy(key, secret.data(), crypto_auth_KEYBYTES);
+    } else {
+        // Derive fixed-size key from arbitrary-length secret
+        crypto_generichash(key, sizeof(key),
+                           secret.data(), secret.size(),
+                           nullptr, 0);
     }
+    crypto_auth(result.data(), data, data_len, key);
+
+    // Wipe key from stack
+    sodium_memzero(key, sizeof(key));
 #endif
 
     return result;
@@ -175,20 +172,34 @@ uint16_t PortKnock::derive_port(uint64_t counter, size_t index) const {
                     (static_cast<uint32_t>(hmac[offset + 2]) << 8) |
                      static_cast<uint32_t>(hmac[offset + 3]);
 
-    uint16_t range = config_.port_range_max - config_.port_range_min + 1;
-    return config_.port_range_min + static_cast<uint16_t>(code % range);
+    uint16_t range;
+    uint16_t port_min;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);  // #65
+        range = config_.port_range_max - config_.port_range_min + 1;
+        port_min = config_.port_range_min;
+    }
+    return port_min + static_cast<uint16_t>(code % range);
 }
 
 // ===== Generate TOTP Sequence =====
 
 std::vector<uint16_t> PortKnock::generate_totp_sequence(int64_t time_offset) const {
+    uint32_t interval;
+    size_t seq_len;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);  // #65
+        interval = config_.totp_interval_sec;
+        seq_len = config_.sequence_length;
+    }
+
     uint64_t now = static_cast<uint64_t>(std::time(nullptr));
-    uint64_t counter = (now / config_.totp_interval_sec) + time_offset;
+    uint64_t counter = (now / interval) + time_offset;
 
     std::vector<uint16_t> sequence;
-    sequence.reserve(config_.sequence_length);
+    sequence.reserve(seq_len);
 
-    for (size_t i = 0; i < config_.sequence_length; ++i) {
+    for (size_t i = 0; i < seq_len; ++i) {
         sequence.push_back(derive_port(counter, i));
     }
 
@@ -196,13 +207,20 @@ std::vector<uint16_t> PortKnock::generate_totp_sequence(int64_t time_offset) con
 }
 
 // ===== Generate SPA Packet =====
+// Issue #68: replaced /dev/urandom with randombytes_buf()
 
 std::vector<uint8_t> PortKnock::generate_spa_packet() const {
-    // SPA format: [random_nonce(16) | timestamp(8) | hmac(32) | padding]
-    std::vector<uint8_t> packet(config_.spa_packet_size, 0);
+    size_t pkt_size;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);  // #65
+        pkt_size = config_.spa_packet_size;
+    }
 
-    // Random nonce
-    csprng_fill(packet.data(), 16);
+    // SPA format: [random_nonce(16) | timestamp(8) | hmac(32) | padding]
+    std::vector<uint8_t> packet(pkt_size, 0);
+
+    // Random nonce — libsodium CSPRNG (#68)
+    randombytes_buf(packet.data(), 16);
 
     // Timestamp (big-endian 64-bit)
     uint64_t ts = static_cast<uint64_t>(std::time(nullptr));
@@ -219,9 +237,9 @@ std::vector<uint8_t> PortKnock::generate_spa_packet() const {
     auto hmac = compute_hmac(packet.data(), 24);
     std::memcpy(packet.data() + 24, hmac.data(), 32);
 
-    // Random padding for rest
+    // Random padding for rest — libsodium CSPRNG (#68)
     if (packet.size() > 56) {
-        csprng_fill(packet.data() + 56, packet.size() - 56);
+        randombytes_buf(packet.data() + 56, packet.size() - 56);
     }
 
     return packet;
@@ -246,6 +264,9 @@ std::vector<PortKnock::CovertKnockValues> PortKnock::generate_covert_sequence() 
 }
 
 // ===== Core: process_knock (sequence mode) =====
+// Issue #67: two-pass matching — check full-match first, then partial.
+// This prevents early return on SEQUENCE_PROGRESS when a different
+// time-offset sequence yields GATE_OPENED.
 
 KnockResult PortKnock::process_knock(
     const std::string& source_ip,
@@ -273,21 +294,30 @@ KnockResult PortKnock::process_knock(
         return KnockResult::RATE_LIMITED;
     }
 
+    // Snapshot config under lock (#65)
+    KnockMode mode;
+    uint32_t totp_tolerance;
+    uint32_t knock_timeout;
+    uint32_t gate_duration;
+    std::vector<uint16_t> static_seq;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        mode = config_.mode;
+        totp_tolerance = config_.totp_tolerance;
+        knock_timeout = config_.knock_timeout_sec;
+        gate_duration = config_.gate_duration_sec;
+        static_seq = config_.static_sequence;
+    }
+
     // Get expected sequence(s) — check current and ±tolerance windows
     std::vector<std::vector<uint16_t>> valid_sequences;
-    if (config_.mode == KnockMode::TOTP_SEQUENCE) {
-        for (int64_t offset = -static_cast<int64_t>(config_.totp_tolerance);
-             offset <= static_cast<int64_t>(config_.totp_tolerance); ++offset) {
+    if (mode == KnockMode::TOTP_SEQUENCE || mode == KnockMode::COVERT_TCP) {
+        for (int64_t offset = -static_cast<int64_t>(totp_tolerance);
+             offset <= static_cast<int64_t>(totp_tolerance); ++offset) {
             valid_sequences.push_back(generate_totp_sequence(offset));
         }
-    } else if (config_.mode == KnockMode::STATIC_SEQUENCE) {
-        valid_sequences.push_back(config_.static_sequence);
-    } else if (config_.mode == KnockMode::COVERT_TCP) {
-        // Covert mode uses process_covert_knock instead
-        for (int64_t offset = -static_cast<int64_t>(config_.totp_tolerance);
-             offset <= static_cast<int64_t>(config_.totp_tolerance); ++offset) {
-            valid_sequences.push_back(generate_totp_sequence(offset));
-        }
+    } else if (mode == KnockMode::STATIC_SEQUENCE) {
+        valid_sequences.push_back(static_seq);
     }
 
     // Get or create progress
@@ -304,7 +334,7 @@ KnockResult PortKnock::process_knock(
         now - prog.first_knock).count();
 
     if (!prog.received_ports.empty() &&
-        elapsed > static_cast<int64_t>(config_.knock_timeout_sec)) {
+        elapsed > static_cast<int64_t>(knock_timeout)) {
         // Sequence expired — reset
         stats_.expired_sequences.fetch_add(1);
         prog.received_ports.clear();
@@ -318,62 +348,68 @@ KnockResult PortKnock::process_knock(
     prog.received_ports.push_back(knocked_port);
     prog.last_knock = now;
 
-    // Check against all valid sequences
+    // ----- Issue #67 FIX: two-pass matching -----
+    // Pass 1: look for a FULL match (complete sequence) across all offsets.
+    // Pass 2: if no full match, look for any partial match.
+    // This prevents early-return on partial when another offset completes.
+
+    // Helper: check if received_ports is a prefix of expected
+    auto is_prefix_match = [&](const std::vector<uint16_t>& expected) -> bool {
+        if (expected.empty()) return false;
+        for (size_t i = 0; i < prog.received_ports.size() && i < expected.size(); ++i) {
+            if (prog.received_ports[i] != expected[i]) return false;
+        }
+        return true;
+    };
+
+    // Pass 1: full match?
     for (const auto& expected : valid_sequences) {
         if (expected.empty()) continue;
+        if (prog.received_ports.size() < expected.size()) continue;
 
-        size_t progress_idx = prog.received_ports.size() - 1;
-
-        // Check if current knock matches expected at this position
-        if (progress_idx < expected.size() &&
-            prog.received_ports.back() == expected[progress_idx]) {
-
-            // Verify all previous knocks also match
-            bool all_match = true;
-            for (size_t i = 0; i < prog.received_ports.size() && i < expected.size(); ++i) {
-                if (prog.received_ports[i] != expected[i]) {
-                    all_match = false;
-                    break;
-                }
-            }
-
-            if (all_match) {
-                event.sequence_progress = static_cast<int>(prog.received_ports.size());
-                event.sequence_total = static_cast<int>(expected.size());
-
-                if (prog.received_ports.size() >= expected.size()) {
-                    // Full sequence matched!
-                    // Anti-replay check
-                    if (is_replay(prog.received_ports)) {
-                        stats_.replays_blocked.fetch_add(1);
-                        prog.received_ports.clear();
-                        event.result = KnockResult::REPLAY;
-                        event.details = "Sequence replay detected";
-                        emit_event(event);
-                        return KnockResult::REPLAY;
-                    }
-
-                    record_completed_sequence(prog.received_ports);
-                    prog.received_ports.clear();
-
-                    // Open gate!
-                    open_gate(source_ip, config_.gate_duration_sec);
-                    stats_.gates_opened.fetch_add(1);
-
-                    event.result = KnockResult::GATE_OPENED;
-                    event.details = "Sequence complete — gate opened for " +
-                        std::to_string(config_.gate_duration_sec) + "s";
-                    emit_event(event);
-                    return KnockResult::GATE_OPENED;
-                }
-
-                // Partial match — waiting for more knocks
-                event.result = KnockResult::SEQUENCE_PROGRESS;
-                event.details = std::to_string(prog.received_ports.size()) +
-                    "/" + std::to_string(expected.size());
+        if (is_prefix_match(expected) &&
+            prog.received_ports.size() >= expected.size()) {
+            // Full sequence matched!
+            // Anti-replay check
+            if (is_replay(prog.received_ports)) {
+                stats_.replays_blocked.fetch_add(1);
+                prog.received_ports.clear();
+                event.result = KnockResult::REPLAY;
+                event.details = "Sequence replay detected";
                 emit_event(event);
-                return KnockResult::SEQUENCE_PROGRESS;
+                return KnockResult::REPLAY;
             }
+
+            record_completed_sequence(prog.received_ports);
+            prog.received_ports.clear();
+
+            // Open gate!
+            open_gate(source_ip, gate_duration);
+            stats_.gates_opened.fetch_add(1);
+
+            event.result = KnockResult::GATE_OPENED;
+            event.sequence_progress = static_cast<int>(expected.size());
+            event.sequence_total = static_cast<int>(expected.size());
+            event.details = "Sequence complete — gate opened for " +
+                std::to_string(gate_duration) + "s";
+            emit_event(event);
+            return KnockResult::GATE_OPENED;
+        }
+    }
+
+    // Pass 2: partial match?
+    for (const auto& expected : valid_sequences) {
+        if (expected.empty()) continue;
+        if (prog.received_ports.size() >= expected.size()) continue;
+
+        if (is_prefix_match(expected)) {
+            event.result = KnockResult::SEQUENCE_PROGRESS;
+            event.sequence_progress = static_cast<int>(prog.received_ports.size());
+            event.sequence_total = static_cast<int>(expected.size());
+            event.details = std::to_string(prog.received_ports.size()) +
+                "/" + std::to_string(expected.size());
+            emit_event(event);
+            return KnockResult::SEQUENCE_PROGRESS;
         }
     }
 
@@ -431,7 +467,15 @@ KnockResult PortKnock::process_spa(
     uint64_t now_ts = static_cast<uint64_t>(std::time(nullptr));
     uint64_t diff = (pkt_ts > now_ts) ? (pkt_ts - now_ts) : (now_ts - pkt_ts);
 
-    if (diff > config_.totp_interval_sec * (config_.totp_tolerance + 1)) {
+    uint32_t totp_interval, tolerance, gate_dur;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);  // #65
+        totp_interval = config_.totp_interval_sec;
+        tolerance = config_.totp_tolerance;
+        gate_dur = config_.gate_duration_sec;
+    }
+
+    if (diff > totp_interval * (tolerance + 1)) {
         stats_.spa_rejected.fetch_add(1);
         event.result = KnockResult::SPA_INVALID;
         event.details = "Timestamp out of range: delta=" + std::to_string(diff) + "s";
@@ -442,12 +486,8 @@ KnockResult PortKnock::process_spa(
     // Verify HMAC over [nonce(16) | timestamp(8)]
     auto expected_hmac = compute_hmac(data, 24);
 
-    volatile uint8_t accum = 0;
-    for (size_t i = 0; i < 32; ++i) {
-        accum |= data[24 + i] ^ expected_hmac[i];
-    }
-
-    if (accum != 0) {
+    // Constant-time comparison (sodium_memcmp is ct)
+    if (sodium_memcmp(data + 24, expected_hmac.data(), 32) != 0) {
         stats_.spa_rejected.fetch_add(1);
         event.result = KnockResult::SPA_INVALID;
         event.details = "HMAC mismatch";
@@ -471,13 +511,13 @@ KnockResult PortKnock::process_spa(
     record_completed_sequence(nonce_as_ports);
 
     // Authenticated!
-    open_gate(source_ip, config_.gate_duration_sec);
+    open_gate(source_ip, gate_dur);
     stats_.spa_authenticated.fetch_add(1);
     stats_.gates_opened.fetch_add(1);
 
     event.result = KnockResult::SPA_AUTHENTICATED;
     event.details = "SPA verified — gate opened for " +
-        std::to_string(config_.gate_duration_sec) + "s";
+        std::to_string(gate_dur) + "s";
     emit_event(event);
     return KnockResult::SPA_AUTHENTICATED;
 }
@@ -490,11 +530,18 @@ KnockResult PortKnock::process_covert_knock(
     uint16_t ip_id,
     uint8_t ttl) {
 
+    bool use_window, use_ipid;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);  // #65
+        use_window = config_.covert_use_window;
+        use_ipid = config_.covert_use_ipid;
+    }
+
     // Decode the knock value from TCP header fields
     uint16_t decoded_port = 0;
-    if (config_.covert_use_window) {
+    if (use_window) {
         decoded_port = tcp_window;
-    } else if (config_.covert_use_ipid) {
+    } else if (use_ipid) {
         decoded_port = ip_id ^ 0xA5A5;  // reverse XOR obfuscation
     }
     (void)ttl; // TTL used as secondary validation in future
@@ -503,16 +550,20 @@ KnockResult PortKnock::process_covert_knock(
 }
 
 // ===== Gate Management =====
+// Issue #66: is_gate_open() is now non-const and lazy-evicts expired entries.
+// This prevents unbounded growth of gates_ under DoS.
 
-bool PortKnock::is_gate_open(const std::string& ip) const {
+bool PortKnock::is_gate_open(const std::string& ip) {
     std::lock_guard<std::mutex> lock(gate_mutex_);
     auto it = gates_.find(ip);
     if (it == gates_.end()) return false;
     if (!it->second.is_open) return false;
 
-    // Check expiry
+    // Check expiry — lazy eviction
     if (std::chrono::steady_clock::now() > it->second.expires_at) {
-        return false;  // expired, but can't modify from const
+        gates_.erase(it);  // Issue #66: remove expired entry in-place
+        stats_.active_gates.store(gates_.size());
+        return false;
     }
     return true;
 }
@@ -520,7 +571,10 @@ bool PortKnock::is_gate_open(const std::string& ip) const {
 void PortKnock::open_gate(const std::string& ip, uint32_t duration_sec) {
     std::lock_guard<std::mutex> lock(gate_mutex_);
 
-    if (duration_sec == 0) duration_sec = config_.gate_duration_sec;
+    if (duration_sec == 0) {
+        std::lock_guard<std::mutex> clock(config_mutex_);  // #65
+        duration_sec = config_.gate_duration_sec;
+    }
 
     auto now = std::chrono::steady_clock::now();
     GateEntry& gate = gates_[ip];
@@ -532,7 +586,12 @@ void PortKnock::open_gate(const std::string& ip, uint32_t duration_sec) {
     stats_.active_gates.store(gates_.size());
 
     // Evict if too many
-    if (gates_.size() > config_.max_active_gates) {
+    size_t max_gates;
+    {
+        std::lock_guard<std::mutex> clock(config_mutex_);  // #65
+        max_gates = config_.max_active_gates;
+    }
+    if (gates_.size() > max_gates) {
         // Remove oldest expired
         for (auto it = gates_.begin(); it != gates_.end();) {
             if (!it->second.is_open || now > it->second.expires_at) {
@@ -541,6 +600,7 @@ void PortKnock::open_gate(const std::string& ip, uint32_t duration_sec) {
                 ++it;
             }
         }
+        stats_.active_gates.store(gates_.size());
     }
 }
 
@@ -580,7 +640,12 @@ void PortKnock::cleanup_expired_gates() {
     // Also clean progress
     {
         std::lock_guard<std::mutex> plock(progress_mutex_);
-        auto cutoff = now - std::chrono::seconds(config_.knock_timeout_sec * 3);
+        uint32_t timeout;
+        {
+            std::lock_guard<std::mutex> clock(config_mutex_);  // #65
+            timeout = config_.knock_timeout_sec;
+        }
+        auto cutoff = now - std::chrono::seconds(timeout * 3);
         for (auto it = progress_.begin(); it != progress_.end();) {
             if (it->second.last_knock < cutoff || it->second.received_ports.empty()) {
                 it = progress_.erase(it);
@@ -593,7 +658,12 @@ void PortKnock::cleanup_expired_gates() {
     // Clean rate limits
     {
         std::lock_guard<std::mutex> rlock(rate_mutex_);
-        auto window = std::chrono::seconds(config_.attempt_window_sec * 2);
+        uint32_t attempt_window;
+        {
+            std::lock_guard<std::mutex> clock(config_mutex_);  // #65
+            attempt_window = config_.attempt_window_sec;
+        }
+        auto window = std::chrono::seconds(attempt_window * 2);
         for (auto it = rate_limits_.begin(); it != rate_limits_.end();) {
             if (now - it->second.window_start > window) {
                 it = rate_limits_.erase(it);
@@ -620,14 +690,21 @@ bool PortKnock::check_rate_limit(const std::string& ip) {
     auto now = std::chrono::steady_clock::now();
     auto& entry = rate_limits_[ip];
 
-    auto window = std::chrono::seconds(config_.attempt_window_sec);
+    uint32_t attempt_window, max_attempts;
+    {
+        std::lock_guard<std::mutex> clock(config_mutex_);  // #65
+        attempt_window = config_.attempt_window_sec;
+        max_attempts = config_.max_attempts_per_ip;
+    }
+
+    auto window = std::chrono::seconds(attempt_window);
     if (now - entry.window_start > window) {
         entry.count = 0;
         entry.window_start = now;
     }
 
     entry.count++;
-    return entry.count <= config_.max_attempts_per_ip;
+    return entry.count <= max_attempts;
 }
 
 // ===== Replay Protection =====
@@ -661,14 +738,21 @@ void PortKnock::record_completed_sequence(const std::vector<uint16_t>& sequence)
     }
 
     // Evict oldest if at capacity
-    while (replay_window_.size() >= config_.replay_window_size) {
+    size_t max_replay;
+    uint32_t replay_expiry;
+    {
+        std::lock_guard<std::mutex> clock(config_mutex_);  // #65
+        max_replay = config_.replay_window_size;
+        replay_expiry = config_.replay_expiry_sec;
+    }
+    while (replay_window_.size() >= max_replay) {
         replay_set_.erase(replay_window_.front().sequence_key);
         replay_window_.pop_front();
     }
 
     ReplayEntry entry;
     entry.sequence_key = key;
-    entry.expiry = now + std::chrono::seconds(config_.replay_expiry_sec);
+    entry.expiry = now + std::chrono::seconds(replay_expiry);
     replay_window_.push_back(entry);
     replay_set_.insert(key);
 }
@@ -686,10 +770,12 @@ void PortKnock::set_event_callback(KnockEventCallback callback) {
 }
 
 void PortKnock::set_config(const PortKnockConfig& config) {
+    std::lock_guard<std::mutex> lock(config_mutex_);  // #65
     config_ = config;
 }
 
 PortKnockConfig PortKnock::get_config() const {
+    std::lock_guard<std::mutex> lock(config_mutex_);  // #65
     return config_;
 }
 
