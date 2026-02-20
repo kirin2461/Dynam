@@ -269,6 +269,9 @@ public:
     // Get recent entries
     std::vector<LogEntry> get_recent_entries(size_t count) const;
 
+    // Write a single log entry (thread-safe, takes mutex internally)
+    void write_entry(const LogEntry& entry);
+
 private:
     std::string log_path_;
     std::ofstream log_file_;
@@ -277,7 +280,9 @@ private:
     mutable std::mutex mutex_;
     
     std::string event_type_to_string(EventType type) const;
-    void write_entry(const LogEntry& entry);
+
+    // Internal write without locking — caller MUST hold mutex_
+    void write_entry_unlocked(const LogEntry& entry);
 };
 
 // ==================== Auto Route Switch ====================
@@ -336,8 +341,9 @@ private:
     std::string active_provider_;
     SwitchCallback switch_callback_;
     mutable std::mutex mutex_;
-    
-    void check_and_switch(const std::string& failed_provider);
+
+    // NOTE: check_and_switch() removed — logic inlined into record_failure()
+    // to allow invoking switch_callback_ outside mutex_ and prevent deadlock.
 };
 
 // ==================== Canary Tokens ====================
