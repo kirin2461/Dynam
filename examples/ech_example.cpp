@@ -75,9 +75,9 @@ int main() {
             std::cout << "   - Encapsulated key size: " << enc.size() << " bytes\n";
             std::cout << "   - Encrypted payload size: " << encrypted.size() << " bytes\n";
 
-            // Server: Decrypt
+            // Server: Decrypt (pass test_config for HPKE info vector)
             ECHServerContext server;
-            if (server.init(private_key, suite)) {
+            if (server.init(private_key, suite, test_config)) {
                 std::vector<uint8_t> decrypted;
                 if (server.decrypt(enc, encrypted, outer_aad, decrypted)) {
                     std::cout << "   ✓ Server decryption successful\n";
