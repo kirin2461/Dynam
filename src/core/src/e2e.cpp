@@ -6,6 +6,12 @@
 #include <mutex>
 #include <cstring>
 
+// OpenSSL for X448 and ECDH_P256
+#include <openssl/evp.h>
+#include <openssl/ec.h>
+#include <openssl/obj_mac.h>
+#include <openssl/err.h>
+
 #ifdef HAVE_LIBOQS
 #include <oqs/oqs.h>
 #endif
@@ -42,6 +48,7 @@ E2ESession::E2ESession(const E2EConfig& config)
 
 E2ESession::~E2ESession() = default;
 
+// ===== Phase 2.3: generate_key_pair() — X448 + ECDH_P256 implementation =====
 KeyPair E2ESession::generate_key_pair() {
     std::lock_guard<std::mutex> lock(pImpl_->mutex);
 
@@ -57,11 +64,101 @@ KeyPair E2ESession::generate_key_pair() {
             crypto_box_keypair(kp.public_key.data(), kp.private_key.data());
             break;
 
-        case KeyExchangeProtocol::X448:
-            throw std::runtime_error("X448 not supported by libsodium - use X25519 or implement with OpenSSL");
+        case KeyExchangeProtocol::X448: {
+            // X448 key generation via OpenSSL EVP API
+            EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X448, nullptr);
+            if (!pctx) {
+                throw std::runtime_error("Failed to create X448 context");
+            }
 
-        case KeyExchangeProtocol::ECDH_P256:
-            throw std::runtime_error("ECDH P-256 not supported by libsodium - use X25519 or implement with OpenSSL");
+            if (EVP_PKEY_keygen_init(pctx) <= 0) {
+                EVP_PKEY_CTX_free(pctx);
+                throw std::runtime_error("Failed to initialize X448 keygen");
+            }
+
+            EVP_PKEY* pkey = nullptr;
+            if (EVP_PKEY_keygen(pctx, &pkey) <= 0) {
+                EVP_PKEY_CTX_free(pctx);
+                throw std::runtime_error("Failed to generate X448 keypair");
+            }
+            EVP_PKEY_CTX_free(pctx);
+
+            // Extract raw public key (56 bytes for X448)
+            size_t pubkey_len = 56;
+            kp.public_key = SecureMemory(pubkey_len);
+            if (EVP_PKEY_get_raw_public_key(pkey, kp.public_key.data(), &pubkey_len) <= 0) {
+                EVP_PKEY_free(pkey);
+                throw std::runtime_error("Failed to extract X448 public key");
+            }
+            kp.public_key.resize(pubkey_len);
+
+            // Extract raw private key (56 bytes for X448)
+            size_t privkey_len = 56;
+            kp.private_key = SecureMemory(privkey_len);
+            if (EVP_PKEY_get_raw_private_key(pkey, kp.private_key.data(), &privkey_len) <= 0) {
+                EVP_PKEY_free(pkey);
+                throw std::runtime_error("Failed to extract X448 private key");
+            }
+            kp.private_key.resize(privkey_len);
+
+            EVP_PKEY_free(pkey);
+            break;
+        }
+
+        case KeyExchangeProtocol::ECDH_P256: {
+            // ECDH P-256 key generation via OpenSSL EVP API
+            EVP_PKEY_CTX* pctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
+            if (!pctx) {
+                throw std::runtime_error("Failed to create ECDH P-256 context");
+            }
+
+            if (EVP_PKEY_keygen_init(pctx) <= 0) {
+                EVP_PKEY_CTX_free(pctx);
+                throw std::runtime_error("Failed to initialize ECDH P-256 keygen");
+            }
+
+            // Set curve to P-256 (NID_X9_62_prime256v1)
+            if (EVP_PKEY_CTX_set_ec_paramgen_curve_nid(pctx, NID_X9_62_prime256v1) <= 0) {
+                EVP_PKEY_CTX_free(pctx);
+                throw std::runtime_error("Failed to set ECDH P-256 curve");
+            }
+
+            EVP_PKEY* pkey = nullptr;
+            if (EVP_PKEY_keygen(pctx, &pkey) <= 0) {
+                EVP_PKEY_CTX_free(pctx);
+                throw std::runtime_error("Failed to generate ECDH P-256 keypair");
+            }
+            EVP_PKEY_CTX_free(pctx);
+
+            // Extract public key (uncompressed point: 0x04 + 32 bytes X + 32 bytes Y = 65 bytes)
+            size_t pubkey_len = 0;
+            if (EVP_PKEY_get_raw_public_key(pkey, nullptr, &pubkey_len) <= 0) {
+                EVP_PKEY_free(pkey);
+                throw std::runtime_error("Failed to query ECDH P-256 public key size");
+            }
+
+            kp.public_key = SecureMemory(pubkey_len);
+            if (EVP_PKEY_get_raw_public_key(pkey, kp.public_key.data(), &pubkey_len) <= 0) {
+                EVP_PKEY_free(pkey);
+                throw std::runtime_error("Failed to extract ECDH P-256 public key");
+            }
+
+            // Extract private key (32 bytes scalar)
+            size_t privkey_len = 0;
+            if (EVP_PKEY_get_raw_private_key(pkey, nullptr, &privkey_len) <= 0) {
+                EVP_PKEY_free(pkey);
+                throw std::runtime_error("Failed to query ECDH P-256 private key size");
+            }
+
+            kp.private_key = SecureMemory(privkey_len);
+            if (EVP_PKEY_get_raw_private_key(pkey, kp.private_key.data(), &privkey_len) <= 0) {
+                EVP_PKEY_free(pkey);
+                throw std::runtime_error("Failed to extract ECDH P-256 private key");
+            }
+
+            EVP_PKEY_free(pkey);
+            break;
+        }
 
         case KeyExchangeProtocol::Kyber1024:
 #ifdef HAVE_LIBOQS
@@ -90,6 +187,7 @@ KeyPair E2ESession::generate_key_pair() {
     return kp;
 }
 
+// ===== Phase 2.3: compute_shared_secret() — X448 + ECDH_P256 implementation =====
 SecureMemory E2ESession::compute_shared_secret(
     const KeyPair& local_keypair,
     const std::vector<uint8_t>& peer_public_key
@@ -115,11 +213,149 @@ SecureMemory E2ESession::compute_shared_secret(
             return shared_secret;
         }
 
-        case KeyExchangeProtocol::X448:
-            throw std::runtime_error("X448 not supported by libsodium");
+        case KeyExchangeProtocol::X448: {
+            // X448 shared secret computation via OpenSSL EVP_PKEY_derive
+            if (peer_public_key.size() != 56) {
+                throw std::runtime_error("Invalid peer public key size for X448 (expected 56 bytes)");
+            }
 
-        case KeyExchangeProtocol::ECDH_P256:
-            throw std::runtime_error("ECDH P-256 not supported by libsodium");
+            // Load local private key
+            EVP_PKEY* local_pkey = EVP_PKEY_new_raw_private_key(
+                EVP_PKEY_X448, nullptr,
+                local_keypair.private_key.data(),
+                local_keypair.private_key.size()
+            );
+            if (!local_pkey) {
+                throw std::runtime_error("Failed to load X448 local private key");
+            }
+
+            // Load peer public key
+            EVP_PKEY* peer_pkey = EVP_PKEY_new_raw_public_key(
+                EVP_PKEY_X448, nullptr,
+                peer_public_key.data(),
+                peer_public_key.size()
+            );
+            if (!peer_pkey) {
+                EVP_PKEY_free(local_pkey);
+                throw std::runtime_error("Failed to load X448 peer public key");
+            }
+
+            // Derive shared secret
+            EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(local_pkey, nullptr);
+            if (!ctx) {
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to create X448 derive context");
+            }
+
+            if (EVP_PKEY_derive_init(ctx) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to initialize X448 derive");
+            }
+
+            if (EVP_PKEY_derive_set_peer(ctx, peer_pkey) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to set X448 peer key");
+            }
+
+            size_t secret_len = 0;
+            if (EVP_PKEY_derive(ctx, nullptr, &secret_len) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to query X448 shared secret size");
+            }
+
+            SecureMemory shared_secret(secret_len);
+            if (EVP_PKEY_derive(ctx, shared_secret.data(), &secret_len) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to derive X448 shared secret");
+            }
+
+            EVP_PKEY_CTX_free(ctx);
+            EVP_PKEY_free(local_pkey);
+            EVP_PKEY_free(peer_pkey);
+
+            return shared_secret;
+        }
+
+        case KeyExchangeProtocol::ECDH_P256: {
+            // ECDH P-256 shared secret computation via OpenSSL EVP_PKEY_derive
+            if (peer_public_key.size() != 65) {  // Uncompressed point: 0x04 + 32 + 32
+                throw std::runtime_error("Invalid peer public key size for ECDH P-256 (expected 65 bytes)");
+            }
+
+            // Load local private key
+            EVP_PKEY* local_pkey = EVP_PKEY_new_raw_private_key(
+                EVP_PKEY_EC, nullptr,
+                local_keypair.private_key.data(),
+                local_keypair.private_key.size()
+            );
+            if (!local_pkey) {
+                throw std::runtime_error("Failed to load ECDH P-256 local private key");
+            }
+
+            // Load peer public key
+            EVP_PKEY* peer_pkey = EVP_PKEY_new_raw_public_key(
+                EVP_PKEY_EC, nullptr,
+                peer_public_key.data(),
+                peer_public_key.size()
+            );
+            if (!peer_pkey) {
+                EVP_PKEY_free(local_pkey);
+                throw std::runtime_error("Failed to load ECDH P-256 peer public key");
+            }
+
+            // Derive shared secret
+            EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(local_pkey, nullptr);
+            if (!ctx) {
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to create ECDH P-256 derive context");
+            }
+
+            if (EVP_PKEY_derive_init(ctx) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to initialize ECDH P-256 derive");
+            }
+
+            if (EVP_PKEY_derive_set_peer(ctx, peer_pkey) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to set ECDH P-256 peer key");
+            }
+
+            size_t secret_len = 0;
+            if (EVP_PKEY_derive(ctx, nullptr, &secret_len) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to query ECDH P-256 shared secret size");
+            }
+
+            SecureMemory shared_secret(secret_len);
+            if (EVP_PKEY_derive(ctx, shared_secret.data(), &secret_len) <= 0) {
+                EVP_PKEY_CTX_free(ctx);
+                EVP_PKEY_free(local_pkey);
+                EVP_PKEY_free(peer_pkey);
+                throw std::runtime_error("Failed to derive ECDH P-256 shared secret");
+            }
+
+            EVP_PKEY_CTX_free(ctx);
+            EVP_PKEY_free(local_pkey);
+            EVP_PKEY_free(peer_pkey);
+
+            return shared_secret;
+        }
 
         case KeyExchangeProtocol::Kyber1024:
 #ifdef HAVE_LIBOQS
