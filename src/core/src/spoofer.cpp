@@ -34,17 +34,21 @@
 namespace ncp {
 
 // ==================== Safe Command Execution ====================
+// NOTE: 'mount' removed from whitelist — it requires root and enables
+// privilege escalation (e.g. mounting tmpfs over system directories).
 static const std::set<std::string> ALLOWED_COMMANDS = {
     "ip", "ifconfig", "netsh", "arp", "route", "hostname", "sysctl",
-    "reg", "mount", "systemctl"
+    "reg", "systemctl"
 };
 
 static bool is_command_allowed(const std::string& cmd_name) {
     return ALLOWED_COMMANDS.find(cmd_name) != ALLOWED_COMMANDS.end();
 }
 
+// FIX: Also reject space characters to prevent argument injection
+// on Windows where CreateProcessA concatenates args with spaces.
 static bool is_safe_argument(const std::string& arg) {
-    const std::string dangerous_chars = ";|&$`\"'\\<>(){}[]!#~";
+    const std::string dangerous_chars = ";|&$`\"'\\<>(){}[]!#~ ";
     for (char c : arg) {
         if (dangerous_chars.find(c) != std::string::npos) {
             return false;
@@ -255,6 +259,8 @@ bool NetworkSpoofer::rotate_mac() {
 
 bool NetworkSpoofer::rotate_dns() {
     if (!enabled_ || !config_.spoof_dns) return false;
+    // TODO: Make DNS providers configurable via SpoofConfig instead of hardcoding.
+    // Hardcoded rotation between well-known providers creates a detectable fingerprint.
     std::vector<std::string> providers = {"1.1.1.1","8.8.8.8","9.9.9.9","1.0.0.1","8.8.4.4"};
     // SECURITY FIX: Use unbiased csprng_uniform for Fisher-Yates shuffle
     for (size_t i = providers.size()-1; i > 0; --i) {
@@ -440,12 +446,15 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
     if (gethostname(hostname, sizeof(hostname)) == 0)
         original_identity_.hostname = hostname;
 
+    // FIX: Save ALL lines from resolv.conf, not just nameserver entries
     std::ifstream resolv("/etc/resolv.conf");
     std::string line;
     while (std::getline(resolv, line)) {
         if (line.substr(0, 11) == "nameserver ") {
             original_identity_.dns_servers.push_back(line.substr(11));
         }
+        // Store full resolv.conf content for complete restoration
+        original_identity_.resolv_conf_lines.push_back(line);
     }
     return true;
 #endif
@@ -458,8 +467,26 @@ bool NetworkSpoofer::restore_original_identity() {
         success &= apply_mac(id.mac_address);
     if (status_.ipv4_spoofed && !id.ipv4_address.empty())
         success &= apply_ipv4(id.ipv4_address);
-    if (status_.dns_spoofed && !id.dns_servers.empty())
+    if (status_.dns_spoofed && !id.dns_servers.empty()) {
+#ifndef _WIN32
+        // FIX: Restore full resolv.conf content (search/domain directives too)
+        if (!id.resolv_conf_lines.empty()) {
+            std::ofstream resolv("/etc/resolv.conf", std::ios::trunc);
+            if (resolv.is_open()) {
+                for (const auto& line : id.resolv_conf_lines) {
+                    resolv << line << "\n";
+                }
+                resolv.close();
+            } else {
+                success = false;
+            }
+        } else {
+            success &= apply_dns(id.dns_servers);
+        }
+#else
         success &= apply_dns(id.dns_servers);
+#endif
+    }
     if (status_.hostname_spoofed && !id.hostname.empty())
         success &= apply_hostname(id.hostname);
     return success;
@@ -544,8 +571,28 @@ bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
     }
     return true;
 #else
+    // FIX: Preserve existing search/domain/options directives from resolv.conf
+    // instead of blindly truncating the entire file.
+    std::vector<std::string> preserved_lines;
+    {
+        std::ifstream resolv("/etc/resolv.conf");
+        std::string line;
+        while (std::getline(resolv, line)) {
+            // Keep non-nameserver lines (search, domain, options, sortlist, comments)
+            if (line.substr(0, 11) != "nameserver ") {
+                preserved_lines.push_back(line);
+            }
+        }
+    }
+
     std::ofstream resolv("/etc/resolv.conf", std::ios::trunc);
     if (!resolv.is_open()) return false;
+
+    // Write back preserved directives first
+    for (const auto& line : preserved_lines) {
+        resolv << line << "\n";
+    }
+    // Then write new nameservers
     for (const auto& dns : dns_servers) {
         resolv << "nameserver " << dns << "\n";
     }
@@ -718,7 +765,7 @@ bool NetworkSpoofer::set_custom_disk_serial(const std::string& disk_serial) {
     return true;
 }
 
-// ==================== Platform-specific: SMBIOS Spoofing ====================
+// ==================== Platform-specific: SMBIOS Spoofing (3-arg) ====================
 bool NetworkSpoofer::apply_smbios(const std::string& board_serial, 
                                    const std::string& system_serial, 
                                    const std::string& uuid) {
@@ -780,6 +827,26 @@ bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
 #endif
 }
 
+// ==================== Platform-specific: SMBIOS Spoofing (8-arg, delegates to 3-arg) ====================
+bool NetworkSpoofer::apply_smbios(
+    [[maybe_unused]] const std::string& bios_vendor,
+    [[maybe_unused]] const std::string& bios_version,
+    [[maybe_unused]] const std::string& board_manufacturer,
+    [[maybe_unused]] const std::string& board_product,
+    const std::string& board_serial,
+    [[maybe_unused]] const std::string& system_manufacturer,
+    [[maybe_unused]] const std::string& system_product,
+    const std::string& system_serial)
+{
+    std::string uuid;
+    if (!config_.custom_system_uuid.empty()) {
+        uuid = config_.custom_system_uuid;
+    } else {
+        uuid = generate_random_uuid();
+    }
+    return apply_smbios(board_serial, system_serial, uuid);
+}
+
 // ==================== Platform-specific: Disk Serial Spoofing ====================
 bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
     if (disk_serial.empty()) return false;
@@ -804,97 +871,13 @@ bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
 }
 
 // ==================== Platform-specific: DHCP Client ID Spoofing ====================
-bool NetworkSpoofer::apply_dhcp_client_id(const std::string& client_id) {
-    if (client_id.empty()) return false;
-    return false; // Not yet implemented
-}
-
-// ==================== Platform-specific: TCP Fingerprint Spoofing ====================
-bool NetworkSpoofer::apply_tcp_fingerprint(const TcpFingerprintProfile& profile) {
-    config_.tcp_profile = profile;
-    return false; // Stub — requires WFP/nfqueue
-}
-
-// ==================== Platform-Specific HW Spoofing Methods ====================
-
-// Phase 1: SMBIOS/DMI Spoofing (Windows Registry / Linux sysfs)
-bool NetworkSpoofer::apply_smbios(const std::string& bios_vendor, const std::string& bios_version,
-                                   const std::string& board_manufacturer, const std::string& board_product,
-                                   const std::string& board_serial, const std::string& system_manufacturer,
-                                   const std::string& system_product, const std::string& system_serial) {
-    (void)bios_vendor;          // Suppress unused parameter warning - stub function
-    (void)bios_version;         // Suppress unused parameter warning - stub function
-    (void)board_manufacturer;   // Suppress unused parameter warning - stub function
-    (void)board_product;        // Suppress unused parameter warning - stub function
-    (void)system_manufacturer;  // Suppress unused parameter warning - stub function
-    (void)system_product;       // Suppress unused parameter warning - stub function
-    (void)system_serial;        // Suppress unused parameter warning - stub function
-    
-#ifdef _WIN32
-    // Windows: Modify HKLM\HARDWARE\DESCRIPTION\System\BIOS via Registry
-    // WARNING: Requires elevated privileges (Administrator)
-    // Note: Direct registry modification may be detected; kernel-mode driver preferred for production
-    
-    const char* registry_paths[] = {
-        "HARDWARE\\DESCRIPTION\\System\\BIOS",
-        "HARDWARE\\DESCRIPTION\\System\\MultifunctionAdapter\\0\\DiskController\\0"
-    };
-    
-    // Example: Set BaseBoardSerialNumber
-    // In production, use RegSetKeyValueA() or similar Win32 APIs
-    // This is a stub showing the approach:
-    
-    std::string cmd = "reg add \"HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS\" /v BaseBoardSerialNumber /t REG_SZ /d \"" + board_serial + "\" /f";
-    auto result = execute_command_safe("reg", {"add", "HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS", "/v", "BaseBoardSerialNumber", "/t", "REG_SZ", "/d", board_serial, "/f"});
-    
-    // Additional keys to spoof:
-    // - SystemManufacturer, SystemProductName, SystemSerialNumber
-    // - BIOSVendor, BIOSVersion, BIOSReleaseDate
-    
-    return result.find("Error") == std::string::npos;
-    
-#else
-    // Linux: Modify /sys/class/dmi/id/* (requires root + remount rw)
-    // This is read-only by default; kernel module required for persistent changes
-    
-    // Usermode approach (temporary, detection risk high):
-    // 1. Mount tmpfs over /sys/class/dmi/id
-    // 2. Create fake files with spoofed values
-    
-    std::string mount_cmd = "mount -t tmpfs tmpfs /sys/class/dmi/id";
-    auto result = execute_command_safe("mount", {"-t", "tmpfs", "tmpfs", "/sys/class/dmi/id"});
-    
-    // Write spoofed values
-    std::ofstream("/sys/class/dmi/id/board_serial") << board_serial;
-    std::ofstream("/sys/class/dmi/id/product_serial") << system_serial;
-    std::ofstream("/sys/class/dmi/id/sys_vendor") << system_manufacturer;
-    
-    return true;
-#endif
-bool NetworkSpoofer::apply_smbios(
-    [[maybe_unused]] const std::string& bios_vendor,
-    [[maybe_unused]] const std::string& bios_version,
-    [[maybe_unused]] const std::string& board_manufacturer,
-    [[maybe_unused]] const std::string& board_product,
-    const std::string& board_serial,
-    [[maybe_unused]] const std::string& system_manufacturer,
-    [[maybe_unused]] const std::string& system_product,
-    const std::string& system_serial)
-{
-    std::string uuid;
-    if (!config_.custom_system_uuid.empty()) {
-        uuid = config_.custom_system_uuid;
-    } else {
-        uuid = generate_random_uuid();
-    }
-    return apply_smbios(board_serial, system_serial, uuid);
-}
-
 bool NetworkSpoofer::apply_dhcp_client_id(const std::string& interface_name, const std::string& client_id) {
+    if (client_id.empty()) return false;
 #ifdef _WIN32
     auto result = execute_command_safe("netsh", {"interface", "ipv4", "set", "interface", interface_name, "dhcpclientid="+client_id});
     return result.find("Error") == std::string::npos;
 #else
+    (void)interface_name;
     std::ofstream dhcp_conf("/etc/dhcp/dhclient.conf", std::ios::app);
     if (dhcp_conf.is_open()) {
         dhcp_conf << "\nsend dhcp-client-identifier \"" << client_id << "\";\n";
@@ -904,6 +887,12 @@ bool NetworkSpoofer::apply_dhcp_client_id(const std::string& interface_name, con
     }
     return false;
 #endif
+}
+
+// ==================== Platform-specific: TCP Fingerprint Spoofing ====================
+bool NetworkSpoofer::apply_tcp_fingerprint(const TcpFingerprintProfile& profile) {
+    config_.tcp_profile = profile;
+    return apply_tcp_fingerprint_impl(profile);
 }
 
 bool NetworkSpoofer::apply_tcp_fingerprint_impl(const TcpFingerprintProfile& profile) {
