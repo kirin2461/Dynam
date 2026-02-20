@@ -8,6 +8,7 @@
 #include <functional>
 #include <chrono>
 #include <cstdint>
+#include <algorithm>
 
 // Forward declaration to avoid circular include
 namespace ncp {
@@ -138,13 +139,44 @@ struct AdvancedDPIConfig {
     //   - apply padding / obfuscation
     //   - apply timing jitter
     bool mimicry_managed_tls = false;
-    bool enable_multipath = false;
-    bool tspu_bypass = true;
-    bool china_gfw_bypass = false;
 
     // === Phase 3D: ECH (Encrypted Client Hello) support ===
     bool enable_ech = false;
     std::vector<uint8_t> ech_config_list;  // Serialized ECHConfig (from DNS or manual)
+
+    // ===== Technique helpers (Step 1D) =====
+
+    /**
+     * @brief Check whether a specific evasion technique is enabled.
+     *
+     * Centralizes the decision instead of ad-hoc std::find calls
+     * scattered across process_outgoing.
+     *
+     * @param t  Technique to look up
+     * @return true if `t` is present in the `techniques` vector
+     */
+    bool has_technique(EvasionTechnique t) const noexcept {
+        return std::find(techniques.begin(), techniques.end(), t) != techniques.end();
+    }
+
+    /**
+     * @brief Add a technique if not already present.
+     */
+    void add_technique(EvasionTechnique t) {
+        if (!has_technique(t)) {
+            techniques.push_back(t);
+        }
+    }
+
+    /**
+     * @brief Remove a technique if present.
+     */
+    void remove_technique(EvasionTechnique t) {
+        techniques.erase(
+            std::remove(techniques.begin(), techniques.end(), t),
+            techniques.end()
+        );
+    }
 };
 
 struct AdvancedDPIStats {
@@ -274,6 +306,7 @@ public:
     void stop();
     bool is_running() const;
     AdvancedDPIStats get_stats() const;
+    AdvancedDPIConfig get_config() const;
     
     std::vector<std::vector<uint8_t>> process_outgoing(
         const uint8_t* data, size_t len);
@@ -302,6 +335,8 @@ public:
      * handles TLS framing.
      */
     void set_mimicry_managed_tls(bool managed);
+
+    /**
      * @brief Set TLS fingerprint for the advanced bypass pipeline.
      *        The fingerprint is forwarded to internal TLSManipulator
      *        so that fake/real ClientHello use realistic browser profiles.
