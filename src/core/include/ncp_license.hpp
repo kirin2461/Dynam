@@ -8,10 +8,10 @@
 #include <memory>
 #include <map>
 #include <functional>
+#include "ncp_secure_memory.hpp"
+#include "ncp_crypto.hpp"
 
 namespace ncp {
-
-class Crypto; // Forward declaration
 
 class License {
 public:
@@ -96,6 +96,9 @@ public:
     License();
     ~License();
 
+    // ===== Public Key Access (for embedding in validators) =====
+    SecureMemory get_public_key() const;
+
     // HWID Generation (multi-factor hardware fingerprinting)
     std::string get_hwid();
     HardwareProfile get_hardware_profile();
@@ -160,7 +163,7 @@ public:
     bool create_trial_license(int days, const std::string& output_file);
     bool is_trial_expired();
     int get_trial_days_remaining();
-    bool has_trial_been_used(); // Persistent trial tracking
+    bool has_trial_been_used();
 
     // Feature Flags
     bool is_feature_enabled(const std::string& feature_name);
@@ -187,6 +190,9 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::unique_ptr<Crypto> crypto_;
+
+    // Persistent signing keypair (generated once in constructor)
+    Crypto::Keypair signing_keypair_;
     
     // Hardware fingerprinting
     std::string get_mac_address();
@@ -247,7 +253,6 @@ private:
     void schedule_next_validation();
 };
 
-// Inline operators for flags
 inline uint8_t operator|(License::AntiTamperFlag a, License::AntiTamperFlag b) {
     return static_cast<uint8_t>(a) | static_cast<uint8_t>(b);
 }

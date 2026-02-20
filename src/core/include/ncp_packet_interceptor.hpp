@@ -23,7 +23,7 @@ namespace ncp {
  *  - MTU enforcement (fragment packets >1500 before they leave)
  *  - Post-tunnel TTL normalization (rewrite TTL after VPN/tunnel)
  *  - GRE/IPIP/VXLAN encapsulation
- *  - Protocol obfuscation (GRE→UDP masking, XOR payload)
+ *  - Protocol obfuscation (ChaCha20 stream cipher / legacy XOR)
  *  - Integration with L3Stealth for IPID/TTL/MSS processing
  *
  * Does NOT require:
@@ -47,7 +47,7 @@ public:
         GRE,            // Generic Routing Encapsulation (IP protocol 47)
         IPIP,           // IP-in-IP (IP protocol 4)
         VXLAN,          // VXLAN over UDP (port 4789)
-        GRE_OBFUSCATED  // GRE masked as UDP + XOR obfuscation
+        GRE_OBFUSCATED  // GRE masked as UDP + stream cipher obfuscation
     };
 
     // ==================== Verdict for intercepted packets ====================
@@ -95,7 +95,16 @@ public:
 
         // --- Protocol Obfuscation ---
         bool enable_protocol_obfuscation = false;
-        uint8_t xor_key = 0x5A;             // XOR key for payload obfuscation
+
+        /// ChaCha20 key material (recommended, any length — hashed to 32 bytes internally).
+        /// When set, uses ChaCha20 stream cipher with per-packet nonce.
+        /// Receiver must strip 8-byte nonce prefix before decryption.
+        std::vector<uint8_t> obfuscation_key;
+
+        /// @deprecated Legacy single-byte XOR key. Trivially reversible.
+        /// Used only as fallback when obfuscation_key is empty.
+        uint8_t xor_key = 0x5A;
+
         bool masquerade_as_udp = false;     // Wrap GRE in fake UDP header
         uint16_t fake_udp_src_port = 53;    // DNS-like traffic
         uint16_t fake_udp_dst_port = 53;
@@ -182,6 +191,7 @@ public:
      * @brief Update config at runtime (thread-safe).
      *
      * Some settings (like backend type) cannot be changed after start.
+     * Bumps internal config version so thread_local caches re-initialize.
      */
     bool update_config(const Config& config);
 
@@ -236,6 +246,7 @@ private:
     Config config_;
     bool initialized_ = false;
     std::atomic<bool> running_{false};
+    std::atomic<uint64_t> config_version_{0};  // Bumped on config changes for thread_local re-init
     Stats stats_;
     LogCallback log_cb_;
     PacketHandler packet_handler_;

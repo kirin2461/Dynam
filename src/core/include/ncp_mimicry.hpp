@@ -7,9 +7,26 @@
 #include <chrono>
 #include <map>
 #include <functional>
+#include <atomic>
+#include <mutex>
 #include "ncp_csprng.hpp"
 
 namespace ncp {
+
+/**
+ * @brief TLS session phase — tracks the state machine so that
+ *        Mimicry never emits Application Data (0x17) before a
+ *        complete handshake sequence (0x16) has been sent.
+ *
+ * Issue #57: Orchestrator was sending 0x17 without prior 0x16,
+ * which is an instant DPI anomaly signal.
+ */
+enum class TlsSessionPhase {
+    IDLE,                   // No TLS records sent yet
+    CLIENT_HELLO_SENT,      // ClientHello (0x16) emitted
+    HANDSHAKE_COMPLETE,     // Fake ServerHello+Finished emitted
+    APPLICATION_DATA        // Ready for Application Data (0x17)
+};
 
 /**
  * @brief Advanced Traffic Mimicry with realistic protocol emulation
@@ -57,12 +74,34 @@ public:
     };
     
     struct MimicStats {
-        uint64_t packets_wrapped = 0;
-        uint64_t packets_unwrapped = 0;
-        uint64_t bytes_original = 0;
-        uint64_t bytes_mimicked = 0;
+        std::atomic<uint64_t> packets_wrapped{0};
+        std::atomic<uint64_t> packets_unwrapped{0};
+        std::atomic<uint64_t> bytes_original{0};
+        std::atomic<uint64_t> bytes_mimicked{0};
+        // average_overhead_percent requires mutex (non-atomic double)
         double average_overhead_percent = 0.0;
+
+        MimicStats() = default;
+        MimicStats(const MimicStats& o)
+            : packets_wrapped(o.packets_wrapped.load()),
+              packets_unwrapped(o.packets_unwrapped.load()),
+              bytes_original(o.bytes_original.load()),
+              bytes_mimicked(o.bytes_mimicked.load()),
+              average_overhead_percent(o.average_overhead_percent) {}
+        MimicStats& operator=(const MimicStats& o) {
+            if (this != &o) {
+                packets_wrapped.store(o.packets_wrapped.load());
+                packets_unwrapped.store(o.packets_unwrapped.load());
+                bytes_original.store(o.bytes_original.load());
+                bytes_mimicked.store(o.bytes_mimicked.load());
+                average_overhead_percent = o.average_overhead_percent;
+            }
+            return *this;
+        }
     };
+
+    // Maximum payload size for DNS tunnel (fits in valid DNS QNAME)
+    static constexpr size_t MAX_DNS_PAYLOAD = 100;
     
     TrafficMimicry();
     explicit TrafficMimicry(const MimicConfig& config);
@@ -77,6 +116,65 @@ public:
     std::vector<uint8_t> wrap_payload(
         const std::vector<uint8_t>& payload
     );
+
+    // ----- TLS session-aware wrapping (Issue #57) -----
+
+    /**
+     * @brief Wrap payload with TLS session state tracking.
+     *
+     * On IDLE:
+     *   1. Generates a full fake TLS handshake preamble
+     *      (ClientHello + fake ServerHello + fake Finished),
+     *      returned via @p handshake_preamble.
+     *   2. Wraps the actual payload as Application Data (0x17).
+     *   3. Transitions to APPLICATION_DATA phase.
+     *
+     * On APPLICATION_DATA:
+     *   Wraps payload as Application Data directly.
+     *
+     * @param payload          Data to wrap.
+     * @param handshake_preamble [out] Packets that MUST be sent
+     *                          before the returned Application Data
+     *                          (non-empty only on session start).
+     * @return The wrapped Application Data packet.
+     */
+    std::vector<uint8_t> wrap_tls_session_aware(
+        const std::vector<uint8_t>& payload,
+        std::vector<std::vector<uint8_t>>& handshake_preamble
+    );
+
+    /**
+     * @brief Generate a fake TLS handshake sequence:
+     *        ClientHello -> ServerHello -> ChangeCipherSpec -> Finished.
+     *
+     * Each element is a complete TLS record ready to be sent on the wire.
+     * Caller must send them in order before any Application Data.
+     */
+    std::vector<std::vector<uint8_t>> generate_tls_handshake_sequence();
+
+    /**
+     * @brief Reset TLS session state to IDLE.
+     *
+     * Call when the underlying TCP connection is closed so the next
+     * wrap_tls_session_aware() will re-emit a handshake.
+     */
+    void reset_tls_session();
+
+    /**
+     * @brief Current TLS session phase.
+     */
+    TlsSessionPhase get_tls_session_phase() const;
+
+    /**
+     * @brief Whether the Mimicry module manages TLS framing.
+     *
+     * When true, external modules (AdvancedDPIBypass) must NOT
+     * inject their own GREASE / fake-ClientHello / SNI split on
+     * the already-framed packets.
+     */
+    bool is_tls_managed() const;
+
+    // ----- end TLS session-aware API -----
     
     // Extract original data from a mimicked packet
     std::vector<uint8_t> unwrap_payload(
@@ -101,6 +199,14 @@ public:
     
     // Timing simulation
     std::chrono::milliseconds get_next_packet_delay();
+
+    /// Set the symmetric key used for TLS ClientHello AEAD encryption.
+    /// Both sides of the tunnel must share the same key for wrap/unwrap to work.
+    /// Key must be exactly crypto_aead_xchacha20poly1305_ietf_KEYBYTES (32) bytes.
+    void set_tls_session_key(const std::vector<uint8_t>& key);
+
+    /// Get the current TLS session key (e.g. to transmit to the peer during handshake).
+    std::vector<uint8_t> get_tls_session_key() const;
     
 private:
     // HTTP mimicry
@@ -112,6 +218,11 @@ private:
     std::vector<uint8_t> create_https_client_hello_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_https_application_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_tls_payload(const std::vector<uint8_t>& data);
+
+    // Fake handshake records (Issue #57)
+    std::vector<uint8_t> create_fake_server_hello();
+    std::vector<uint8_t> create_fake_change_cipher_spec();
+    std::vector<uint8_t> create_fake_finished();
     
     // DNS mimicry
     std::vector<uint8_t> create_dns_query_wrapper(const std::vector<uint8_t>& payload);
@@ -147,13 +258,22 @@ private:
     
     MimicConfig config_;
     MimicStats stats_;
-    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
+    mutable std::mutex stats_overhead_mutex_;  // Protects average_overhead_percent
     std::chrono::steady_clock::time_point last_packet_time_;
     
-    // Protocol-specific state
-    uint32_t tls_sequence_number_;
+    // Protocol-specific state — separate counters per protocol
+    uint32_t tls_seq_;
+    uint32_t skype_seq_;
+    uint32_t zoom_seq_;
     uint16_t dns_transaction_id_;
+    int      dns_last_domain_idx_;  // Track query domain for response matching
     uint64_t quic_packet_number_;
+
+    // TLS session state machine (Issue #57)
+    TlsSessionPhase tls_session_phase_ = TlsSessionPhase::IDLE;
+    /// Symmetric key for XChaCha20-Poly1305 encryption in TLS ClientHello wrapper.
+    /// Generated randomly in constructor; must be shared with peer for unwrap.
+    std::vector<uint8_t> tls_session_key_;
 };
 
 } // namespace ncp

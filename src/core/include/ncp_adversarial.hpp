@@ -175,8 +175,14 @@ public:
     
     /// Apply adversarial padding to outgoing packet payload.
     /// Returns padded payload. Original data can be extracted with unpad().
-    /// The first byte is a control byte: [strategy:4][pre_len_hi:4]
-    /// Second byte: [pre_len_lo:8] — allows up to 4095 bytes pre-padding.
+    ///
+    /// Always writes V2 control header (4 bytes):
+    ///   Byte 0: [strategy:4 bits][pre_len bits 11..8]
+    ///   Byte 1: [pre_len bits 7..0]              => 12-bit pre_len (max 4095)
+    ///   Byte 2: [payload_len bits 15..8]
+    ///   Byte 3: [payload_len bits 7..0]           => 16-bit payload_len (max 65535)
+    ///
+    /// Wire format: [ctrl0..ctrl3][pre_padding][original_payload][post_padding]
     std::vector<uint8_t> pad(
         const uint8_t* payload, size_t len
     );
@@ -184,6 +190,10 @@ public:
     std::vector<uint8_t> pad(const std::vector<uint8_t>& payload);
     
     /// Remove adversarial padding, restore original payload.
+    ///
+    /// Auto-detects header version:
+    ///   - V2 (4-byte): uses payload_len to precisely strip post-padding.
+    ///   - V1 (2-byte, legacy): returns payload + post-padding (caller strips).
     std::vector<uint8_t> unpad(
         const uint8_t* padded_data, size_t len
     );
@@ -266,16 +276,30 @@ private:
     static constexpr uint8_t DUMMY_MAGIC_2 = 0xBE;
     static constexpr uint8_t DUMMY_MAGIC_3 = 0xEF;
     
-    // Control byte encoding
-    // Byte 0: [strategy:4 bits][pre_len high 4 bits]
-    // Byte 1: [pre_len low 8 bits]
-    // This gives 12-bit pre_len = max 4095 bytes
-    static constexpr size_t CONTROL_HEADER_SIZE = 2;
+    // Control header versioning
+    //
+    // V1 (legacy, 2 bytes):
+    //   Byte 0: [strategy:4][pre_len_hi:4]
+    //   Byte 1: [pre_len_lo:8]
+    //   No payload_len — unpad() returns payload + post-padding.
+    //
+    // V2 (current, 4 bytes):
+    //   Byte 0: [strategy:4][pre_len_hi:4]
+    //   Byte 1: [pre_len_lo:8]
+    //   Byte 2: [payload_len_hi:8]
+    //   Byte 3: [payload_len_lo:8]
+    //   unpad() uses payload_len to precisely strip post-padding.
+    //
+    // unpad() auto-detects: tries V2 first, falls back to V1.
+    // pad() always writes V2.
+    static constexpr size_t CONTROL_HEADER_SIZE_V1 = 2;   // Legacy
+    static constexpr size_t CONTROL_HEADER_SIZE_V2 = 4;   // Current
+    static constexpr size_t CONTROL_HEADER_SIZE = CONTROL_HEADER_SIZE_V2;  // pad() uses this
+    static constexpr size_t MAX_PRE_PADDING = 4095;   // 12-bit limit
+    static constexpr size_t MAX_PAYLOAD_LEN = 65535;   // 16-bit limit
     
     AdversarialConfig config_;
     AdversarialStats stats_;
-    
-    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     
     // Adaptive state
     AdversarialStrategy active_strategy_;
