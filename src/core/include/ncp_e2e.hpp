@@ -30,14 +30,14 @@ enum class E2ESessionState {
  */
 enum class KeyExchangeProtocol {
     X25519,      // Curve25519 Diffie-Hellman (libsodium)
-    X448,        // X448 (not supported by libsodium, throws at runtime)
-    ECDH_P256,   // ECDH P-256 (not supported by libsodium, throws at runtime)
+    X448,        // X448 (OpenSSL)
+    ECDH_P256,   // ECDH P-256 (OpenSSL)
     Kyber1024    // Post-quantum KEM (requires liboqs)
 };
 
 struct RatchetState {
     SecureMemory root_key;    // 32 bytes
-    SecureMemory chain_key;   // 32 bytes
+    SecureMemory chain_key;   // 32 bytes (legacy — see sending_chain_key)
     uint32_t sending_chain_length = 0;
     uint32_t receiving_chain_length = 0;
     uint32_t previous_chain_length = 0;
@@ -110,6 +110,12 @@ public:
         size_t key_length
     );
 
+    // FIX #61: Getter for Kyber1024 KEM ciphertext.
+    // After compute_shared_secret() in sender mode (encaps), the ciphertext
+    // must be transmitted to the receiver for decapsulation.
+    // Returns empty vector if not in Kyber mode or no encaps performed.
+    std::vector<uint8_t> get_last_kem_ciphertext() const;
+
     // Low-level encrypt/decrypt with explicit key
     EncryptedMessage encrypt_message(
         const std::vector<uint8_t>& plaintext,
@@ -144,11 +150,14 @@ public:
     uint64_t get_messages_sent() const;
     uint64_t get_messages_received() const;
 
+    // Serialization support for export/import
+    std::vector<uint8_t> serialize_session_state() const;
+    bool restore_session_state(const std::vector<uint8_t>& data);
+
 private:
     void init_ratchet_keys();
 
     /// Internal: decrypt a message using an already-derived message key.
-    /// Used by decrypt() after resolving the key from ratchet chain or skipped storage.
     std::optional<std::vector<uint8_t>> decrypt_with_key_(
         const EncryptedMessage& msg,
         const SecureMemory& message_key
