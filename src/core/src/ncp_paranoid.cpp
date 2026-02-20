@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <sodium.h>
 #include <fstream>
 #include <cstdlib>
@@ -33,7 +34,7 @@ namespace ncp {
 struct ParanoidMode::Impl {
     std::vector<std::string> active_circuits;
     std::thread cover_traffic_thread;
-    bool cover_traffic_running = false;
+    std::atomic<bool> cover_traffic_running{false};  // FIX #18: atomic for thread safety
     std::chrono::system_clock::time_point last_rotation;
     std::vector<std::string> bridge_nodes;
     bool kill_switch_active = false;
@@ -142,13 +143,17 @@ bool ParanoidMode::deactivate() {
     }
 #else
     if (impl_->kill_switch_active) {
-        // Remove iptables rules via fork+exec
+        // FIX #16: Delete the EXACT rule that was added by setup_kill_switch()
+        // setup_kill_switch() adds: iptables -A OUTPUT ! -o lo -j DROP
+        // So we must delete:        iptables -D OUTPUT ! -o lo -j DROP
         pid_t pid = fork();
         if (pid == 0) {
             close(STDIN_FILENO);
             close(STDOUT_FILENO);
             close(STDERR_FILENO);
-            execlp("iptables", "iptables", "-D", "OUTPUT", "-j", "DROP", nullptr);
+            execlp("iptables", "iptables",
+                   "-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP",
+                   nullptr);
             _exit(127);
         } else if (pid > 0) {
             int status;
@@ -183,11 +188,12 @@ std::vector<ParanoidMode::HopChain> ParanoidMode::get_active_chains() const {
 // ---- Traffic management ------------------------------------------------
 
 void ParanoidMode::start_cover_traffic() {
-    if (impl_->cover_traffic_running) return;
+    // FIX #18: use atomic load/store with memory ordering
+    if (impl_->cover_traffic_running.load(std::memory_order_acquire)) return;
 
-    impl_->cover_traffic_running = true;
+    impl_->cover_traffic_running.store(true, std::memory_order_release);
     impl_->cover_traffic_thread = std::thread([this]() {
-        while (impl_->cover_traffic_running) {
+        while (impl_->cover_traffic_running.load(std::memory_order_acquire)) {
             inject_dummy_traffic(layered_config_.cover_traffic_rate_kbps);
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
@@ -195,7 +201,8 @@ void ParanoidMode::start_cover_traffic() {
 }
 
 void ParanoidMode::stop_cover_traffic() {
-    impl_->cover_traffic_running = false;
+    // FIX #18: atomic store with release semantics ensures visibility on ARM
+    impl_->cover_traffic_running.store(false, std::memory_order_release);
     if (impl_->cover_traffic_thread.joinable()) {
         impl_->cover_traffic_thread.join();
     }
@@ -257,18 +264,44 @@ void ParanoidMode::configure_circuit_isolation(bool per_domain, bool per_identit
 void ParanoidMode::strip_metadata(std::vector<uint8_t>& data) {
     if (data.size() < 4) return;
     
-    // JPEG EXIF removal (marker 0xFFE1)
+    // FIX #19: JPEG EXIF removal with proper bounds checking
     if (data[0] == 0xFF && data[1] == 0xD8) {
-        for (size_t i = 2; i < data.size() - 3; ) {
-            if (data[i] == 0xFF && data[i+1] == 0xE1) {
-                uint16_t len = (data[i+2] << 8) | data[i+3];
-                data.erase(data.begin() + i, data.begin() + i + 2 + len);
-            } else if (data[i] == 0xFF) {
-                if (data[i+1] == 0xD9 || data[i+1] == 0xDA) break;
-                uint16_t len = (data[i+2] << 8) | data[i+3];
-                i += 2 + len;
-            } else {
+        for (size_t i = 2; i + 3 < data.size(); ) {
+            if (data[i] != 0xFF) {
                 ++i;
+                continue;
+            }
+
+            uint8_t marker = data[i + 1];
+
+            // End of image or start of scan — stop parsing
+            if (marker == 0xD9 || marker == 0xDA) break;
+
+            // Markers without length payload (standalone markers, RST0-RST7)
+            if (marker == 0x00 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) {
+                i += 2;
+                continue;
+            }
+
+            // Need at least 2 more bytes for the length field
+            if (i + 3 >= data.size()) break;
+
+            uint16_t seg_len = static_cast<uint16_t>(
+                (static_cast<unsigned>(data[i + 2]) << 8) | data[i + 3]
+            );
+
+            // Validate segment length: must be >= 2 (length field itself)
+            // and must not extend past end of data
+            if (seg_len < 2 || (i + 2 + seg_len) > data.size()) break;
+
+            // EXIF marker (APP1 = 0xE1) — erase it
+            if (marker == 0xE1) {
+                data.erase(data.begin() + static_cast<ptrdiff_t>(i),
+                           data.begin() + static_cast<ptrdiff_t>(i + 2 + seg_len));
+                // Don't advance i — next marker is now at same position
+            } else {
+                // Skip over this segment
+                i += 2 + seg_len;
             }
         }
     }
@@ -441,19 +474,31 @@ void ParanoidMode::enable_memory_protection() {
     // Windows: VirtualLock + mitigation policies
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
 
-    // Lock impl_ struct in memory to prevent swapping
+    // FIX #17: VirtualLock(sizeof(Impl)) only locks the struct shell,
+    // not the heap-allocated data inside std::vector/std::string members.
+    // On Windows we still call VirtualLock as best-effort for the struct itself,
+    // but the real protection comes from SetProcessWorkingSetSize + mitigation policies.
+    // For full heap protection, consider using VirtualAlloc(MEM_COMMIT) with
+    // custom allocator for sensitive containers.
     if (VirtualLock(impl_.get(), sizeof(Impl))) {
         impl_->memory_protection_enabled = true;
     }
 
+    // Increase working set to allow more locked pages
+    SIZE_T min_ws = 0, max_ws = 0;
+    if (GetProcessWorkingSetSize(GetCurrentProcess(), &min_ws, &max_ws)) {
+        // Increase by 4MB for locked allocations
+        SetProcessWorkingSetSize(GetCurrentProcess(),
+                                 min_ws + 4 * 1024 * 1024,
+                                 max_ws + 4 * 1024 * 1024);
+    }
+
     // Enable process mitigation policies (Windows 8+)
-    // DEP (Data Execution Prevention)
     PROCESS_MITIGATION_DEP_POLICY dep_policy = {};
     dep_policy.Enable = 1;
     dep_policy.Permanent = 1;
     SetProcessMitigationPolicy(ProcessDEPPolicy, &dep_policy, sizeof(dep_policy));
 
-    // ASLR (Address Space Layout Randomization)
     PROCESS_MITIGATION_ASLR_POLICY aslr_policy = {};
     aslr_policy.EnableBottomUpRandomization = 1;
     aslr_policy.EnableForceRelocateImages = 1;
@@ -461,7 +506,9 @@ void ParanoidMode::enable_memory_protection() {
     SetProcessMitigationPolicy(ProcessASLRPolicy, &aslr_policy, sizeof(aslr_policy));
 
 #else
-    // Linux: mlockall + disable core dumps
+    // FIX #17: mlockall(MCL_CURRENT | MCL_FUTURE) locks ALL pages in the
+    // process address space — including heap allocations inside std::vector,
+    // std::string etc. This is the correct approach for Linux.
     if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0) {
         impl_->memory_protection_enabled = true;
     }
@@ -482,34 +529,61 @@ void ParanoidMode::setup_kill_switch() {
     DWORD result = FwpmEngineOpen0(nullptr, RPC_C_AUTHN_DEFAULT, nullptr, &session,
                                      &impl_->wfp_engine_handle);
     if (result != ERROR_SUCCESS || !impl_->wfp_engine_handle) {
-        // Fallback to flag-only mode
         impl_->kill_switch_active = true;
         return;
     }
 
-    // Block all outbound TCP traffic (layer: FWPM_LAYER_ALE_AUTH_CONNECT_V4)
-    FWPM_FILTER0 filter = {};
-    filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
-    filter.action.type = FWP_ACTION_BLOCK;
-    filter.weight.type = FWP_UINT8;
-    filter.weight.uint8 = 15;  // High priority
-    filter.flags = FWPM_FILTER_FLAG_NONE;
+    // FIX #20: Use different WFP layers to cover all traffic types
 
-    UINT64 filter_id = 0;
-    result = FwpmFilterAdd0(impl_->wfp_engine_handle, &filter, nullptr, &filter_id);
-    if (result == ERROR_SUCCESS) {
-        impl_->wfp_filter_ids.push_back(filter_id);
+    // Filter 1: Block outbound connections (TCP connect)
+    // FWPM_LAYER_ALE_AUTH_CONNECT_V4 catches connect()-based traffic
+    {
+        FWPM_FILTER0 filter = {};
+        filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
+        filter.action.type = FWP_ACTION_BLOCK;
+        filter.weight.type = FWP_UINT8;
+        filter.weight.uint8 = 15;
+        filter.flags = FWPM_FILTER_FLAG_NONE;
+
+        UINT64 filter_id = 0;
+        result = FwpmFilterAdd0(impl_->wfp_engine_handle, &filter, nullptr, &filter_id);
+        if (result == ERROR_SUCCESS) {
+            impl_->wfp_filter_ids.push_back(filter_id);
+        }
     }
 
-    // Block all outbound UDP traffic (layer: FWPM_LAYER_ALE_AUTH_CONNECT_V4)
-    filter.layerKey = FWPM_LAYER_ALE_AUTH_CONNECT_V4;
-    filter.action.type = FWP_ACTION_BLOCK;
-    filter.weight.uint8 = 15;
+    // Filter 2: Block outbound transport (catches connectionless UDP sendto)
+    // FWPM_LAYER_OUTBOUND_TRANSPORT_V4 intercepts all outbound datagrams
+    {
+        FWPM_FILTER0 filter = {};
+        filter.layerKey = FWPM_LAYER_OUTBOUND_TRANSPORT_V4;
+        filter.action.type = FWP_ACTION_BLOCK;
+        filter.weight.type = FWP_UINT8;
+        filter.weight.uint8 = 15;
+        filter.flags = FWPM_FILTER_FLAG_NONE;
 
-    filter_id = 0;
-    result = FwpmFilterAdd0(impl_->wfp_engine_handle, &filter, nullptr, &filter_id);
-    if (result == ERROR_SUCCESS) {
-        impl_->wfp_filter_ids.push_back(filter_id);
+        UINT64 filter_id = 0;
+        result = FwpmFilterAdd0(impl_->wfp_engine_handle, &filter, nullptr, &filter_id);
+        if (result == ERROR_SUCCESS) {
+            impl_->wfp_filter_ids.push_back(filter_id);
+        }
+    }
+
+    // Filter 3: Block inbound accept (prevents incoming connections leaking info)
+    // FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4 catches inbound connection attempts
+    {
+        FWPM_FILTER0 filter = {};
+        filter.layerKey = FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4;
+        filter.action.type = FWP_ACTION_BLOCK;
+        filter.weight.type = FWP_UINT8;
+        filter.weight.uint8 = 15;
+        filter.flags = FWPM_FILTER_FLAG_NONE;
+
+        UINT64 filter_id = 0;
+        result = FwpmFilterAdd0(impl_->wfp_engine_handle, &filter, nullptr, &filter_id);
+        if (result == ERROR_SUCCESS) {
+            impl_->wfp_filter_ids.push_back(filter_id);
+        }
     }
 
     // TODO: Add whitelist rules for network_isolation_.whitelist_ips
@@ -521,14 +595,13 @@ void ParanoidMode::setup_kill_switch() {
     // Linux: Use iptables via fork+exec (no shell injection)
     pid_t pid = fork();
     if (pid == 0) {
-        // Child process: exec iptables
         close(STDIN_FILENO);
         close(STDOUT_FILENO);
         close(STDERR_FILENO);
 
         // Block all outbound traffic except loopback
         execlp("iptables", "iptables", "-A", "OUTPUT", "!", "-o", "lo", "-j", "DROP", nullptr);
-        _exit(127);  // If exec fails
+        _exit(127);
     } else if (pid > 0) {
         int status;
         waitpid(pid, &status, 0);
@@ -564,7 +637,6 @@ void ParanoidMode::overwrite_memory_region(void* ptr, size_t size) {
 
 // SECURITY FIX: shred_file — no more fopen() leak, proper sync
 void ParanoidMode::shred_file(const std::string& path, int passes) {
-    // Use low-level I/O for proper fdatasync without descriptor leaks
 #ifdef _WIN32
     HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ | GENERIC_WRITE,
         0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -622,7 +694,6 @@ void ParanoidMode::shred_file(const std::string& path, int passes) {
             randombytes_buf(buffer.data(), buffer.size());
         }
         
-        // Write and sync — no fopen() leak
         ssize_t written = write(fd, buffer.data(), size);
         (void)written;
         fdatasync(fd);
@@ -636,8 +707,6 @@ void ParanoidMode::shred_file(const std::string& path, int passes) {
 // SECURITY FIX: Replace system() with direct API calls
 void ParanoidMode::clear_system_traces() {
 #ifdef _WIN32
-    // Use DnsFlushResolverCache() instead of system("ipconfig /flushdns")
-    // DnsFlushResolverCache is in dnsapi.dll
     typedef BOOL (WINAPI *DnsFlushProc)();
     HMODULE hDnsApi = LoadLibraryA("dnsapi.dll");
     if (hDnsApi) {
@@ -649,16 +718,12 @@ void ParanoidMode::clear_system_traces() {
         FreeLibrary(hDnsApi);
     }
 #else
-    // Linux: fork+exec instead of system() to avoid shell injection
     pid_t pid = fork();
     if (pid == 0) {
-        // Child: exec systemd-resolve --flush-caches
-        // Close stdin/stdout/stderr to avoid info leaks
         close(STDIN_FILENO);
         close(STDOUT_FILENO);
         close(STDERR_FILENO);
         execlp("systemd-resolve", "systemd-resolve", "--flush-caches", nullptr);
-        // If exec fails, try resolvectl
         execlp("resolvectl", "resolvectl", "flush-caches", nullptr);
         _exit(127);
     } else if (pid > 0) {
@@ -674,53 +739,88 @@ void ParanoidMode::execute_panic_protocol() {
     destroy_all_evidence();
 }
 
-// ===== Phase 2.2: destroy_all_evidence() — FULL IMPLEMENTATION =====
+// ===== FIX #15: destroy_all_evidence() — safe cleanup without UB =====
+//
+// OLD CODE: sodium_memzero(impl_.get(), sizeof(Impl))
+//   This zeroes the raw bytes of the Impl struct while it's still alive.
+//   std::thread, std::vector, std::string all have internal state (vtables,
+//   heap pointers, size fields). Zeroing them → ~Impl() later does
+//   double-free, use-after-free, or crashes on corrupted internal state.
+//
+// FIX: Properly tear down each field before releasing the Impl object.
+//   1. Stop cover traffic thread (join it)
+//   2. Wipe sensitive container contents with sodium_memzero before clearing
+//   3. Reset impl_ via unique_ptr::reset() — calls ~Impl() on a clean object
+//   4. Re-create empty Impl so the object remains usable (deactivate() etc)
+//
 void ParanoidMode::destroy_all_evidence() {
-    // Get current working directory
+    // Shred files on disk
     char cwd[1024];
 #ifdef _WIN32
     DWORD len = GetCurrentDirectoryA(sizeof(cwd), cwd);
-    if (len == 0 || len > sizeof(cwd)) return;
-
-    // Patterns to shred: *.db, *.log, *.conf
-    const char* patterns[] = {"*.db", "*.log", "*.conf"};
-    for (const char* pattern : patterns) {
-        std::string search_pattern = std::string(cwd) + "\\" + pattern;
-        WIN32_FIND_DATAA fd;
-        HANDLE hFind = FindFirstFileA(search_pattern.c_str(), &fd);
-        if (hFind != INVALID_HANDLE_VALUE) {
-            do {
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    std::string full_path = std::string(cwd) + "\\" + fd.cFileName;
-                    shred_file(full_path, forensic_resistance_.overwrite_passes);
-                }
-            } while (FindNextFileA(hFind, &fd));
-            FindClose(hFind);
+    if (len > 0 && len < sizeof(cwd)) {
+        const char* patterns[] = {"*.db", "*.log", "*.conf"};
+        for (const char* pattern : patterns) {
+            std::string search_pattern = std::string(cwd) + "\\" + pattern;
+            WIN32_FIND_DATAA fd;
+            HANDLE hFind = FindFirstFileA(search_pattern.c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                        std::string full_path = std::string(cwd) + "\\" + fd.cFileName;
+                        shred_file(full_path, forensic_resistance_.overwrite_passes);
+                    }
+                } while (FindNextFileA(hFind, &fd));
+                FindClose(hFind);
+            }
         }
     }
 #else
-    if (getcwd(cwd, sizeof(cwd)) == nullptr) return;
-
-    // Patterns to shred: *.db, *.log, *.conf
-    const char* patterns[] = {"*.db", "*.log", "*.conf"};
-    for (const char* pattern : patterns) {
-        std::string glob_pattern = std::string(cwd) + "/" + pattern;
-        glob_t globbuf;
-        if (glob(glob_pattern.c_str(), GLOB_NOSORT, nullptr, &globbuf) == 0) {
-            for (size_t i = 0; i < globbuf.gl_pathc; ++i) {
-                shred_file(globbuf.gl_pathv[i], forensic_resistance_.overwrite_passes);
+    if (getcwd(cwd, sizeof(cwd)) != nullptr) {
+        const char* patterns[] = {"*.db", "*.log", "*.conf"};
+        for (const char* pattern : patterns) {
+            std::string glob_pattern = std::string(cwd) + "/" + pattern;
+            glob_t globbuf;
+            if (glob(glob_pattern.c_str(), GLOB_NOSORT, nullptr, &globbuf) == 0) {
+                for (size_t i = 0; i < globbuf.gl_pathc; ++i) {
+                    shred_file(globbuf.gl_pathv[i], forensic_resistance_.overwrite_passes);
+                }
+                globfree(&globbuf);
             }
-            globfree(&globbuf);
         }
     }
 #endif
 
-    // Wipe impl_ memory
+    // Safely destroy Impl contents without UB
     if (impl_) {
-        sodium_memzero(impl_.get(), sizeof(Impl));
+        // 1. Stop the cover traffic thread properly
+        impl_->cover_traffic_running.store(false, std::memory_order_release);
+        if (impl_->cover_traffic_thread.joinable()) {
+            impl_->cover_traffic_thread.join();
+        }
+
+        // 2. Wipe sensitive strings in containers before clearing
+        for (auto& circuit : impl_->active_circuits) {
+            sodium_memzero(circuit.data(), circuit.size());
+        }
+        impl_->active_circuits.clear();
+
+        for (auto& bridge : impl_->bridge_nodes) {
+            sodium_memzero(bridge.data(), bridge.size());
+        }
+        impl_->bridge_nodes.clear();
+
+        impl_->kill_switch_active = false;
+        impl_->memory_protection_enabled = false;
+
+        // 3. Release Impl — ~Impl() runs on a cleanly emptied object (no UB)
+        impl_.reset();
+
+        // 4. Re-create empty Impl so ParanoidMode remains in a valid state
+        //    (deactivate() or destructor may still reference impl_)
+        impl_ = std::make_unique<Impl>();
     }
 
-    // Call system-wide trace cleanup
     clear_system_traces();
 }
 
