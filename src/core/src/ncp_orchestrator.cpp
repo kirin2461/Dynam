@@ -165,7 +165,6 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
     }
 
-    // Initialize ECH config once in constructor
     if (config_.ech_enabled) {
         if (!config_.ech_config_data.empty()) {
             if (ECH::parse_ech_config(config_.ech_config_data, ech_config_)) {
@@ -257,11 +256,9 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
 
     std::vector<uint8_t> data = payload;
 
-    // Detect ClientHello: ContentType=0x16, Version=0x03, HandshakeType=0x01
     bool is_client_hello = (!data.empty() && data.size() > 5 &&
                            data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01);
 
-    // Phase 2+: Apply TLS fingerprint rotation before handshake
     if (current_strategy_.enable_tls_fingerprint && is_client_hello) {
         if (current_strategy_.tls_rotate_per_connection) {
             static const ncp::BrowserType profiles[] = {
@@ -273,8 +270,6 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         stats_.tls_fingerprints_applied.fetch_add(1);
     }
 
-    // Phase 4A: Route ClientHello through AdvancedDPIBypass (multi-segment)
-    // ECH is handled inside AdvancedDPIBypass — no double application
     if (is_client_hello && current_strategy_.enable_advanced_dpi && advanced_dpi_) {
         auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
         stats_.advanced_dpi_segments.fetch_add(segments.size());
@@ -291,7 +286,6 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         return result;
     }
 
-    // Fallback ECH: only when advanced DPI is disabled
     if (config_.ech_enabled && ech_initialized_ && is_client_hello &&
         !current_strategy_.enable_advanced_dpi) {
         auto ech_result = ECH::apply_ech(data, ech_config_);
@@ -301,30 +295,25 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         }
     }
 
-    // Non-advanced path: single segment pipeline
     return process_single_segment_(std::move(data), true);
 }
 
 std::vector<OrchestratedPacket> ProtocolOrchestrator::process_single_segment_(
     std::vector<uint8_t> data, bool is_first_segment) {
 
-    // Step 1: Adversarial Padding (Phase 1)
     if (current_strategy_.enable_adversarial) {
         data = adversarial_.pad(data);
     }
 
-    // Step 2: Protocol Mimicry
     if (current_strategy_.enable_mimicry) {
         data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
     }
 
-    // Step 3: Prepend auth token (Phase 3 client-side, first segment only)
     if (current_strategy_.enable_probe_resist && !config_.is_server && is_first_segment) {
         auto token = probe_resist_.generate_client_auth();
         data.insert(data.begin(), token.begin(), token.end());
     }
 
-    // Step 4: Flow Shaping (Phase 2)
     if (current_strategy_.enable_flow_shaping) {
         auto shaped = flow_shaper_.shape_sync(data, true);
         std::vector<OrchestratedPacket> result;
@@ -374,6 +363,15 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 }
 
 // ===== Server Pipeline: receive =====
+// FIX: Reordered receive pipeline so that:
+//   1. Probe auth token is stripped first (always outermost)
+//   2. Flow dummy check (flow shaper inserts dummies after mimicry wrapping)
+//   3. Mimicry unwrap (removes protocol disguise)
+//   4. Adversarial dummy check + unpad (adversarial is innermost layer)
+//
+// Previously: adversarial dummy check ran before mimicry unwrap,
+// which meant the check was scanning mimicry-wrapped data and could
+// never match the adversarial dummy pattern inside.
 
 std::vector<uint8_t> ProtocolOrchestrator::receive(
     const std::vector<uint8_t>& wire_data,
@@ -391,6 +389,7 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     std::vector<uint8_t> data = wire_data;
 
+    // Step 1: Probe authentication (outermost layer — prepended token)
     if (current_strategy_.enable_probe_resist && config_.is_server) {
         AuthResult result = probe_resist_.process_connection(
             source_ip, source_port, data.data(), data.size(), ja3);
@@ -410,22 +409,26 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
         if (auth_result) *auth_result = AuthResult::AUTHENTICATED;
     }
 
+    // Step 2: Flow shaper dummy check (dummies are injected post-mimicry)
     if (current_strategy_.enable_flow_shaping) {
         if (FlowShaper::is_flow_dummy(data.data(), data.size())) {
             return {};
         }
     }
 
+    // Step 3: Protocol mimicry unwrap (removes HTTP/TLS/DNS/etc. wrapper)
+    if (current_strategy_.enable_mimicry) {
+        data = mimicry_.unwrap_payload(data);
+    }
+
+    // Step 4: Adversarial dummy check (after mimicry unwrap, before unpad)
     if (current_strategy_.enable_adversarial) {
         if (AdversarialPadding::is_dummy(data.data(), data.size())) {
             return {};
         }
     }
 
-    if (current_strategy_.enable_mimicry) {
-        data = mimicry_.unwrap_payload(data);
-    }
-
+    // Step 5: Adversarial unpad (innermost layer)
     if (current_strategy_.enable_adversarial) {
         data = adversarial_.unpad(data);
     }
@@ -438,9 +441,6 @@ std::vector<uint8_t> ProtocolOrchestrator::generate_cover_response() {
 }
 
 // ===== Adaptive Control =====
-// FIX: Deadlock — report_detection() held strategy_mutex_ then called
-// report_success() which also locked strategy_mutex_.
-// Solution: report_success_locked_() assumes caller already holds the lock.
 
 void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
     stats_.detection_events.fetch_add(1);
@@ -451,7 +451,6 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
 
     switch (event.type) {
         case DetectionEvent::Type::SUCCESS:
-            // Delegate to lock-free version — we already hold strategy_mutex_
             report_success_locked_();
             return;
 
@@ -498,7 +497,6 @@ void ProtocolOrchestrator::report_success() {
 }
 
 void ProtocolOrchestrator::report_success_locked_() {
-    // NOTE: Caller MUST hold strategy_mutex_
     stats_.successful_sends.fetch_add(1);
 
     consecutive_successes_++;
@@ -610,12 +608,10 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
         mimicry_.set_config(mc);
     }
 
-    // Phase 2+: Apply TLS fingerprint profile
     if (strategy.enable_tls_fingerprint) {
         tls_fingerprint_.set_profile(strategy.tls_browser_profile);
     }
 
-    // Phase 4A: Rebuild AdvancedDPIBypass on strategy change
     rebuild_advanced_dpi_();
 }
 
@@ -650,7 +646,6 @@ void ProtocolOrchestrator::init_advanced_dpi_() {
     adv_cfg.base_config.target_host = "";
     adv_cfg.tspu_bypass = (current_strategy_.dpi_preset == AdvancedDPIBypass::BypassPreset::STEALTH);
 
-    // Map preset to techniques
     switch (current_strategy_.dpi_preset) {
         case AdvancedDPIBypass::BypassPreset::STEALTH:
             adv_cfg.techniques = {
@@ -680,12 +675,10 @@ void ProtocolOrchestrator::init_advanced_dpi_() {
             break;
     }
 
-    // Forward ECH config if available
     if (adv_cfg.enable_ech && ech_initialized_) {
         adv_cfg.ech_config_list = config_.ech_config_data;
     }
 
-    // Forward TLS fingerprint
     advanced_dpi_->set_tls_fingerprint(&tls_fingerprint_);
 
     if (advanced_dpi_->initialize(adv_cfg)) {
