@@ -109,10 +109,6 @@ struct OrchestratorStrategy {
     static OrchestratorStrategy balanced();      // good protection, moderate overhead
     static OrchestratorStrategy performance();   // min overhead, basic protection
     static OrchestratorStrategy max_compat();    // maximum compatibility
-    static OrchestratorStrategy stealth();
-    static OrchestratorStrategy balanced();
-    static OrchestratorStrategy performance();
-    static OrchestratorStrategy max_compat();
 };
 
 // ===== Orchestrator Config =====
@@ -248,6 +244,17 @@ public:
     OrchestratorStrategy get_strategy() const;
     void apply_preset(const std::string& name);
 
+    /// Derive and synchronize the adversarial dummy key from a shared secret.
+    /// Both peers calling this with the same secret will get the same dummy
+    /// marker, eliminating the need for separate key exchange.
+    ///
+    /// Uses: HKDF-SHA256(secret, salt="NCP-ADV-DUMMY-KEY-v1", len=32)
+    ///
+    /// Called automatically from the constructor and set_config() when
+    /// config_.shared_secret is non-empty. Can also be called manually
+    /// after E2E key exchange completes.
+    void synchronize_dummy_key(const std::vector<uint8_t>& shared_secret);
+
     AdversarialPadding& adversarial();
     FlowShaper& flow_shaper();
     ProbeResist& probe_resist();
@@ -301,6 +308,9 @@ private:
     //           (adversarial → mimicry → probe auth → flow shaping)
     std::vector<OrchestratedPacket> process_single_segment_(
         std::vector<uint8_t> data, bool is_first_segment);
+
+    /// Internal: derive dummy key from shared_secret (caller must hold strategy_mutex_)
+    void derive_dummy_key_from_secret_(const std::vector<uint8_t>& secret);
 
     OrchestratorConfig config_;
     OrchestratorStats stats_;
