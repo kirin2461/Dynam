@@ -121,6 +121,10 @@ struct AdvancedDPIConfig {
     bool enable_multipath = false;
     bool tspu_bypass = true;
     bool china_gfw_bypass = false;
+
+    // === Phase 3D: ECH (Encrypted Client Hello) support ===
+    bool enable_ech = false;
+    std::vector<uint8_t> ech_config_list;  // Serialized ECHConfig (from DNS or manual)
 };
 
 struct AdvancedDPIStats {
@@ -137,6 +141,7 @@ struct AdvancedDPIStats {
     uint64_t bytes_obfuscated = 0;
     uint64_t bytes_deobfuscated = 0;
     uint64_t dpi_signatures_evaded = 0;
+    uint64_t ech_applied = 0;  // Phase 3D: Count successful ECH applications
 };
 
 class PacketTransformer {
@@ -267,6 +272,14 @@ public:
      * @param fp Pointer to TLSFingerprint (not owned, caller keeps alive).
      */
     void set_tls_fingerprint(ncp::TLSFingerprint* fp);
+
+    /**
+     * @brief Set ECH config for ClientHello encryption (Phase 3D).
+     *        When enable_ech is true and this is set, process_outgoing()
+     *        will apply ECH to ClientHello before splitting/obfuscation.
+     * @param config_list Serialized ECHConfigList (from DNS HTTPS record or manual config).
+     */
+    void set_ech_config(const std::vector<uint8_t>& config_list);
 
 private:
     struct Impl;
