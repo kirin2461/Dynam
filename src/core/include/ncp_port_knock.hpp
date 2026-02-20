@@ -18,6 +18,10 @@
  *   - Knock opens the "gate" for source IP
  *   - Once gate is open, ProbeResist takes over for L1-L7 checks
  *   - If knock fails, server doesn't even respond (not even cover page)
+ *
+ * Security notes:
+ *   - HMAC uses libsodium crypto_auth (HMAC-SHA-512-256), no OpenSSL required
+ *   - config_ is protected by shared_mutex for thread-safe read/write
  */
 
 #include <cstdint>
@@ -29,6 +33,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -262,11 +267,12 @@ private:
     /// Derive port from HMAC(secret, counter) in [port_min, port_max].
     uint16_t derive_port(uint64_t counter, size_t index) const;
 
-    /// Compute HMAC-SHA256.
+    /// Compute HMAC via libsodium crypto_auth (HMAC-SHA-512-256).
     std::array<uint8_t, 32> compute_hmac(
         const uint8_t* data, size_t data_len) const;
 
     PortKnockConfig config_;
+    mutable std::shared_mutex config_mutex_;  // protects config_ reads/writes
     PortKnockStats stats_;
     KnockEventCallback event_callback_;
 
