@@ -1,7 +1,9 @@
 #include "ncp_orchestrator.hpp"
+#include "ncp_ech.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <sodium.h>
 
 // FIX #72: Magic bytes for auth header validation
 static constexpr uint8_t NCP_AUTH_MAGIC[2] = { 0x4E, 0x43 };  // "NC"
@@ -53,6 +55,12 @@ OrchestratorStrategy OrchestratorStrategy::stealth() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.tls_rotate_per_connection = true;
+    s.enable_advanced_dpi = true;
+    s.dpi_preset = AdvancedDPIBypass::BypassPreset::STEALTH;
+
     return s;
 }
 
@@ -101,6 +109,12 @@ OrchestratorStrategy OrchestratorStrategy::balanced() {
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.tls_rotate_per_connection = false;
+    s.enable_advanced_dpi = true;
+    s.dpi_preset = AdvancedDPIBypass::BypassPreset::MODERATE;
+
     return s;
 }
 
@@ -112,13 +126,17 @@ OrchestratorStrategy OrchestratorStrategy::performance() {
     s.enable_adversarial = true;
     s.adversarial_config = AdversarialConfig::minimal();
 
-    s.enable_flow_shaping = false;  // no flow shaping — min latency
+    s.enable_flow_shaping = false;
 
     s.enable_probe_resist = true;
     s.probe_config = ProbeResistConfig::permissive();
 
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
+
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.enable_advanced_dpi = false;
 
     return s;
 }
@@ -136,6 +154,10 @@ OrchestratorStrategy OrchestratorStrategy::max_compat() {
 
     s.enable_mimicry = true;
     s.mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
+
+    s.enable_tls_fingerprint = true;
+    s.tls_browser_profile = ncp::BrowserType::CHROME;
+    s.enable_advanced_dpi = false;
 
     return s;
 }
@@ -167,12 +189,39 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
     : config_(config),
       current_strategy_(config.strategy),
       threat_level_(ThreatLevel::NONE),
+      tls_fingerprint_(config.strategy.tls_browser_profile),
+      ech_initialized_(false),
       consecutive_failures_(0),
       consecutive_successes_(0) {
 
-    // Initialize shared secret
     if (!config_.shared_secret.empty()) {
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
+    }
+
+    if (config_.ech_enabled) {
+        if (!config_.ech_config_data.empty()) {
+            if (ECH::parse_ech_config(config_.ech_config_data, ech_config_)) {
+                ech_initialized_ = true;
+            } else {
+                std::string public_name = (current_strategy_.tls_browser_profile == ncp::BrowserType::SAFARI)
+                                          ? "apple.com" : "cloudflare.com";
+                ech_config_ = ECH::create_test_ech_config(
+                    public_name,
+                    ECH::HPKECipherSuite(),
+                    ech_private_key_
+                );
+                ech_initialized_ = true;
+            }
+        } else {
+            std::string public_name = (current_strategy_.tls_browser_profile == ncp::BrowserType::SAFARI)
+                                      ? "apple.com" : "cloudflare.com";
+            ech_config_ = ECH::create_test_ech_config(
+                public_name,
+                ECH::HPKECipherSuite(),
+                ech_private_key_
+            );
+            ech_initialized_ = true;
+        }
     }
 
     apply_strategy(current_strategy_);
@@ -192,7 +241,6 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
     send_callback_ = send_cb;
     running_.store(true);
 
-    // Start flow shaper if enabled
     if (current_strategy_.enable_flow_shaping) {
         flow_shaper_.start([this](const ShapedPacket& sp) {
             if (send_callback_) {
@@ -205,7 +253,6 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
         });
     }
 
-    // Start health monitor
     if (config_.health_check_interval_sec > 0) {
         health_thread_ = std::thread(&ProtocolOrchestrator::health_monitor_func, this);
     }
@@ -214,6 +261,9 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
 void ProtocolOrchestrator::stop() {
     running_.store(false);
     flow_shaper_.stop();
+    if (advanced_dpi_) {
+        advanced_dpi_->stop();
+    }
     if (health_thread_.joinable()) {
         health_thread_.join();
     }
@@ -254,6 +304,60 @@ std::vector<uint8_t> ProtocolOrchestrator::prepare_payload(
     // Step 3: Prepend auth token with magic header (Phase 3 client-side)
     // FIX #72: Add magic bytes + version before auth token so receiver can validate
     if (snapshot.enable_probe_resist && !config_.is_server) {
+    bool is_client_hello = (!data.empty() && data.size() > 5 &&
+                           data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01);
+
+    if (current_strategy_.enable_tls_fingerprint && is_client_hello) {
+        if (current_strategy_.tls_rotate_per_connection) {
+            static const ncp::BrowserType profiles[] = {
+                ncp::BrowserType::CHROME, ncp::BrowserType::FIREFOX,
+                ncp::BrowserType::SAFARI, ncp::BrowserType::EDGE
+            };
+            tls_fingerprint_.set_profile(profiles[randombytes_uniform(4)]);
+        }
+        stats_.tls_fingerprints_applied.fetch_add(1);
+    }
+
+    if (is_client_hello && current_strategy_.enable_advanced_dpi && advanced_dpi_) {
+        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+        stats_.advanced_dpi_segments.fetch_add(segments.size());
+
+        std::vector<OrchestratedPacket> result;
+        for (size_t i = 0; i < segments.size(); ++i) {
+            auto packets = process_single_segment_(
+                std::move(segments[i]), (i == 0));
+            for (auto& pkt : packets) {
+                result.push_back(std::move(pkt));
+            }
+        }
+        update_overhead_stats();
+        return result;
+    }
+
+    if (config_.ech_enabled && ech_initialized_ && is_client_hello &&
+        !current_strategy_.enable_advanced_dpi) {
+        auto ech_result = ECH::apply_ech(data, ech_config_);
+        if (!ech_result.empty() && ech_result.size() > data.size()) {
+            data = std::move(ech_result);
+            stats_.ech_encryptions.fetch_add(1);
+        }
+    }
+
+    return process_single_segment_(std::move(data), true);
+}
+
+std::vector<OrchestratedPacket> ProtocolOrchestrator::process_single_segment_(
+    std::vector<uint8_t> data, bool is_first_segment) {
+
+    if (current_strategy_.enable_adversarial) {
+        data = adversarial_.pad(data);
+    }
+
+    if (current_strategy_.enable_mimicry) {
+        data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
+    }
+
+    if (current_strategy_.enable_probe_resist && !config_.is_server && is_first_segment) {
         auto token = probe_resist_.generate_client_auth();
         // Prepend: [MAGIC:2][VERSION:1][auth_token:N]
         std::vector<uint8_t> header;
@@ -288,6 +392,7 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
 
     // Step 4: Flow Shaping (Phase 2)
     if (snapshot.enable_flow_shaping) {
+    if (current_strategy_.enable_flow_shaping) {
         auto shaped = flow_shaper_.shape_sync(data, true);
         std::vector<OrchestratedPacket> result;
         for (auto& sp : shaped) {
@@ -298,15 +403,12 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
             stats_.bytes_on_wire.fetch_add(op.data.size());
             result.push_back(std::move(op));
         }
-        update_overhead_stats();
         return result;
     }
 
-    // No flow shaping — return single packet
     OrchestratedPacket op;
+    stats_.bytes_on_wire.fetch_add(data.size());
     op.data = std::move(data);
-    stats_.bytes_on_wire.fetch_add(op.data.size());
-    update_overhead_stats();
     return {op};
 }
 
@@ -322,6 +424,20 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 
     // Step 4: Enqueue for async flow shaping
     if (snapshot.enable_flow_shaping && flow_shaper_.is_running()) {
+    std::vector<uint8_t> data = payload;
+
+    if (current_strategy_.enable_adversarial) {
+        data = adversarial_.pad(data);
+    }
+    if (current_strategy_.enable_mimicry) {
+        data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
+    }
+    if (current_strategy_.enable_probe_resist && !config_.is_server) {
+        auto token = probe_resist_.generate_client_auth();
+        data.insert(data.begin(), token.begin(), token.end());
+    }
+
+    if (current_strategy_.enable_flow_shaping && flow_shaper_.is_running()) {
         flow_shaper_.enqueue(data, true);
     } else if (send_callback_) {
         OrchestratedPacket op;
@@ -331,6 +447,15 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 }
 
 // ===== Server Pipeline: receive =====
+// FIX: Reordered receive pipeline so that:
+//   1. Probe auth token is stripped first (always outermost)
+//   2. Flow dummy check (flow shaper inserts dummies after mimicry wrapping)
+//   3. Mimicry unwrap (removes protocol disguise)
+//   4. Adversarial dummy check + unpad (adversarial is innermost layer)
+//
+// Previously: adversarial dummy check ran before mimicry unwrap,
+// which meant the check was scanning mimicry-wrapped data and could
+// never match the adversarial dummy pattern inside.
 
 std::vector<uint8_t> ProtocolOrchestrator::receive(
     const std::vector<uint8_t>& wire_data,
@@ -381,6 +506,10 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
             if (result != AuthResult::AUTHENTICATED) {
                 return {};  // Caller should send cover response
             }
+    // Step 1: Probe authentication (outermost layer — prepended token)
+    if (current_strategy_.enable_probe_resist && config_.is_server) {
+        AuthResult result = probe_resist_.process_connection(
+            source_ip, source_port, data.data(), data.size(), ja3);
 
             // Strip auth token (magic already removed)
             if (auth_data.size() > auth_token_len) {
@@ -400,6 +529,14 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
                 return {};
             }
             // Legacy client: data passes through without auth stripping
+        if (result != AuthResult::AUTHENTICATED) {
+            return {};
+        }
+
+        size_t auth_len = probe_resist_.get_config().nonce_length + 4 +
+                          probe_resist_.get_config().auth_length;
+        if (data.size() > auth_len) {
+            data.erase(data.begin(), data.begin() + auth_len);
         }
     } else {
         if (auth_result) *auth_result = AuthResult::AUTHENTICATED;
@@ -407,15 +544,24 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     // Step 2: Discard flow dummies
     if (snapshot.enable_flow_shaping) {
+    // Step 2: Flow shaper dummy check (dummies are injected post-mimicry)
+    if (current_strategy_.enable_flow_shaping) {
         if (FlowShaper::is_flow_dummy(data.data(), data.size())) {
-            return {};  // dummy packet, discard
+            return {};
         }
     }
 
     // Step 3: Discard adversarial dummies
     if (snapshot.enable_adversarial) {
+    // Step 3: Protocol mimicry unwrap (removes HTTP/TLS/DNS/etc. wrapper)
+    if (current_strategy_.enable_mimicry) {
+        data = mimicry_.unwrap_payload(data);
+    }
+
+    // Step 4: Adversarial dummy check (after mimicry unwrap, before unpad)
+    if (current_strategy_.enable_adversarial) {
         if (AdversarialPadding::is_dummy(data.data(), data.size())) {
-            return {};  // dummy packet, discard
+            return {};
         }
     }
 
@@ -426,6 +572,8 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     // Step 5: Adversarial unpad
     if (snapshot.enable_adversarial) {
+    // Step 5: Adversarial unpad (innermost layer)
+    if (current_strategy_.enable_adversarial) {
         data = adversarial_.unpad(data);
     }
 
@@ -449,11 +597,12 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
         case DetectionEvent::Type::SUCCESS:
             // FIX #74: report_success_locked() called under existing lock
             report_success_locked();
+            report_success_locked_();
             return;
 
         case DetectionEvent::Type::CONNECTION_RESET:
         case DetectionEvent::Type::TLS_ALERT:
-            consecutive_failures_ += 2;  // strong signal
+            consecutive_failures_ += 2;
             consecutive_successes_ = 0;
             break;
 
@@ -465,7 +614,7 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
 
         case DetectionEvent::Type::PROBE_RECEIVED:
         case DetectionEvent::Type::IP_BLOCKED:
-            consecutive_failures_ += 3;  // critical signal
+            consecutive_failures_ += 3;
             consecutive_successes_ = 0;
             break;
 
@@ -493,13 +642,17 @@ void ProtocolOrchestrator::report_success() {
     std::lock_guard<std::mutex> lock(strategy_mutex_);
     report_success_locked();
 }
+    report_success_locked_();
+}
+
+void ProtocolOrchestrator::report_success_locked_() {
+    stats_.successful_sends.fetch_add(1);
 
 // FIX #74: Private implementation — must be called with strategy_mutex_ held
 void ProtocolOrchestrator::report_success_locked() {
     consecutive_successes_++;
     consecutive_failures_ = (std::max)(0, consecutive_failures_ - 1);
 
-    // Check cooldown
     auto now = std::chrono::steady_clock::now();
     auto since_escalation = std::chrono::duration_cast<std::chrono::seconds>(
         now - last_escalation_).count();
@@ -523,7 +676,6 @@ void ProtocolOrchestrator::escalate(const std::string& reason) {
     consecutive_failures_ = 0;
     last_escalation_ = std::chrono::steady_clock::now();
 
-    // Apply new strategy for this threat level
     auto new_strategy = strategy_for_threat(threat_level_);
     apply_strategy(new_strategy);
 
@@ -590,12 +742,10 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
     current_strategy_ = strategy;
     stats_.current_strategy_name = strategy.name;
 
-    // Propagate shared secret
     if (!config_.shared_secret.empty()) {
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
     }
 
-    // Apply to components
     if (strategy.enable_adversarial) {
         adversarial_.set_config(strategy.adversarial_config);
     }
@@ -610,6 +760,12 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
         mc.profile = strategy.mimic_profile;
         mimicry_.set_config(mc);
     }
+
+    if (strategy.enable_tls_fingerprint) {
+        tls_fingerprint_.set_profile(strategy.tls_browser_profile);
+    }
+
+    rebuild_advanced_dpi_();
 }
 
 void ProtocolOrchestrator::set_strategy(const OrchestratorStrategy& strategy) {
@@ -630,6 +786,80 @@ void ProtocolOrchestrator::apply_preset(const std::string& name) {
     else if (name == "max_compat") apply_strategy(OrchestratorStrategy::max_compat());
 }
 
+// ===== Phase 4A: AdvancedDPIBypass management =====
+
+void ProtocolOrchestrator::init_advanced_dpi_() {
+    if (!current_strategy_.enable_advanced_dpi) {
+        advanced_dpi_.reset();
+        return;
+    }
+
+    advanced_dpi_ = std::make_unique<AdvancedDPIBypass>();
+
+    AdvancedDPIConfig adv_cfg;
+    adv_cfg.base_config.target_host = "";
+    adv_cfg.tspu_bypass = (current_strategy_.dpi_preset == AdvancedDPIBypass::BypassPreset::STEALTH);
+
+    switch (current_strategy_.dpi_preset) {
+        case AdvancedDPIBypass::BypassPreset::STEALTH:
+            adv_cfg.techniques = {
+                EvasionTechnique::SNI_SPLIT,
+                EvasionTechnique::TCP_SEGMENTATION,
+                EvasionTechnique::IP_TTL_TRICKS,
+                EvasionTechnique::FAKE_SNI,
+                EvasionTechnique::TLS_GREASE,
+                EvasionTechnique::TIMING_JITTER,
+                EvasionTechnique::TCP_DISORDER
+            };
+            adv_cfg.enable_ech = (config_.ech_enabled && ech_initialized_);
+            break;
+        case AdvancedDPIBypass::BypassPreset::MODERATE:
+            adv_cfg.techniques = {
+                EvasionTechnique::SNI_SPLIT,
+                EvasionTechnique::TCP_SEGMENTATION,
+                EvasionTechnique::TLS_GREASE
+            };
+            adv_cfg.enable_ech = (config_.ech_enabled && ech_initialized_);
+            break;
+        case AdvancedDPIBypass::BypassPreset::MINIMAL:
+        default:
+            adv_cfg.techniques = {
+                EvasionTechnique::SNI_SPLIT
+            };
+            break;
+    }
+
+    if (adv_cfg.enable_ech && ech_initialized_) {
+        adv_cfg.ech_config_list = config_.ech_config_data;
+    }
+
+    advanced_dpi_->set_tls_fingerprint(&tls_fingerprint_);
+
+    if (advanced_dpi_->initialize(adv_cfg)) {
+        advanced_dpi_->set_tls_fingerprint(&tls_fingerprint_);
+        if (ech_initialized_) {
+            advanced_dpi_->set_ech_config(config_.ech_config_data);
+        }
+        advanced_dpi_->start();
+    } else {
+        advanced_dpi_.reset();
+    }
+}
+
+void ProtocolOrchestrator::rebuild_advanced_dpi_() {
+    if (current_strategy_.enable_advanced_dpi) {
+        if (advanced_dpi_) {
+            advanced_dpi_->stop();
+        }
+        init_advanced_dpi_();
+    } else {
+        if (advanced_dpi_) {
+            advanced_dpi_->stop();
+            advanced_dpi_.reset();
+        }
+    }
+}
+
 // ===== Component Access =====
 
 AdversarialPadding& ProtocolOrchestrator::adversarial() { return adversarial_; }
@@ -641,6 +871,15 @@ const AdversarialPadding& ProtocolOrchestrator::adversarial() const { return adv
 const FlowShaper& ProtocolOrchestrator::flow_shaper() const { return flow_shaper_; }
 const ProbeResist& ProtocolOrchestrator::probe_resist() const { return probe_resist_; }
 const TrafficMimicry& ProtocolOrchestrator::mimicry() const { return mimicry_; }
+
+ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() { return tls_fingerprint_; }
+const ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() const { return tls_fingerprint_; }
+
+AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() { return advanced_dpi_.get(); }
+const AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() const { return advanced_dpi_.get(); }
+
+const ECH::ECHConfig& ProtocolOrchestrator::ech_config() const { return ech_config_; }
+bool ProtocolOrchestrator::is_ech_initialized() const { return ech_initialized_; }
 
 // ===== Config & Stats =====
 
@@ -691,9 +930,10 @@ void ProtocolOrchestrator::health_monitor_func() {
             if (current_strategy_.enable_probe_resist) {
                 probe_resist_.cleanup_stale_data();
             }
+        if (current_strategy_.enable_probe_resist) {
+            probe_resist_.cleanup_stale_data();
         }
 
-        // Update overhead stats
         update_overhead_stats();
     }
 }

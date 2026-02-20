@@ -37,9 +37,21 @@ struct License::Impl {
     // Implementation details
 };
 
-License::License() : crypto_(std::make_unique<Crypto>()) {}
+License::License() : crypto_(std::make_unique<Crypto>()) {
+    // FIX: Generate signing keypair ONCE in constructor, not per-call.
+    // Previously generate_license_file() called generate_keypair() every time,
+    // creating a new key each invocation — the public key was never stored,
+    // making signature verification impossible.
+    signing_keypair_ = crypto_->generate_keypair();
+}
 
 License::~License() = default;
+
+// ==================== Public Key Access ====================
+
+SecureMemory License::get_public_key() const {
+    return signing_keypair_.public_key;
+}
 
 // ==================== HWID Generation ====================
 
@@ -55,12 +67,10 @@ std::string License::get_hwid() {
     // Component 3: OS UUID
     hwid_components += get_os_uuid();
 
-    // FIX: Convert to SecureMemory for hash_sha256
     SecureMemory input(hwid_components.size());
     std::memcpy(input.data(), hwid_components.data(), hwid_components.size());
     SecureMemory hash = crypto_->hash_sha256(input);
 
-    // Convert to hex string using SecureMemory accessors
     std::stringstream ss;
     for (size_t i = 0; i < hash.size(); ++i) {
         ss << std::hex << std::setfill('0') << std::setw(2)
@@ -207,6 +217,30 @@ std::string License::get_os_uuid() {
 #endif
 }
 
+// ==================== Hex Helpers ====================
+
+static std::string to_hex(const SecureMemory& mem) {
+    std::stringstream ss;
+    for (size_t i = 0; i < mem.size(); ++i) {
+        ss << std::hex << std::setfill('0') << std::setw(2)
+           << static_cast<int>(mem.data()[i]);
+    }
+    return ss.str();
+}
+
+static bool from_hex(const std::string& hex, std::vector<uint8_t>& out) {
+    if (hex.size() % 2 != 0) return false;
+    out.resize(hex.size() / 2);
+    for (size_t i = 0; i < out.size(); ++i) {
+        unsigned int byte;
+        std::stringstream ss;
+        ss << std::hex << hex.substr(i * 2, 2);
+        if (!(ss >> byte)) return false;
+        out[i] = static_cast<uint8_t>(byte);
+    }
+    return true;
+}
+
 // ==================== License Validation ====================
 
 License::ValidationResult License::validate_offline(
@@ -230,7 +264,7 @@ License::ValidationResult License::validate_offline(
 
     std::string stored_hwid = matches[1].str();
     std::string expiry_str = matches[2].str();
-    std::string signature_b64 = matches[3].str();
+    std::string signature_hex = matches[3].str();
 
     // Verify HWID
     if (stored_hwid != hwid) {
@@ -246,11 +280,30 @@ License::ValidationResult License::validate_offline(
         return ValidationResult::EXPIRED;
     }
 
-    // Verify signature
+    // FIX: Actually verify the Ed25519 signature instead of just checking non-empty.
+    // Previously ANY non-empty string was accepted as valid — complete bypass.
+    if (signature_hex.empty()) {
+        return ValidationResult::INVALID_SIGNATURE;
+    }
+
+    // Decode hex signature
+    std::vector<uint8_t> sig_bytes;
+    if (!from_hex(signature_hex, sig_bytes)) {
+        return ValidationResult::INVALID_SIGNATURE;
+    }
+
+    // Reconstruct the signed data
     std::string data_to_verify = stored_hwid + "|" + expiry_str;
-    // Decode base64 signature and verify with public key
-    // (simplified - in production use proper base64 and key storage)
-    if (signature_b64.empty()) {
+
+    // Convert to SecureMemory for verification
+    SecureMemory msg(data_to_verify.size());
+    std::memcpy(msg.data(), data_to_verify.data(), data_to_verify.size());
+
+    SecureMemory sig_mem(sig_bytes.size());
+    std::memcpy(sig_mem.data(), sig_bytes.data(), sig_bytes.size());
+
+    // Verify with the stored public key
+    if (!crypto_->verify_ed25519(msg, sig_mem, signing_keypair_.public_key)) {
         return ValidationResult::INVALID_SIGNATURE;
     }
 
@@ -261,10 +314,8 @@ License::ValidationResult License::validate_online(
     const std::string& hwid,
     const std::string& license_key,
     const std::string& server_url) {
-    (void)hwid;  // Suppress unused parameter warning - used in production implementation
+    (void)hwid;
     
-    // In production: HTTPS request to validation server
-    // For now: simulate validation
     if (license_key.empty()) {
         return ValidationResult::INVALID_KEY;
     }
@@ -279,7 +330,6 @@ License::ValidationResult License::validate_online(
     }
 
     // TODO: Implement actual HTTPS validation
-    // curl/libcurl or cpp-httplib for HTTP requests
     return ValidationResult::VALID;
 }
 
@@ -291,11 +341,11 @@ bool License::generate_license_file(
     const std::chrono::system_clock::time_point& expiration_date,
     const std::string& output_file,
     LicenseType type) {
-    (void)license_key;  // Suppress unused parameter warning - reserved for future use
-    (void)type;         // Suppress unused parameter warning - reserved for future use
+    (void)license_key;
+    (void)type;
     
     auto time_t_expiry = std::chrono::system_clock::to_time_t(expiration_date);
-    #ifdef _WIN32
+#ifdef _WIN32
     std::tm tm_buf;
     localtime_s(&tm_buf, &time_t_expiry);
     std::tm* tm = &tm_buf;
@@ -309,23 +359,18 @@ bool License::generate_license_file(
     // Create data to sign
     std::string data = hwid + "|" + expiry_str;
 
-    // Generate signature (using Ed25519)
-    auto keypair = crypto_->generate_keypair();
-
-    // FIX: Convert data to SecureMemory for sign_ed25519
+    // FIX: Use the persistent signing_keypair_ instead of generating a new one.
+    // Previously a new keypair was created every call — the public key was lost
+    // immediately, making verification of the signature impossible.
     SecureMemory msg(data.size());
     std::memcpy(msg.data(), data.data(), data.size());
-    SecureMemory signature = crypto_->sign_ed25519(msg, keypair.secret_key);
+    SecureMemory signature = crypto_->sign_ed25519(msg, signing_keypair_.secret_key);
 
-    // Encode signature to hex string using SecureMemory accessors
-    std::stringstream sig_ss;
-    for (size_t i = 0; i < signature.size(); ++i) {
-        sig_ss << std::hex << std::setfill('0') << std::setw(2)
-               << static_cast<int>(signature.data()[i]);
-    }
+    // Encode signature to hex string
+    std::string sig_hex = to_hex(signature);
 
     // Write license file
-    std::string license_content = data + "|" + sig_ss.str();
+    std::string license_content = data + "|" + sig_hex;
     std::ofstream file(output_file, std::ios::binary);
     if (!file.is_open()) {
         return false;
