@@ -170,6 +170,19 @@ public:
     );
 
     /**
+     * @brief Set raw ECHConfig for HPKE info string construction.
+     *
+     * Must be called before decrypt(). The server needs the same
+     * raw ECHConfig bytes that the client used to build HPKE info:
+     *   info = "tls ech" || 0x00 || ECHConfig
+     *
+     * Without this, HPKE key schedule diverges and decryption fails.
+     *
+     * @param raw_config Serialized ECHConfig bytes
+     */
+    void set_raw_config(const std::vector<uint8_t>& raw_config);
+
+    /**
      * @brief Decrypt ClientHelloInner using HPKE
      * @param enc HPKE encapsulated key from client
      * @param encrypted_payload Encrypted inner ClientHello
