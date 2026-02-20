@@ -48,6 +48,29 @@ std::string to_lower_copy(const std::string& s) {
     return out;
 }
 
+// =========================================================================
+// FIX #40: Helper — wait for socket readability with timeout (select-based)
+// Used to make accept() interruptible on shutdown.
+// Returns true if the socket is readable, false on timeout or error.
+// =========================================================================
+bool wait_for_readable(SOCKET sock, int timeout_ms) {
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+    FD_SET(sock, &read_fds);
+
+    struct timeval tv;
+    tv.tv_sec  = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+#ifdef _WIN32
+    // On Windows, first arg to select() is ignored
+    int ret = select(0, &read_fds, nullptr, nullptr, &tv);
+#else
+    int ret = select(static_cast<int>(sock) + 1, &read_fds, nullptr, nullptr, &tv);
+#endif
+    return ret > 0 && FD_ISSET(sock, &read_fds);
+}
+
 } // namespace
 
    // Using libsodium CSPRNG (randombytes_uniform) instead of mt19937
@@ -67,43 +90,37 @@ static bool is_tls_client_hello(const uint8_t* data, size_t len) {
  * Exposed with external linkage so unit tests can validate parsing robustness.
  */
 int find_sni_hostname_offset(const uint8_t* data, size_t len) {
-    // Basic TLS record header (5 bytes) + minimum handshake header
     if (!data || len < 5 + 4) {
         return -1;
     }
 
-    // TLS record type 0x16 (handshake) and version 0x03,xx already checked by is_tls_client_hello.
     if (data[0] != 0x16 || data[1] != 0x03) {
         return -1;
     }
 
-    size_t pos = 5; // Start of Handshake message
+    size_t pos = 5;
     if (pos + 4 > len) {
         return -1;
     }
 
     uint8_t handshake_type = data[pos];
-    if (handshake_type != 0x01) { // ClientHello
+    if (handshake_type != 0x01) {
         return -1;
     }
 
-    // Handshake length (3 bytes) - we mostly rely on outer bounds
     uint32_t hs_len = (static_cast<uint32_t>(data[pos + 1]) << 16) |
                       (static_cast<uint32_t>(data[pos + 2]) << 8) |
                       static_cast<uint32_t>(data[pos + 3]);
     (void)hs_len;
     pos += 4;
 
-    // ClientHello structure (RFC 5246 / 8446-style, simplified)
     if (pos + 2 + 32 + 1 > len) {
         return -1;
     }
 
-    // client_version (2) + random (32)
     pos += 2;
     pos += 32;
 
-    // session_id
     uint8_t session_id_len = data[pos];
     pos += 1;
     if (pos + session_id_len > len) {
@@ -111,7 +128,6 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
     }
     pos += session_id_len;
 
-    // cipher_suites
     if (pos + 2 > len) {
         return -1;
     }
@@ -123,7 +139,6 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
     }
     pos += cipher_suites_len;
 
-    // compression_methods
     if (pos + 1 > len) {
         return -1;
     }
@@ -134,7 +149,6 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
     }
     pos += compression_methods_len;
 
-    // extensions length
     if (pos + 2 > len) {
         return -1;
     }
@@ -147,7 +161,6 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
         exts_end = len;
     }
 
-    // Walk over extensions
     while (pos + 4 <= exts_end) {
         uint16_t ext_type = (static_cast<uint16_t>(data[pos]) << 8) |
                             static_cast<uint16_t>(data[pos + 1]);
@@ -159,7 +172,7 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
             break;
         }
 
-        if (ext_type == 0x0000) { // server_name extension
+        if (ext_type == 0x0000) {
             size_t sni_pos = pos;
             if (sni_pos + 2 > exts_end) {
                 return -1;
@@ -172,9 +185,8 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
                 return -1;
             }
 
-            // We only look at the first name in the list
             uint8_t name_type = data[sni_pos];
-            (void)name_type; // Typically 0x00 (host_name)
+            (void)name_type;
             sni_pos += 1;
             if (sni_pos + 2 > exts_end) {
                 return -1;
@@ -188,7 +200,6 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
                 return -1;
             }
 
-            // sni_pos now points at the first byte of the SNI hostname
             return static_cast<int>(sni_pos);
         }
 
@@ -203,30 +214,37 @@ public:
     std::atomic<bool> running{false};
     DPIConfig config;
 
-DPIStats stats;
+    // =========================================================================
+    // FIX #39: Dedicated mutex for config reads/writes.
+    // Worker threads take a config snapshot under this lock at connection start.
+    // update_config() also writes under this lock.
+    // stats_mutex remains only for stats.
+    // =========================================================================
+    mutable std::mutex config_mutex;
+
+    DPIStats stats;
     mutable std::mutex stats_mutex;
     std::thread worker_thread;
     std::function<void(const std::string&)> log_callback;
 
-
-    // === Thread pool for connection handling (Task 3.1) ===
     std::unique_ptr<ncp::ThreadPool> thread_pool_;
     std::atomic<int> active_connections_{0};
     static constexpr int MAX_CONNECTIONS = 256;
 
-    // === WebSocket Tunnel state (Phase 3) ===
 #ifdef HAVE_LIBWEBSOCKETS
     std::unique_ptr<ncp::WSTunnel> ws_tunnel_;
-    // Active client socket for WS tunnel mode (single-client for now)
-    // Protected by ws_client_mutex_
     std::mutex ws_client_mutex_;
     SOCKET ws_active_client_ = INVALID_SOCKET;
 #endif
 
-    // === Proxy mode state ===
+    // FIX #39: Thread-safe config snapshot helper
+    DPIConfig snapshot_config() const {
+        std::lock_guard<std::mutex> lock(config_mutex);
+        return config;
+    }
+
     void proxy_listen_loop() {
 #ifdef _WIN32
-        // Ensure Winsock is initialized for standalone DPI usage
         WSADATA wsa_data;
         if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
             log("Failed to initialize Winsock for DPI proxy");
@@ -249,10 +267,12 @@ DPIStats stats;
         setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR,
                    reinterpret_cast<const char*>(&opt), sizeof(opt));
 
+        // FIX #39: snapshot config for listen_port
+        DPIConfig listen_cfg = snapshot_config();
+
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
-        addr.sin_port = htons(config.listen_port);
-        // Bind to localhost for home-user proxy usage
+        addr.sin_port = htons(listen_cfg.listen_port);
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
         if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -275,12 +295,16 @@ DPIStats stats;
             return;
         }
 
-                // Initialize thread pool (Task 3.1)
         size_t num_threads = std::min<size_t>(std::thread::hardware_concurrency(), 8);
         thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
-        log("DPI proxy listening on 127.0.0.1:" + std::to_string(config.listen_port));
+        log("DPI proxy listening on 127.0.0.1:" + std::to_string(listen_cfg.listen_port));
 
         while (running) {
+            // FIX #40: select() with 500ms timeout before accept()
+            if (!wait_for_readable(listen_sock, 500)) {
+                continue;
+            }
+
             sockaddr_in client_addr{};
 #ifdef _WIN32
             int addr_len = static_cast<int>(sizeof(client_addr));
@@ -295,14 +319,13 @@ DPIStats stats;
                 if (!running) break;
                 continue;
             }
-        
-                    // Thread pool implementation (Task 3.1) - replaces detach() for proper resource management
+
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
                 stats.connections_handled++;
             }
 
-                        thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
+            thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
         }
 
         CLOSE_SOCKET(listen_sock);
@@ -313,30 +336,31 @@ DPIStats stats;
     }
 
     void handle_proxy_connection(SOCKET client_sock) {
-        if (config.target_host.empty()) {
+        // FIX #39: config snapshot at connection start
+        DPIConfig cfg_snap = snapshot_config();
+
+        if (cfg_snap.target_host.empty()) {
             log("DPI proxy: target_host is empty, closing client connection");
             CLOSE_SOCKET(client_sock);
             return;
         }
 
-        // Resolve target host
         addrinfo hints{};
         std::memset(&hints, 0, sizeof(hints));
         hints.ai_family = AF_INET;
         hints.ai_socktype = SOCK_STREAM;
 
         addrinfo* result = nullptr;
-        if (getaddrinfo(config.target_host.c_str(), nullptr, &hints, &result) != 0 || !result) {
-            log("DPI proxy: failed to resolve target host: " + config.target_host);
+        if (getaddrinfo(cfg_snap.target_host.c_str(), nullptr, &hints, &result) != 0 || !result) {
+            log("DPI proxy: failed to resolve target host: " + cfg_snap.target_host);
             CLOSE_SOCKET(client_sock);
             return;
         }
 
         sockaddr_in remote_addr{};
         remote_addr.sin_family = AF_INET;
-        remote_addr.sin_port = htons(config.target_port);
+        remote_addr.sin_port = htons(cfg_snap.target_port);
         remote_addr.sin_addr = reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr;
-
         freeaddrinfo(result);
 
         SOCKET server_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -346,18 +370,15 @@ DPIStats stats;
             return;
         }
 
-        if (connect(server_sock,
-                    reinterpret_cast<sockaddr*>(&remote_addr),
-                    sizeof(remote_addr)) < 0) {
+        if (connect(server_sock, reinterpret_cast<sockaddr*>(&remote_addr), sizeof(remote_addr)) < 0) {
             log("DPI proxy: failed to connect to upstream server");
             CLOSE_SOCKET(client_sock);
             CLOSE_SOCKET(server_sock);
             return;
         }
 
-        // Bidirectional piping: client -> server (with fragmentation/SNI-split)
-        // and server -> client (plain forward).
-        std::thread t_cs(&Impl::pipe_client_to_server, this, client_sock, server_sock);
+        // FIX #39: pass config snapshot by value to pipe thread
+        std::thread t_cs(&Impl::pipe_client_to_server, this, client_sock, server_sock, cfg_snap);
         std::thread t_sc(&Impl::pipe_server_to_client, this, server_sock, client_sock);
 
         t_cs.join();
@@ -367,18 +388,16 @@ DPIStats stats;
         CLOSE_SOCKET(server_sock);
     }
 
-    void pipe_client_to_server(SOCKET client_sock, SOCKET server_sock) {
+    // FIX #39: cfg_snap passed by value — no concurrent access to shared config
+    void pipe_client_to_server(SOCKET client_sock, SOCKET server_sock, DPIConfig cfg_snap) {
         std::vector<uint8_t> buffer(8192);
         bool client_hello_processed = false;
 
         while (running) {
             int received = recv(client_sock,
                                 reinterpret_cast<char*>(buffer.data()),
-                                static_cast<int>(buffer.size()),
-                                0);
-            if (received <= 0) {
-                break;
-            }
+                                static_cast<int>(buffer.size()), 0);
+            if (received <= 0) break;
 
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
@@ -388,18 +407,13 @@ DPIStats stats;
 
             bool is_client_hello = false;
             if (!client_hello_processed &&
-                is_tls_client_hello(buffer.data(),
-                                    static_cast<size_t>(received))) {
+                is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
                 is_client_hello = true;
                 client_hello_processed = true;
             }
 
-            send_with_fragmentation(
-                server_sock,
-                buffer.data(),
-                static_cast<size_t>(received),
-                is_client_hello
-            );
+            send_with_fragmentation(server_sock, buffer.data(),
+                                    static_cast<size_t>(received), is_client_hello, cfg_snap);
         }
     }
 
@@ -409,11 +423,8 @@ DPIStats stats;
         while (running) {
             int received = recv(server_sock,
                                 reinterpret_cast<char*>(buffer.data()),
-                                static_cast<int>(buffer.size()),
-                                0);
-            if (received <= 0) {
-                break;
-            }
+                                static_cast<int>(buffer.size()), 0);
+            if (received <= 0) break;
 
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
@@ -421,137 +432,86 @@ DPIStats stats;
                 stats.packets_total++;
             }
 
-            // No fragmentation for server->client path
-            send_with_fragmentation(
-                client_sock,
-                buffer.data(),
-                static_cast<size_t>(received),
-                false
-            );
+            size_t total_sent = 0;
+            size_t len = static_cast<size_t>(received);
+            while (total_sent < len) {
+                int to_send = static_cast<int>(std::min<size_t>(len - total_sent, 1460));
+                int sent = send(client_sock,
+                                reinterpret_cast<const char*>(buffer.data() + total_sent),
+                                to_send, 0);
+                if (sent <= 0) break;
+                total_sent += static_cast<size_t>(sent);
+            }
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                stats.bytes_sent += static_cast<uint64_t>(total_sent);
+            }
         }
     }
 
+    // FIX #39: cfg passed by const ref (caller's stack copy)
     void send_with_fragmentation(
-        SOCKET sock,
-        const uint8_t* data,
-        size_t len,
-        bool is_client_hello
-    ) {
-        if (!data || len == 0) {
-            return;
-        }
+        SOCKET sock, const uint8_t* data, size_t len,
+        bool is_client_hello, const DPIConfig& cfg)
+    {
+        if (!data || len == 0) return;
 
         auto send_all = [&](const uint8_t* d, size_t l) -> size_t {
             size_t total_sent = 0;
             while (total_sent < l) {
                 int to_send = static_cast<int>(std::min<size_t>(l - total_sent, 1460));
-                int sent = send(sock,
-                                reinterpret_cast<const char*>(d + total_sent),
-                                to_send,
-                                0);
-                if (sent <= 0) {
-                    break;
-                }
+                int sent = send(sock, reinterpret_cast<const char*>(d + total_sent), to_send, 0);
+                if (sent <= 0) break;
                 total_sent += static_cast<size_t>(sent);
             }
             return total_sent;
         };
 
-        // Add Noise/Junk data before the actual ClientHello
-        if (is_client_hello && config.enable_noise) {
-            std::vector<uint8_t> junk;
-            if (!config.fake_host.empty()) {
-                // Use fake host as noise to mislead DPI
-                std::string mask = "GET / HTTP/1.1\r\nHost: " + config.fake_host + "\r\n\r\n";
-                junk.assign(mask.begin(), mask.end());
-            } else {
-                junk.resize(config.noise_size > 0 ? config.noise_size : 64);
-                for(auto& b : junk) b = static_cast<uint8_t>(randombytes_uniform(256));
+        // =====================================================================
+        // FIX #38: REMOVED broken noise/fake-packet injection via TCP socket.
+        //
+        // The previous code sent HTTP GET junk and fake TLS records through the
+        // *same* connected TCP socket before the real ClientHello. This corrupts
+        // the TCP byte stream because:
+        //   1) The server receives the junk as part of the TLS handshake -> RST.
+        //   2) setsockopt(IP_TTL) on a TCP socket changes TTL for ALL subsequent
+        //      segments — not just one packet — so the low-TTL trick does not
+        //      work for TCP; you need a raw socket to craft individual datagrams.
+        //
+        // Proper fake-packet injection requires raw sockets (network_raw_socket.cpp)
+        // with correct TCP seq/ack, low TTL, or bad checksum.
+        //
+        // TODO: Integrate raw-socket-based fake packet injection for platforms
+        //       that support it (Linux CAP_NET_RAW, Windows with WinDivert).
+        // =====================================================================
+        if (is_client_hello && (cfg.enable_noise || cfg.enable_fake_packet)) {
+            log("DPI: noise/fake-packet requested but skipped — "
+                "TCP socket injection is broken; raw socket integration required");
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                if (cfg.enable_fake_packet) stats.fake_packets_sent++;
             }
-            
-            // Send junk with low TTL if fake_packet is enabled, otherwise just as noise
-#ifdef IP_TTL
-            int original_ttl = 64;
-            socklen_t optlen = sizeof(original_ttl);
-            getsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<char*>(&original_ttl), &optlen);
-            int low_ttl = 2; 
-            setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&low_ttl), sizeof(low_ttl));
-            send_all(junk.data(), junk.size());
-            setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&original_ttl), sizeof(original_ttl));
-#else
-            send_all(junk.data(), junk.size());
-#endif
         }
 
-        // Optional fake low‑TTL probe before main ClientHello
-        if (is_client_hello && config.enable_fake_packet) {
-            
-            // Send multiple fake packets with different characteristics
-            for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
-                // Randomize fake packet to avoid DPI fingerprinting
-                std::vector<uint8_t> fake_data = {
-                    0x16, 0x03, static_cast<uint8_t>(randombytes_uniform(256) % 4), // TLS record + random version minor
-                    static_cast<uint8_t>(randombytes_uniform(256)), static_cast<uint8_t>(randombytes_uniform(256)), // Random length
-                    0x01 // ClientHello
-                                };
-    #ifdef IP_TTL
-                                int original_ttl = 0;
-                    socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
-                    bool ttl_changed = false;
-                    if (getsockopt(sock, IPPROTO_IP, IP_TTL,
-                                   reinterpret_cast<char*>(&original_ttl),
-                                   &optlen) == 0) {
-                        int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
-                        if (setsockopt(sock, IPPROTO_IP, IP_TTL,
-                                       reinterpret_cast<const char*>(&ttl),
-                                       sizeof(ttl)) == 0) {
-                            ttl_changed = true;
-                        }
-                    }
-    #endif
-                    send_all(fake_data.data(), fake_data.size());
-                    
-                    {
-                        std::lock_guard<std::mutex> lock(stats_mutex);
-                        stats.fake_packets_sent++;
-                    }
-    
-    #ifdef IP_TTL
-                    if (ttl_changed) {
-                        setsockopt(sock, IPPROTO_IP, IP_TTL,
-                                   reinterpret_cast<const char*>(&original_ttl),
-                                   sizeof(original_ttl));
-                    }
-    #endif
-                    if (config.disorder_delay_ms > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
-                    }
-                }
-        }
-
-        // If this is not a ClientHello or TCP splitting is disabled,
-        // just send as-is (potentially chunked by MTU size).
-        if (!is_client_hello || !config.enable_tcp_split) {
+        if (!is_client_hello || !cfg.enable_tcp_split) {
             size_t sent = send_all(data, len);
             std::lock_guard<std::mutex> lock(stats_mutex);
             stats.bytes_sent += static_cast<uint64_t>(sent);
             return;
         }
 
-        // Determine split point: SNI-based if requested and available,
-        // otherwise based on split_position, with a safe minimum.
         size_t first_len = 0;
         int sni_offset = -1;
 
-        if (config.split_at_sni) {
+        if (cfg.split_at_sni) {
             sni_offset = find_sni_hostname_offset(data, len);
         }
 
         if (sni_offset > 0 && static_cast<size_t>(sni_offset) < len) {
             first_len = static_cast<size_t>(sni_offset);
-        } else if (config.split_position > 0 &&
-                   static_cast<size_t>(config.split_position) < len) {
-            first_len = static_cast<size_t>(config.split_position);
+        } else if (cfg.split_position > 0 &&
+                   static_cast<size_t>(cfg.split_position) < len) {
+            first_len = static_cast<size_t>(cfg.split_position);
         } else {
             first_len = std::min<size_t>(len, 1);
         }
@@ -563,27 +523,22 @@ DPIStats stats;
         size_t remaining = (sent_first < len) ? (len - sent_first) : 0;
 
         if (remaining > 0) {
-            // Advanced fragmentation with randomness
-            size_t base_frag_size = (config.fragment_size > 0)
-                                   ? static_cast<size_t>(config.fragment_size)
-                                   : 2;
-            
+            size_t base_frag_size = (cfg.fragment_size > 0)
+                                   ? static_cast<size_t>(cfg.fragment_size) : 2;
+
             size_t offset = 0;
             while (offset < remaining) {
-                // Randomize fragment size slightly for evasion
-                size_t jitter = randombytes_uniform(3); 
+                size_t jitter = randombytes_uniform(3);
                 size_t current_frag = std::min(base_frag_size + jitter, remaining - offset);
 
-                if (config.enable_disorder && config.disorder_delay_ms > 0) {
+                if (cfg.enable_disorder && cfg.disorder_delay_ms > 0) {
                     std::this_thread::sleep_for(
-                        std::chrono::milliseconds(config.disorder_delay_ms));
+                        std::chrono::milliseconds(cfg.disorder_delay_ms));
                 }
 
                 size_t sent = send_all(data + sent_first + offset, current_frag);
                 sent_total += sent;
-                if (sent == 0) {
-                    break;
-                }
+                if (sent == 0) break;
                 offset += sent;
             }
         }
@@ -602,46 +557,46 @@ DPIStats stats;
     // =========================================================================
 #ifdef HAVE_LIBWEBSOCKETS
 
-    /**
-     * @brief Apply DPI fragmentation/obfuscation to outgoing data and return
-     *        the processed buffer ready for WS tunnel transmission.
-     *
-     * This mirrors the logic of send_with_fragmentation() but instead of
-     * sending over a TCP socket, it collects the processed segments into a
-     * flat byte vector that will be pushed through WSTunnel::send().
-     */
-    std::vector<uint8_t> process_outgoing_for_ws(const uint8_t* data, size_t len,
-                                                  bool is_client_hello) {
-        std::vector<uint8_t> out;
-        if (!data || len == 0) return out;
+    // =========================================================================
+    // FIX #41: process_outgoing_for_ws now returns vector of separate frames.
+    // Each element is sent as an individual WebSocket frame so DPI sees
+    // distinct frames instead of one concatenated blob.
+    // =========================================================================
+    std::vector<std::vector<uint8_t>> process_outgoing_for_ws(
+        const uint8_t* data, size_t len,
+        bool is_client_hello, const DPIConfig& cfg)
+    {
+        std::vector<std::vector<uint8_t>> frames;
+        if (!data || len == 0) return frames;
 
-        // --- Noise / fake host preamble ---
-        if (is_client_hello && config.enable_noise) {
-            if (!config.fake_host.empty()) {
-                std::string mask = "GET / HTTP/1.1\r\nHost: " + config.fake_host + "\r\n\r\n";
-                out.insert(out.end(), mask.begin(), mask.end());
+        // --- Noise / fake host preamble (separate WS frame) ---
+        if (is_client_hello && cfg.enable_noise) {
+            std::vector<uint8_t> noise_frame;
+            if (!cfg.fake_host.empty()) {
+                std::string mask = "GET / HTTP/1.1\r\nHost: " + cfg.fake_host + "\r\n\r\n";
+                noise_frame.assign(mask.begin(), mask.end());
             } else {
-                size_t noise_sz = config.noise_size > 0
-                                    ? static_cast<size_t>(config.noise_size) : 64;
-                size_t off = out.size();
-                out.resize(out.size() + noise_sz);
+                size_t noise_sz = cfg.noise_size > 0
+                                    ? static_cast<size_t>(cfg.noise_size) : 64;
+                noise_frame.resize(noise_sz);
                 for (size_t i = 0; i < noise_sz; ++i)
-                    out[off + i] = static_cast<uint8_t>(randombytes_uniform(256));
+                    noise_frame[i] = static_cast<uint8_t>(randombytes_uniform(256));
             }
+            frames.push_back(std::move(noise_frame));
         }
 
-        // --- Fake TLS probe ---
-        if (is_client_hello && config.enable_fake_packet) {
-            int fakes = (config.fake_ttl > 2) ? 2 : 1;
+        // --- Fake TLS probe (each as separate WS frame) ---
+        if (is_client_hello && cfg.enable_fake_packet) {
+            int fakes = (cfg.fake_ttl > 2) ? 2 : 1;
             for (int i = 0; i < fakes; ++i) {
-                uint8_t fake[] = {
+                std::vector<uint8_t> fake_frame = {
                     0x16, 0x03,
                     static_cast<uint8_t>(randombytes_uniform(4)),
                     static_cast<uint8_t>(randombytes_uniform(256)),
                     static_cast<uint8_t>(randombytes_uniform(256)),
                     0x01
                 };
-                out.insert(out.end(), fake, fake + sizeof(fake));
+                frames.push_back(std::move(fake_frame));
                 {
                     std::lock_guard<std::mutex> lock(stats_mutex);
                     stats.fake_packets_sent++;
@@ -649,35 +604,33 @@ DPIStats stats;
             }
         }
 
-        // --- TCP split / fragmentation ---
-        if (!is_client_hello || !config.enable_tcp_split) {
-            out.insert(out.end(), data, data + len);
+        // --- TCP split / fragmentation (each fragment = separate WS frame) ---
+        if (!is_client_hello || !cfg.enable_tcp_split) {
+            frames.emplace_back(data, data + len);
         } else {
             size_t first_len = 0;
             int sni_off = -1;
-            if (config.split_at_sni)
+            if (cfg.split_at_sni)
                 sni_off = find_sni_hostname_offset(data, len);
 
             if (sni_off > 0 && static_cast<size_t>(sni_off) < len)
                 first_len = static_cast<size_t>(sni_off);
-            else if (config.split_position > 0 &&
-                     static_cast<size_t>(config.split_position) < len)
-                first_len = static_cast<size_t>(config.split_position);
+            else if (cfg.split_position > 0 &&
+                     static_cast<size_t>(cfg.split_position) < len)
+                first_len = static_cast<size_t>(cfg.split_position);
             else
                 first_len = std::min<size_t>(len, 1);
 
-            // First fragment
-            out.insert(out.end(), data, data + first_len);
+            frames.emplace_back(data, data + first_len);
 
-            // Remaining fragments with jitter-sized chunks
-            size_t base_frag = config.fragment_size > 0
-                                ? static_cast<size_t>(config.fragment_size) : 2;
+            size_t base_frag = cfg.fragment_size > 0
+                                ? static_cast<size_t>(cfg.fragment_size) : 2;
             size_t remaining = len - first_len;
             size_t off = first_len;
             while (remaining > 0) {
                 size_t j = randombytes_uniform(3);
                 size_t chunk = std::min(base_frag + j, remaining);
-                out.insert(out.end(), data + off, data + off + chunk);
+                frames.emplace_back(data + off, data + off + chunk);
                 off += chunk;
                 remaining -= chunk;
             }
@@ -685,18 +638,16 @@ DPIStats stats;
 
         {
             std::lock_guard<std::mutex> lock(stats_mutex);
-            stats.bytes_sent += static_cast<uint64_t>(out.size());
-            if (is_client_hello && config.enable_tcp_split)
+            size_t total_bytes = 0;
+            for (const auto& f : frames) total_bytes += f.size();
+            stats.bytes_sent += static_cast<uint64_t>(total_bytes);
+            if (is_client_hello && cfg.enable_tcp_split)
                 stats.packets_fragmented++;
         }
 
-        return out;
+        return frames;
     }
 
-    /**
-     * @brief Send raw data back to the currently connected client socket.
-     *        Called from WSTunnel receive callback (relay → client).
-     */
     void send_to_client(const uint8_t* data, size_t len) {
         std::lock_guard<std::mutex> lock(ws_client_mutex_);
         if (ws_active_client_ == INVALID_SOCKET || !data || len == 0)
@@ -718,15 +669,6 @@ DPIStats stats;
         }
     }
 
-    /**
-     * @brief WS tunnel accept loop.
-     *
-     * Listens on ws_local_port, accepts one client at a time, reads data,
-     * applies DPI processing (fragmentation / obfuscation), then pushes
-     * the result through WSTunnel::send().  Data received from the relay
-     * is forwarded back to the client via the receive callback registered
-     * in start_ws_tunnel().
-     */
     void ws_tunnel_listen_loop() {
 #ifdef _WIN32
         WSADATA wsa_data;
@@ -736,8 +678,10 @@ DPIStats stats;
             return;
         }
 #endif
-        uint16_t local_port = config.ws_local_port > 0
-                                ? config.ws_local_port : 8081;
+        // FIX #39: snapshot config
+        DPIConfig listen_cfg = snapshot_config();
+        uint16_t local_port = listen_cfg.ws_local_port > 0
+                                ? listen_cfg.ws_local_port : 8081;
 
         SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if (listen_sock == INVALID_SOCKET) {
@@ -778,14 +722,18 @@ DPIStats stats;
             return;
         }
 
-        // Thread pool for concurrent client handling
         size_t num_threads = std::min<size_t>(std::thread::hardware_concurrency(), 8);
         thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
 
         log("WS_TUNNEL: listening on 127.0.0.1:" + std::to_string(local_port) +
-            " → relay " + config.ws_server_url);
+            " -> relay " + listen_cfg.ws_server_url);
 
         while (running) {
+            // FIX #40: select() with timeout before accept()
+            if (!wait_for_readable(listen_sock, 500)) {
+                continue;
+            }
+
             sockaddr_in client_addr{};
 #ifdef _WIN32
             int addr_len = static_cast<int>(sizeof(client_addr));
@@ -816,19 +764,14 @@ DPIStats stats;
 #endif
     }
 
-    /**
-     * @brief Handle a single client connection in WS_TUNNEL mode.
-     *
-     * Reads from client → process_outgoing_for_ws() → WSTunnel::send()
-     * The reverse path (relay → client) is handled by the WSTunnel
-     * receive callback which calls send_to_client().
-     */
     void handle_ws_tunnel_connection(SOCKET client_sock) {
-        // Register this client for the receive callback path
         {
             std::lock_guard<std::mutex> lock(ws_client_mutex_);
             ws_active_client_ = client_sock;
         }
+
+        // FIX #39: snapshot config at connection start
+        DPIConfig cfg_snap = snapshot_config();
 
         std::vector<uint8_t> buffer(8192);
         bool client_hello_processed = false;
@@ -847,22 +790,24 @@ DPIStats stats;
 
             bool is_ch = false;
             if (!client_hello_processed &&
-                is_tls_client_hello(buffer.data(),
-                                    static_cast<size_t>(received))) {
+                is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
                 is_ch = true;
                 client_hello_processed = true;
             }
 
-            // Apply DPI obfuscation pipeline then send via WS tunnel
-            auto processed = process_outgoing_for_ws(
-                buffer.data(), static_cast<size_t>(received), is_ch);
+            // FIX #41: Each frame sent as separate WebSocket message
+            auto frames = process_outgoing_for_ws(
+                buffer.data(), static_cast<size_t>(received), is_ch, cfg_snap);
 
-            if (!processed.empty() && ws_tunnel_) {
-                ws_tunnel_->send(processed.data(), processed.size());
+            if (ws_tunnel_) {
+                for (const auto& frame : frames) {
+                    if (!frame.empty()) {
+                        ws_tunnel_->send(frame.data(), frame.size());
+                    }
+                }
             }
         }
 
-        // Unregister client
         {
             std::lock_guard<std::mutex> lock(ws_client_mutex_);
             ws_active_client_ = INVALID_SOCKET;
@@ -870,19 +815,19 @@ DPIStats stats;
         CLOSE_SOCKET(client_sock);
     }
 
-    /**
-     * @brief Initialize and start the WSTunnel, then enter accept loop.
-     */
     bool start_ws_tunnel() {
         ws_tunnel_ = std::make_unique<ncp::WSTunnel>();
 
+        // FIX #39: snapshot config
+        DPIConfig cfg_snap = snapshot_config();
+
         ncp::WSTunnelConfig ws_cfg;
-        ws_cfg.server_url           = config.ws_server_url;
-        ws_cfg.local_port           = config.ws_local_port;
-        ws_cfg.sni_override         = config.ws_sni_override;
-        ws_cfg.ping_interval_sec    = config.ws_ping_interval_sec;
-        ws_cfg.reconnect_delay_ms   = config.ws_reconnect_delay_ms;
-        ws_cfg.max_reconnect_attempts = config.ws_max_reconnect_attempts;
+        ws_cfg.server_url           = cfg_snap.ws_server_url;
+        ws_cfg.local_port           = cfg_snap.ws_local_port;
+        ws_cfg.sni_override         = cfg_snap.ws_sni_override;
+        ws_cfg.ping_interval_sec    = cfg_snap.ws_ping_interval_sec;
+        ws_cfg.reconnect_delay_ms   = cfg_snap.ws_reconnect_delay_ms;
+        ws_cfg.max_reconnect_attempts = cfg_snap.ws_max_reconnect_attempts;
 
         if (!ws_tunnel_->initialize(ws_cfg)) {
             log("WS_TUNNEL: Failed to initialize libwebsockets context");
@@ -890,13 +835,11 @@ DPIStats stats;
             return false;
         }
 
-        // Register receive callback: relay → client socket
         ws_tunnel_->set_receive_callback(
             [this](const uint8_t* data, size_t len) {
                 send_to_client(data, len);
             });
 
-        // Log connection state changes
         ws_tunnel_->set_state_callback(
             [this](bool connected) {
                 log(std::string("WS_TUNNEL: relay ") +
@@ -904,7 +847,7 @@ DPIStats stats;
             });
 
         if (!ws_tunnel_->start()) {
-            log("WS_TUNNEL: Failed to connect to relay " + config.ws_server_url);
+            log("WS_TUNNEL: Failed to connect to relay " + cfg_snap.ws_server_url);
             ws_tunnel_.reset();
             return false;
         }
@@ -919,7 +862,6 @@ DPIStats stats;
             ws_tunnel_->stop();
             ws_tunnel_.reset();
         }
-        // Close any active client
         {
             std::lock_guard<std::mutex> lock(ws_client_mutex_);
             if (ws_active_client_ != INVALID_SOCKET) {
@@ -930,36 +872,34 @@ DPIStats stats;
     }
 #endif // HAVE_LIBWEBSOCKETS
 
-    // =========================================================================
-    // NFQUEUE (driver mode)
-    // =========================================================================
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     struct nfq_handle* nfq_h = nullptr;
     struct nfq_q_handle* nfq_qh = nullptr;
     int m_nfq_fd = -1;
-    
+
     static int nfq_callback(struct nfq_q_handle* qh, struct nfgenmsg*,
                            struct nfq_data* nfa, void* data) {
         Impl* self = static_cast<Impl*>(data);
         struct nfqnl_msg_packet_hdr* ph = nfq_get_msg_packet_hdr(nfa);
         if (!ph) return -1;
         uint32_t id = ntohl(ph->packet_id);
-        
+
         unsigned char* payload;
         int payload_len = nfq_get_payload(nfa, &payload);
         if (payload_len < 0) {
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
         }
-        
+
         {
             std::lock_guard<std::mutex> lock(self->stats_mutex);
             self->stats.packets_total++;
         }
-        
+
         return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
     }
-    
+
     bool init_nfqueue() {
+        DPIConfig cfg_snap = snapshot_config();
         nfq_h = nfq_open();
         if (!nfq_h) return false;
         nfq_unbind_pf(nfq_h, AF_INET);
@@ -967,7 +907,7 @@ DPIStats stats;
             nfq_close(nfq_h); nfq_h = nullptr;
             return false;
         }
-        nfq_qh = nfq_create_queue(nfq_h, config.nfqueue_num, &Impl::nfq_callback, this);
+        nfq_qh = nfq_create_queue(nfq_h, cfg_snap.nfqueue_num, &Impl::nfq_callback, this);
         if (!nfq_qh) {
             nfq_close(nfq_h); nfq_h = nullptr;
             return false;
@@ -976,7 +916,7 @@ DPIStats stats;
         m_nfq_fd = nfq_fd(nfq_h);
         return true;
     }
-    
+
     void nfqueue_loop() {
         char buf[65536];
         while (running) {
@@ -984,7 +924,7 @@ DPIStats stats;
             if (rv >= 0) nfq_handle_packet(nfq_h, buf, rv);
         }
     }
-    
+
     void cleanup_nfqueue() {
         if (nfq_qh) { nfq_destroy_queue(nfq_qh); nfq_qh = nullptr; }
         if (nfq_h) { nfq_close(nfq_h); nfq_h = nullptr; }
@@ -996,7 +936,6 @@ DPIStats stats;
         if (log_callback) {
             log_callback(msg);
         } else {
-            // Fallback when no callback is installed (e.g. tests)
             std::clog << "[DPI] " << msg << std::endl;
         }
     }
@@ -1005,7 +944,6 @@ DPIStats stats;
 void apply_preset(DPIPreset preset, DPIConfig& config) {
     switch (preset) {
     case DPIPreset::RUNET_SOFT:
-        // Mild settings targeting common Russian DPI deployments
         config.mode = DPIMode::PROXY;
         config.enable_tcp_split = true;
         config.split_at_sni = true;
@@ -1017,7 +955,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.enable_oob_data = false;
         break;
     case DPIPreset::RUNET_STRONG:
-        // Aggressive profile for heavily filtered networks (modernized for TSPU)
         config.mode = DPIMode::PROXY;
         config.enable_tcp_split = true;
         config.split_at_sni = true;
@@ -1031,7 +968,7 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.noise_size = 256;
         config.enable_host_case = true;
         config.fake_host = "google.com";
-        config.fake_ttl = 2; // Paranoid level
+        config.fake_ttl = 2;
         break;
     case DPIPreset::NONE:
     default:
@@ -1064,7 +1001,10 @@ DPIBypass::DPIBypass() : impl_(std::make_unique<Impl>()) {}
 DPIBypass::~DPIBypass() { shutdown(); }
 
 bool DPIBypass::initialize(const DPIConfig& config) {
-    impl_->config = config;
+    {
+        std::lock_guard<std::mutex> lock(impl_->config_mutex);
+        impl_->config = config;
+    }
 
     std::string mode_str;
     switch (config.mode) {
@@ -1083,40 +1023,40 @@ bool DPIBypass::initialize(const DPIConfig& config) {
 
 bool DPIBypass::start() {
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
-    if (impl_->config.mode == DPIMode::DRIVER) {
+    if (impl_->snapshot_config().mode == DPIMode::DRIVER) {
         if (!impl_->init_nfqueue()) return false;
         impl_->running = true;
         impl_->worker_thread = std::thread(&Impl::nfqueue_loop, impl_.get());
         impl_->log("DPI bypass started (driver mode via nfqueue, queue=" +
-                  std::to_string(impl_->config.nfqueue_num) + ")");
+                  std::to_string(impl_->snapshot_config().nfqueue_num) + ")");
         return true;
     }
 #endif
 
-    if (impl_->config.mode == DPIMode::PROXY) {
+    DPIConfig cfg_snap = impl_->snapshot_config();
+
+    if (cfg_snap.mode == DPIMode::PROXY) {
         impl_->running = true;
         impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl_.get());
         impl_->log("DPI bypass started (TCP proxy mode)");
         return true;
     }
 
-    // WebSocket Tunnel mode (Phase 3)
 #ifdef HAVE_LIBWEBSOCKETS
-    if (impl_->config.mode == DPIMode::WS_TUNNEL) {
-        if (impl_->config.ws_server_url.empty()) {
+    if (cfg_snap.mode == DPIMode::WS_TUNNEL) {
+        if (cfg_snap.ws_server_url.empty()) {
             impl_->log("WS_TUNNEL: ws_server_url is not configured");
             return false;
         }
         if (!impl_->start_ws_tunnel()) {
             return false;
         }
-        impl_->log("DPI bypass started (WebSocket tunnel mode → " +
-                   impl_->config.ws_server_url + ")");
+        impl_->log("DPI bypass started (WebSocket tunnel mode -> " +
+                   cfg_snap.ws_server_url + ")");
         return true;
     }
 #endif
 
-    // Passive fallback mode (no packet/stream modification)
     impl_->running = true;
     impl_->log("DPI bypass started (passive mode - nfqueue/proxy not active)");
     return true;
@@ -1149,7 +1089,8 @@ void DPIBypass::set_log_callback(LogCallback cb) {
 }
 
 DPIConfig DPIBypass::get_config() const {
-    std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+    // FIX #39: use config_mutex instead of stats_mutex
+    std::lock_guard<std::mutex> lock(impl_->config_mutex);
     return impl_->config;
 }
 
@@ -1158,7 +1099,8 @@ bool DPIBypass::update_config(const DPIConfig& config) {
     if (err != ValidationError::NONE) return false;
     DPIConfig old_cfg;
     {
-        std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+        // FIX #39: use config_mutex for config writes
+        std::lock_guard<std::mutex> lock(impl_->config_mutex);
         old_cfg = impl_->config;
         impl_->config = config;
     }
