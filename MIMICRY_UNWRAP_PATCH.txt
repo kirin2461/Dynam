@@ -1,0 +1,137 @@
+MIMICRY UNWRAP + DETECT FIXES
+==============================
+
+Changes to src/core/src/mimicry.cpp:
+
+1. ADD extract_skype_payload() after extract_bittorrent_payload():
+
+```cpp
+std::vector<uint8_t> TrafficMimicry::extract_skype_payload(const std::vector<uint8_t>& data) {
+    // Wrap format: [2 random][0x02][0x00][2 seq][2 len_be][payload][padding to 160]
+    if (data.size() < 8) return {};
+    if (data[2] != 0x02 || data[3] != 0x00) return {};
+    
+    uint16_t len = (static_cast<uint16_t>(data[6]) << 8) | data[7];
+    if (8 + len > data.size()) return {};
+    
+    return std::vector<uint8_t>(data.begin() + 8, data.begin() + 8 + len);
+}
+```
+
+2. ADD extract_zoom_payload() after extract_skype_payload():
+
+```cpp
+std::vector<uint8_t> TrafficMimicry::extract_zoom_payload(const std::vector<uint8_t>& data) {
+    // Wrap format: [0x90][0x60][2 seq][4 timestamp][4 SSRC][0xBE][0xDE][2 ext_len][2 len_be][payload][padding to %4]
+    if (data.size() < 18) return {};
+    if (data[0] != 0x90 || data[1] != 0x60) return {};
+    if (data[12] != 0xBE || data[13] != 0xDE) return {};
+    
+    uint16_t len = (static_cast<uint16_t>(data[16]) << 8) | data[17];
+    if (18 + len > data.size()) return {};
+    
+    return std::vector<uint8_t>(data.begin() + 18, data.begin() + 18 + len);
+}
+```
+
+3. ADD extract_generic_tcp_payload() after extract_zoom_payload():
+
+```cpp
+std::vector<uint8_t> TrafficMimicry::extract_generic_tcp_payload(const std::vector<uint8_t>& data) {
+    // Same as fallback in unwrap_payload() but explicit
+    if (data.size() <= 4) return {};
+    
+    uint32_t len = (static_cast<uint32_t>(data[0]) << 24) |
+                   (static_cast<uint32_t>(data[1]) << 16) |
+                   (static_cast<uint32_t>(data[2]) << 8) |
+                    static_cast<uint32_t>(data[3]);
+    
+    if (4 + len <= data.size()) {
+        return std::vector<uint8_t>(data.begin() + 4, data.begin() + 4 + len);
+    } else {
+        return std::vector<uint8_t>(data.begin() + 4, data.end());
+    }
+}
+```
+
+4. UPDATE unwrap_payload() switch to wire new extractors:
+
+```cpp
+std::vector<uint8_t> TrafficMimicry::unwrap_payload(
+        const std::vector<uint8_t>& mimicked_data, MimicProfile profile) {
+    std::vector<uint8_t> result;
+    switch (profile) {
+        case MimicProfile::HTTP_GET:
+        case MimicProfile::HTTP_POST:           result = extract_http_payload(mimicked_data); break;
+        case MimicProfile::HTTPS_CLIENT_HELLO:
+        case MimicProfile::HTTPS_APPLICATION:   result = extract_tls_payload(mimicked_data); break;
+        case MimicProfile::DNS_QUERY:
+        case MimicProfile::DNS_RESPONSE:        result = extract_dns_payload(mimicked_data); break;
+        case MimicProfile::QUIC_INITIAL:        result = extract_quic_payload(mimicked_data); break;
+        case MimicProfile::WEBSOCKET:           result = extract_websocket_payload(mimicked_data); break;
+        case MimicProfile::BITTORRENT:          result = extract_bittorrent_payload(mimicked_data); break;
+        case MimicProfile::SKYPE:               result = extract_skype_payload(mimicked_data); break;  // NEW
+        case MimicProfile::ZOOM:                result = extract_zoom_payload(mimicked_data); break;   // NEW
+        case MimicProfile::GENERIC_TCP:         result = extract_generic_tcp_payload(mimicked_data); break;  // NEW
+        case MimicProfile::GENERIC_UDP:
+        default:
+            // GENERIC_UDP fallback (4-byte length prefix)
+            if (mimicked_data.size() > 4) {
+                uint32_t len = (static_cast<uint32_t>(mimicked_data[0]) << 24) |
+                               (static_cast<uint32_t>(mimicked_data[1]) << 16) |
+                               (static_cast<uint32_t>(mimicked_data[2]) << 8) |
+                                static_cast<uint32_t>(mimicked_data[3]);
+                if (4 + len <= mimicked_data.size()) {
+                    result.assign(mimicked_data.begin() + 4, mimicked_data.begin() + 4 + len);
+                } else {
+                    result.assign(mimicked_data.begin() + 4, mimicked_data.end());
+                }
+            }
+            break;
+    }
+    stats_.packets_unwrapped++;
+    return result;
+}
+```
+
+5. UPDATE detect_profile() to detect SKYPE and ZOOM:
+
+```cpp
+TrafficMimicry::MimicProfile TrafficMimicry::detect_profile(const std::vector<uint8_t>& data) {
+    if (data.size() < 2) return MimicProfile::GENERIC_UDP;
+
+    // Check for SKYPE (before TLS to avoid false positive on 0x16 0x03...)
+    if (data.size() >= 8 && data[2] == 0x02 && data[3] == 0x00) {
+        // Skype: offset 2-3 == 0x02 0x00 with seq and length fields
+        return MimicProfile::SKYPE;
+    }
+
+    // Check for ZOOM
+    if (data.size() >= 18 && data[0] == 0x90 && data[1] == 0x60) {
+        if (data[12] == 0xBE && data[13] == 0xDE) {
+            return MimicProfile::ZOOM;
+        }
+    }
+
+    // ... rest of detect_profile logic unchanged ...
+}
+```
+
+6. REMOVE generate_random_port() from .cpp (dead code)
+
+7. REMOVE generate_random_port() declaration from include/ncp_mimicry.hpp
+
+Changes to src/core/include/ncp_mimicry.hpp:
+
+1. ADD extract_skype_payload(), extract_zoom_payload(), extract_generic_tcp_payload() declarations in private section:
+
+```cpp
+private:
+    // ... existing extractors ...
+    std::vector<uint8_t> extract_skype_payload(const std::vector<uint8_t>& data);
+    std::vector<uint8_t> extract_zoom_payload(const std::vector<uint8_t>& data);
+    std::vector<uint8_t> extract_generic_tcp_payload(const std::vector<uint8_t>& data);
+```
+
+2. REMOVE:
+    uint16_t generate_random_port();
