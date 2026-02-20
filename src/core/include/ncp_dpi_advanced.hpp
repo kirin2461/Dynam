@@ -228,11 +228,14 @@ public:
         size_t urgent_position
     );
     
-    // Reorder segments for disorder effect
-    // Phase 0: unused_param kept for API compatibility (libsodium used internally)
+    /**
+     * @brief Reorder segments using Fisher-Yates shuffle (libsodium CSPRNG)
+     *
+     * Uses cryptographically secure randomness from libsodium internally.
+     * No external RNG state is needed.
+     */
     void shuffle_segments(
-        std::vector<std::vector<uint8_t>>& segments,
-        void* unused_param = nullptr
+        std::vector<std::vector<uint8_t>>& segments
     );
 
 private:
