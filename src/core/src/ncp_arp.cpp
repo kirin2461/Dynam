@@ -26,6 +26,15 @@
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
+
+// FIX #21: Npcap/WinPcap headers for raw ARP packet injection on Windows.
+// Requires Npcap SDK headers at compile time and npcap.dll at runtime.
+// Download: https://npcap.com/#download  (SDK + runtime installer)
+#ifdef HAVE_NPCAP
+#include <pcap.h>
+#pragma comment(lib, "wpcap.lib")
+#endif // HAVE_NPCAP
+
 #else
 #include <arpa/inet.h>
 #include <net/if.h>
@@ -39,7 +48,7 @@
 namespace ncp {
 namespace DPI {
 
-// ─── ARP packet structure ─────────────────────────────────────────────────────
+// ─── ARP packet structure ─────────────────────────────────────────────────────────────
 
 #pragma pack(push, 1)
 struct ARPPacket {
@@ -69,7 +78,7 @@ static constexpr uint16_t ARP_PROTO_IP  = 0x0800;
 static constexpr uint16_t ARP_OP_REQ    = 0x0001;
 static constexpr uint16_t ARP_OP_REPLY  = 0x0002;
 
-// ─── Impl ─────────────────────────────────────────────────────────────────────
+// ─── Impl ───────────────────────────────────────────────────────────────────────
 
 struct ARPController::Impl {
     std::string                   iface;
@@ -85,14 +94,17 @@ struct ARPController::Impl {
     std::thread                   worker;
 
 #ifdef _WIN32
-    // Windows: use SendARP or Npcap
-    // Placeholder for raw socket handle
-    int raw_socket = -1;
+    // FIX #21: Npcap pcap_t handle for raw packet injection on Windows.
+    // When HAVE_NPCAP is not defined, falls back to error reporting.
+#ifdef HAVE_NPCAP
+    pcap_t* pcap_handle = nullptr;
+#endif
+    std::string last_error;
 #else
     int                           raw_socket = -1;
 #endif
 
-    // ── Build ARP packet ────────────────────────────────────────────────────
+    // ── Build ARP packet ──────────────────────────────────────────────────────
     ARPPacket build_arp(uint16_t opcode,
                         const MACAddress& src_mac, const IPv4Address& src_ip,
                         const MACAddress& dst_mac, const IPv4Address& dst_ip)
@@ -120,21 +132,106 @@ struct ARPController::Impl {
         return pkt;
     }
 
-    // ── Open raw socket ─────────────────────────────────────────────────────
+    // ── Open raw socket ───────────────────────────────────────────────────────
     bool open_socket() {
 #ifdef _WIN32
-        // Windows: raw ARP sending requires Npcap/WinPcap
-        // Stub - will integrate with existing ncp_network.hpp pcap handles
+#ifdef HAVE_NPCAP
+        // FIX #21: Real Npcap implementation.
+        // Convert interface name to Npcap device format.
+        // Npcap uses "\\Device\\NPF_{GUID}" format, but we also accept
+        // friendly names and attempt to find the matching device.
+        std::string dev_name;
+
+        // First try: if iface already looks like an NPF device, use directly
+        if (iface.find("NPF_") != std::string::npos ||
+            iface.find("npf_") != std::string::npos) {
+            dev_name = iface;
+        } else {
+            // Enumerate Npcap devices and find one matching the interface name
+            pcap_if_t* alldevs = nullptr;
+            char errbuf[PCAP_ERRBUF_SIZE];
+            if (pcap_findalldevs(&alldevs, errbuf) == -1) {
+                last_error = std::string("Npcap pcap_findalldevs failed: ") + errbuf;
+                return false;
+            }
+
+            for (pcap_if_t* d = alldevs; d != nullptr; d = d->next) {
+                // Match by description (friendly name) or device name substring
+                std::string name_str = d->name ? d->name : "";
+                std::string desc_str = d->description ? d->description : "";
+
+                if (name_str.find(iface) != std::string::npos ||
+                    desc_str.find(iface) != std::string::npos) {
+                    dev_name = name_str;
+                    break;
+                }
+            }
+
+            // If no match found, try first non-loopback device as fallback
+            if (dev_name.empty() && alldevs) {
+                for (pcap_if_t* d = alldevs; d != nullptr; d = d->next) {
+                    if (!(d->flags & PCAP_IF_LOOPBACK)) {
+                        dev_name = d->name;
+                        break;
+                    }
+                }
+            }
+
+            pcap_freealldevs(alldevs);
+
+            if (dev_name.empty()) {
+                last_error = "Npcap: no matching network interface found for '" + iface + "'";
+                return false;
+            }
+        }
+
+        // Open the device for raw sending
+        char errbuf[PCAP_ERRBUF_SIZE];
+        pcap_handle = pcap_open_live(
+            dev_name.c_str(),
+            65536,          // snaplen — max capture length
+            1,              // promisc mode on (needed for ARP injection)
+            100,            // read timeout ms
+            errbuf
+        );
+
+        if (!pcap_handle) {
+            last_error = std::string("Npcap pcap_open_live failed: ") + errbuf;
+            return false;
+        }
+
+        // Verify it's an Ethernet interface (ARP only works on Ethernet)
+        if (pcap_datalink(pcap_handle) != DLT_EN10MB) {
+            last_error = "Npcap: interface '" + iface + "' is not Ethernet (DLT_EN10MB)";
+            pcap_close(pcap_handle);
+            pcap_handle = nullptr;
+            return false;
+        }
+
         return true;
+#else
+        // HAVE_NPCAP not defined — compile-time stub with clear error
+        last_error = "ARPController: Windows raw ARP requires Npcap SDK. "
+                     "Build with -DHAVE_NPCAP=1 and link against wpcap.lib. "
+                     "Runtime: install Npcap from https://npcap.com/";
+        return false;
+#endif // HAVE_NPCAP
 #else
         raw_socket = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ARP));
         return raw_socket >= 0;
 #endif
     }
 
-    // ── Close raw socket ────────────────────────────────────────────────────
+    // ── Close raw socket ──────────────────────────────────────────────────────
     void close_socket() {
-#ifndef _WIN32
+#ifdef _WIN32
+#ifdef HAVE_NPCAP
+        if (pcap_handle) {
+            pcap_close(pcap_handle);
+            pcap_handle = nullptr;
+        }
+#endif
+#else
         if (raw_socket >= 0) {
             close(raw_socket);
             raw_socket = -1;
@@ -142,12 +239,34 @@ struct ARPController::Impl {
 #endif
     }
 
-    // ── Send raw ARP packet ─────────────────────────────────────────────────
+    // ── Send raw ARP packet ───────────────────────────────────────────────────
     bool send_raw_arp(const ARPPacket& pkt) {
 #ifdef _WIN32
-        // Windows stub - integration with Npcap
-        (void)pkt;
+#ifdef HAVE_NPCAP
+        // FIX #21: Actual packet injection via Npcap pcap_sendpacket().
+        if (!pcap_handle) {
+            last_error = "Npcap: pcap handle not initialized (call open_socket() first)";
+            return false;
+        }
+
+        int ret = pcap_sendpacket(
+            pcap_handle,
+            reinterpret_cast<const u_char*>(&pkt),
+            sizeof(ARPPacket)
+        );
+
+        if (ret != 0) {
+            last_error = std::string("Npcap pcap_sendpacket failed: ") +
+                         pcap_geterr(pcap_handle);
+            return false;
+        }
         return true;
+#else
+        // HAVE_NPCAP not defined — cannot send
+        (void)pkt;
+        last_error = "ARPController: cannot send ARP — compiled without Npcap support";
+        return false;
+#endif // HAVE_NPCAP
 #else
         if (raw_socket < 0) return false;
 
@@ -165,7 +284,7 @@ struct ARPController::Impl {
 #endif
     }
 
-    // ── Worker thread loop ──────────────────────────────────────────────────
+    // ── Worker thread loop ────────────────────────────────────────────────────
     void worker_loop() {
         // Send initial gratuitous ARP
         send_gratuitous();
@@ -184,7 +303,7 @@ struct ARPController::Impl {
         }
     }
 
-    // ── Send gratuitous ARP ─────────────────────────────────────────────────
+    // ── Send gratuitous ARP ───────────────────────────────────────────────────
     bool send_gratuitous() {
         MACAddress broadcast = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -202,7 +321,7 @@ struct ARPController::Impl {
     }
 };
 
-// ─── Constructor / Destructor ─────────────────────────────────────────────────
+// ─── Constructor / Destructor ───────────────────────────────────────────────────────
 
 ARPController::ARPController()
     : impl_(std::make_unique<Impl>())
@@ -217,7 +336,7 @@ ARPController::~ARPController() {
 ARPController::ARPController(ARPController&&) noexcept = default;
 ARPController& ARPController::operator=(ARPController&&) noexcept = default;
 
-// ─── Configuration ────────────────────────────────────────────────────────────
+// ─── Configuration ────────────────────────────────────────────────────────────────
 
 void ARPController::set_interface(const std::string& iface) {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -234,13 +353,22 @@ void ARPController::set_ip(const IPv4Address& ip) {
     impl_->our_ip = ip;
 }
 
-// ─── start / stop ─────────────────────────────────────────────────────────────
+// ─── start / stop ─────────────────────────────────────────────────────────────────
 
 void ARPController::start() {
     if (impl_->running.load()) return;
 
     if (!impl_->open_socket()) {
+#ifdef _WIN32
+        // FIX #21: Include Npcap-specific error details in exception
+        std::string msg = "ARPController: failed to open raw socket";
+        if (!impl_->last_error.empty()) {
+            msg += " — " + impl_->last_error;
+        }
+        throw std::runtime_error(msg);
+#else
         throw std::runtime_error("ARPController: failed to open raw socket");
+#endif
     }
 
     impl_->running.store(true, std::memory_order_release);
@@ -261,7 +389,7 @@ bool ARPController::is_running() const {
     return impl_->running.load(std::memory_order_acquire);
 }
 
-// ─── ARP operations ───────────────────────────────────────────────────────────
+// ─── ARP operations ───────────────────────────────────────────────────────────────
 
 bool ARPController::send_gratuitous_arp() {
     return impl_->send_gratuitous();
@@ -295,7 +423,7 @@ void ARPController::set_announce_interval(uint32_t interval_sec) {
     impl_->announce_interval_sec = interval_sec;
 }
 
-// ─── Stats ────────────────────────────────────────────────────────────────────
+// ─── Stats ────────────────────────────────────────────────────────────────────────
 
 ARPStats ARPController::get_stats() const {
     std::lock_guard<std::mutex> lock(impl_->mu);
@@ -309,7 +437,7 @@ void ARPController::reset_stats() {
     impl_->stats = ARPStats{};
 }
 
-// ─── MAC utilities ────────────────────────────────────────────────────────────
+// ─── MAC utilities ────────────────────────────────────────────────────────────────
 
 std::string ARPController::mac_to_string(const MACAddress& mac) {
     char buf[18];
