@@ -53,7 +53,7 @@ struct RotationCoordinatorConfig {
 struct RotationEvent {
     RotationLayer layer;
     std::chrono::steady_clock::time_point timestamp;
-    uint32_t actual_interval_sec;
+    uint32_t actual_interval_ms;  // FIX: was _sec (truncated), now ms
 };
 
 struct CorrelationResult {
@@ -91,7 +91,11 @@ public:
     void stop();
     bool is_running() const;
     void rotate_now(RotationLayer layer);
+
+    /// Rotate all layers with stagger. Use for emergency/init only —
+    /// creates near-simultaneous events that anti-correlation may flag.
     void rotate_all();
+
     std::chrono::milliseconds time_until_next(RotationLayer layer) const;
     std::vector<RotationEvent> get_recent_events(size_t max_count = 50) const;
     std::vector<CorrelationResult> get_correlation_results() const;
