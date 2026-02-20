@@ -32,6 +32,10 @@
     #endif
 #endif
 
+#ifdef HAVE_LIBWEBSOCKETS
+    #include "ncp_ws_tunnel.hpp"
+#endif
+
 namespace ncp {
 namespace DPI {
 
@@ -209,6 +213,16 @@ DPIStats stats;
     std::unique_ptr<ncp::ThreadPool> thread_pool_;
     std::atomic<int> active_connections_{0};
     static constexpr int MAX_CONNECTIONS = 256;
+
+    // === WebSocket Tunnel state (Phase 3) ===
+#ifdef HAVE_LIBWEBSOCKETS
+    std::unique_ptr<ncp::WSTunnel> ws_tunnel_;
+    // Active client socket for WS tunnel mode (single-client for now)
+    // Protected by ws_client_mutex_
+    std::mutex ws_client_mutex_;
+    SOCKET ws_active_client_ = INVALID_SOCKET;
+#endif
+
     // === Proxy mode state ===
     void proxy_listen_loop() {
 #ifdef _WIN32
@@ -582,7 +596,343 @@ DPIStats stats;
             }
         }
     }
-    
+
+    // =========================================================================
+    // WebSocket Tunnel mode (Phase 3.4)
+    // =========================================================================
+#ifdef HAVE_LIBWEBSOCKETS
+
+    /**
+     * @brief Apply DPI fragmentation/obfuscation to outgoing data and return
+     *        the processed buffer ready for WS tunnel transmission.
+     *
+     * This mirrors the logic of send_with_fragmentation() but instead of
+     * sending over a TCP socket, it collects the processed segments into a
+     * flat byte vector that will be pushed through WSTunnel::send().
+     */
+    std::vector<uint8_t> process_outgoing_for_ws(const uint8_t* data, size_t len,
+                                                  bool is_client_hello) {
+        std::vector<uint8_t> out;
+        if (!data || len == 0) return out;
+
+        // --- Noise / fake host preamble ---
+        if (is_client_hello && config.enable_noise) {
+            if (!config.fake_host.empty()) {
+                std::string mask = "GET / HTTP/1.1\r\nHost: " + config.fake_host + "\r\n\r\n";
+                out.insert(out.end(), mask.begin(), mask.end());
+            } else {
+                size_t noise_sz = config.noise_size > 0
+                                    ? static_cast<size_t>(config.noise_size) : 64;
+                size_t off = out.size();
+                out.resize(out.size() + noise_sz);
+                for (size_t i = 0; i < noise_sz; ++i)
+                    out[off + i] = static_cast<uint8_t>(randombytes_uniform(256));
+            }
+        }
+
+        // --- Fake TLS probe ---
+        if (is_client_hello && config.enable_fake_packet) {
+            int fakes = (config.fake_ttl > 2) ? 2 : 1;
+            for (int i = 0; i < fakes; ++i) {
+                uint8_t fake[] = {
+                    0x16, 0x03,
+                    static_cast<uint8_t>(randombytes_uniform(4)),
+                    static_cast<uint8_t>(randombytes_uniform(256)),
+                    static_cast<uint8_t>(randombytes_uniform(256)),
+                    0x01
+                };
+                out.insert(out.end(), fake, fake + sizeof(fake));
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.fake_packets_sent++;
+                }
+            }
+        }
+
+        // --- TCP split / fragmentation ---
+        if (!is_client_hello || !config.enable_tcp_split) {
+            out.insert(out.end(), data, data + len);
+        } else {
+            size_t first_len = 0;
+            int sni_off = -1;
+            if (config.split_at_sni)
+                sni_off = find_sni_hostname_offset(data, len);
+
+            if (sni_off > 0 && static_cast<size_t>(sni_off) < len)
+                first_len = static_cast<size_t>(sni_off);
+            else if (config.split_position > 0 &&
+                     static_cast<size_t>(config.split_position) < len)
+                first_len = static_cast<size_t>(config.split_position);
+            else
+                first_len = std::min<size_t>(len, 1);
+
+            // First fragment
+            out.insert(out.end(), data, data + first_len);
+
+            // Remaining fragments with jitter-sized chunks
+            size_t base_frag = config.fragment_size > 0
+                                ? static_cast<size_t>(config.fragment_size) : 2;
+            size_t remaining = len - first_len;
+            size_t off = first_len;
+            while (remaining > 0) {
+                size_t j = randombytes_uniform(3);
+                size_t chunk = std::min(base_frag + j, remaining);
+                out.insert(out.end(), data + off, data + off + chunk);
+                off += chunk;
+                remaining -= chunk;
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            stats.bytes_sent += static_cast<uint64_t>(out.size());
+            if (is_client_hello && config.enable_tcp_split)
+                stats.packets_fragmented++;
+        }
+
+        return out;
+    }
+
+    /**
+     * @brief Send raw data back to the currently connected client socket.
+     *        Called from WSTunnel receive callback (relay → client).
+     */
+    void send_to_client(const uint8_t* data, size_t len) {
+        std::lock_guard<std::mutex> lock(ws_client_mutex_);
+        if (ws_active_client_ == INVALID_SOCKET || !data || len == 0)
+            return;
+
+        size_t total_sent = 0;
+        while (total_sent < len) {
+            int chunk = static_cast<int>(std::min<size_t>(len - total_sent, 8192));
+            int sent = ::send(ws_active_client_,
+                              reinterpret_cast<const char*>(data + total_sent),
+                              chunk, 0);
+            if (sent <= 0) break;
+            total_sent += static_cast<size_t>(sent);
+        }
+
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex);
+            stats.bytes_received += static_cast<uint64_t>(total_sent);
+        }
+    }
+
+    /**
+     * @brief WS tunnel accept loop.
+     *
+     * Listens on ws_local_port, accepts one client at a time, reads data,
+     * applies DPI processing (fragmentation / obfuscation), then pushes
+     * the result through WSTunnel::send().  Data received from the relay
+     * is forwarded back to the client via the receive callback registered
+     * in start_ws_tunnel().
+     */
+    void ws_tunnel_listen_loop() {
+#ifdef _WIN32
+        WSADATA wsa_data;
+        if (WSAStartup(MAKEWORD(2, 2), &wsa_data) != 0) {
+            log("WS_TUNNEL: Failed to initialize Winsock");
+            running = false;
+            return;
+        }
+#endif
+        uint16_t local_port = config.ws_local_port > 0
+                                ? config.ws_local_port : 8081;
+
+        SOCKET listen_sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (listen_sock == INVALID_SOCKET) {
+            log("WS_TUNNEL: Failed to create listen socket");
+            running = false;
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return;
+        }
+
+        int opt = 1;
+        setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char*>(&opt), sizeof(opt));
+
+        sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(local_port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+        if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+            log("WS_TUNNEL: Failed to bind on port " + std::to_string(local_port));
+            CLOSE_SOCKET(listen_sock);
+            running = false;
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return;
+        }
+
+        if (listen(listen_sock, SOMAXCONN) < 0) {
+            log("WS_TUNNEL: Failed to listen");
+            CLOSE_SOCKET(listen_sock);
+            running = false;
+#ifdef _WIN32
+            WSACleanup();
+#endif
+            return;
+        }
+
+        // Thread pool for concurrent client handling
+        size_t num_threads = std::min<size_t>(std::thread::hardware_concurrency(), 8);
+        thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
+
+        log("WS_TUNNEL: listening on 127.0.0.1:" + std::to_string(local_port) +
+            " → relay " + config.ws_server_url);
+
+        while (running) {
+            sockaddr_in client_addr{};
+#ifdef _WIN32
+            int addr_len = static_cast<int>(sizeof(client_addr));
+#else
+            socklen_t addr_len = static_cast<socklen_t>(sizeof(client_addr));
+#endif
+            SOCKET client_sock = accept(listen_sock,
+                                        reinterpret_cast<sockaddr*>(&client_addr),
+                                        &addr_len);
+            if (client_sock == INVALID_SOCKET) {
+                if (!running) break;
+                continue;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                stats.connections_handled++;
+            }
+
+            thread_pool_->submit([this, client_sock]() {
+                handle_ws_tunnel_connection(client_sock);
+            });
+        }
+
+        CLOSE_SOCKET(listen_sock);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+    }
+
+    /**
+     * @brief Handle a single client connection in WS_TUNNEL mode.
+     *
+     * Reads from client → process_outgoing_for_ws() → WSTunnel::send()
+     * The reverse path (relay → client) is handled by the WSTunnel
+     * receive callback which calls send_to_client().
+     */
+    void handle_ws_tunnel_connection(SOCKET client_sock) {
+        // Register this client for the receive callback path
+        {
+            std::lock_guard<std::mutex> lock(ws_client_mutex_);
+            ws_active_client_ = client_sock;
+        }
+
+        std::vector<uint8_t> buffer(8192);
+        bool client_hello_processed = false;
+
+        while (running) {
+            int received = recv(client_sock,
+                                reinterpret_cast<char*>(buffer.data()),
+                                static_cast<int>(buffer.size()), 0);
+            if (received <= 0) break;
+
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex);
+                stats.bytes_received += static_cast<uint64_t>(received);
+                stats.packets_total++;
+            }
+
+            bool is_ch = false;
+            if (!client_hello_processed &&
+                is_tls_client_hello(buffer.data(),
+                                    static_cast<size_t>(received))) {
+                is_ch = true;
+                client_hello_processed = true;
+            }
+
+            // Apply DPI obfuscation pipeline then send via WS tunnel
+            auto processed = process_outgoing_for_ws(
+                buffer.data(), static_cast<size_t>(received), is_ch);
+
+            if (!processed.empty() && ws_tunnel_) {
+                ws_tunnel_->send(processed.data(), processed.size());
+            }
+        }
+
+        // Unregister client
+        {
+            std::lock_guard<std::mutex> lock(ws_client_mutex_);
+            ws_active_client_ = INVALID_SOCKET;
+        }
+        CLOSE_SOCKET(client_sock);
+    }
+
+    /**
+     * @brief Initialize and start the WSTunnel, then enter accept loop.
+     */
+    bool start_ws_tunnel() {
+        ws_tunnel_ = std::make_unique<ncp::WSTunnel>();
+
+        ncp::WSTunnelConfig ws_cfg;
+        ws_cfg.server_url           = config.ws_server_url;
+        ws_cfg.local_port           = config.ws_local_port;
+        ws_cfg.sni_override         = config.ws_sni_override;
+        ws_cfg.ping_interval_sec    = config.ws_ping_interval_sec;
+        ws_cfg.reconnect_delay_ms   = config.ws_reconnect_delay_ms;
+        ws_cfg.max_reconnect_attempts = config.ws_max_reconnect_attempts;
+
+        if (!ws_tunnel_->initialize(ws_cfg)) {
+            log("WS_TUNNEL: Failed to initialize libwebsockets context");
+            ws_tunnel_.reset();
+            return false;
+        }
+
+        // Register receive callback: relay → client socket
+        ws_tunnel_->set_receive_callback(
+            [this](const uint8_t* data, size_t len) {
+                send_to_client(data, len);
+            });
+
+        // Log connection state changes
+        ws_tunnel_->set_state_callback(
+            [this](bool connected) {
+                log(std::string("WS_TUNNEL: relay ") +
+                    (connected ? "CONNECTED" : "DISCONNECTED"));
+            });
+
+        if (!ws_tunnel_->start()) {
+            log("WS_TUNNEL: Failed to connect to relay " + config.ws_server_url);
+            ws_tunnel_.reset();
+            return false;
+        }
+
+        running = true;
+        worker_thread = std::thread(&Impl::ws_tunnel_listen_loop, this);
+        return true;
+    }
+
+    void stop_ws_tunnel() {
+        if (ws_tunnel_) {
+            ws_tunnel_->stop();
+            ws_tunnel_.reset();
+        }
+        // Close any active client
+        {
+            std::lock_guard<std::mutex> lock(ws_client_mutex_);
+            if (ws_active_client_ != INVALID_SOCKET) {
+                CLOSE_SOCKET(ws_active_client_);
+                ws_active_client_ = INVALID_SOCKET;
+            }
+        }
+    }
+#endif // HAVE_LIBWEBSOCKETS
+
+    // =========================================================================
+    // NFQUEUE (driver mode)
+    // =========================================================================
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     struct nfq_handle* nfq_h = nullptr;
     struct nfq_q_handle* nfq_qh = nullptr;
@@ -715,9 +1065,17 @@ DPIBypass::~DPIBypass() { shutdown(); }
 
 bool DPIBypass::initialize(const DPIConfig& config) {
     impl_->config = config;
-    impl_->log("Initialize DPI (mode=" +
-              std::string(config.mode == DPIMode::DRIVER ? "driver" :
-                          config.mode == DPIMode::PROXY ? "proxy" : "passive") +
+
+    std::string mode_str;
+    switch (config.mode) {
+        case DPIMode::DRIVER:     mode_str = "driver";     break;
+        case DPIMode::PROXY:      mode_str = "proxy";      break;
+        case DPIMode::PASSIVE:    mode_str = "passive";    break;
+        case DPIMode::WS_TUNNEL:  mode_str = "ws_tunnel";  break;
+        default:                  mode_str = "unknown";    break;
+    }
+
+    impl_->log("Initialize DPI (mode=" + mode_str +
               ", listen_port=" + std::to_string(config.listen_port) +
               ", fragment_size=" + std::to_string(config.fragment_size) + ")");
     return true;
@@ -734,12 +1092,29 @@ bool DPIBypass::start() {
         return true;
     }
 #endif
+
     if (impl_->config.mode == DPIMode::PROXY) {
         impl_->running = true;
         impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl_.get());
         impl_->log("DPI bypass started (TCP proxy mode)");
         return true;
     }
+
+    // WebSocket Tunnel mode (Phase 3)
+#ifdef HAVE_LIBWEBSOCKETS
+    if (impl_->config.mode == DPIMode::WS_TUNNEL) {
+        if (impl_->config.ws_server_url.empty()) {
+            impl_->log("WS_TUNNEL: ws_server_url is not configured");
+            return false;
+        }
+        if (!impl_->start_ws_tunnel()) {
+            return false;
+        }
+        impl_->log("DPI bypass started (WebSocket tunnel mode → " +
+                   impl_->config.ws_server_url + ")");
+        return true;
+    }
+#endif
 
     // Passive fallback mode (no packet/stream modification)
     impl_->running = true;
@@ -749,6 +1124,11 @@ bool DPIBypass::start() {
 
 void DPIBypass::stop() {
     impl_->running = false;
+
+#ifdef HAVE_LIBWEBSOCKETS
+    impl_->stop_ws_tunnel();
+#endif
+
     if (impl_->worker_thread.joinable()) impl_->worker_thread.join();
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     impl_->cleanup_nfqueue();
@@ -815,4 +1195,3 @@ void DPIBypass::notify_config_change(const DPIConfig& old_cfg, const DPIConfig& 
 } // namespace DPI
 
 } // namespace ncp
-
