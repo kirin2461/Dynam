@@ -34,6 +34,8 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_identity.cpp
     src/ncp_entropy_masking.cpp
     src/ncp_geneva_engine.cpp
+    src/ncp_geneva_ga.cpp           # Geneva GA evolutionary DPI strategy engine
+    src/ncp_protocol_morph.cpp      # Protocol morphing / polymorphic framing
     src/ncp_paranoid.cpp
     src/ncp_secure_memory.cpp
     # Anti ML-TSPU modules (Phase 1-5)
@@ -81,9 +83,6 @@ if(ENABLE_WEBSOCKETS OR HAVE_LIBWEBSOCKETS)
     list(APPEND NCP_CORE_SRC_SOURCES
         src/ncp_ws_tunnel.cpp
     )
-    list(APPEND NCP_CORE_INCLUDE_HEADERS
-        include/ncp_ws_tunnel.hpp
-    )
 endif()
 
 # Always compile these with #ifdef guards inside
@@ -125,6 +124,9 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
     include/ncp_port_knock.hpp
+    # Geneva / Protocol Morph headers
+    include/ncp_geneva_ga.hpp
+    include/ncp_protocol_morph.hpp
     # L3/L2 Stealth headers
     include/ncp_l3_stealth.hpp
     include/ncp_packet_interceptor.hpp
@@ -138,6 +140,8 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_ech_cache.hpp
     include/ncp_ech_fetch.hpp
     include/ncp_ech_retry.hpp
+    # WebSocket tunnel header (always listed; source conditional on ENABLE_WEBSOCKETS)
+    include/ncp_ws_tunnel.hpp
 )
 
 # Combine all sources and headers
