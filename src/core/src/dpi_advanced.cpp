@@ -135,7 +135,6 @@ void TLSManipulator::set_tls_fingerprint(ncp::TLSFingerprint* fp) {
 
 std::vector<uint8_t> TLSManipulator::create_fingerprinted_client_hello(
     const std::string& sni) {
-    // Use external fingerprint's current profile (don't randomize — caller controls profile)
     auto& fp = impl_->active_fp();
     fp.set_sni(sni);
 
@@ -779,12 +778,17 @@ AdvancedDPIStats AdvancedDPIBypass::get_stats() const {
     return stats;
 }
 
+AdvancedDPIConfig AdvancedDPIBypass::get_config() const {
+    return impl_->config;
+}
+
 // =====================================================================
-// process_outgoing — unified pipeline (FIX #57 cleanup)
+// process_outgoing — technique-driven 7-stage pipeline (Step 1E)
 //
-// All TLS-level manipulations (GREASE, ECH, decoy SNI, splitting) are
-// guarded by !cfg.mimicry_managed_tls to prevent corrupting records
-// already framed by the mimicry layer.
+// Each evasion stage is guarded by has_technique() checks while
+// maintaining backward compat with base_config flags.
+// TLS-level stages also check !cfg.mimicry_managed_tls (FIX #57)
+// to prevent corrupting records already framed by the mimicry layer.
 // Transport-level ops (padding, obfuscation, timing) always apply.
 // =====================================================================
 
@@ -795,20 +799,23 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     std::vector<uint8_t> working_data(data, data + len);
     const auto& cfg = impl_->config;
 
-    // Check if this is TLS ClientHello (single definition)
+    // Detect TLS ClientHello
     bool is_client_hello = (len > 5 && data[0] == 0x16 &&
                             data[1] == 0x03 && data[5] == 0x01);
 
-    // === GREASE injection (before ECH, before splits) ===
-    if (!cfg.mimicry_managed_tls &&
-        cfg.base_config.enable_pattern_obfuscation && is_client_hello) {
+    // ── Stage 1: GREASE injection (TLS fingerprint randomization) ─────
+    if (!cfg.mimicry_managed_tls && is_client_hello &&
+        (cfg.has_technique(EvasionTechnique::GREASE_INJECTION) ||
+         cfg.has_technique(EvasionTechnique::TLS_GREASE) ||
+         cfg.base_config.enable_pattern_obfuscation)) {
+
         working_data = impl_->tls_manip->inject_grease(
             working_data.data(), working_data.size());
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.grease_injected++;
     }
 
-    // === ECH application (after GREASE, before splits) ===
+    // ── Stage 1b: ECH application (after GREASE, before splits) ───────
     if (!cfg.mimicry_managed_tls &&
         cfg.enable_ech && is_client_hello && impl_->ech_config_valid_) {
         auto ech_hello = ECH::apply_ech(working_data, impl_->ech_config_);
@@ -820,10 +827,12 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
 
-    // === Decoy SNI (fingerprinted fake ClientHellos before real one) ===
-    if (!cfg.mimicry_managed_tls &&
-        cfg.base_config.enable_decoy_sni && is_client_hello &&
+    // ── Stage 2: Decoy SNI (fake ClientHello before real) ────────────
+    if (!cfg.mimicry_managed_tls && is_client_hello &&
+        (cfg.has_technique(EvasionTechnique::FAKE_SNI) ||
+         cfg.base_config.enable_decoy_sni) &&
         !cfg.base_config.decoy_sni_domains.empty()) {
+
         for (const auto& decoy_domain : cfg.base_config.decoy_sni_domains) {
             auto fake_hello = impl_->tls_manip->create_fake_client_hello(decoy_domain);
             result.push_back(std::move(fake_hello));
@@ -832,58 +841,99 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
 
-    // === Splitting logic (multi-layer or SNI-based) ===
-    if (!cfg.mimicry_managed_tls &&
-        cfg.base_config.enable_multi_layer_split && is_client_hello &&
+    // ── Stage 3: Segmentation ────────────────────────────────────────
+    bool segmented = false;
+
+    // 3a: Multi-layer split at explicit positions
+    if (!cfg.mimicry_managed_tls && is_client_hello &&
+        (cfg.has_technique(EvasionTechnique::TCP_SEGMENTATION) ||
+         cfg.base_config.enable_multi_layer_split) &&
         !cfg.base_config.split_positions.empty()) {
-        std::vector<size_t> sp;
-        sp.reserve(cfg.base_config.split_positions.size());
+
+        std::vector<size_t> split_positions_sz;
+        split_positions_sz.reserve(cfg.base_config.split_positions.size());
         for (int pos : cfg.base_config.split_positions) {
-            if (pos >= 0) sp.push_back(static_cast<size_t>(pos));
+            if (pos >= 0) split_positions_sz.push_back(static_cast<size_t>(pos));
         }
+
         auto segments = impl_->tcp_manip->split_segments(
-            working_data.data(), working_data.size(), sp);
+            working_data.data(), working_data.size(), split_positions_sz);
+
         result.insert(result.end(), segments.begin(), segments.end());
+        segmented = true;
+
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.tcp_segments_split += segments.size();
-    } else if (!cfg.mimicry_managed_tls && is_client_hello) {
-        // Standard SNI-based split
+    }
+    // 3b: SNI-based split
+    else if (!cfg.mimicry_managed_tls && is_client_hello &&
+             (cfg.has_technique(EvasionTechnique::SNI_SPLIT) ||
+              cfg.base_config.enable_tcp_split)) {
+
         auto split_points = impl_->tls_manip->find_sni_split_points(
             working_data.data(), working_data.size());
+
         if (!split_points.empty()) {
-            if (cfg.base_config.randomize_split_position) {
-                int jitter = static_cast<int>(secure_random(static_cast<uint32_t>(
-                    cfg.base_config.split_position_max - cfg.base_config.split_position_min + 1)));
+            // Apply random jitter to split points if configured
+            if (cfg.base_config.randomize_split_position &&
+                cfg.base_config.split_position_max > cfg.base_config.split_position_min) {
+                int range = cfg.base_config.split_position_max -
+                            cfg.base_config.split_position_min + 1;
+                int jitter = static_cast<int>(secure_random(
+                    static_cast<uint32_t>(range)));
                 jitter += cfg.base_config.split_position_min;
-                for (auto& pt : split_points)
-                    pt = std::min(pt + static_cast<size_t>(jitter), working_data.size() - 1);
+
+                for (auto& pt : split_points) {
+                    pt = std::min(pt + static_cast<size_t>(jitter),
+                                  working_data.size() - 1);
+                }
             }
+
             auto segments = impl_->tcp_manip->split_segments(
                 working_data.data(), working_data.size(), split_points);
+
             result.insert(result.end(), segments.begin(), segments.end());
+            segmented = true;
+
             std::lock_guard<std::mutex> lock(impl_->stats_mutex);
             impl_->stats.tls_records_split++;
-        } else {
-            result.push_back(working_data);
         }
-    } else {
+    }
+
+    // If no segmentation was applied, pass data as single segment
+    if (!segmented) {
         result.push_back(working_data);
     }
 
-    // === Padding (transport-level — always safe) ===
-    if (cfg.padding.enabled && cfg.padding.max_padding > 0) {
+    // ── Stage 4: TCP disorder (shuffle segments) ─────────────────────
+    if (cfg.has_technique(EvasionTechnique::TCP_DISORDER) &&
+        result.size() > 1) {
+        impl_->tcp_manip->shuffle_segments(result);
+    }
+
+    // ── Stage 5: TLS padding ─────────────────────────────────────────
+    if (cfg.has_technique(EvasionTechnique::TLS_PADDING) ||
+        (cfg.padding.enabled && cfg.padding.max_padding > 0)) {
+
         for (auto& segment : result) {
-            size_t ps = cfg.padding.random_padding
-                ? secure_random(static_cast<uint32_t>(cfg.padding.max_padding - cfg.padding.min_padding + 1)) + cfg.padding.min_padding
-                : cfg.padding.max_padding;
-            segment = impl_->tls_manip->add_tls_padding(segment.data(), segment.size(), ps);
+            size_t pad_min = cfg.padding.min_padding;
+            size_t pad_max = cfg.padding.max_padding;
+            if (pad_max == 0) pad_max = 64;  // default if technique enabled but config empty
+
+            size_t padding_size = cfg.padding.random_padding
+                ? secure_random(static_cast<uint32_t>(pad_max - pad_min + 1)) + pad_min
+                : pad_max;
+
+            segment = impl_->tls_manip->add_tls_padding(
+                segment.data(), segment.size(), padding_size);
+
             std::lock_guard<std::mutex> lock(impl_->stats_mutex);
             impl_->stats.packets_padded++;
-            impl_->stats.bytes_padding += ps;
+            impl_->stats.bytes_padding += padding_size;
         }
     }
 
-    // === Obfuscation (transport-level — always safe) ===
+    // ── Stage 6: Obfuscation (XOR / ChaCha20 / HTTP camouflage) ──────
     if (impl_->obfuscator) {
         for (auto& segment : result) {
             segment = impl_->obfuscator->obfuscate(segment.data(), segment.size());
@@ -892,8 +942,11 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
 
-    // === Timing jitter (transport-level — always safe) ===
-    if (cfg.base_config.enable_timing_jitter && result.size() > 1) {
+    // ── Stage 7: Timing jitter marker ────────────────────────────────
+    if ((cfg.has_technique(EvasionTechnique::TIMING_JITTER) ||
+         cfg.base_config.enable_timing_jitter) && result.size() > 1) {
+        // Actual delays are applied by the caller (pipe_client_to_server)
+        // based on base_config.timing_jitter_*_us.  We just track stats.
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.timing_delays_applied += result.size() - 1;
     }
@@ -916,10 +969,12 @@ void AdvancedDPIBypass::set_log_callback(std::function<void(const std::string&)>
 }
 
 void AdvancedDPIBypass::set_technique_enabled(EvasionTechnique technique, bool enabled) {
-    auto& techniques = impl_->config.techniques;
-    auto it = std::find(techniques.begin(), techniques.end(), technique);
-    if (enabled && it == techniques.end()) techniques.push_back(technique);
-    else if (!enabled && it != techniques.end()) techniques.erase(it);
+    // Step 1E: Use the new helpers from step 1D
+    if (enabled) {
+        impl_->config.add_technique(technique);
+    } else {
+        impl_->config.remove_technique(technique);
+    }
 }
 
 std::vector<EvasionTechnique> AdvancedDPIBypass::get_active_techniques() const {
@@ -991,7 +1046,6 @@ std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
     const std::string& real_domain) {
     std::vector<uint8_t> result = data;
 
-    // Find and replace SNI hostname with the front domain
     auto pos = std::search(
         result.begin(), result.end(),
         real_domain.begin(), real_domain.end()
@@ -1010,7 +1064,6 @@ namespace Presets {
 AdvancedDPIConfig create_tspu_preset() {
     AdvancedDPIConfig config;
     
-    // Base config for Russian TSPU
     config.base_config.mode = DPIMode::PROXY;
     config.base_config.enable_tcp_split = true; config.base_config.split_at_sni = true;
     config.base_config.split_position = 1; config.base_config.fragment_size = 1;
