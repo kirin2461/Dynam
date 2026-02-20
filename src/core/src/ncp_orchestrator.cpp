@@ -72,7 +72,6 @@ OrchestratorStrategy OrchestratorStrategy::paranoid() {
 
     s.enable_adversarial = true;
     s.adversarial_config = AdversarialConfig::aggressive();
-    // Max entropy masking — increase padding to obscure all patterns
     s.adversarial_config.min_pad_bytes = 64;
     s.adversarial_config.max_pad_bytes = 256;
     s.adversarial_config.dummy_probability = 0.15;
@@ -80,7 +79,7 @@ OrchestratorStrategy OrchestratorStrategy::paranoid() {
     s.enable_flow_shaping = true;
     s.flow_config = FlowShaperConfig::web_browsing();
     s.flow_config.enable_flow_dummy = true;
-    s.flow_config.dummy_ratio = 0.20;  // Higher dummy ratio
+    s.flow_config.dummy_ratio = 0.20;
     s.flow_config.enable_constant_rate = true;
 
     s.enable_probe_resist = true;
@@ -283,7 +282,6 @@ static bool is_https_profile(TrafficMimicry::MimicProfile p) {
            p == TrafficMimicry::MimicProfile::HTTPS_CLIENT_HELLO;
 }
 
-// ===== Client Pipeline: send =====
 // =============================================================================
 // FIX #73: Extract common send pipeline into private method to eliminate
 // duplication between send() and send_async(). Snapshot strategy under lock
@@ -308,12 +306,7 @@ std::vector<uint8_t> ProtocolOrchestrator::prepare_payload(
     }
 
     // Step 2: Protocol Mimicry (wrap in HTTPS/DNS/QUIC)
-    //
     // Issue #57 FIX: For HTTPS profiles, use the session-aware wrapper
-    // so that the first packet on a connection automatically gets a
-    // full TLS handshake preamble (CH → SH → CCS → Finished) before
-    // Application Data. This prevents the "0x17 without 0x16" anomaly.
-    std::vector<OrchestratedPacket> preamble_packets;
     if (snapshot.enable_mimicry) {
         data = mimicry_.wrap_payload(data, snapshot.mimic_profile);
     }
@@ -321,75 +314,6 @@ std::vector<uint8_t> ProtocolOrchestrator::prepare_payload(
     // Step 3: Prepend auth token with magic header (Phase 3 client-side)
     // FIX #72: Add magic bytes + version before auth token so receiver can validate
     if (snapshot.enable_probe_resist && !config_.is_server) {
-    bool is_client_hello = (!data.empty() && data.size() > 5 &&
-                           data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01);
-
-    if (current_strategy_.enable_tls_fingerprint && is_client_hello) {
-        if (current_strategy_.tls_rotate_per_connection) {
-            static const ncp::BrowserType profiles[] = {
-                ncp::BrowserType::CHROME, ncp::BrowserType::FIREFOX,
-                ncp::BrowserType::SAFARI, ncp::BrowserType::EDGE
-            };
-            tls_fingerprint_.set_profile(profiles[randombytes_uniform(4)]);
-        }
-        stats_.tls_fingerprints_applied.fetch_add(1);
-    }
-
-    if (is_client_hello && current_strategy_.enable_advanced_dpi && advanced_dpi_) {
-        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
-        stats_.advanced_dpi_segments.fetch_add(segments.size());
-
-        std::vector<OrchestratedPacket> result;
-        for (size_t i = 0; i < segments.size(); ++i) {
-            auto packets = process_single_segment_(
-                std::move(segments[i]), (i == 0));
-            for (auto& pkt : packets) {
-                result.push_back(std::move(pkt));
-            }
-        }
-        update_overhead_stats();
-        return result;
-    }
-
-    if (config_.ech_enabled && ech_initialized_ && is_client_hello &&
-        !current_strategy_.enable_advanced_dpi) {
-        auto ech_result = ECH::apply_ech(data, ech_config_);
-        if (!ech_result.empty() && ech_result.size() > data.size()) {
-            data = std::move(ech_result);
-            stats_.ech_encryptions.fetch_add(1);
-        }
-    }
-
-    return process_single_segment_(std::move(data), true);
-}
-
-std::vector<OrchestratedPacket> ProtocolOrchestrator::process_single_segment_(
-    std::vector<uint8_t> data, bool is_first_segment) {
-
-    if (current_strategy_.enable_adversarial) {
-        data = adversarial_.pad(data);
-    }
-
-    if (current_strategy_.enable_mimicry) {
-        if (is_https_profile(current_strategy_.mimic_profile)) {
-            // TLS session-aware path
-            std::vector<std::vector<uint8_t>> handshake_preamble;
-            data = mimicry_.wrap_tls_session_aware(data, handshake_preamble);
-
-            // Handshake records must be sent BEFORE the Application Data
-            for (auto& hs_record : handshake_preamble) {
-                OrchestratedPacket hs_op;
-                hs_op.data = std::move(hs_record);
-                stats_.bytes_on_wire.fetch_add(hs_op.data.size());
-                preamble_packets.push_back(std::move(hs_op));
-            }
-        } else {
-            // Non-TLS profiles (DNS, QUIC, etc.) — direct wrap
-            data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
-        }
-    }
-
-    if (current_strategy_.enable_probe_resist && !config_.is_server && is_first_segment) {
         auto token = probe_resist_.generate_client_auth();
         // Prepend: [MAGIC:2][VERSION:1][auth_token:N]
         std::vector<uint8_t> header;
@@ -424,15 +348,8 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
 
     // Step 4: Flow Shaping (Phase 2)
     if (snapshot.enable_flow_shaping) {
-    if (current_strategy_.enable_flow_shaping) {
         auto shaped = flow_shaper_.shape_sync(data, true);
         std::vector<OrchestratedPacket> result;
-
-        // Preamble first (handshake records bypass flow shaping)
-        result.insert(result.end(),
-                      std::make_move_iterator(preamble_packets.begin()),
-                      std::make_move_iterator(preamble_packets.end()));
-
         for (auto& sp : shaped) {
             OrchestratedPacket op;
             op.data = std::move(sp.data);
@@ -441,22 +358,15 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
             stats_.bytes_on_wire.fetch_add(op.data.size());
             result.push_back(std::move(op));
         }
+        update_overhead_stats();
         return result;
     }
 
-    // No flow shaping — return preamble + single data packet
-    std::vector<OrchestratedPacket> result;
-    result.insert(result.end(),
-                  std::make_move_iterator(preamble_packets.begin()),
-                  std::make_move_iterator(preamble_packets.end()));
-
+    // No flow shaping -- return single data packet
     OrchestratedPacket op;
     stats_.bytes_on_wire.fetch_add(data.size());
     op.data = std::move(data);
-    stats_.bytes_on_wire.fetch_add(op.data.size());
-    result.push_back(std::move(op));
     update_overhead_stats();
-    return result;
     return {op};
 }
 
@@ -472,42 +382,6 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 
     // Step 4: Enqueue for async flow shaping
     if (snapshot.enable_flow_shaping && flow_shaper_.is_running()) {
-    std::vector<uint8_t> data = payload;
-
-    // Step 1: Adversarial Padding
-    if (current_strategy_.enable_adversarial) {
-        data = adversarial_.pad(data);
-    }
-
-    // Step 2: Protocol Mimicry (TLS session-aware for HTTPS)
-    // Issue #57 FIX: same session-aware logic as sync send()
-    std::vector<std::vector<uint8_t>> handshake_preamble;
-
-    if (current_strategy_.enable_mimicry) {
-        if (is_https_profile(current_strategy_.mimic_profile)) {
-            data = mimicry_.wrap_tls_session_aware(data, handshake_preamble);
-        } else {
-            data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
-        }
-    }
-
-    // Step 3: Auth token
-    if (current_strategy_.enable_probe_resist && !config_.is_server) {
-        auto token = probe_resist_.generate_client_auth();
-        data.insert(data.begin(), token.begin(), token.end());
-    }
-
-    // Send handshake preamble first (synchronously via callback)
-    if (send_callback_) {
-        for (auto& hs_record : handshake_preamble) {
-            OrchestratedPacket hs_op;
-            hs_op.data = std::move(hs_record);
-            send_callback_(hs_op);
-        }
-    }
-
-    // Step 4: Enqueue for async flow shaping
-    if (current_strategy_.enable_flow_shaping && flow_shaper_.is_running()) {
         flow_shaper_.enqueue(data, true);
     } else if (send_callback_) {
         OrchestratedPacket op;
@@ -517,15 +391,12 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 }
 
 // ===== Server Pipeline: receive =====
-// FIX: Reordered receive pipeline so that:
-//   1. Probe auth token is stripped first (always outermost)
-//   2. Flow dummy check (flow shaper inserts dummies after mimicry wrapping)
-//   3. Mimicry unwrap (removes protocol disguise)
-//   4. Adversarial dummy check + unpad (adversarial is innermost layer)
-//
-// Previously: adversarial dummy check ran before mimicry unwrap,
-// which meant the check was scanning mimicry-wrapped data and could
-// never match the adversarial dummy pattern inside.
+// FIX #72/#73: Reordered receive pipeline:
+//   1. Probe auth token stripped first (outermost, with magic header validation)
+//   2. Flow dummy check
+//   3. Adversarial dummy check
+//   4. Mimicry unwrap
+//   5. Adversarial unpad (innermost layer)
 
 std::vector<uint8_t> ProtocolOrchestrator::receive(
     const std::vector<uint8_t>& wire_data,
@@ -553,8 +424,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
     // Step 1: Auth check (Phase 3 server-side)
     if (snapshot.enable_probe_resist && config_.is_server) {
         // FIX #72: Validate magic header before stripping auth token.
-        // If magic bytes are missing, this is a legacy client or non-auth data —
-        // pass through to probe_resist for standard auth check without stripping.
         size_t auth_token_len = probe_resist_.get_config().nonce_length + 4 +
                                 probe_resist_.get_config().auth_length;
         size_t total_auth_len = NCP_AUTH_HEADER_SIZE + auth_token_len;
@@ -574,22 +443,17 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
             if (auth_result) *auth_result = result;
 
             if (result != AuthResult::AUTHENTICATED) {
-                return {};  // Caller should send cover response
+                return {};
             }
-    // Step 1: Probe authentication (outermost layer — prepended token)
-    if (current_strategy_.enable_probe_resist && config_.is_server) {
-        AuthResult result = probe_resist_.process_connection(
-            source_ip, source_port, data.data(), data.size(), ja3);
 
             // Strip auth token (magic already removed)
             if (auth_data.size() > auth_token_len) {
                 data.assign(auth_data.begin() + auth_token_len, auth_data.end());
             } else {
-                return {};  // No payload after auth
+                return {};
             }
         } else {
-            // No magic header — legacy client or probe attempt
-            // Let probe_resist decide based on raw data
+            // No magic header -- legacy client or probe attempt
             AuthResult result = probe_resist_.process_connection(
                 source_ip, source_port, data.data(), data.size(), ja3);
 
@@ -599,14 +463,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
                 return {};
             }
             // Legacy client: data passes through without auth stripping
-        if (result != AuthResult::AUTHENTICATED) {
-            return {};
-        }
-
-        size_t auth_len = probe_resist_.get_config().nonce_length + 4 +
-                          probe_resist_.get_config().auth_length;
-        if (data.size() > auth_len) {
-            data.erase(data.begin(), data.begin() + auth_len);
         }
     } else {
         if (auth_result) *auth_result = AuthResult::AUTHENTICATED;
@@ -614,8 +470,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     // Step 2: Discard flow dummies
     if (snapshot.enable_flow_shaping) {
-    // Step 2: Flow shaper dummy check (dummies are injected post-mimicry)
-    if (current_strategy_.enable_flow_shaping) {
         if (FlowShaper::is_flow_dummy(data.data(), data.size())) {
             return {};
         }
@@ -623,13 +477,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     // Step 3: Discard adversarial dummies
     if (snapshot.enable_adversarial) {
-    // Step 3: Protocol mimicry unwrap (removes HTTP/TLS/DNS/etc. wrapper)
-    if (current_strategy_.enable_mimicry) {
-        data = mimicry_.unwrap_payload(data);
-    }
-
-    // Step 4: Adversarial dummy check (after mimicry unwrap, before unpad)
-    if (current_strategy_.enable_adversarial) {
         if (AdversarialPadding::is_dummy(data.data(), data.size())) {
             return {};
         }
@@ -642,8 +489,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     // Step 5: Adversarial unpad
     if (snapshot.enable_adversarial) {
-    // Step 5: Adversarial unpad (innermost layer)
-    if (current_strategy_.enable_adversarial) {
         data = adversarial_.unpad(data);
     }
 
@@ -667,7 +512,6 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
         case DetectionEvent::Type::SUCCESS:
             // FIX #74: report_success_locked() called under existing lock
             report_success_locked();
-            report_success_locked_();
             return;
 
         case DetectionEvent::Type::CONNECTION_RESET:
@@ -712,13 +556,8 @@ void ProtocolOrchestrator::report_success() {
     std::lock_guard<std::mutex> lock(strategy_mutex_);
     report_success_locked();
 }
-    report_success_locked_();
-}
 
-void ProtocolOrchestrator::report_success_locked_() {
-    stats_.successful_sends.fetch_add(1);
-
-// FIX #74: Private implementation — must be called with strategy_mutex_ held
+// FIX #74: Private implementation -- must be called with strategy_mutex_ held
 void ProtocolOrchestrator::report_success_locked() {
     consecutive_successes_++;
     consecutive_failures_ = (std::max)(0, consecutive_failures_ - 1);
@@ -749,8 +588,7 @@ void ProtocolOrchestrator::escalate(const std::string& reason) {
     auto new_strategy = strategy_for_threat(threat_level_);
     apply_strategy(new_strategy);
 
-    // Issue #57: reset TLS session on strategy change so new
-    // handshake sequence matches the new mimicry config
+    // Issue #57: reset TLS session on strategy change
     mimicry_.reset_tls_session();
 
     if (config_.on_strategy_change) {
@@ -808,7 +646,6 @@ void ProtocolOrchestrator::set_threat_level(ThreatLevel level) {
     stats_.current_threat = level;
     auto new_strategy = strategy_for_threat(level);
     apply_strategy(new_strategy);
-    // Issue #57: reset TLS session on manual override
     mimicry_.reset_tls_session();
     if (config_.on_strategy_change && old != level) {
         config_.on_strategy_change(old, level, "Manual override");
@@ -850,7 +687,6 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
 void ProtocolOrchestrator::set_strategy(const OrchestratorStrategy& strategy) {
     std::lock_guard<std::mutex> lock(strategy_mutex_);
     apply_strategy(strategy);
-    // Issue #57: reset TLS session when strategy changes
     mimicry_.reset_tls_session();
 }
 
@@ -865,7 +701,6 @@ void ProtocolOrchestrator::apply_preset(const std::string& name) {
     else if (name == "balanced") apply_strategy(OrchestratorStrategy::balanced());
     else if (name == "performance") apply_strategy(OrchestratorStrategy::performance());
     else if (name == "max_compat") apply_strategy(OrchestratorStrategy::max_compat());
-    // Issue #57: reset TLS session on preset change
     mimicry_.reset_tls_session();
 }
 
@@ -1007,15 +842,13 @@ void ProtocolOrchestrator::health_monitor_func() {
 
         if (!running_.load()) break;
 
-        // Periodic cleanup
+        // Periodic cleanup -- scope the lock properly
         {
             std::lock_guard<std::mutex> lock(strategy_mutex_);
             if (current_strategy_.enable_probe_resist) {
                 probe_resist_.cleanup_stale_data();
             }
-        if (current_strategy_.enable_probe_resist) {
-            probe_resist_.cleanup_stale_data();
-        }
+        }  // lock released here
 
         update_overhead_stats();
     }
