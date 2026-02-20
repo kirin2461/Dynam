@@ -4,20 +4,29 @@
  * @file ncp_http_steg.hpp
  * @brief HTTP Header Steganography — covert data in HTTP header order & values
  *
+ * ARCHITECTURE (per review):
+ *   - Transport: uses INetworkBackend* → send_tcp_packet()
+ *   - HTTP scaffold: uses TrafficMimicry* → create_http_get_wrapper()
+ *   - Steg layer: ONLY embeds data in specific headers
+ *   - NO internal encryption — Manager handles crypto centrally
+ *
+ * Pipeline:
+ *   ICovertChannel::send(raw_bytes)
+ *     → fragment into per-request chunks
+ *     → embed in HTTP headers (permutation + value coding)
+ *     → TrafficMimicry::create_http_get_wrapper() for realistic scaffold
+ *     → INetworkBackend::send_tcp_packet() for wire transport
+ *
  * Encoding:
  *   - Permutation coding: order of N carrier headers encodes ⌊log₂(N!)⌋ bits
- *   - Value encoding: Cookie, Accept-Language, X-Request-ID, ETag carry
- *     payload bytes via lookup tables with browser-realistic values
- *
- * Reuses BrowserProfile from ncp_mimicry.hpp for realistic header fingerprints.
- * All traffic travels inside HTTPS — DPI sees only encrypted TLS.
+ *   - Value encoding: Cookie, Accept-Language, X-Request-ID, If-None-Match
+ *     carry payload bytes via lookup tables with browser-realistic values
  *
  * Capacity: ~40-80 bits (permutation) + ~128 bits (values) per request
- * No root required ✅
+ * No root required (if backend is PROXY_ONLY) ✅
  */
 
 #include "ncp_covert_channel.hpp"
-#include "ncp_mimicry.hpp"
 
 #include <string>
 #include <vector>
@@ -32,9 +41,14 @@
 #include <functional>
 
 namespace ncp {
+
+// Forward declarations — no include needed, channel takes pointers
+class TrafficMimicry;
+class INetworkBackend;
+
 namespace covert {
 
-// ===== Browser Profile for Steg =====
+// ===== Browser Profile for Steg Value Tables =====
 
 enum class StegBrowserType {
     CHROME_WIN,
@@ -49,9 +63,14 @@ enum class StegBrowserType {
 
 struct HTTPStegConfig {
     // === Target ===
-    std::string target_url;             // HTTPS endpoint for cover requests
-    std::string target_host;            // Host header value
+    std::string target_host;            // Host header value / IP
     uint16_t target_port = 443;
+    std::string target_path = "/";      // GET path
+
+    // === Dependencies (injected, not owned) ===
+    // TrafficMimicry* — for HTTP scaffold (create_http_get_wrapper etc.)
+    // INetworkBackend* — for wire transport (send_tcp_packet)
+    // Both set via constructor or set_transport()
 
     // === Browser mimicry ===
     StegBrowserType browser_type = StegBrowserType::CHROME_WIN;
@@ -67,7 +86,6 @@ struct HTTPStegConfig {
     };
 
     // === Value-encoding headers ===
-    // These headers' VALUES carry payload bytes via lookup tables.
     struct ValueCarrier {
         std::string header_name;
         size_t capacity_bits;           // max bits per header value
@@ -90,14 +108,10 @@ struct HTTPStegConfig {
     size_t tx_queue_max = 512;
     size_t rx_buffer_max = 65536;
 
-    // === Crypto ===
-    std::vector<uint8_t> channel_key;   // symmetric key for payload encryption
-    bool encrypt_payload = true;
-
     // === Cover traffic ===
     bool enable_cover_requests = true;
     double cover_traffic_ratio = 0.4;   // 40% cover
-    std::vector<std::string> cover_urls;// legitimate URLs to intersperse
+    std::vector<std::string> cover_paths;// legitimate paths to intersperse
 };
 
 // ===== HTTP Steg Statistics =====
@@ -118,31 +132,18 @@ struct HTTPStegStats {
 // ===== Permutation Codec =====
 
 /**
- * Encodes/decodes integer values via permutation ordering.
+ * Encodes/decodes integer values via permutation ordering (Lehmer code).
  *
- * N items can be arranged in N! ways. Given a set of N carrier headers,
- * their ordering encodes an integer in [0, N!), which represents
- * ⌊log₂(N!)⌋ bits of data.
- *
- * For 6 headers: 6! = 720, ⌊log₂(720)⌋ = 9 bits per request.
- * For 8 headers: 8! = 40320, ⌊log₂(40320)⌋ = 15 bits per request.
- *
- * Uses Lehmer code (factoradic) for O(N²) encode/decode.
+ * N items → N! arrangements → ⌊log₂(N!)⌋ bits per request.
+ * 6 headers: 720 perms → 9 bits.  8 headers: 40320 → 15 bits.
  */
 class PermutationCodec {
 public:
     explicit PermutationCodec(size_t n_items);
 
-    // Max bits encodable in one permutation
     size_t capacity_bits() const;
-
-    // Encode: integer → permutation of [0..N-1]
     std::vector<size_t> encode(uint64_t value) const;
-
-    // Decode: permutation → integer
     uint64_t decode(const std::vector<size_t>& permutation) const;
-
-    // Max encodable value (N! - 1)
     uint64_t max_value() const;
 
 private:
@@ -153,39 +154,27 @@ private:
 // ===== Header Value Encoder =====
 
 /**
- * Encodes payload bytes into realistic HTTP header values.
+ * Maps payload bytes ↔ realistic HTTP header values.
  *
- * Each carrier header has a value generator that maps data bits
- * to plausible header values using the browser profile.
- *
- * Example: X-Request-ID = UUID format, 128 bits of payload
- *   encode(0xDEADBEEF...) → "550e8400-e29b-41d4-a716-446655440000"
- *   (UUID is derived from payload, not random)
- *
- * Example: Accept-Language = language tag permutation, 24 bits
- *   encode(0x42) → "en-US,en;q=0.9,fr;q=0.8"
- *   (language order/q-values encode data)
+ * X-Request-ID: UUID v4 format → 128 bits (version/variant bits masked)
+ * Cookie:       _ga=GA1.2.<hex> → 64 bits
+ * Accept-Language: lang order + q-values → 24 bits
+ * If-None-Match:   W/"<hex>" → 64 bits
  */
 class HeaderValueEncoder {
 public:
     explicit HeaderValueEncoder(StegBrowserType browser_type);
 
-    // Encode bits into a header value
     std::string encode_value(const std::string& header_name,
                              const uint8_t* data, size_t bits);
-
-    // Decode bits from a header value
     std::vector<uint8_t> decode_value(const std::string& header_name,
                                       const std::string& value,
                                       size_t expected_bits);
-
-    // Get capacity for a specific header
     size_t capacity_bits(const std::string& header_name) const;
 
 private:
     StegBrowserType browser_type_;
 
-    // Per-header encoding strategies
     std::string encode_cookie(const uint8_t* data, size_t bits);
     std::string encode_accept_language(const uint8_t* data, size_t bits);
     std::string encode_request_id(const uint8_t* data, size_t bits);
@@ -196,36 +185,31 @@ private:
     std::vector<uint8_t> decode_request_id(const std::string& value, size_t bits);
     std::vector<uint8_t> decode_etag(const std::string& value, size_t bits);
 
-    // Language tag tables per browser
     static const std::vector<std::string>& get_language_pool(StegBrowserType type);
 };
 
-// ===== HTTP Steg Request Builder =====
+// ===== Steg HTTP Request (internal) =====
 
 struct StegHTTPRequest {
     std::string method = "GET";
     std::string path = "/";
     std::vector<std::pair<std::string, std::string>> headers; // ordered!
-    std::string body;                   // for POST requests
-
-    // How many covert bits are in this request
     size_t covert_bits_permutation = 0;
     size_t covert_bits_values = 0;
-};
-
-struct StegHTTPResponse {
-    int status_code = 0;
-    std::vector<std::pair<std::string, std::string>> headers;
-    std::string body;
-    bool has_covert_data = false;
 };
 
 // ===== HTTP Header Steg Channel =====
 
 class HTTPStegChannel : public ICovertChannel {
 public:
-    HTTPStegChannel();
-    explicit HTTPStegChannel(const HTTPStegConfig& config);
+    /**
+     * @param backend  Network transport (send_tcp_packet). NOT owned.
+     * @param mimicry  HTTP scaffold generator. NOT owned.
+     * @param config   Channel configuration.
+     */
+    HTTPStegChannel(ncp::INetworkBackend* backend,
+                    ncp::TrafficMimicry* mimicry,
+                    const HTTPStegConfig& config = {});
     ~HTTPStegChannel() override;
 
     HTTPStegChannel(const HTTPStegChannel&) = delete;
@@ -251,32 +235,30 @@ public:
     bool set_config(const HTTPStegConfig& config);
     HTTPStegConfig get_config() const;
     HTTPStegStats get_steg_stats() const;
-
-    // Calculate total bits per request for current config
     size_t bits_per_request() const;
 
 private:
-    // Build a steg HTTP request encoding the given bits
-    StegHTTPRequest build_steg_request(const uint8_t* data, size_t bits);
+    // Build steg headers for one chunk → returns ordered header pairs
+    std::vector<std::pair<std::string, std::string>>
+        build_steg_headers(const uint8_t* data, size_t bits,
+                           size_t& out_perm_bits, size_t& out_val_bits);
 
-    // Extract covert bits from an HTTP response
-    std::vector<uint8_t> extract_from_response(const StegHTTPResponse& response);
-
-    // Send an HTTP request and get response
-    StegHTTPResponse send_http_request(const StegHTTPRequest& request);
+    // Full pipeline: steg headers → mimicry wrap → backend send
+    bool send_steg_request(const uint8_t* data, size_t bits);
+    void send_cover_request();
 
     // Workers
     void tx_worker_func();
     void cover_traffic_func();
 
-    // Encryption (reuses same pattern as DNS channel)
-    std::vector<uint8_t> encrypt_payload(const uint8_t* data, size_t len) const;
-    std::vector<uint8_t> decrypt_payload(const uint8_t* data, size_t len) const;
-
     void update_stealth_score();
     std::chrono::milliseconds next_request_delay() const;
 
-    // State
+    // Dependencies (not owned)
+    ncp::INetworkBackend* backend_;
+    ncp::TrafficMimicry* mimicry_;
+
+    // Config & State
     HTTPStegConfig config_;
     std::atomic<ChannelState> state_{ChannelState::CLOSED};
 
@@ -286,7 +268,7 @@ private:
 
     // TX queue
     struct TxItem {
-        std::vector<uint8_t> payload;   // raw bits to encode
+        std::vector<uint8_t> payload;
         size_t bit_count = 0;
     };
     std::queue<TxItem> tx_queue_;

@@ -7,6 +7,12 @@
  * All covert channels (DNS, TLS Padding, HTTP Header Steg, HLS Video Steg)
  * implement ICovertChannel, enabling the CovertChannelManager to multiplex
  * and failover transparently.
+ *
+ * ARCHITECTURE:
+ *   - Channels are THIN transports: send(bytes) → embed → wire
+ *   - Encryption is NOT inside channels — CovertChannelManager handles it
+ *     centrally via ncp::Crypto::encrypt_aead() / decrypt_aead()
+ *   - Channel selection, failover, and key management are Manager's job
  */
 
 #include <cstdint>
@@ -20,6 +26,12 @@
 #include <atomic>
 
 namespace ncp {
+
+// Forward declarations for Manager dependencies
+class Crypto;
+class TrafficMimicry;
+class INetworkBackend;
+
 namespace covert {
 
 // ===== Channel Statistics =====
@@ -56,7 +68,7 @@ struct CovertDetectionEvent {
         NONE,
         STATISTICAL_ANOMALY,     // traffic pattern anomaly detected
         TIMING_ANOMALY,          // inter-packet timing deviation
-        VOLUME_ANOMALY,          // unusual DNS query volume
+        VOLUME_ANOMALY,          // unusual query volume
         CONTENT_FINGERPRINT,     // payload fingerprinted by DPI
         ACTIVE_PROBE,            // active probing attempt detected
         BLOCK_DETECTED           // channel appears blocked
@@ -71,6 +83,12 @@ using DetectionCallback = std::function<void(const CovertDetectionEvent&)>;
 
 // ===== Base Interface =====
 
+/**
+ * @brief Thin transport interface for covert channels.
+ *
+ * Channels do NOT encrypt — they only embed and transport raw bytes.
+ * CovertChannelManager wraps send/receive with encrypt_aead/decrypt_aead.
+ */
 class ICovertChannel {
 public:
     virtual ~ICovertChannel() = default;
@@ -81,7 +99,7 @@ public:
     virtual bool is_open() const = 0;
     virtual ChannelState state() const = 0;
 
-    // Data transfer
+    // Data transfer (raw bytes — no encryption here)
     virtual size_t send(const uint8_t* data, size_t len) = 0;
     virtual size_t receive(uint8_t* buf, size_t max_len) = 0;
 
@@ -111,6 +129,17 @@ public:
 /**
  * @brief Multiplexes data across multiple covert channels with automatic failover.
  *
+ * ENCRYPTION LAYER:
+ *   Manager wraps all channel I/O with ncp::Crypto:
+ *     send(pt) → encrypt_aead(pt, session_key, channel_id_as_aad) → channel.send(ct)
+ *     channel.receive() → ct → decrypt_aead(ct, session_key, channel_id_as_aad) → pt
+ *
+ *   This ensures:
+ *   - Channels stay thin (embed + transport only)
+ *   - No crypto duplication across channels (DRY)
+ *   - ProtocolOrchestrator manages keys centrally (HKDF from shared_secret)
+ *   - channel_id as AAD authenticates which channel produced the ciphertext
+ *
  * Integrates with ncp_orchestrator.hpp — when a channel reports detection,
  * manager shifts traffic to surviving channels and notifies the orchestrator.
  */
@@ -126,6 +155,7 @@ public:
 
     CovertChannelManager();
     explicit CovertChannelManager(const Config& config);
+    CovertChannelManager(const Config& config, std::shared_ptr<ncp::Crypto> crypto);
     ~CovertChannelManager();
 
     // Channel registration
@@ -133,9 +163,15 @@ public:
     void remove_channel(const std::string& channel_type);
     std::vector<std::string> active_channels() const;
 
-    // Unified send/receive (auto-selects best channel)
+    // Unified send/receive (auto-selects best channel + encrypts/decrypts)
+    // send: encrypt_aead(data, session_key_, channel_id_aad) → channel.send(ct)
+    // receive: channel.receive() → decrypt_aead(ct, session_key_, channel_id_aad)
     size_t send(const uint8_t* data, size_t len);
     size_t receive(uint8_t* buf, size_t max_len);
+
+    // Session key management (called by ProtocolOrchestrator)
+    void set_session_key(const std::vector<uint8_t>& key);
+    bool has_session_key() const;
 
     // Lifecycle
     void start();
