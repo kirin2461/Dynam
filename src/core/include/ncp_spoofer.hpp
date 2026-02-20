@@ -7,6 +7,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 
 namespace ncp {
@@ -143,6 +144,10 @@ public:
         std::string original_system_serial;
         std::string original_system_uuid;
         std::string original_disk_serial;
+
+        // Windows: adapter registry subkey index (e.g. "0001") for MAC spoofing
+        // Discovered during save_original_identity() by matching adapter GUID
+        std::string adapter_reg_index;
     };
     
     // Spoof status
@@ -187,8 +192,11 @@ public:
     bool disable();
     bool is_enabled() const { return enabled_; }
     
-    // Get current status
-    SpoofStatus get_status() const { return status_; }
+    // Get current status (thread-safe copy)
+    SpoofStatus get_status() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return status_;
+    }
     NetworkIdentity get_original_identity() const { return original_identity_; }
     
     // Manual rotation
@@ -202,7 +210,7 @@ public:
     bool rotate_disk_serial();
     bool rotate_all();
     
-    // Set custom values
+    // Set custom values (thread-safe)
     bool set_custom_ipv4(const std::string& ipv4);
     bool set_custom_ipv6(const std::string& ipv6);
     bool set_custom_mac(const std::string& mac);
@@ -256,9 +264,14 @@ private:
     std::atomic<bool> rotation_running_{false};
     std::thread rotation_thread_;
     
-    SpoofConfig config_;
+    // FIX #49.2: Mutex protecting config_ and status_ from data races
+    // between rotation_thread_func() and public API calls.
+    // Must be held when reading or writing config_ or status_.
+    mutable std::mutex mu_;
+    
+    SpoofConfig config_;            // GUARDED_BY(mu_)
     NetworkIdentity original_identity_;
-    SpoofStatus status_;
+    SpoofStatus status_;            // GUARDED_BY(mu_)
     
     RotationCallback rotation_callback_;
     
