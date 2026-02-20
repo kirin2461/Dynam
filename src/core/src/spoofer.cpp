@@ -8,6 +8,7 @@
 #include <set>
 #include <vector>
 #include <iostream>
+#include <mutex>
 #include <sodium.h>
 
 #ifdef _WIN32
@@ -32,6 +33,12 @@
 #endif
 
 namespace ncp {
+
+// ==========================================================================
+// FIX #8: Mutex for thread-safe access to config_ and status_
+// rotation_thread_func() reads config_/status_ concurrently with rotate_*()
+// ==========================================================================
+static std::mutex g_spoofer_mutex;
 
 // ==================== Safe Command Execution ====================
 static const std::set<std::string> ALLOWED_COMMANDS = {
@@ -140,6 +147,8 @@ NetworkSpoofer::~NetworkSpoofer() {
 // ==================== Enable/Disable ====================
 bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig& config) {
     if (enabled_) return false;
+
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     config_ = config;
 
     if (!save_original_identity(interface_name)) return false;
@@ -209,6 +218,7 @@ bool NetworkSpoofer::disable() {
     if (rotation_thread_.joinable()) rotation_thread_.join();
     bool success = restore_original_identity();
     enabled_ = false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     status_ = SpoofStatus();
     return success;
 }
@@ -216,6 +226,7 @@ bool NetworkSpoofer::disable() {
 // ==================== Rotation Methods ====================
 bool NetworkSpoofer::rotate_ipv4() {
     if (!enabled_ || !config_.spoof_ipv4) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::string old_ip = status_.current_ipv4;
     std::string new_ip = generate_random_ipv4();
     if (apply_ipv4(new_ip)) {
@@ -229,6 +240,7 @@ bool NetworkSpoofer::rotate_ipv4() {
 
 bool NetworkSpoofer::rotate_ipv6() {
     if (!enabled_ || !config_.spoof_ipv6) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::string old = status_.current_ipv6;
     std::string n = generate_random_ipv6();
     if (apply_ipv6(n)) {
@@ -242,6 +254,7 @@ bool NetworkSpoofer::rotate_ipv6() {
 
 bool NetworkSpoofer::rotate_mac() {
     if (!enabled_ || !config_.spoof_mac) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::string old = status_.current_mac;
     std::string n = generate_random_mac();
     if (apply_mac(n)) {
@@ -255,8 +268,8 @@ bool NetworkSpoofer::rotate_mac() {
 
 bool NetworkSpoofer::rotate_dns() {
     if (!enabled_ || !config_.spoof_dns) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::vector<std::string> providers = {"1.1.1.1","8.8.8.8","9.9.9.9","1.0.0.1","8.8.4.4"};
-    // SECURITY FIX: Use unbiased csprng_uniform for Fisher-Yates shuffle
     for (size_t i = providers.size()-1; i > 0; --i) {
         std::swap(providers[i], providers[csprng_uniform(static_cast<uint32_t>(i+1))]);
     }
@@ -272,6 +285,7 @@ bool NetworkSpoofer::rotate_dns() {
 
 bool NetworkSpoofer::rotate_hostname() {
     if (!enabled_) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::string n = generate_random_hostname();
     if (apply_hostname(n)) {
         status_.current_hostname = n;
@@ -284,6 +298,7 @@ bool NetworkSpoofer::rotate_hostname() {
 
 bool NetworkSpoofer::rotate_hw_info() {
     if (!enabled_ || !config_.spoof_hw_info) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::string old = status_.current_hw_serial;
     std::string n = generate_random_hw_serial();
     if (apply_hw_info(n)) {
@@ -307,9 +322,47 @@ bool NetworkSpoofer::rotate_all() {
 }
 
 // ==================== Generators ====================
+
+// ==========================================================================
+// FIX #9: generate_random_ipv4() — detect current subnet instead of
+// always generating 10.x.x.x addresses. If the real network is 192.168.x
+// or 172.16-31.x, generated IPs will be in the matching RFC1918 range.
+// Fallback to 10.x.x.x if subnet cannot be determined.
+// ==========================================================================
 std::string NetworkSpoofer::generate_random_ipv4() {
+    const std::string& orig_ip = original_identity_.ipv4_address;
+    const std::string& orig_mask = original_identity_.ipv4_netmask;
+
+    if (!orig_ip.empty() && !orig_mask.empty()) {
+        struct in_addr ip_addr, mask_addr;
+        if (inet_pton(AF_INET, orig_ip.c_str(), &ip_addr) == 1 &&
+            inet_pton(AF_INET, orig_mask.c_str(), &mask_addr) == 1) {
+
+            uint32_t ip   = ntohl(ip_addr.s_addr);
+            uint32_t mask = ntohl(mask_addr.s_addr);
+            uint32_t net  = ip & mask;
+            uint32_t host_bits = ~mask;
+
+            if (host_bits >= 2) {
+                uint32_t max_host = host_bits - 1;
+                uint32_t rand_host = 1 + csprng_uniform(static_cast<uint32_t>(max_host));
+                uint32_t new_ip = net | rand_host;
+
+                struct in_addr result;
+                result.s_addr = htonl(new_ip);
+                char buf[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &result, buf, sizeof(buf))) {
+                    return std::string(buf);
+                }
+            }
+        }
+    }
+
+    // Fallback: RFC1918 10.x.x.x/8
     std::ostringstream oss;
-    oss << "10." << csprng_byte() << "." << csprng_byte() << "." << (1 + csprng_byte() % 254);
+    oss << "10." << static_cast<int>(csprng_byte()) << "."
+        << static_cast<int>(csprng_byte()) << "."
+        << (1 + csprng_byte() % 254);
     return oss.str();
 }
 
@@ -326,12 +379,10 @@ std::string NetworkSpoofer::generate_random_mac() {
     oss << std::hex << std::setfill('0');
     oss << std::setw(2) << ((csprng_byte() & 0xFC) | 0x02);
     for (int i = 0; i < 5; ++i)
-        oss << ":" << std::setw(2) << csprng_byte();
+        oss << ":" << std::setw(2) << static_cast<int>(csprng_byte());
     return oss.str();
 }
 
-// SECURITY FIX: Use csprng_uniform(9000) for full 1000-9999 range
-// Previously csprng_byte() % 9000 only produced 0-255
 std::string NetworkSpoofer::generate_random_hostname() {
     std::vector<std::string> prefixes = {"PC-","WORK-","HOME-","LAPTOP-","NODE-"};
     return prefixes[csprng_uniform(static_cast<uint32_t>(prefixes.size()))]
@@ -354,21 +405,42 @@ bool NetworkSpoofer::set_custom_hostname(const std::string& hostname) { config_.
 bool NetworkSpoofer::set_custom_hw_serial(const std::string& serial) { config_.custom_hw_serial = serial; return true; }
 bool NetworkSpoofer::set_custom_dns(const std::vector<std::string>& dns_servers) { config_.custom_dns_servers = dns_servers; return true; }
 
-// ==================== Rotation Thread ====================
+// ==========================================================================
+// FIX #8: rotation_thread_func() — protect config_/status_ reads with mutex
+// ==========================================================================
 void NetworkSpoofer::rotation_thread_func() {
     while (rotation_running_) {
         auto now = std::chrono::steady_clock::now();
-        auto check_rotate = [&](int interval, auto& last, auto rotate_fn) {
+
+        // Snapshot config/status under lock to avoid data races
+        int ipv4_interval, mac_interval, dns_interval, hostname_interval, hw_info_interval;
+        std::chrono::steady_clock::time_point last_ipv4, last_mac, last_dns, last_hostname, last_hw;
+        {
+            std::lock_guard<std::mutex> lock(g_spoofer_mutex);
+            ipv4_interval     = config_.ipv4_rotation_seconds;
+            mac_interval      = config_.mac_rotation_seconds;
+            dns_interval      = config_.dns_rotation_seconds;
+            hostname_interval = config_.hostname_rotation_seconds;
+            hw_info_interval  = config_.hw_info_rotation_seconds;
+            last_ipv4    = status_.last_ipv4_rotation;
+            last_mac     = status_.last_mac_rotation;
+            last_dns     = status_.last_dns_rotation;
+            last_hostname = status_.last_hostname_rotation;
+            last_hw      = status_.last_hw_info_rotation;
+        }
+
+        auto check_rotate = [&](int interval, const std::chrono::steady_clock::time_point& last, auto rotate_fn) {
             if (interval > 0) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last).count();
                 if (elapsed >= interval) rotate_fn();
             }
         };
-        check_rotate(config_.ipv4_rotation_seconds, status_.last_ipv4_rotation, [this]{ rotate_ipv4(); });
-        check_rotate(config_.mac_rotation_seconds, status_.last_mac_rotation, [this]{ rotate_mac(); });
-        check_rotate(config_.dns_rotation_seconds, status_.last_dns_rotation, [this]{ rotate_dns(); });
-        check_rotate(config_.hostname_rotation_seconds, status_.last_hostname_rotation, [this]{ rotate_hostname(); });
-        check_rotate(config_.hw_info_rotation_seconds, status_.last_hw_info_rotation, [this]{ rotate_hw_info(); });
+
+        check_rotate(ipv4_interval, last_ipv4, [this]{ rotate_ipv4(); });
+        check_rotate(mac_interval, last_mac, [this]{ rotate_mac(); });
+        check_rotate(dns_interval, last_dns, [this]{ rotate_dns(); });
+        check_rotate(hostname_interval, last_hostname, [this]{ rotate_hostname(); });
+        check_rotate(hw_info_interval, last_hw, [this]{ rotate_hw_info(); });
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
@@ -399,6 +471,10 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
                     char ip[INET_ADDRSTRLEN];
                     inet_ntop(AF_INET, &((sockaddr_in*)ua->Address.lpSockaddr)->sin_addr, ip, sizeof(ip));
                     original_identity_.ipv4_address = ip;
+                } else if (ua->Address.lpSockaddr->sa_family == AF_INET6) {
+                    char ip6[INET6_ADDRSTRLEN];
+                    inet_ntop(AF_INET6, &((sockaddr_in6*)ua->Address.lpSockaddr)->sin6_addr, ip6, sizeof(ip6));
+                    original_identity_.ipv6_address = ip6;
                 }
             }
             break;
@@ -436,12 +512,31 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
     }
     close(fd);
 
+    // Save IPv6 address via ip command
+    {
+        std::string result = execute_command_safe("ip", {"-6", "addr", "show", "dev", interface_name});
+        std::istringstream iss(result);
+        std::string line;
+        while (std::getline(iss, line)) {
+            auto pos = line.find("inet6 ");
+            if (pos != std::string::npos && line.find("scope global") != std::string::npos) {
+                auto start = pos + 6;
+                auto slash = line.find('/', start);
+                if (slash != std::string::npos) {
+                    original_identity_.ipv6_address = line.substr(start, slash - start);
+                }
+                break;
+            }
+        }
+    }
+
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) == 0)
         original_identity_.hostname = hostname;
 
     std::ifstream resolv("/etc/resolv.conf");
     std::string line;
+    original_identity_.dns_servers.clear();
     while (std::getline(resolv, line)) {
         if (line.substr(0, 11) == "nameserver ") {
             original_identity_.dns_servers.push_back(line.substr(11));
@@ -451,17 +546,32 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
 #endif
 }
 
+// ==========================================================================
+// FIX #11: restore_original_identity() — also restore IPv6 and HW info
+// ==========================================================================
 bool NetworkSpoofer::restore_original_identity() {
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     bool success = true;
     const auto& id = original_identity_;
+
     if (status_.mac_spoofed && !id.mac_address.empty())
         success &= apply_mac(id.mac_address);
     if (status_.ipv4_spoofed && !id.ipv4_address.empty())
         success &= apply_ipv4(id.ipv4_address);
+
+    // FIX #11: Restore IPv6 if it was spoofed
+    if (status_.ipv6_spoofed && !id.ipv6_address.empty())
+        success &= apply_ipv6(id.ipv6_address);
+
     if (status_.dns_spoofed && !id.dns_servers.empty())
         success &= apply_dns(id.dns_servers);
     if (status_.hostname_spoofed && !id.hostname.empty())
         success &= apply_hostname(id.hostname);
+
+    // FIX #11: Restore HW info if it was spoofed
+    if (status_.hw_info_spoofed && !id.original_board_serial.empty())
+        success &= apply_hw_info(id.original_board_serial);
+
     return success;
 }
 
@@ -500,15 +610,49 @@ bool NetworkSpoofer::apply_ipv6(const std::string& ipv6) {
 #endif
 }
 
+// ==========================================================================
+// FIX #10: apply_mac() Windows — write MAC to registry before disable/enable
+// ==========================================================================
 bool NetworkSpoofer::apply_mac(const std::string& mac) {
     if (mac.empty()) return false;
     const auto& iface = original_identity_.interface_name;
 #ifdef _WIN32
     std::string reg_mac;
     for (char c : mac) if (c != ':') reg_mac += c;
+
+    // FIX #10: Write NetworkAddress to the adapter's registry key
+    std::string reg_path = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+                           "{4D36E972-E325-11CE-BFC1-08002BE10318}";
+
+    bool mac_written = false;
+    for (int i = 0; i < 32; ++i) {
+        char subkey[8];
+        snprintf(subkey, sizeof(subkey), "%04d", i);
+        std::string full_path = reg_path + "\\" + subkey;
+
+        auto check_result = execute_command_safe("reg", {
+            "query", full_path, "/v", "NetCfgInstanceId"
+        });
+        if (check_result.find(iface) != std::string::npos) {
+            auto write_result = execute_command_safe("reg", {
+                "add", full_path, "/v", "NetworkAddress",
+                "/t", "REG_SZ", "/d", reg_mac, "/f"
+            });
+            if (write_result.find("Error") == std::string::npos) {
+                mac_written = true;
+            }
+            break;
+        }
+    }
+
+    if (!mac_written) {
+        return false;
+    }
+
     std::string result = execute_command_safe("netsh", {
         "interface", "set", "interface", "name=" + iface, "admin=disable"
     });
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     execute_command_safe("netsh", {
         "interface", "set", "interface", "name=" + iface, "admin=enable"
     });
@@ -523,6 +667,9 @@ bool NetworkSpoofer::apply_mac(const std::string& mac) {
 #endif
 }
 
+// ==========================================================================
+// FIX #6: apply_dns() Linux — preserve non-nameserver lines in resolv.conf
+// ==========================================================================
 bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
     if (dns_servers.empty()) return false;
 #ifdef _WIN32
@@ -544,12 +691,30 @@ bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
     }
     return true;
 #else
-    std::ofstream resolv("/etc/resolv.conf", std::ios::trunc);
-    if (!resolv.is_open()) return false;
-    for (const auto& dns : dns_servers) {
-        resolv << "nameserver " << dns << "\n";
+    // FIX #6: Read existing resolv.conf and preserve non-nameserver lines
+    std::vector<std::string> preserved_lines;
+    {
+        std::ifstream resolv_in("/etc/resolv.conf");
+        if (resolv_in.is_open()) {
+            std::string line;
+            while (std::getline(resolv_in, line)) {
+                if (line.substr(0, 11) != "nameserver ") {
+                    preserved_lines.push_back(line);
+                }
+            }
+        }
     }
-    resolv.close();
+
+    std::ofstream resolv_out("/etc/resolv.conf", std::ios::trunc);
+    if (!resolv_out.is_open()) return false;
+
+    for (const auto& line : preserved_lines) {
+        resolv_out << line << "\n";
+    }
+    for (const auto& dns : dns_servers) {
+        resolv_out << "nameserver " << dns << "\n";
+    }
+    resolv_out.close();
     return true;
 #endif
 }
@@ -570,17 +735,18 @@ bool NetworkSpoofer::apply_hostname(const std::string& hostname) {
 #endif
 }
 
+// ==========================================================================
+// FIX #7: apply_hw_info() Linux — sysfs DMI is read-only, return false
+// ==========================================================================
 bool NetworkSpoofer::apply_hw_info(const std::string& serial) {
     if (serial.empty()) return false;
 #ifdef _WIN32
     return true;
 #else
-    std::ofstream sf("/sys/class/dmi/id/board_serial", std::ios::trunc);
-    if (sf.is_open()) {
-        sf << serial;
-        sf.close();
-        return true;
-    }
+    // /sys/class/dmi/id/board_serial is READ-ONLY on Linux.
+    // Writing appears to succeed but the kernel ignores the data.
+    std::cerr << "[Spoofer] WARNING: /sys/class/dmi/id/* is read-only on Linux. "
+              << "HW serial spoofing requires kernel-level hooks." << std::endl;
     return false;
 #endif
 }
@@ -642,14 +808,12 @@ std::string NetworkSpoofer::generate_random_system_serial() {
     return serial;
 }
 
-// SECURITY FIX: Readable UUID generator using randombytes_buf
 std::string NetworkSpoofer::generate_random_uuid() {
     uint8_t bytes[16];
     randombytes_buf(bytes, sizeof(bytes));
     
-    // Set version 4 (random) and variant 1 (RFC 4122)
-    bytes[6] = (bytes[6] & 0x0F) | 0x40;  // Version 4
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;  // Variant 1
+    bytes[6] = (bytes[6] & 0x0F) | 0x40;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
     
     char uuid_str[37];
     snprintf(uuid_str, sizeof(uuid_str),
@@ -674,6 +838,7 @@ std::string NetworkSpoofer::generate_random_disk_serial() {
 // ==================== New Rotation Methods ====================
 bool NetworkSpoofer::rotate_smbios() {
     if (!enabled_ || !config_.spoof_smbios) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::string old_board = status_.current_board_serial;
     
     std::string new_board = generate_random_board_serial();
@@ -692,6 +857,7 @@ bool NetworkSpoofer::rotate_smbios() {
 
 bool NetworkSpoofer::rotate_disk_serial() {
     if (!enabled_ || !config_.spoof_disk_serial) return false;
+    std::lock_guard<std::mutex> lock(g_spoofer_mutex);
     std::string old = status_.current_disk_serial;
     std::string n = generate_random_disk_serial();
     if (apply_disk_serial(n)) {
@@ -718,7 +884,9 @@ bool NetworkSpoofer::set_custom_disk_serial(const std::string& disk_serial) {
     return true;
 }
 
-// ==================== Platform-specific: SMBIOS Spoofing ====================
+// ==========================================================================
+// FIX #7: apply_smbios() Linux — sysfs DMI is read-only, return false
+// ==========================================================================
 bool NetworkSpoofer::apply_smbios(const std::string& board_serial, 
                                    const std::string& system_serial, 
                                    const std::string& uuid) {
@@ -756,27 +924,10 @@ bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
     RegCloseKey(hKey);
     return success;
 #else
-    bool success = true;
-    
-    if (!board_serial.empty()) {
-        std::ofstream sf("/sys/class/dmi/id/board_serial", std::ios::trunc);
-        if (sf.is_open()) { sf << board_serial; sf.close(); }
-        else { success = false; }
-    }
-    
-    if (!system_serial.empty()) {
-        std::ofstream sf("/sys/class/dmi/id/product_serial", std::ios::trunc);
-        if (sf.is_open()) { sf << system_serial; sf.close(); }
-        else { success = false; }
-    }
-    
-    if (!uuid.empty()) {
-        std::ofstream sf("/sys/class/dmi/id/product_uuid", std::ios::trunc);
-        if (sf.is_open()) { sf << uuid; sf.close(); }
-        else { success = false; }
-    }
-    
-    return success;
+    // FIX #7: /sys/class/dmi/id/* is READ-ONLY on Linux
+    std::cerr << "[Spoofer] WARNING: /sys/class/dmi/id/* is read-only on Linux. "
+              << "SMBIOS spoofing not possible via sysfs." << std::endl;
+    return false;
 #endif
 }
 
@@ -803,19 +954,16 @@ bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
 #endif
 }
 
-// ==================== Platform-specific: DHCP Client ID Spoofing ====================
 bool NetworkSpoofer::apply_dhcp_client_id(const std::string& client_id) {
     if (client_id.empty()) return false;
-    return false; // Not yet implemented
+    return false;
 }
 
-// ==================== Platform-specific: TCP Fingerprint Spoofing ====================
 bool NetworkSpoofer::apply_tcp_fingerprint(const TcpFingerprintProfile& profile) {
     config_.tcp_profile = profile;
-    return false; // Stub — requires WFP/nfqueue
+    return false;
 }
 
-// ==================== Platform-Specific HW Spoofing Methods ====================
 bool NetworkSpoofer::apply_smbios(
     [[maybe_unused]] const std::string& bios_vendor,
     [[maybe_unused]] const std::string& bios_version,
@@ -879,8 +1027,6 @@ uint8_t NetworkSpoofer::csprng_byte() {
     return val;
 }
 
-// SECURITY FIX: Use libsodium's randombytes_uniform for unbiased random
-// Replaces manual BCrypt/urandom + modulo which had modulo bias
 uint32_t NetworkSpoofer::csprng_uniform(uint32_t upper_bound) {
     if (upper_bound <= 1) return 0;
     return randombytes_uniform(upper_bound);
