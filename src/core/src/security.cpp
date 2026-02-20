@@ -4,6 +4,13 @@
  *
  * All classes use direct member fields as declared in ncp_security.hpp.
  * No pimpl idiom — the header exposes members directly.
+ *
+ * Security audit fixes applied:
+ * - [P0] secure_zero_memory(): volatile loop → sodium_memzero / explicit_bzero
+ * - [P1] check_and_switch(): callback invoked OUTSIDE mutex to prevent deadlock
+ * - [P1] write_entry(): guarded with mutex (safe for direct public calls)
+ * - [P2] record_latency(): alert callback invoked OUTSIDE mutex
+ * - [P2] secure_delete_file(): last pass uses CSPRNG instead of deterministic 0x55
  */
 
 #include "../include/ncp_security.hpp"
@@ -14,6 +21,10 @@
 #include <sstream>
 #include <cstring>
 #include <ctime>
+
+#ifdef HAVE_SODIUM
+#include <sodium.h>
+#endif
 
 #ifdef _WIN32
 #  ifndef NOMINMAX
@@ -40,6 +51,9 @@
 #  include <signal.h>
 #  include <dirent.h>
 #  include <fstream>
+#  if defined(__GLIBC__) || defined(__linux__)
+#    include <string.h>  // explicit_bzero
+#  endif
 #endif
 
 namespace ncp {
@@ -110,24 +124,39 @@ LatencyMonitor::LatencyMonitor(uint32_t threshold_ms)
 LatencyMonitor::~LatencyMonitor() = default;
 
 void LatencyMonitor::record_latency(const std::string& provider, uint32_t latency_ms) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto& history = latency_history_[provider];
-    history.push_back(latency_ms);
+    // FIX [P2]: Invoke alert_callback_ OUTSIDE mutex to avoid blocking
+    // all concurrent writers for the duration of the callback.
+    // Old code: callback fired under lock → any writer calling record_latency()
+    // concurrently would block until the callback completes.
+    AlertCallback callback_copy;
+    LatencyAlert alert;
+    bool should_fire = false;
 
-    // Keep only last 100 measurements
-    if (history.size() > 100) {
-        history.erase(history.begin());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto& history = latency_history_[provider];
+        history.push_back(latency_ms);
+
+        // Keep only last 100 measurements
+        if (history.size() > 100) {
+            history.erase(history.begin());
+        }
+
+        // Prepare alert if threshold exceeded
+        if (alert_callback_ && latency_ms > threshold_ms_) {
+            should_fire = true;
+            callback_copy = alert_callback_;
+            alert.provider = provider;
+            alert.latency_ms = latency_ms;
+            alert.threshold_ms = threshold_ms_;
+            alert.timestamp = std::chrono::system_clock::now();
+            alert.message = "Latency exceeded threshold";
+        }
     }
 
-    // Fire alert if threshold exceeded
-    if (alert_callback_ && latency_ms > threshold_ms_) {
-        LatencyAlert alert;
-        alert.provider = provider;
-        alert.latency_ms = latency_ms;
-        alert.threshold_ms = threshold_ms_;
-        alert.timestamp = std::chrono::system_clock::now();
-        alert.message = "Latency exceeded threshold";
-        alert_callback_(alert);
+    // Fire callback outside lock
+    if (should_fire && callback_copy) {
+        callback_copy(alert);
     }
 }
 
@@ -395,6 +424,17 @@ std::string ForensicLogger::event_type_to_string(EventType type) const {
 }
 
 void ForensicLogger::write_entry(const LogEntry& entry) {
+    // FIX [P1]: write_entry() is public. Previously had NO mutex guard,
+    // relying on being called only from log() which holds mutex_.
+    // If called directly → data race on log_file_.
+    // Now: always takes the lock. If called from log(), log() must NOT
+    // hold the lock when calling write_entry (restructured below).
+    std::lock_guard<std::mutex> lock(mutex_);
+    write_entry_unlocked(entry);
+}
+
+void ForensicLogger::write_entry_unlocked(const LogEntry& entry) {
+    // Internal: caller MUST hold mutex_
     if (!log_file_.is_open()) return;
 
     auto time_t_val = std::chrono::system_clock::to_time_t(entry.timestamp);
@@ -435,7 +475,8 @@ void ForensicLogger::log(EventType type, const std::string& source,
         entries_.erase(entries_.begin());
     }
 
-    write_entry(entry);
+    // Call the unlocked version since we already hold mutex_
+    write_entry_unlocked(entry);
 }
 
 void ForensicLogger::log_dns_query(const std::string& hostname, const std::string& provider) {
@@ -552,41 +593,56 @@ void AutoRouteSwitch::record_success(const std::string& provider) {
 }
 
 void AutoRouteSwitch::record_failure(const std::string& provider) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = status_.find(provider);
-    if (it == status_.end()) return;
+    // FIX [P1]: Invoke switch_callback_ OUTSIDE mutex to prevent deadlock.
+    // Old code: check_and_switch() called switch_callback_() under mutex_.
+    // If callback calls record_success()/record_failure() → deadlock on mutex_.
+    SwitchCallback callback_copy;
+    std::string old_active;
+    std::string new_active;
+    std::string reason;
+    bool should_fire = false;
 
-    it->second.consecutive_failures++;
-    it->second.total_failures++;
-    it->second.last_failure = std::chrono::system_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = status_.find(provider);
+        if (it == status_.end()) return;
 
-    if (it->second.consecutive_failures >= failure_threshold_ && provider == active_provider_) {
-        check_and_switch(provider);
-    }
-}
+        it->second.consecutive_failures++;
+        it->second.total_failures++;
+        it->second.last_failure = std::chrono::system_clock::now();
 
-void AutoRouteSwitch::check_and_switch(const std::string& failed_provider) {
-    // Already under lock from caller
-    std::string next;
-    for (const auto& p : providers_) {
-        if (p.first != failed_provider) {
-            auto sit = status_.find(p.first);
-            if (sit != status_.end() && sit->second.consecutive_failures < failure_threshold_) {
-                next = p.first;
-                break;
+        if (it->second.consecutive_failures >= failure_threshold_ && provider == active_provider_) {
+            // Find next provider (inline, no separate function needed)
+            std::string next;
+            for (const auto& p : providers_) {
+                if (p.first != provider) {
+                    auto sit = status_.find(p.first);
+                    if (sit != status_.end() && sit->second.consecutive_failures < failure_threshold_) {
+                        next = p.first;
+                        break;
+                    }
+                }
+            }
+
+            if (!next.empty()) {
+                old_active = active_provider_;
+                if (status_.count(old_active)) status_[old_active].is_active = false;
+                active_provider_ = next;
+                status_[next].is_active = true;
+                new_active = next;
+                reason = "consecutive failures >= " + std::to_string(failure_threshold_);
+
+                if (switch_callback_) {
+                    should_fire = true;
+                    callback_copy = switch_callback_;
+                }
             }
         }
     }
 
-    if (!next.empty()) {
-        std::string old_active = active_provider_;
-        if (status_.count(old_active)) status_[old_active].is_active = false;
-        active_provider_ = next;
-        status_[next].is_active = true;
-
-        if (switch_callback_) {
-            switch_callback_(old_active, next, "consecutive failures >= " + std::to_string(failure_threshold_));
-        }
+    // Fire callback outside lock — safe even if callback calls record_*()
+    if (should_fire && callback_copy) {
+        callback_copy(old_active, new_active, reason);
     }
 }
 
@@ -774,7 +830,24 @@ AntiForensics::AntiForensics() {}
 
 AntiForensics::AntiForensics(const Config& config) : config_(config) {}
 
+/**
+ * @brief Helper: fill buffer with CSPRNG bytes for secure file deletion.
+ *        Uses sodium if available, falls back to ncp::csprng_fill().
+ */
+static void fill_random_bytes(uint8_t* buf, size_t len) {
+#ifdef HAVE_SODIUM
+    randombytes_buf(buf, len);
+#else
+    ncp::csprng_fill(buf, len);
+#endif
+}
+
 bool AntiForensics::secure_delete_file(const std::string& path) {
+    // FIX [P2]: Last pass now uses CSPRNG instead of deterministic 0x55.
+    // Deterministic patterns (0x00, 0xFF, 0x55) repeating every 3 passes
+    // are ineffective on SSDs with wear leveling — controller may map writes
+    // to different physical cells. CSPRNG on the final pass ensures no
+    // recognizable pattern remains in the most recently written data.
 #ifdef _WIN32
     HANDLE hFile = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -788,14 +861,29 @@ bool AntiForensics::secure_delete_file(const std::string& path) {
     std::vector<uint8_t> buf(buf_size);
     for (int pass = 0; pass < config_.overwrite_passes; ++pass) {
         SetFilePointer(hFile, 0, nullptr, FILE_BEGIN);
-        uint8_t fill = (pass % 3 == 0) ? 0x00 : (pass % 3 == 1) ? 0xFF : 0x55;
-        std::memset(buf.data(), fill, buf.size());
-        size_t remaining = size;
-        while (remaining > 0) {
-            DWORD to_write = static_cast<DWORD>(remaining < buf.size() ? remaining : buf.size());
-            DWORD written = 0;
-            WriteFile(hFile, buf.data(), to_write, &written, nullptr);
-            remaining -= written;
+
+        bool is_last_pass = (pass == config_.overwrite_passes - 1);
+        if (is_last_pass) {
+            // Final pass: CSPRNG random bytes
+            size_t remaining = size;
+            while (remaining > 0) {
+                DWORD to_write = static_cast<DWORD>(remaining < buf.size() ? remaining : buf.size());
+                fill_random_bytes(buf.data(), to_write);
+                DWORD written = 0;
+                WriteFile(hFile, buf.data(), to_write, &written, nullptr);
+                remaining -= written;
+            }
+        } else {
+            // Earlier passes: deterministic patterns (0x00, 0xFF alternating)
+            uint8_t fill = (pass % 2 == 0) ? 0x00 : 0xFF;
+            std::memset(buf.data(), fill, buf.size());
+            size_t remaining = size;
+            while (remaining > 0) {
+                DWORD to_write = static_cast<DWORD>(remaining < buf.size() ? remaining : buf.size());
+                DWORD written = 0;
+                WriteFile(hFile, buf.data(), to_write, &written, nullptr);
+                remaining -= written;
+            }
         }
         FlushFileBuffers(hFile);
     }
@@ -812,13 +900,27 @@ bool AntiForensics::secure_delete_file(const std::string& path) {
     std::vector<uint8_t> buf(buf_size);
     for (int pass = 0; pass < config_.overwrite_passes; ++pass) {
         file.seekp(0, std::ios::beg);
-        uint8_t fill = (pass % 3 == 0) ? 0x00 : (pass % 3 == 1) ? 0xFF : 0x55;
-        std::memset(buf.data(), fill, buf.size());
-        size_t remaining = size;
-        while (remaining > 0) {
-            size_t chunk = remaining < buf.size() ? remaining : buf.size();
-            file.write(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(chunk));
-            remaining -= chunk;
+
+        bool is_last_pass = (pass == config_.overwrite_passes - 1);
+        if (is_last_pass) {
+            // Final pass: CSPRNG random bytes
+            size_t remaining = size;
+            while (remaining > 0) {
+                size_t chunk = remaining < buf.size() ? remaining : buf.size();
+                fill_random_bytes(buf.data(), chunk);
+                file.write(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(chunk));
+                remaining -= chunk;
+            }
+        } else {
+            // Earlier passes: deterministic patterns
+            uint8_t fill = (pass % 2 == 0) ? 0x00 : 0xFF;
+            std::memset(buf.data(), fill, buf.size());
+            size_t remaining = size;
+            while (remaining > 0) {
+                size_t chunk = remaining < buf.size() ? remaining : buf.size();
+                file.write(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(chunk));
+                remaining -= chunk;
+            }
         }
         file.flush();
     }
@@ -849,12 +951,26 @@ bool AntiForensics::unlock_memory(void* ptr, size_t size) {
 }
 
 bool AntiForensics::secure_zero_memory(void* ptr, size_t size) {
+    // FIX [P0]: volatile unsigned char* loop is NOT guaranteed to survive
+    // compiler optimizations across all compilers and optimization levels.
+    // Priority chain:
+    //   1. sodium_memzero() — uses platform-specific barriers
+    //   2. explicit_bzero() — glibc/FreeBSD guaranteed not optimized out
+    //   3. SecureZeroMemory() — Windows, always works
+    //   4. Fallback: volatile + compiler barrier
     if (!ptr || size == 0) return false;
-#ifdef _WIN32
+#ifdef HAVE_SODIUM
+    sodium_memzero(ptr, size);
+#elif defined(_WIN32)
     SecureZeroMemory(ptr, size);
+#elif defined(__GLIBC__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+    explicit_bzero(ptr, size);
 #else
+    // Last resort: volatile write + compiler barrier
     volatile unsigned char* p = static_cast<volatile unsigned char*>(ptr);
     for (size_t i = 0; i < size; ++i) p[i] = 0;
+    // Compiler barrier to prevent dead-store elimination
+    __asm__ __volatile__("" ::: "memory");
 #endif
     return true;
 }
