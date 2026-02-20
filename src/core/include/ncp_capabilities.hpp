@@ -16,14 +16,19 @@ namespace ncp {
 // ======================================================================
 //  E2E Message Type Discriminator
 // ======================================================================
-//  Prepended as first byte to all E2E encrypted messages.
-//  Allows peer to distinguish capabilities exchange from application data.
+//  4-byte magic prefix: 'N','C','P', <type_byte>
+//  Eliminates collision with legacy untagged E2E messages.
+//  Old peers' data won't start with "NCP" — safe fallback to DATA.
 
 enum class E2EMessageType : uint8_t {
-    DATA             = 0x00,   // Existing application data
+    DATA             = 0x00,   // Application data (may be untagged from old peers)
     CAPABILITIES     = 0x01,   // Capabilities exchange message
     CAPS_CONFIRM     = 0x02,   // Confirmation HMAC of negotiated config
 };
+
+/// Magic prefix for capabilities-aware messages.
+static constexpr uint8_t NCP_MSG_MAGIC[3] = {'N', 'C', 'P'};
+static constexpr size_t  NCP_MSG_TAG_SIZE = 4;  // magic[3] + type[1]
 
 // ======================================================================
 //  Stage Flags — bitmap of pipeline stages
@@ -68,6 +73,18 @@ inline bool has_flag(StageFlag set, StageFlag flag) {
     return (static_cast<uint32_t>(set) & static_cast<uint32_t>(flag)) != 0;
 }
 
+/// Portable popcount (Kernighan's bit trick). MSVC-safe.
+inline uint32_t popcount32(uint32_t v) {
+    uint32_t c = 0;
+    while (v) { v &= v - 1; ++c; }
+    return c;
+}
+
+/// Validate that a stage_id has exactly one bit set (single stage).
+inline bool is_valid_stage_id(uint32_t sid) {
+    return sid != 0 && popcount32(sid) == 1;
+}
+
 /// Iterate over all set bits, calling fn(StageFlag) for each.
 template<typename Fn>
 void for_each_stage(StageFlag set, Fn&& fn) {
@@ -101,6 +118,9 @@ inline const char* stage_flag_name(StageFlag flag) {
 //  Per-stage configuration entry (TLV)
 // ======================================================================
 
+/// Maximum size of a single stage config blob (prevents DoS).
+static constexpr uint16_t MAX_STAGE_CONFIG_SIZE = 4096;
+
 struct StageConfigEntry {
     StageFlag stage_id;
     std::vector<uint8_t> config_data;  // Opaque per-stage config blob
@@ -116,7 +136,7 @@ struct StageConfigEntry {
 //    [tls_profile:1][burst_target:1][max_fragment_size:2]
 //    [num_configs:1]
 //    for each config:
-//      [stage_id_bits:4][config_len:2][config_data:N]
+//      [stage_id_bits:4][config_len:2][config_data:N]  (max N=4096)
 //    [reserved:16]  — zero-filled, for future extensions
 
 static constexpr uint16_t NCP_CAPS_VERSION = 1;
@@ -146,7 +166,7 @@ struct NCPCapabilities {
 
     std::vector<uint8_t> serialize() const {
         std::vector<uint8_t> out;
-        out.reserve(128);  // Typical size
+        out.reserve(128);
 
         // Version (2 bytes)
         out.push_back(static_cast<uint8_t>((version >> 8) & 0xFF));
@@ -175,26 +195,34 @@ struct NCPCapabilities {
         out.push_back(static_cast<uint8_t>((max_fragment_size >> 8) & 0xFF));
         out.push_back(static_cast<uint8_t>(max_fragment_size & 0xFF));
 
-        // Stage configs (TLV array)
-        uint8_t num = static_cast<uint8_t>(
-            std::min(stage_configs.size(), size_t(255)));
+        // Stage configs (TLV array) — only valid single-bit stage IDs
+        uint8_t num = 0;
+        for (const auto& entry : stage_configs) {
+            if (is_valid_stage_id(static_cast<uint32_t>(entry.stage_id))) ++num;
+            if (num == 255) break;
+        }
         out.push_back(num);
 
-        for (size_t i = 0; i < num; ++i) {
-            const auto& entry = stage_configs[i];
+        uint8_t written = 0;
+        for (const auto& entry : stage_configs) {
+            if (written >= num) break;
             uint32_t sid = static_cast<uint32_t>(entry.stage_id);
+            if (!is_valid_stage_id(sid)) continue;
+
             out.push_back(static_cast<uint8_t>((sid >> 24) & 0xFF));
             out.push_back(static_cast<uint8_t>((sid >> 16) & 0xFF));
             out.push_back(static_cast<uint8_t>((sid >> 8) & 0xFF));
             out.push_back(static_cast<uint8_t>(sid & 0xFF));
 
             uint16_t clen = static_cast<uint16_t>(
-                std::min(entry.config_data.size(), size_t(65535)));
+                std::min(entry.config_data.size(),
+                         static_cast<size_t>(MAX_STAGE_CONFIG_SIZE)));
             out.push_back(static_cast<uint8_t>((clen >> 8) & 0xFF));
             out.push_back(static_cast<uint8_t>(clen & 0xFF));
             out.insert(out.end(),
                        entry.config_data.begin(),
                        entry.config_data.begin() + clen);
+            ++written;
         }
 
         // Reserved (16 bytes)
@@ -214,7 +242,8 @@ struct NCPCapabilities {
 
         // Version
         caps.version = static_cast<uint16_t>(
-            (data[pos] << 8) | data[pos + 1]);
+            (static_cast<uint16_t>(data[pos]) << 8) |
+             static_cast<uint16_t>(data[pos + 1]));
         pos += 2;
 
         // For forward compat: accept version >= 1, parse what we know
@@ -246,7 +275,8 @@ struct NCPCapabilities {
         caps.tls_profile = data[pos++];
         caps.burst_target = data[pos++];
         caps.max_fragment_size = static_cast<uint16_t>(
-            (data[pos] << 8) | data[pos + 1]);
+            (static_cast<uint16_t>(data[pos]) << 8) |
+             static_cast<uint16_t>(data[pos + 1]));
         pos += 2;
 
         // Stage configs
@@ -256,19 +286,36 @@ struct NCPCapabilities {
         for (uint8_t i = 0; i < num_configs; ++i) {
             if (pos + 6 > len) break;  // Graceful: stop parsing, keep what we have
 
-            StageConfigEntry entry;
             uint32_t sid = (static_cast<uint32_t>(data[pos]) << 24) |
                            (static_cast<uint32_t>(data[pos+1]) << 16) |
                            (static_cast<uint32_t>(data[pos+2]) << 8) |
                             static_cast<uint32_t>(data[pos+3]);
-            entry.stage_id = static_cast<StageFlag>(sid);
             pos += 4;
 
             uint16_t clen = static_cast<uint16_t>(
-                (data[pos] << 8) | data[pos + 1]);
+                (static_cast<uint16_t>(data[pos]) << 8) |
+                 static_cast<uint16_t>(data[pos + 1]));
             pos += 2;
 
+            // FIX: Cap config size to prevent DoS
+            if (clen > MAX_STAGE_CONFIG_SIZE) {
+                // Skip oversized entry (advance pos but don't store)
+                if (pos + clen > len) break;
+                pos += clen;
+                continue;
+            }
+
             if (pos + clen > len) break;
+
+            // FIX: Validate stage_id is single-bit (popcount == 1)
+            if (!is_valid_stage_id(sid)) {
+                // Skip invalid stage_id entry
+                pos += clen;
+                continue;
+            }
+
+            StageConfigEntry entry;
+            entry.stage_id = static_cast<StageFlag>(sid);
             entry.config_data.assign(data + pos, data + pos + clen);
             pos += clen;
 
@@ -302,7 +349,8 @@ struct NCPCapabilities {
 // ======================================================================
 
 struct NegotiatedConfig {
-    StageFlag active_stages = StageFlag::NONE;  // Intersection of both peers
+    uint16_t version = NCP_CAPS_VERSION;           // FIX: Include in HMAC
+    StageFlag active_stages = StageFlag::NONE;     // Intersection of both peers
 
     // Resolved parameters
     std::array<uint8_t, NCP_MORPH_SEED_SIZE> morph_seed{};  // HKDF-derived shared seed
@@ -319,8 +367,13 @@ struct NegotiatedConfig {
 
     /// Serialize for confirmation HMAC computation.
     /// Deterministic byte representation of the negotiated config.
+    /// FIX: Now includes version to prevent cross-version HMAC collisions.
     std::vector<uint8_t> serialize_for_hmac() const {
         std::vector<uint8_t> out;
+
+        // Version (2 bytes) — prevents cross-version HMAC match
+        out.push_back(static_cast<uint8_t>((version >> 8) & 0xFF));
+        out.push_back(static_cast<uint8_t>(version & 0xFF));
 
         uint32_t active = static_cast<uint32_t>(active_stages);
         out.push_back(static_cast<uint8_t>((active >> 24) & 0xFF));
@@ -334,7 +387,7 @@ struct NegotiatedConfig {
         out.push_back(static_cast<uint8_t>((max_fragment_size >> 8) & 0xFF));
         out.push_back(static_cast<uint8_t>(max_fragment_size & 0xFF));
 
-        // Stage configs in deterministic order (sorted by key)
+        // Stage configs in deterministic order (sorted by key via std::map)
         for (const auto& [sid, data] : stage_configs) {
             out.push_back(static_cast<uint8_t>((sid >> 24) & 0xFF));
             out.push_back(static_cast<uint8_t>((sid >> 16) & 0xFF));
@@ -354,19 +407,12 @@ struct NegotiatedConfig {
 //  Negotiation Logic
 // ======================================================================
 
-/// Negotiate capabilities between local and peer.
-/// Uses INTERSECTION of supported stages — if one peer doesn't support
-/// a stage, neither uses it. Safer than union (no assumption that peer
-/// understands traffic it didn't advertise support for).
-///
-/// Per-stage configs: prefer peer's config if both have it,
-/// fallback to local's. This allows the more constrained peer
-/// (e.g., mobile client) to drive parameter selection.
 inline NegotiatedConfig negotiate(
     const NCPCapabilities& local,
     const NCPCapabilities& peer) {
 
     NegotiatedConfig result;
+    result.version = std::min(local.version, peer.version);
 
     // Active = both support AND at least one prefers
     StageFlag both_support = local.supported_stages & peer.supported_stages;
@@ -387,7 +433,7 @@ inline NegotiatedConfig negotiate(
 
     // NOTE: morph_seed is NOT set here — it must be derived via HKDF
     // from shared_secret + both morph seeds by the caller.
-    // See derive_morph_seed() below.
+    // Use derive_and_apply_morph_seed() helper below.
 
     // Merge per-stage configs for active stages only
     for_each_stage(result.active_stages, [&](StageFlag flag) {
@@ -408,16 +454,15 @@ inline NegotiatedConfig negotiate(
 }
 
 /// Create local-only config when peer doesn't respond (timeout fallback).
-/// Uses local supported as active, local preferred as filter.
 inline NegotiatedConfig negotiate_local_only(
     const NCPCapabilities& local) {
 
     NegotiatedConfig result;
+    result.version = local.version;
     result.active_stages = local.supported_stages & local.preferred_stages;
     result.tls_profile = local.tls_profile;
     result.burst_target = local.burst_target;
     result.max_fragment_size = local.max_fragment_size;
-    // morph_seed left zeroed — caller should use local seed directly
 
     for (const auto& entry : local.stage_configs) {
         if (has_flag(result.active_stages, entry.stage_id)) {
@@ -432,20 +477,10 @@ inline NegotiatedConfig negotiate_local_only(
 // ======================================================================
 //  Morph Seed Derivation
 // ======================================================================
-//
-//  Both peers derive the same morph seed deterministically:
-//    morph_seed = HKDF-SHA256(
-//        ikm   = shared_secret,
-//        salt  = initiator_morph_seed || responder_morph_seed,
-//        info  = "ncp-morph-seed-v1",
-//        len   = 32
-//    )
-//
-//  Order is deterministic: initiator's seed always first.
-//  is_initiator is known to each peer from the handshake role.
 
 struct MorphSeedDerivation {
     /// Build the HKDF salt from both morph seeds in deterministic order.
+    /// Initiator's seed always comes first.
     static std::vector<uint8_t> build_salt(
         const std::array<uint8_t, NCP_MORPH_SEED_SIZE>& local_seed,
         const std::array<uint8_t, NCP_MORPH_SEED_SIZE>& peer_seed,
@@ -475,6 +510,47 @@ struct MorphSeedDerivation {
 };
 
 // ======================================================================
+//  Helper: derive_and_apply_morph_seed
+// ======================================================================
+//
+//  Combines salt construction + HKDF derivation into a single call.
+//  Prevents callers from forgetting the HKDF step after negotiate().
+//
+//  Usage:
+//    auto negotiated = negotiate(local_caps, peer_caps);
+//    derive_and_apply_morph_seed(
+//        negotiated, shared_secret,
+//        local_caps.morph_seed, peer_caps.morph_seed,
+//        is_initiator,
+//        hkdf_fn  // = E2EUtils::derive_key or equivalent
+//    );
+//    // negotiated.morph_seed is now set
+
+using HkdfDeriveFn = std::function<std::vector<uint8_t>(
+    const uint8_t* ikm, size_t ikm_len,
+    const std::vector<uint8_t>& salt,
+    const std::vector<uint8_t>& info,
+    size_t output_len)>;
+
+inline void derive_and_apply_morph_seed(
+    NegotiatedConfig& config,
+    const uint8_t* shared_secret, size_t shared_secret_len,
+    const std::array<uint8_t, NCP_MORPH_SEED_SIZE>& local_seed,
+    const std::array<uint8_t, NCP_MORPH_SEED_SIZE>& peer_seed,
+    bool is_initiator,
+    HkdfDeriveFn hkdf_fn) {
+
+    auto salt = MorphSeedDerivation::build_salt(local_seed, peer_seed, is_initiator);
+    auto info = MorphSeedDerivation::info();
+    auto derived = hkdf_fn(shared_secret, shared_secret_len,
+                           salt, info, NCP_MORPH_SEED_SIZE);
+
+    size_t copy_len = std::min(derived.size(),
+                               static_cast<size_t>(NCP_MORPH_SEED_SIZE));
+    std::memcpy(config.morph_seed.data(), derived.data(), copy_len);
+}
+
+// ======================================================================
 //  Capabilities Exchange Protocol
 // ======================================================================
 //
@@ -482,80 +558,110 @@ struct MorphSeedDerivation {
 //
 //  1. Both peers reach SessionEstablished (after E2E key exchange)
 //  2. Both peers immediately encrypt(serialize(local_caps))
-//     with E2EMessageType::CAPABILITIES tag prepended
+//     with NCP magic + E2EMessageType::CAPABILITIES tag prepended
 //  3. Both peers wait for peer capabilities (5s timeout)
 //  4. negotiate(local_caps, peer_caps) → NegotiatedConfig
-//  5. Both peers send HMAC(session_key, serialize(negotiated))
-//     with E2EMessageType::CAPS_CONFIRM tag
-//  6. Both peers verify peer's HMAC matches their own
-//  7. If HMAC mismatch → abort (MITM detected) or fallback
-//  8. apply_negotiated_config(negotiated) → Orchestrator
+//  5. derive_and_apply_morph_seed(negotiated, ...)
+//  6. Both peers send HMAC(session_key, serialize(negotiated))
+//     with NCP magic + E2EMessageType::CAPS_CONFIRM tag
+//  7. Both peers verify peer's HMAC matches their own
+//  8. If HMAC mismatch → abort (MITM detected) or fallback
+//  9. apply_negotiated_config(negotiated) → Orchestrator
 //
 //  If allow_in_band_negotiation = false (default):
-//    Skip steps 2-7, use pre-shared OrchestratorConfig directly.
+//    Skip steps 2-8, use pre-shared OrchestratorConfig directly.
 
 struct CapabilitiesExchange {
-    /// Wrap capabilities message with type tag for E2E channel.
+
+    // ---- Message wrapping with 4-byte magic tag ----
+
+    /// Check if a decrypted message has the NCP magic prefix.
+    /// Legacy messages from old peers won't have it → treated as DATA.
+    static bool has_magic(const std::vector<uint8_t>& decrypted) {
+        if (decrypted.size() < NCP_MSG_TAG_SIZE) return false;
+        return decrypted[0] == NCP_MSG_MAGIC[0] &&
+               decrypted[1] == NCP_MSG_MAGIC[1] &&
+               decrypted[2] == NCP_MSG_MAGIC[2];
+    }
+
+    /// Wrap capabilities message with 4-byte tag: 'N','C','P', 0x01
     static std::vector<uint8_t> wrap_capabilities(
         const NCPCapabilities& caps) {
 
         auto serialized = caps.serialize();
         std::vector<uint8_t> msg;
-        msg.reserve(1 + serialized.size());
+        msg.reserve(NCP_MSG_TAG_SIZE + serialized.size());
+        msg.push_back(NCP_MSG_MAGIC[0]);
+        msg.push_back(NCP_MSG_MAGIC[1]);
+        msg.push_back(NCP_MSG_MAGIC[2]);
         msg.push_back(static_cast<uint8_t>(E2EMessageType::CAPABILITIES));
         msg.insert(msg.end(), serialized.begin(), serialized.end());
         return msg;
     }
 
-    /// Wrap confirmation HMAC with type tag.
+    /// Wrap confirmation HMAC with 4-byte tag: 'N','C','P', 0x02
     static std::vector<uint8_t> wrap_confirm(
         const std::vector<uint8_t>& hmac_bytes) {
 
         std::vector<uint8_t> msg;
-        msg.reserve(1 + hmac_bytes.size());
+        msg.reserve(NCP_MSG_TAG_SIZE + hmac_bytes.size());
+        msg.push_back(NCP_MSG_MAGIC[0]);
+        msg.push_back(NCP_MSG_MAGIC[1]);
+        msg.push_back(NCP_MSG_MAGIC[2]);
         msg.push_back(static_cast<uint8_t>(E2EMessageType::CAPS_CONFIRM));
         msg.insert(msg.end(), hmac_bytes.begin(), hmac_bytes.end());
         return msg;
     }
 
-    /// Wrap application data with type tag.
+    /// Wrap application data with 4-byte tag: 'N','C','P', 0x00
+    /// Only call this when BOTH peers are capabilities-aware.
+    /// For communication with old peers, send raw data without wrapping.
     static std::vector<uint8_t> wrap_data(
         const std::vector<uint8_t>& data) {
 
         std::vector<uint8_t> msg;
-        msg.reserve(1 + data.size());
+        msg.reserve(NCP_MSG_TAG_SIZE + data.size());
+        msg.push_back(NCP_MSG_MAGIC[0]);
+        msg.push_back(NCP_MSG_MAGIC[1]);
+        msg.push_back(NCP_MSG_MAGIC[2]);
         msg.push_back(static_cast<uint8_t>(E2EMessageType::DATA));
         msg.insert(msg.end(), data.begin(), data.end());
         return msg;
     }
 
-    /// Peek at message type without consuming.
+    /// Peek at message type. Returns DATA for legacy untagged messages.
     static E2EMessageType peek_type(const std::vector<uint8_t>& decrypted) {
-        if (decrypted.empty()) return E2EMessageType::DATA;
-        return static_cast<E2EMessageType>(decrypted[0]);
+        if (!has_magic(decrypted)) return E2EMessageType::DATA;
+        return static_cast<E2EMessageType>(decrypted[3]);
     }
 
-    /// Extract payload (strip type tag).
+    /// Extract payload (strip 4-byte tag).
+    /// For legacy untagged messages, returns the full message.
     static std::vector<uint8_t> unwrap(
         const std::vector<uint8_t>& decrypted) {
 
-        if (decrypted.size() <= 1) return {};
+        if (!has_magic(decrypted)) {
+            // Legacy message — no tag to strip
+            return decrypted;
+        }
+        if (decrypted.size() <= NCP_MSG_TAG_SIZE) return {};
         return std::vector<uint8_t>(
-            decrypted.begin() + 1, decrypted.end());
+            decrypted.begin() + NCP_MSG_TAG_SIZE, decrypted.end());
     }
 
-    /// Parse capabilities from unwrapped payload.
+    /// Parse capabilities from a tagged message.
     static std::optional<NCPCapabilities> parse_capabilities(
         const std::vector<uint8_t>& decrypted_message) {
 
-        if (decrypted_message.empty()) return std::nullopt;
-        if (static_cast<E2EMessageType>(decrypted_message[0]) !=
+        if (!has_magic(decrypted_message)) return std::nullopt;
+        if (decrypted_message.size() < NCP_MSG_TAG_SIZE + 1) return std::nullopt;
+        if (static_cast<E2EMessageType>(decrypted_message[3]) !=
             E2EMessageType::CAPABILITIES) {
             return std::nullopt;
         }
         return NCPCapabilities::deserialize(
-            decrypted_message.data() + 1,
-            decrypted_message.size() - 1);
+            decrypted_message.data() + NCP_MSG_TAG_SIZE,
+            decrypted_message.size() - NCP_MSG_TAG_SIZE);
     }
 
     /// Default timeout for capabilities exchange (milliseconds).
