@@ -529,7 +529,7 @@ std::vector<uint8_t> TLSManipulator::create_fake_client_hello(
             }
             uint16_t all = static_cast<uint16_t>(alist.size());
             al.push_back(static_cast<uint8_t>((all >> 8) & 0xFF));
-            al.push_back(static_cast<uint8_t>(all & 0xFF));
+            al.push_back(static_cast<uint8_t>(al all & 0xFF));
             al.insert(al.end(), alist.begin(), alist.end());
             append_ext(16, al);
             break;
@@ -697,6 +697,10 @@ struct AdvancedDPIBypass::Impl {
     // Phase 3C: External TLS fingerprint (forwarded to tls_manip)
     ncp::TLSFingerprint* external_fp_ = nullptr;
 
+    // Phase 3D: ECH config (parsed from ech_config_list in AdvancedDPIConfig)
+    ECH::ECHConfig ech_config_;
+    bool ech_config_valid_ = false;
+
     void log(const std::string& msg) { if (log_callback) log_callback(msg); }
 };
 
@@ -717,6 +721,16 @@ bool AdvancedDPIBypass::initialize(const AdvancedDPIConfig& config) {
         impl_->tls_manip->set_tls_fingerprint(impl_->external_fp_);
     }
 
+    // Phase 3D: Parse ECH config from config.ech_config_list
+    if (config.enable_ech && !config.ech_config_list.empty()) {
+        if (ECH::parse_ech_config(config.ech_config_list, impl_->ech_config_)) {
+            impl_->ech_config_valid_ = true;
+            impl_->log("ECH config loaded and validated");
+        } else {
+            impl_->log("Failed to parse ECH config from ech_config_list");
+        }
+    }
+
     if (config.obfuscation != ObfuscationMode::NONE) {
         impl_->obfuscator = std::make_unique<TrafficObfuscator>(config.obfuscation, config.obfuscation_key);
     }
@@ -732,6 +746,17 @@ void AdvancedDPIBypass::set_tls_fingerprint(ncp::TLSFingerprint* fp) {
     }
     impl_->log("TLS fingerprint " + std::string(fp ? "set" : "cleared") +
                " on advanced bypass pipeline");
+}
+
+void AdvancedDPIBypass::set_ech_config(const std::vector<uint8_t>& config_list) {
+    if (ECH::parse_ech_config(config_list, impl_->ech_config_)) {
+        impl_->ech_config_valid_ = true;
+        impl_->config.enable_ech = true;
+        impl_->log("ECH config updated and validated");
+    } else {
+        impl_->ech_config_valid_ = false;
+        impl_->log("Failed to parse ECH config in set_ech_config()");
+    }
 }
 
 bool AdvancedDPIBypass::start() {
@@ -764,13 +789,26 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     const auto& cfg = impl_->config;
     bool is_client_hello = (len > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01);
 
+    // === Phase 2.2: GREASE injection (before ECH, before splits) ===
     if (cfg.base_config.enable_pattern_obfuscation && is_client_hello) {
         working_data = impl_->tls_manip->inject_grease(working_data.data(), working_data.size());
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.grease_injected++;
     }
 
-    // Phase 2: Decoy SNI uses fingerprinted ClientHello when external fp is set
+    // === Phase 3D: ECH application (after GREASE, before splits) ===
+    if (cfg.enable_ech && is_client_hello && impl_->ech_config_valid_) {
+        auto ech_hello = ECH::apply_ech(working_data, impl_->ech_config_);
+        if (ech_hello.size() > working_data.size()) {
+            // ECH extension was added — update working_data
+            working_data = std::move(ech_hello);
+            std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+            impl_->stats.ech_applied++;
+            impl_->log("ECH applied to ClientHello");
+        }
+    }
+
+    // === Phase 2: Decoy SNI (uses fingerprinted ClientHello) ===
     if (cfg.base_config.enable_decoy_sni && is_client_hello && !cfg.base_config.decoy_sni_domains.empty()) {
         for (const auto& decoy_domain : cfg.base_config.decoy_sni_domains) {
             auto fake_hello = impl_->tls_manip->create_fake_client_hello(decoy_domain);
@@ -780,6 +818,7 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
 
+    // === Splitting logic (SNI split or multi-layer split) ===
     if (cfg.base_config.enable_multi_layer_split && is_client_hello && !cfg.base_config.split_positions.empty()) {
         std::vector<size_t> sp;
         sp.reserve(cfg.base_config.split_positions.size());
@@ -809,6 +848,7 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         result.push_back(working_data);
     }
 
+    // === Padding ===
     if (cfg.padding.enabled && cfg.padding.max_padding > 0) {
         for (auto& segment : result) {
             size_t ps = cfg.padding.random_padding
@@ -821,6 +861,7 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
 
+    // === Obfuscation ===
     if (impl_->obfuscator) {
         for (auto& segment : result) {
             segment = impl_->obfuscator->obfuscate(segment.data(), segment.size());
