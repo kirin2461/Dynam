@@ -505,18 +505,30 @@ uint32_t L3Stealth::generate_flow_label(uint64_t flow_hash) {
                 }
             }
 
-            // Phase 2: If still over limit, remove oldest entries until at 75% capacity
+            // Phase 2: If still over limit, remove oldest entries until at 75% capacity.
+            // FIX: Use partial_sort via a sorted vector of iterators to achieve O(n log k)
+            // instead of O(n²) from repeated full scans. k = entries to remove.
             if (flow_label_cache_.size() > FLOW_LABEL_CACHE_MAX) {
                 size_t target_size = FLOW_LABEL_CACHE_MAX * 3 / 4;
-                while (flow_label_cache_.size() > target_size) {
-                    // Find the oldest entry
-                    auto oldest = flow_label_cache_.begin();
-                    for (auto iter = flow_label_cache_.begin(); iter != flow_label_cache_.end(); ++iter) {
-                        if (iter->second.last_used < oldest->second.last_used) {
-                            oldest = iter;
-                        }
-                    }
-                    flow_label_cache_.erase(oldest);
+                size_t to_remove = flow_label_cache_.size() - target_size;
+
+                // Collect all iterators
+                std::vector<decltype(flow_label_cache_)::iterator> entries;
+                entries.reserve(flow_label_cache_.size());
+                for (auto it = flow_label_cache_.begin(); it != flow_label_cache_.end(); ++it) {
+                    entries.push_back(it);
+                }
+
+                // Partial sort: move the `to_remove` oldest entries to the front — O(n log k)
+                std::partial_sort(entries.begin(), entries.begin() + static_cast<ptrdiff_t>(to_remove),
+                                  entries.end(),
+                                  [](const auto& a, const auto& b) {
+                                      return a->second.last_used < b->second.last_used;
+                                  });
+
+                // Erase the oldest entries
+                for (size_t i = 0; i < to_remove; ++i) {
+                    flow_label_cache_.erase(entries[i]);
                 }
             }
         }
