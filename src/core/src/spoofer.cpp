@@ -9,6 +9,7 @@
 #include <vector>
 #include <iostream>
 #include <sodium.h>
+#include <mutex>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -128,6 +129,61 @@ static std::string execute_command_safe(const std::string& command, const std::v
 #endif
 }
 
+#ifdef _WIN32
+// ==================== Windows: Find adapter registry index ====================
+// Enumerates network adapters to find the registry subkey index ("0000", "0001", ...)
+// for the given interface name under:
+//   HKLM\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}
+static std::string find_adapter_registry_index(const std::string& interface_name) {
+    const std::string class_key =
+        "SYSTEM\\CurrentControlSet\\Control\\Class\\"
+        "{4D36E972-E325-11CE-BFC1-08002BE10318}";
+
+    HKEY hClassKey;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, class_key.c_str(), 0,
+                      KEY_ENUMERATE_SUB_KEYS, &hClassKey) != ERROR_SUCCESS) {
+        return "";
+    }
+
+    char subkey_name[256];
+    DWORD subkey_len;
+    for (DWORD i = 0; ; ++i) {
+        subkey_len = sizeof(subkey_name);
+        if (RegEnumKeyExA(hClassKey, i, subkey_name, &subkey_len,
+                          NULL, NULL, NULL, NULL) != ERROR_SUCCESS) {
+            break;
+        }
+
+        std::string full_subkey = class_key + "\\" + subkey_name;
+        HKEY hSubKey;
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, full_subkey.c_str(), 0,
+                          KEY_READ, &hSubKey) != ERROR_SUCCESS) {
+            continue;
+        }
+
+        // Check NetCfgInstanceId to match the adapter GUID / interface name
+        char value_buf[512];
+        DWORD value_len = sizeof(value_buf);
+        DWORD value_type;
+        if (RegQueryValueExA(hSubKey, "NetCfgInstanceId", NULL, &value_type,
+                             (BYTE*)value_buf, &value_len) == ERROR_SUCCESS &&
+            value_type == REG_SZ) {
+            std::string instance_id(value_buf, value_len > 0 ? value_len - 1 : 0);
+            if (instance_id == interface_name) {
+                RegCloseKey(hSubKey);
+                RegCloseKey(hClassKey);
+                return subkey_name;  // e.g. "0001"
+            }
+        }
+
+        RegCloseKey(hSubKey);
+    }
+
+    RegCloseKey(hClassKey);
+    return "";
+}
+#endif
+
 // ==================== Constructor/Destructor ====================
 NetworkSpoofer::NetworkSpoofer() {}
 
@@ -139,6 +195,7 @@ NetworkSpoofer::~NetworkSpoofer() {
 
 // ==================== Enable/Disable ====================
 bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig& config) {
+    std::lock_guard<std::mutex> lock(mu_);
     if (enabled_) return false;
     config_ = config;
 
@@ -204,9 +261,15 @@ bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig
 }
 
 bool NetworkSpoofer::disable() {
-    if (!enabled_) return false;
-    rotation_running_ = false;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!enabled_) return false;
+        rotation_running_ = false;
+    }
+    // Join outside mutex to avoid deadlock with rotation thread
     if (rotation_thread_.joinable()) rotation_thread_.join();
+
+    std::lock_guard<std::mutex> lock(mu_);
     bool success = restore_original_identity();
     enabled_ = false;
     status_ = SpoofStatus();
@@ -215,6 +278,7 @@ bool NetworkSpoofer::disable() {
 
 // ==================== Rotation Methods ====================
 bool NetworkSpoofer::rotate_ipv4() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_ || !config_.spoof_ipv4) return false;
     std::string old_ip = status_.current_ipv4;
     std::string new_ip = generate_random_ipv4();
@@ -228,6 +292,7 @@ bool NetworkSpoofer::rotate_ipv4() {
 }
 
 bool NetworkSpoofer::rotate_ipv6() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_ || !config_.spoof_ipv6) return false;
     std::string old = status_.current_ipv6;
     std::string n = generate_random_ipv6();
@@ -241,6 +306,7 @@ bool NetworkSpoofer::rotate_ipv6() {
 }
 
 bool NetworkSpoofer::rotate_mac() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_ || !config_.spoof_mac) return false;
     std::string old = status_.current_mac;
     std::string n = generate_random_mac();
@@ -254,6 +320,7 @@ bool NetworkSpoofer::rotate_mac() {
 }
 
 bool NetworkSpoofer::rotate_dns() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_ || !config_.spoof_dns) return false;
     std::vector<std::string> providers = {"1.1.1.1","8.8.8.8","9.9.9.9","1.0.0.1","8.8.4.4"};
     // SECURITY FIX: Use unbiased csprng_uniform for Fisher-Yates shuffle
@@ -271,6 +338,7 @@ bool NetworkSpoofer::rotate_dns() {
 }
 
 bool NetworkSpoofer::rotate_hostname() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_) return false;
     std::string n = generate_random_hostname();
     if (apply_hostname(n)) {
@@ -283,6 +351,7 @@ bool NetworkSpoofer::rotate_hostname() {
 }
 
 bool NetworkSpoofer::rotate_hw_info() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_ || !config_.spoof_hw_info) return false;
     std::string old = status_.current_hw_serial;
     std::string n = generate_random_hw_serial();
@@ -296,6 +365,7 @@ bool NetworkSpoofer::rotate_hw_info() {
 }
 
 bool NetworkSpoofer::rotate_all() {
+    // Each rotate_*() acquires the mutex individually
     bool s = true;
     if (config_.spoof_ipv4) s &= rotate_ipv4();
     if (config_.spoof_ipv6) s &= rotate_ipv6();
@@ -317,7 +387,8 @@ std::string NetworkSpoofer::generate_random_ipv6() {
     std::ostringstream oss;
     oss << "fd" << std::hex << std::setfill('0');
     for (int i = 0; i < 7; ++i)
-        oss << ":" << std::setw(4) << (csprng_byte() << 8 | csprng_byte());
+        oss << ":" << std::setw(4)
+            << static_cast<uint16_t>(static_cast<uint16_t>(csprng_byte()) << 8 | csprng_byte());
     return oss.str();
 }
 
@@ -347,28 +418,95 @@ std::string NetworkSpoofer::generate_random_hw_serial() {
 }
 
 // ==================== Setters ====================
-bool NetworkSpoofer::set_custom_ipv4(const std::string& ipv4) { config_.custom_ipv4 = ipv4; return true; }
-bool NetworkSpoofer::set_custom_ipv6(const std::string& ipv6) { config_.custom_ipv6 = ipv6; return true; }
-bool NetworkSpoofer::set_custom_mac(const std::string& mac) { config_.custom_mac = mac; return true; }
-bool NetworkSpoofer::set_custom_hostname(const std::string& hostname) { config_.custom_hostname = hostname; return true; }
-bool NetworkSpoofer::set_custom_hw_serial(const std::string& serial) { config_.custom_hw_serial = serial; return true; }
-bool NetworkSpoofer::set_custom_dns(const std::vector<std::string>& dns_servers) { config_.custom_dns_servers = dns_servers; return true; }
+bool NetworkSpoofer::set_custom_ipv4(const std::string& ipv4) { std::lock_guard<std::mutex> lock(mu_); config_.custom_ipv4 = ipv4; return true; }
+bool NetworkSpoofer::set_custom_ipv6(const std::string& ipv6) { std::lock_guard<std::mutex> lock(mu_); config_.custom_ipv6 = ipv6; return true; }
+bool NetworkSpoofer::set_custom_mac(const std::string& mac) { std::lock_guard<std::mutex> lock(mu_); config_.custom_mac = mac; return true; }
+bool NetworkSpoofer::set_custom_hostname(const std::string& hostname) { std::lock_guard<std::mutex> lock(mu_); config_.custom_hostname = hostname; return true; }
+bool NetworkSpoofer::set_custom_hw_serial(const std::string& serial) { std::lock_guard<std::mutex> lock(mu_); config_.custom_hw_serial = serial; return true; }
+bool NetworkSpoofer::set_custom_dns(const std::vector<std::string>& dns_servers) { std::lock_guard<std::mutex> lock(mu_); config_.custom_dns_servers = dns_servers; return true; }
 
 // ==================== Rotation Thread ====================
 void NetworkSpoofer::rotation_thread_func() {
     while (rotation_running_) {
-        auto now = std::chrono::steady_clock::now();
-        auto check_rotate = [&](int interval, auto& last, auto rotate_fn) {
-            if (interval > 0) {
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last).count();
-                if (elapsed >= interval) rotate_fn();
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            auto now = std::chrono::steady_clock::now();
+            auto check_rotate = [&](int interval, auto& last, auto rotate_fn) {
+                if (interval > 0) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last).count();
+                    if (elapsed >= interval) rotate_fn();
+                }
+            };
+            // NOTE: rotate_*_unlocked() variants called here must NOT acquire mu_
+            // since we already hold it. We call the apply/status update inline.
+            if (config_.ipv4_rotation_seconds > 0) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - status_.last_ipv4_rotation).count();
+                if (elapsed >= config_.ipv4_rotation_seconds && config_.spoof_ipv4) {
+                    std::string old_ip = status_.current_ipv4;
+                    std::string new_ip = generate_random_ipv4();
+                    if (apply_ipv4(new_ip)) {
+                        status_.current_ipv4 = new_ip;
+                        status_.last_ipv4_rotation = now;
+                        if (rotation_callback_) rotation_callback_("ipv4", old_ip, new_ip);
+                    }
+                }
             }
-        };
-        check_rotate(config_.ipv4_rotation_seconds, status_.last_ipv4_rotation, [this]{ rotate_ipv4(); });
-        check_rotate(config_.mac_rotation_seconds, status_.last_mac_rotation, [this]{ rotate_mac(); });
-        check_rotate(config_.dns_rotation_seconds, status_.last_dns_rotation, [this]{ rotate_dns(); });
-        check_rotate(config_.hostname_rotation_seconds, status_.last_hostname_rotation, [this]{ rotate_hostname(); });
-        check_rotate(config_.hw_info_rotation_seconds, status_.last_hw_info_rotation, [this]{ rotate_hw_info(); });
+            if (config_.mac_rotation_seconds > 0) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - status_.last_mac_rotation).count();
+                if (elapsed >= config_.mac_rotation_seconds && config_.spoof_mac) {
+                    std::string old = status_.current_mac;
+                    std::string n = generate_random_mac();
+                    if (apply_mac(n)) {
+                        status_.current_mac = n;
+                        status_.last_mac_rotation = now;
+                        if (rotation_callback_) rotation_callback_("mac", old, n);
+                    }
+                }
+            }
+            if (config_.dns_rotation_seconds > 0) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - status_.last_dns_rotation).count();
+                if (elapsed >= config_.dns_rotation_seconds && config_.spoof_dns) {
+                    std::vector<std::string> providers = {"1.1.1.1","8.8.8.8","9.9.9.9","1.0.0.1","8.8.4.4"};
+                    for (size_t i = providers.size()-1; i > 0; --i) {
+                        std::swap(providers[i], providers[csprng_uniform(static_cast<uint32_t>(i+1))]);
+                    }
+                    std::vector<std::string> selected = {providers[0], providers[1]};
+                    if (apply_dns(selected)) {
+                        status_.current_dns = selected;
+                        status_.last_dns_rotation = now;
+                        if (rotation_callback_) rotation_callback_("dns", "previous", selected[0]);
+                    }
+                }
+            }
+            if (config_.hostname_rotation_seconds > 0) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - status_.last_hostname_rotation).count();
+                if (elapsed >= config_.hostname_rotation_seconds) {
+                    std::string n = generate_random_hostname();
+                    if (apply_hostname(n)) {
+                        status_.current_hostname = n;
+                        status_.last_hostname_rotation = now;
+                        if (rotation_callback_) rotation_callback_("hostname", "previous", n);
+                    }
+                }
+            }
+            if (config_.hw_info_rotation_seconds > 0) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    now - status_.last_hw_info_rotation).count();
+                if (elapsed >= config_.hw_info_rotation_seconds && config_.spoof_hw_info) {
+                    std::string old = status_.current_hw_serial;
+                    std::string n = generate_random_hw_serial();
+                    if (apply_hw_info(n)) {
+                        status_.current_hw_serial = n;
+                        status_.last_hw_info_rotation = now;
+                        if (rotation_callback_) rotation_callback_("hw_serial", old, n);
+                    }
+                }
+            }
+        } // mutex released here
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 }
@@ -504,11 +642,35 @@ bool NetworkSpoofer::apply_mac(const std::string& mac) {
     if (mac.empty()) return false;
     const auto& iface = original_identity_.interface_name;
 #ifdef _WIN32
+    // FIX: Write MAC to registry NetworkAddress BEFORE disable/enable cycle.
+    // Without this step the MAC never actually changes on Windows.
     std::string reg_mac;
     for (char c : mac) if (c != ':') reg_mac += c;
+
+    // Find the correct adapter subkey index (e.g. "0001")
+    std::string adapter_index = find_adapter_registry_index(iface);
+    if (adapter_index.empty()) {
+        // Fallback: could not find adapter in registry
+        return false;
+    }
+
+    // Write NetworkAddress to registry
+    std::string reg_path = "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Class\\"
+                           "{4D36E972-E325-11CE-BFC1-08002BE10318}\\" + adapter_index;
+    std::string reg_result = execute_command_safe("reg", {
+        "add", reg_path, "/v", "NetworkAddress", "/t", "REG_SZ",
+        "/d", reg_mac, "/f"
+    });
+    if (reg_result.find("Error") != std::string::npos) {
+        return false;
+    }
+
+    // Disable and re-enable the interface to apply the new MAC
     std::string result = execute_command_safe("netsh", {
         "interface", "set", "interface", "name=" + iface, "admin=disable"
     });
+    // Small delay to let Windows process the state change
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     execute_command_safe("netsh", {
         "interface", "set", "interface", "name=" + iface, "admin=enable"
     });
@@ -673,6 +835,7 @@ std::string NetworkSpoofer::generate_random_disk_serial() {
 
 // ==================== New Rotation Methods ====================
 bool NetworkSpoofer::rotate_smbios() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_ || !config_.spoof_smbios) return false;
     std::string old_board = status_.current_board_serial;
     
@@ -691,6 +854,7 @@ bool NetworkSpoofer::rotate_smbios() {
 }
 
 bool NetworkSpoofer::rotate_disk_serial() {
+    std::lock_guard<std::mutex> lock(mu_);
     if (!enabled_ || !config_.spoof_disk_serial) return false;
     std::string old = status_.current_disk_serial;
     std::string n = generate_random_disk_serial();
@@ -707,6 +871,7 @@ bool NetworkSpoofer::rotate_disk_serial() {
 bool NetworkSpoofer::set_custom_smbios(const std::string& board_serial, 
                                         const std::string& system_serial, 
                                         const std::string& uuid) {
+    std::lock_guard<std::mutex> lock(mu_);
     config_.custom_board_serial = board_serial;
     config_.custom_system_serial = system_serial;
     config_.custom_system_uuid = uuid;
@@ -714,6 +879,7 @@ bool NetworkSpoofer::set_custom_smbios(const std::string& board_serial,
 }
 
 bool NetworkSpoofer::set_custom_disk_serial(const std::string& disk_serial) {
+    std::lock_guard<std::mutex> lock(mu_);
     config_.custom_disk_serial = disk_serial;
     return true;
 }

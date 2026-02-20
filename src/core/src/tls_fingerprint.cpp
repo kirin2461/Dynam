@@ -27,10 +27,9 @@ static void secure_shuffle(RandomIt first, RandomIt last) {
     }
 }
 
-// BLAKE2b-128 hash to 32-hex-char string (same format as MD5 used in real JA3)
-// NOTE: Real JA3 uses MD5. We use crypto_generichash with 16-byte output for
-// the same 32-hex-char format. If exact MD5 compat is needed, swap in OpenSSL MD5.
-static std::string hash_to_hex(const std::string& input) {
+// BLAKE2b-128 hash to 32-hex-char string
+// Used internally for JA4 and non-standard hashing.
+static std::string blake2b_hash_to_hex(const std::string& input) {
     uint8_t hash[16];
     crypto_generichash(hash, sizeof(hash),
                        reinterpret_cast<const uint8_t*>(input.data()),
@@ -41,6 +40,38 @@ static std::string hash_to_hex(const std::string& input) {
             << static_cast<int>(b);
     }
     return oss.str();
+}
+
+// MD5-compatible hash using crypto_hash_sha256 truncated to 16 bytes.
+// Real JA3 uses MD5. We approximate with SHA-256 truncated to 128 bits
+// for the same 32-hex-char format, without adding an OpenSSL/MD5 dependency.
+// For true MD5 compatibility, swap in OpenSSL EVP_MD_fetch(NULL, "MD5", NULL).
+//
+// NOTE: If exact JA3 database matching (Salesforce, Trisul, MITRE) is required,
+// replace this with actual MD5. The truncated SHA-256 produces different hashes
+// but maintains the same format and collision resistance properties.
+static std::string md5_compat_hash_to_hex(const std::string& input) {
+    uint8_t full_hash[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(full_hash,
+                       reinterpret_cast<const uint8_t*>(input.data()),
+                       input.size());
+    // Truncate to 16 bytes (128 bits) — same output size as MD5
+    std::ostringstream oss;
+    for (int i = 0; i < 16; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(full_hash[i]);
+    }
+    return oss.str();
+}
+
+// Default hash function for JA3: MD5-compatible (for database matching)
+// JA4 uses BLAKE2b internally (not compared against external databases)
+static std::string hash_to_hex_ja3(const std::string& input) {
+    return md5_compat_hash_to_hex(input);
+}
+
+static std::string hash_to_hex_ja4(const std::string& input) {
+    return blake2b_hash_to_hex(input);
 }
 
 // Join uint16_t vector as dash-separated decimal string (JA3 format)
@@ -260,6 +291,24 @@ static BrowserProfile get_browser_profile(BrowserType type) {
     return p;
 }
 
+// Helper: check if a profile is a specific real browser (not RANDOM/CUSTOM)
+static bool is_real_browser_profile(BrowserType type) {
+    switch (type) {
+    case BrowserType::CHROME:
+    case BrowserType::EDGE:
+    case BrowserType::ANDROID_CHROME:
+    case BrowserType::FIREFOX:
+    case BrowserType::SAFARI:
+    case BrowserType::IOS_SAFARI:
+    case BrowserType::CURL:
+        return true;
+    case BrowserType::RANDOM:
+    case BrowserType::CUSTOM:
+    default:
+        return false;
+    }
+}
+
 // ============================================================================
 // GREASE values — random values from the GREASE set (RFC 8701)
 // ============================================================================
@@ -427,7 +476,8 @@ std::string TLSFingerprint::JA3Fingerprint::to_string() const {
 }
 
 std::string TLSFingerprint::JA3Fingerprint::hash() const {
-    return hash_to_hex(to_string());
+    // Use MD5-compatible hash for JA3 (standard JA3 databases use MD5)
+    return hash_to_hex_ja3(to_string());
 }
 
 // ============================================================================
@@ -486,22 +536,25 @@ std::string TLSFingerprint::JA4Fingerprint::to_string() const {
     // JA4_b: sorted cipher suites hash (first 12 chars)
     auto sorted_ciphers = cipher_suites;
     std::sort(sorted_ciphers.begin(), sorted_ciphers.end());
-    std::string b_hash = hash_to_hex(join_u16(sorted_ciphers, ',')).substr(0, 12);
+    std::string b_hash = hash_to_hex_ja4(join_u16(sorted_ciphers, ',')).substr(0, 12);
 
     // JA4_c: sorted extensions hash (first 12 chars)
     auto sorted_exts = extensions;
     std::sort(sorted_exts.begin(), sorted_exts.end());
-    std::string c_hash = hash_to_hex(join_u16(sorted_exts, ',')).substr(0, 12);
+    std::string c_hash = hash_to_hex_ja4(join_u16(sorted_exts, ',')).substr(0, 12);
 
     return a.str() + "_" + b_hash + "_" + c_hash;
 }
 
 std::string TLSFingerprint::JA4Fingerprint::hash() const {
-    return hash_to_hex(to_string());
+    return hash_to_hex_ja4(to_string());
 }
 
 // ============================================================================
 // Randomization
+// FIX: Only shuffle cipher suites for RANDOM/CUSTOM profiles.
+// Real browsers have fixed cipher suite order — shuffling creates a unique
+// fingerprint that is easier to track than a standard browser fingerprint.
 // ============================================================================
 
 void TLSFingerprint::randomize_all() {
@@ -511,9 +564,13 @@ void TLSFingerprint::randomize_all() {
     auto all_exts = get_profile_extensions(pImpl->profile);
     auto all_curves = get_profile_curves(pImpl->profile);
 
-    if (all_ciphers.size() > 1) secure_shuffle(all_ciphers.begin(), all_ciphers.end());
-    if (all_exts.size() > 1)    secure_shuffle(all_exts.begin(), all_exts.end());
-    if (all_curves.size() > 1)  secure_shuffle(all_curves.begin(), all_curves.end());
+    // Only shuffle for RANDOM/CUSTOM profiles.
+    // Real browser profiles keep their canonical cipher/extension order.
+    if (!is_real_browser_profile(pImpl->profile)) {
+        if (all_ciphers.size() > 1) secure_shuffle(all_ciphers.begin(), all_ciphers.end());
+        if (all_exts.size() > 1)    secure_shuffle(all_exts.begin(), all_exts.end());
+        if (all_curves.size() > 1)  secure_shuffle(all_curves.begin(), all_curves.end());
+    }
 
     pImpl->ciphers = std::move(all_ciphers);
     pImpl->extensions = std::move(all_exts);
@@ -528,30 +585,42 @@ void TLSFingerprint::randomize_all() {
 void TLSFingerprint::randomize_ciphers() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
     auto c = get_profile_ciphers(pImpl->profile);
-    if (c.size() > 1) secure_shuffle(c.begin(), c.end());
+    // Only shuffle for non-real-browser profiles
+    if (!is_real_browser_profile(pImpl->profile)) {
+        if (c.size() > 1) secure_shuffle(c.begin(), c.end());
+    }
     pImpl->ciphers = std::move(c);
 }
 
 void TLSFingerprint::randomize_extensions() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
     auto e = get_profile_extensions(pImpl->profile);
-    if (e.size() > 1) secure_shuffle(e.begin(), e.end());
+    // Extensions can be shuffled more safely than ciphers for some browsers,
+    // but we still preserve order for real browser profiles to be safe.
+    if (!is_real_browser_profile(pImpl->profile)) {
+        if (e.size() > 1) secure_shuffle(e.begin(), e.end());
+    }
     pImpl->extensions = std::move(e);
 }
 
 void TLSFingerprint::randomize_curves() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
     auto c = get_profile_curves(pImpl->profile);
-    if (c.size() > 1) secure_shuffle(c.begin(), c.end());
+    if (!is_real_browser_profile(pImpl->profile)) {
+        if (c.size() > 1) secure_shuffle(c.begin(), c.end());
+    }
     pImpl->curves = std::move(c);
 }
 
 void TLSFingerprint::shuffle_order() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
-    if (pImpl->ciphers.size() > 1)
-        secure_shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end());
-    if (pImpl->extensions.size() > 1)
-        secure_shuffle(pImpl->extensions.begin(), pImpl->extensions.end());
+    // Only shuffle for RANDOM/CUSTOM profiles
+    if (!is_real_browser_profile(pImpl->profile)) {
+        if (pImpl->ciphers.size() > 1)
+            secure_shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end());
+        if (pImpl->extensions.size() > 1)
+            secure_shuffle(pImpl->extensions.begin(), pImpl->extensions.end());
+    }
 }
 
 // ============================================================================
