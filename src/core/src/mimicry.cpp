@@ -5,6 +5,7 @@
 #include <array>
 #include <iomanip>
 #include <ctime>
+#include <sodium.h>
 
 namespace ncp {
 
@@ -54,16 +55,47 @@ static const std::array<const char*, 8> RU_TLS_SNI_HOSTS = {{
     "gosuslugi.ru", "sberbank.ru", "rutube.ru", "dzen.ru"
 }};
 
+// ==================== Safe hex decode helper (replaces sscanf) ====================
+static int hex_char_to_nibble(uint8_t c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1; // invalid
+}
+
+static bool safe_hex_decode_byte(uint8_t hi, uint8_t lo, uint8_t& out) {
+    int h = hex_char_to_nibble(hi);
+    int l = hex_char_to_nibble(lo);
+    if (h < 0 || l < 0) return false;
+    out = static_cast<uint8_t>((h << 4) | l);
+    return true;
+}
+
+static unsigned int safe_hex_to_uint(const char* hex, size_t len) {
+    unsigned int result = 0;
+    for (size_t i = 0; i < len; ++i) {
+        int n = hex_char_to_nibble(static_cast<uint8_t>(hex[i]));
+        if (n < 0) return 0;
+        result = (result << 4) | static_cast<unsigned int>(n);
+    }
+    return result;
+}
+
 // ==================== Constructors / Destructor ====================
 TrafficMimicry::TrafficMimicry()
     : tls_sequence_number_(0), dns_transaction_id_(0), quic_packet_number_(0) {
     ncp::csprng_init();
+    // Generate default session key for TLS mimicry encryption
+    tls_session_key_.resize(crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
+    randombytes_buf(tls_session_key_.data(), tls_session_key_.size());
 }
 
 TrafficMimicry::TrafficMimicry(const MimicConfig& config)
     : config_(config),
       tls_sequence_number_(0), dns_transaction_id_(0), quic_packet_number_(0) {
     ncp::csprng_init();
+    tls_session_key_.resize(crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
+    randombytes_buf(tls_session_key_.data(), tls_session_key_.size());
     if (config_.http_user_agent.empty()) {
         config_.http_user_agent = generate_random_user_agent();
     }
@@ -75,7 +107,11 @@ TrafficMimicry::TrafficMimicry(const MimicConfig& config)
     }
 }
 
-TrafficMimicry::~TrafficMimicry() = default;
+TrafficMimicry::~TrafficMimicry() {
+    if (!tls_session_key_.empty()) {
+        sodium_memzero(tls_session_key_.data(), tls_session_key_.size());
+    }
+}
 
 // ==================== wrap / unwrap with stats ====================
 std::vector<uint8_t> TrafficMimicry::wrap_payload(
@@ -127,8 +163,17 @@ std::vector<uint8_t> TrafficMimicry::unwrap_payload(
         case MimicProfile::QUIC_INITIAL:        result = extract_quic_payload(mimicked_data); break;
         case MimicProfile::WEBSOCKET:           result = extract_websocket_payload(mimicked_data); break;
         default:
+            // FIX #49: Generic fallback uses 4-byte length prefix (matches updated UDP wrapper)
             if (mimicked_data.size() > 4) {
-                result.assign(mimicked_data.begin() + 4, mimicked_data.end());
+                uint32_t len = (static_cast<uint32_t>(mimicked_data[0]) << 24) |
+                               (static_cast<uint32_t>(mimicked_data[1]) << 16) |
+                               (static_cast<uint32_t>(mimicked_data[2]) << 8) |
+                                static_cast<uint32_t>(mimicked_data[3]);
+                if (4 + len <= mimicked_data.size()) {
+                    result.assign(mimicked_data.begin() + 4, mimicked_data.begin() + 4 + len);
+                } else {
+                    result.assign(mimicked_data.begin() + 4, mimicked_data.end());
+                }
             }
             break;
     }
@@ -271,32 +316,65 @@ std::vector<uint8_t> TrafficMimicry::generate_random_padding(size_t min_size, si
     return pad;
 }
 
-// ==================== HTTP wrappers ====================
+// ==================== Base64 (FIX #46: complete rewrite) ====================
+// Previous implementation had:
+// - UB on empty input (out-of-bounds access in padding logic)
+// - Incorrect padding calculation for remainder == 1 and == 2
+// This version handles all cases explicitly and safely.
 
 static std::string base64_encode(const std::vector<uint8_t>& data) {
-    static const char* chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string encoded;
+    if (data.empty()) return {};
+
+    static const char* chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+
     size_t i = 0;
-    while (i < data.size()) {
-        uint32_t a = i < data.size() ? data[i++] : 0;
-        uint32_t b = i < data.size() ? data[i++] : 0;
-        uint32_t c = i < data.size() ? data[i++] : 0;
-        uint32_t triple = (a << 16) + (b << 8) + c;
-        encoded += chars[(triple >> 18) & 0x3F];
-        encoded += chars[(triple >> 12) & 0x3F];
-        encoded += (i > data.size() + 1) ? '=' : chars[(triple >> 6) & 0x3F];
-        encoded += (i > data.size()) ? '=' : chars[triple & 0x3F];
+    // Process complete 3-byte groups
+    for (; i + 2 < data.size(); i += 3) {
+        uint32_t triple = (static_cast<uint32_t>(data[i]) << 16) |
+                          (static_cast<uint32_t>(data[i + 1]) << 8) |
+                           static_cast<uint32_t>(data[i + 2]);
+        out += chars[(triple >> 18) & 0x3F];
+        out += chars[(triple >> 12) & 0x3F];
+        out += chars[(triple >> 6) & 0x3F];
+        out += chars[triple & 0x3F];
     }
-    return encoded;
+
+    // Handle remainder
+    size_t remaining = data.size() - i;
+    if (remaining == 1) {
+        uint32_t val = static_cast<uint32_t>(data[i]) << 16;
+        out += chars[(val >> 18) & 0x3F];
+        out += chars[(val >> 12) & 0x3F];
+        out += '=';
+        out += '=';
+    } else if (remaining == 2) {
+        uint32_t val = (static_cast<uint32_t>(data[i]) << 16) |
+                       (static_cast<uint32_t>(data[i + 1]) << 8);
+        out += chars[(val >> 18) & 0x3F];
+        out += chars[(val >> 12) & 0x3F];
+        out += chars[(val >> 6) & 0x3F];
+        out += '=';
+    }
+
+    return out;
 }
 
 static std::vector<uint8_t> base64_decode(const std::string& encoded) {
-    static const std::string chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    if (encoded.empty()) return {};
+
+    static const std::string chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::vector<uint8_t> decoded;
+    decoded.reserve((encoded.size() / 4) * 3);
+
     uint32_t buf = 0;
     int bits = 0;
     for (char c : encoded) {
-        if (c == '=') break;
+        if (c == '=' || c == '\0') break;
         size_t pos = chars.find(c);
         if (pos == std::string::npos) continue;
         buf = (buf << 6) | static_cast<uint32_t>(pos);
@@ -308,6 +386,8 @@ static std::vector<uint8_t> base64_decode(const std::string& encoded) {
     }
     return decoded;
 }
+
+// ==================== HTTP wrappers ====================
 
 std::vector<uint8_t> TrafficMimicry::create_http_get_wrapper(const std::vector<uint8_t>& payload) {
     std::string host = generate_random_hostname();
@@ -370,7 +450,18 @@ std::vector<uint8_t> TrafficMimicry::extract_http_payload(const std::vector<uint
     return data;
 }
 
-// ==================== TLS wrappers ====================
+// ==================== TLS ClientHello wrapper (FIX #45) ====================
+// Previous: payload hidden in session_id + custom extension 0xFF01 with
+// plaintext length in Random field. DPI could trivially extract.
+// 
+// New approach:
+// - Encrypt payload with XChaCha20-Poly1305 using tls_session_key_
+// - 24-byte nonce placed in Random field (24 of 32 bytes; rest is padding)
+// - First min(32, ciphertext) bytes go into session_id field (looks normal)
+// - Remaining ciphertext goes into pre_shared_key extension (0x0029) which
+//   is a legitimate TLS 1.3 extension, normal to see large values there
+// - Without the symmetric key, DPI sees only standard-looking random bytes
+
 std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std::vector<uint8_t>& payload) {
     std::string sni = config_.tls_sni;
     if (sni.empty()) {
@@ -378,34 +469,50 @@ std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std
         sni = RU_TLS_SNI_HOSTS[idx];
     }
 
+    // Encrypt payload with XChaCha20-Poly1305
+    uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES]; // 24 bytes
+    randombytes_buf(nonce, sizeof(nonce));
+
+    std::vector<uint8_t> ciphertext(payload.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES);
+    unsigned long long ct_len = 0;
+    crypto_aead_xchacha20poly1305_ietf_encrypt(
+        ciphertext.data(), &ct_len,
+        payload.data(), payload.size(),
+        nullptr, 0, // no AAD
+        nullptr,
+        nonce,
+        tls_session_key_.data());
+    ciphertext.resize(static_cast<size_t>(ct_len));
+
     std::vector<uint8_t> result;
 
-    result.push_back(0x16);
-    result.push_back(0x03);
-    result.push_back(0x01);
+    // TLS Record header
+    result.push_back(0x16); // Handshake
+    result.push_back(0x03); result.push_back(0x01); // TLS 1.0 (legacy)
     size_t record_length_pos = result.size();
-    result.push_back(0x00); result.push_back(0x00);
+    result.push_back(0x00); result.push_back(0x00); // placeholder
 
-    result.push_back(0x01);
+    // Handshake header
+    result.push_back(0x01); // ClientHello
     size_t handshake_length_pos = result.size();
-    result.push_back(0x00); result.push_back(0x00); result.push_back(0x00);
+    result.push_back(0x00); result.push_back(0x00); result.push_back(0x00); // placeholder
 
-    result.push_back(0x03); result.push_back(0x03);
+    // Client version
+    result.push_back(0x03); result.push_back(0x03); // TLS 1.2
 
-    uint32_t payload_len = static_cast<uint32_t>(payload.size());
-    result.push_back((payload_len >> 24) & 0xFF);
-    result.push_back((payload_len >> 16) & 0xFF);
-    result.push_back((payload_len >> 8) & 0xFF);
-    result.push_back(payload_len & 0xFF);
-    for (int i = 0; i < 28; ++i) result.push_back(ncp::csprng_byte());
+    // Random (32 bytes): nonce (24) + 8 random padding bytes
+    result.insert(result.end(), nonce, nonce + sizeof(nonce));
+    for (int i = 0; i < 8; ++i) result.push_back(ncp::csprng_byte());
 
-    size_t session_id_len = std::min(payload.size(), size_t(32));
+    // Session ID: first min(32, ct_len) bytes of ciphertext
+    size_t session_id_len = std::min(ciphertext.size(), size_t(32));
     result.push_back(static_cast<uint8_t>(session_id_len));
-    result.insert(result.end(), payload.begin(), payload.begin() + session_id_len);
+    result.insert(result.end(), ciphertext.begin(), ciphertext.begin() + session_id_len);
 
+    // Cipher suites
     std::vector<uint16_t> suites = config_.tls_cipher_suites;
     if (suites.empty()) {
-        suites = {0x1301,0x1302,0x1303,0xC02C,0xC02B,0xC030,0xC02F,0x009E,0x009C,0x00FF};
+        suites = {0x1301, 0x1302, 0x1303, 0xC02C, 0xC02B, 0xC030, 0xC02F, 0x009E, 0x009C, 0x00FF};
     }
     uint16_t suites_len = static_cast<uint16_t>(suites.size() * 2);
     result.push_back(static_cast<uint8_t>(suites_len >> 8));
@@ -415,49 +522,80 @@ std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std
         result.push_back(static_cast<uint8_t>(cs & 0xFF));
     }
 
+    // Compression methods
     result.push_back(0x01); result.push_back(0x00);
 
+    // Extensions
     std::vector<uint8_t> exts;
 
+    // SNI extension (0x0000)
     {
         uint16_t name_len = static_cast<uint16_t>(sni.size());
         uint16_t list_len = name_len + 3;
-        exts.push_back(0x00); exts.push_back(0x00);
+        exts.push_back(0x00); exts.push_back(0x00); // type
         uint16_t ext_total = list_len + 2;
         exts.push_back(static_cast<uint8_t>(ext_total >> 8));
         exts.push_back(static_cast<uint8_t>(ext_total & 0xFF));
         exts.push_back(static_cast<uint8_t>(list_len >> 8));
         exts.push_back(static_cast<uint8_t>(list_len & 0xFF));
-        exts.push_back(0x00);
+        exts.push_back(0x00); // host_name type
         exts.push_back(static_cast<uint8_t>(name_len >> 8));
         exts.push_back(static_cast<uint8_t>(name_len & 0xFF));
         exts.insert(exts.end(), sni.begin(), sni.end());
     }
 
+    // Supported versions extension (0x002B)
     exts.push_back(0x00); exts.push_back(0x2B);
     exts.push_back(0x00); exts.push_back(0x05);
     exts.push_back(0x04);
-    exts.push_back(0x03); exts.push_back(0x04);
-    exts.push_back(0x03); exts.push_back(0x03);
+    exts.push_back(0x03); exts.push_back(0x04); // TLS 1.3
+    exts.push_back(0x03); exts.push_back(0x03); // TLS 1.2
 
-    size_t remaining_start = session_id_len;
-    size_t remaining_size = payload.size() > remaining_start ? payload.size() - remaining_start : 0;
-    if (remaining_size > 0) {
-        exts.push_back(0xFF); exts.push_back(0x01);
-        exts.push_back(static_cast<uint8_t>((remaining_size >> 8) & 0xFF));
-        exts.push_back(static_cast<uint8_t>(remaining_size & 0xFF));
-        exts.insert(exts.end(), payload.begin() + remaining_start, payload.end());
+    // pre_shared_key extension (0x0029) — carries remaining ciphertext
+    // This is a legitimate TLS 1.3 extension; large PSK identity values are normal
+    size_t remaining_ct = ciphertext.size() > session_id_len ? ciphertext.size() - session_id_len : 0;
+    if (remaining_ct > 0) {
+        exts.push_back(0x00); exts.push_back(0x29); // pre_shared_key type
+
+        // PSK structure: identities_len(2) + [identity_len(2) + identity + obfuscated_ticket_age(4)] + binders_len(2) + binder(1+)
+        uint16_t identity_len = static_cast<uint16_t>(remaining_ct);
+        uint16_t identities_len = identity_len + 2 + 4; // identity_len field + data + ticket_age
+        uint16_t binder_len = 32; // dummy binder
+        uint16_t binders_len = binder_len + 1; // length prefix + binder
+        uint16_t psk_total = identities_len + 2 + binders_len + 2;
+
+        exts.push_back(static_cast<uint8_t>(psk_total >> 8));
+        exts.push_back(static_cast<uint8_t>(psk_total & 0xFF));
+
+        // Identities
+        exts.push_back(static_cast<uint8_t>(identities_len >> 8));
+        exts.push_back(static_cast<uint8_t>(identities_len & 0xFF));
+        exts.push_back(static_cast<uint8_t>(identity_len >> 8));
+        exts.push_back(static_cast<uint8_t>(identity_len & 0xFF));
+        exts.insert(exts.end(), ciphertext.begin() + session_id_len, ciphertext.end());
+
+        // Obfuscated ticket age (4 bytes random)
+        for (int i = 0; i < 4; ++i) exts.push_back(ncp::csprng_byte());
+
+        // Binders
+        exts.push_back(static_cast<uint8_t>(binders_len >> 8));
+        exts.push_back(static_cast<uint8_t>(binders_len & 0xFF));
+        exts.push_back(static_cast<uint8_t>(binder_len));
+        for (uint16_t i = 0; i < binder_len; ++i) exts.push_back(ncp::csprng_byte());
     }
 
+    // Extensions length
     uint16_t exts_len = static_cast<uint16_t>(exts.size());
     result.push_back(static_cast<uint8_t>(exts_len >> 8));
     result.push_back(static_cast<uint8_t>(exts_len & 0xFF));
     result.insert(result.end(), exts.begin(), exts.end());
 
+    // Fix record length
     size_t total_len = result.size() - 5;
     result[record_length_pos] = static_cast<uint8_t>((total_len >> 8) & 0xFF);
     result[record_length_pos + 1] = static_cast<uint8_t>(total_len & 0xFF);
 
+    // Fix handshake length
     size_t hs_len = result.size() - 9;
     result[handshake_length_pos] = static_cast<uint8_t>((hs_len >> 16) & 0xFF);
     result[handshake_length_pos + 1] = static_cast<uint8_t>((hs_len >> 8) & 0xFF);
@@ -467,25 +605,16 @@ std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std
     return result;
 }
 
-// FIX: HTTPS_APPLICATION mimicry without TLS handshake = DPI alarm.
-// Previously: plaintext 4-byte length prefix + raw payload inside a TLS
-// Application Data record. Any stateful DPI tracking TLS sessions would
-// see this record without a preceding handshake and flag it.
-// Now: XOR-obfuscate the payload body with a random key so the content
-// doesn't contain recognizable plaintext patterns. The 16-byte CSPRNG
-// key is prepended to the encrypted body. DPI sees random-looking bytes
-// which is consistent with actual encrypted TLS application data.
+// HTTPS Application Data wrapper (uses XOR obfuscation — already fixed in prior commit)
 std::vector<uint8_t> TrafficMimicry::create_https_application_wrapper(const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> result;
     result.push_back(0x17); // Application Data
     result.push_back(0x03); result.push_back(0x03); // TLS 1.2
 
-    // XOR key for obfuscation (16 bytes)
     static constexpr size_t XOR_KEY_LEN = 16;
     std::array<uint8_t, XOR_KEY_LEN> xor_key;
     ncp::csprng_fill(xor_key.data(), XOR_KEY_LEN);
 
-    // Body = xor_key(16) + length_prefix(4) + xor_encrypted_payload + padding
     size_t body_len = XOR_KEY_LEN + 4 + payload.size();
     if (config_.enable_size_mimicry && config_.max_padding > 0) {
         body_len += static_cast<size_t>(ncp::csprng_range(
@@ -495,10 +624,8 @@ std::vector<uint8_t> TrafficMimicry::create_https_application_wrapper(const std:
     result.push_back(static_cast<uint8_t>((body_len >> 8) & 0xFF));
     result.push_back(static_cast<uint8_t>(body_len & 0xFF));
 
-    // Append XOR key
     result.insert(result.end(), xor_key.begin(), xor_key.end());
 
-    // XOR-encrypt the 4-byte length prefix
     uint32_t pl = static_cast<uint32_t>(payload.size());
     uint8_t len_bytes[4] = {
         static_cast<uint8_t>((pl >> 24) & 0xFF),
@@ -510,12 +637,10 @@ std::vector<uint8_t> TrafficMimicry::create_https_application_wrapper(const std:
         result.push_back(len_bytes[i] ^ xor_key[i % XOR_KEY_LEN]);
     }
 
-    // XOR-encrypt payload
     for (size_t i = 0; i < payload.size(); ++i) {
         result.push_back(payload[i] ^ xor_key[(i + 4) % XOR_KEY_LEN]);
     }
 
-    // Random padding to fill to body_len
     while (result.size() < 5 + body_len) {
         result.push_back(ncp::csprng_byte());
     }
@@ -524,21 +649,19 @@ std::vector<uint8_t> TrafficMimicry::create_https_application_wrapper(const std:
     return result;
 }
 
+// ==================== TLS payload extraction ====================
 std::vector<uint8_t> TrafficMimicry::extract_tls_payload(const std::vector<uint8_t>& data) {
     if (data.size() < 9) return {};
     if (data[0] != 0x16 && data[0] != 0x17) return {};
 
     if (data[0] == 0x17) {
-        // Application Data — XOR-obfuscated format:
-        // [0x17][0x03][0x03][len_hi][len_lo][xor_key(16)][enc_len(4)][enc_payload...]
+        // Application Data — XOR-obfuscated format (unchanged from prior fix)
         static constexpr size_t XOR_KEY_LEN = 16;
         if (data.size() < 5 + XOR_KEY_LEN + 4) return {};
 
-        // Extract XOR key
         std::array<uint8_t, XOR_KEY_LEN> xor_key;
         std::copy(data.begin() + 5, data.begin() + 5 + XOR_KEY_LEN, xor_key.begin());
 
-        // Decrypt length prefix
         size_t len_off = 5 + XOR_KEY_LEN;
         uint8_t len_bytes[4];
         for (int i = 0; i < 4; ++i) {
@@ -552,38 +675,38 @@ std::vector<uint8_t> TrafficMimicry::extract_tls_payload(const std::vector<uint8
         size_t payload_off = len_off + 4;
         if (data.size() < payload_off + payload_len) return {};
 
-        // Decrypt payload
         std::vector<uint8_t> result(payload_len);
         for (size_t i = 0; i < payload_len; ++i) {
             result[i] = data[payload_off + i] ^ xor_key[(i + 4) % XOR_KEY_LEN];
         }
         return result;
     } else {
-        // ClientHello extraction (unchanged)
+        // ClientHello extraction — decrypt with XChaCha20-Poly1305
+        // Structure: [5 record][4 handshake_hdr][2 version][32 random][1+N session_id][...exts with 0x0029]
         if (data.size() < 44) return {};
 
-        uint32_t payload_len = (static_cast<uint32_t>(data[11]) << 24) |
-                               (static_cast<uint32_t>(data[12]) << 16) |
-                               (static_cast<uint32_t>(data[13]) << 8) |
-                                static_cast<uint32_t>(data[14]);
-        (void)payload_len;
+        // Extract nonce from Random field (first 24 bytes of 32-byte Random)
+        uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
+        std::memcpy(nonce, &data[11], sizeof(nonce)); // offset 11 = after record(5)+handshake(4)+version(2)
 
+        // Extract session_id
         uint8_t session_id_len = data[43];
-        std::vector<uint8_t> result;
+        if (data.size() < 44u + session_id_len) return {};
 
-        if (data.size() > 44u + session_id_len) {
-            result.insert(result.end(), data.begin() + 44, data.begin() + 44 + session_id_len);
-        }
+        std::vector<uint8_t> ciphertext;
+        ciphertext.insert(ciphertext.end(), data.begin() + 44, data.begin() + 44 + session_id_len);
 
+        // Skip cipher suites and compression to reach extensions
         size_t pos = 44 + session_id_len;
         if (pos + 2 <= data.size()) {
             uint16_t cipher_len = (data[pos] << 8) | data[pos + 1];
             pos += 2 + cipher_len;
         }
         if (pos + 1 <= data.size()) {
-            pos += 1 + data[pos];
+            pos += 1 + data[pos]; // compression methods
         }
 
+        // Parse extensions, find pre_shared_key (0x0029)
         if (pos + 2 <= data.size()) {
             uint16_t ext_len = (data[pos] << 8) | data[pos + 1];
             pos += 2;
@@ -593,13 +716,43 @@ std::vector<uint8_t> TrafficMimicry::extract_tls_payload(const std::vector<uint8
                 uint16_t ext_type = (data[pos] << 8) | data[pos + 1];
                 uint16_t ext_data_len = (data[pos + 2] << 8) | data[pos + 3];
                 pos += 4;
-                if (ext_type == 0xFF01 && pos + ext_data_len <= data.size()) {
-                    result.insert(result.end(), data.begin() + pos, data.begin() + pos + ext_data_len);
+
+                if (ext_type == 0x0029 && pos + ext_data_len <= data.size()) {
+                    // Parse PSK identities to extract ciphertext
+                    size_t psk_pos = pos;
+                    if (psk_pos + 2 > data.size()) break;
+                    uint16_t identities_len = (data[psk_pos] << 8) | data[psk_pos + 1];
+                    psk_pos += 2;
+                    if (psk_pos + 2 > data.size()) break;
+                    uint16_t identity_len = (data[psk_pos] << 8) | data[psk_pos + 1];
+                    psk_pos += 2;
+                    if (psk_pos + identity_len > data.size()) break;
+
+                    ciphertext.insert(ciphertext.end(),
+                                      data.begin() + psk_pos,
+                                      data.begin() + psk_pos + identity_len);
                 }
                 pos += ext_data_len;
             }
         }
-        return result;
+
+        if (ciphertext.empty()) return {};
+
+        // Decrypt
+        std::vector<uint8_t> plaintext(ciphertext.size());
+        unsigned long long pt_len = 0;
+        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+                plaintext.data(), &pt_len,
+                nullptr,
+                ciphertext.data(), ciphertext.size(),
+                nullptr, 0,
+                nonce,
+                tls_session_key_.data()) != 0) {
+            return {}; // Decryption failed
+        }
+
+        plaintext.resize(static_cast<size_t>(pt_len));
+        return plaintext;
     }
     return {};
 }
@@ -643,7 +796,7 @@ std::vector<uint8_t> TrafficMimicry::extract_websocket_payload(const std::vector
     return r;
 }
 
-// ==================== DNS ====================
+// ==================== DNS (FIX #47: safe hex decode) ====================
 std::vector<uint8_t> TrafficMimicry::create_dns_query_wrapper(const std::vector<uint8_t>& payload) {
     dns_transaction_id_ = static_cast<uint16_t>(ncp::csprng_range(0, 0xFFFF));
     uint16_t txn_id = dns_transaction_id_;
@@ -686,6 +839,7 @@ std::vector<uint8_t> TrafficMimicry::create_dns_query_wrapper(const std::vector<
     result.push_back(0x00); result.push_back(0x10);
     result.push_back(0x00); result.push_back(0x01);
 
+    // EDNS OPT
     result.push_back(0x00);
     result.push_back(0x00); result.push_back(0x29);
     result.push_back(0x10); result.push_back(0x00);
@@ -731,6 +885,9 @@ std::vector<uint8_t> TrafficMimicry::create_dns_response_wrapper(const std::vect
     return result;
 }
 
+// FIX #47: Replaced sscanf with safe_hex_decode_byte() and safe_hex_to_uint().
+// sscanf("%x", &byte_val) had UB on non-hex input (byte_val uninitialized)
+// and no overflow protection. Now each hex pair is validated character-by-character.
 std::vector<uint8_t> TrafficMimicry::extract_dns_payload(const std::vector<uint8_t>& data) {
     if (data.size() < 12) return {};
 
@@ -773,6 +930,7 @@ std::vector<uint8_t> TrafficMimicry::extract_dns_payload(const std::vector<uint8
             pos += rdlength;
         }
     } else {
+        // DNS query: hex-encoded payload in labels
         std::vector<uint8_t> result;
         size_t pos = 12;
 
@@ -781,19 +939,18 @@ std::vector<uint8_t> TrafficMimicry::extract_dns_payload(const std::vector<uint8
         if (pos + 4 > data.size()) return {};
         char len_hex[5] = {0};
         std::memcpy(len_hex, &data[pos], 4);
-        unsigned int payload_len = 0;
-        sscanf(len_hex, "%x", &payload_len);
+        unsigned int payload_len = safe_hex_to_uint(len_hex, 4);
         pos += 4;
 
         while (pos < data.size() && data[pos] != 0 && result.size() < payload_len) {
             uint8_t label_len = data[pos++];
             if (label_len > 62 || pos + label_len > data.size()) break;
             for (uint8_t i = 0; i + 1 < label_len && result.size() < payload_len; i += 2) {
-                char hex[3] = {static_cast<char>(data[pos + i]), static_cast<char>(data[pos + i + 1]), 0};
-                unsigned int byte_val;
-                if (sscanf(hex, "%x", &byte_val) == 1) {
-                    result.push_back(static_cast<uint8_t>(byte_val));
+                uint8_t decoded_byte;
+                if (safe_hex_decode_byte(data[pos + i], data[pos + i + 1], decoded_byte)) {
+                    result.push_back(decoded_byte);
                 }
+                // Invalid hex chars are silently skipped (no UB)
             }
             pos += label_len;
         }
@@ -802,44 +959,87 @@ std::vector<uint8_t> TrafficMimicry::extract_dns_payload(const std::vector<uint8
     return {};
 }
 
-// ==================== QUIC ====================
+// ==================== QUIC Initial (FIX #48: add AEAD encryption) ====================
+// Previous: plaintext payload with 4-byte length prefix, padded to 1200. DPI trivially
+// detects fake QUIC because no crypto is applied.
+// Fix: Encrypt (4-byte-length + payload) with XChaCha20-Poly1305. Key is derived
+// from DCID via HKDF-like hash. This mimics the real QUIC encryption where
+// the initial keys are derived from the DCID.
+
 std::vector<uint8_t> TrafficMimicry::create_quic_initial_wrapper(const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> result;
 
+    // Long header form bit + Initial type
     result.push_back(0xC0 | (ncp::csprng_byte() & 0x03));
 
+    // Version (QUIC v1 = 0x00000001)
     result.push_back(0x00); result.push_back(0x00);
     result.push_back(0x00); result.push_back(0x01);
 
+    // DCID (8 bytes random)
+    uint8_t dcid[8];
+    ncp::csprng_fill(dcid, sizeof(dcid));
+    result.push_back(8);
+    result.insert(result.end(), dcid, dcid + 8);
+
+    // SCID (8 bytes random)
     result.push_back(8);
     for (int i = 0; i < 8; ++i) result.push_back(ncp::csprng_byte());
 
-    result.push_back(8);
-    for (int i = 0; i < 8; ++i) result.push_back(ncp::csprng_byte());
-
+    // Token length = 0
     result.push_back(0x00);
 
-    uint16_t total_payload = static_cast<uint16_t>(payload.size() + 24);
+    // Derive encryption key from DCID (HKDF-like: hash DCID with context)
+    uint8_t quic_key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
+    uint8_t quic_info[] = "NCP-QUIC-INITIAL-KEY-v1";
+    crypto_generichash(quic_key, sizeof(quic_key),
+                       dcid, sizeof(dcid),
+                       quic_info, sizeof(quic_info) - 1);
+
+    // Build plaintext: 4-byte length prefix + payload
+    uint32_t pl = static_cast<uint32_t>(payload.size());
+    std::vector<uint8_t> plaintext;
+    plaintext.push_back((pl >> 24) & 0xFF);
+    plaintext.push_back((pl >> 16) & 0xFF);
+    plaintext.push_back((pl >> 8) & 0xFF);
+    plaintext.push_back(pl & 0xFF);
+    plaintext.insert(plaintext.end(), payload.begin(), payload.end());
+
+    // Encrypt with XChaCha20-Poly1305
+    uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
+    randombytes_buf(nonce, sizeof(nonce));
+
+    std::vector<uint8_t> ct(plaintext.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES);
+    unsigned long long ct_len = 0;
+    crypto_aead_xchacha20poly1305_ietf_encrypt(
+        ct.data(), &ct_len,
+        plaintext.data(), plaintext.size(),
+        nullptr, 0,
+        nullptr, nonce, quic_key);
+    ct.resize(static_cast<size_t>(ct_len));
+
+    // Length field (2-byte variable-length encoding)
+    uint16_t total_payload = static_cast<uint16_t>(sizeof(nonce) + 4 + ct.size());
     result.push_back(0x40 | ((total_payload >> 8) & 0x3F));
     result.push_back(total_payload & 0xFF);
 
+    // Packet number (4 bytes)
     result.push_back((quic_packet_number_ >> 24) & 0xFF);
     result.push_back((quic_packet_number_ >> 16) & 0xFF);
     result.push_back((quic_packet_number_ >> 8) & 0xFF);
     result.push_back(quic_packet_number_ & 0xFF);
     quic_packet_number_++;
 
-    uint32_t pl = static_cast<uint32_t>(payload.size());
-    result.push_back((pl >> 24) & 0xFF);
-    result.push_back((pl >> 16) & 0xFF);
-    result.push_back((pl >> 8) & 0xFF);
-    result.push_back(pl & 0xFF);
+    // Nonce (24 bytes) + encrypted payload
+    result.insert(result.end(), nonce, nonce + sizeof(nonce));
+    result.insert(result.end(), ct.begin(), ct.end());
 
-    result.insert(result.end(), payload.begin(), payload.end());
-
+    // Pad to minimum 1200 bytes (QUIC requirement)
     while (result.size() < 1200) {
         result.push_back(ncp::csprng_byte());
     }
+
+    sodium_memzero(quic_key, sizeof(quic_key));
     return result;
 }
 
@@ -849,25 +1049,77 @@ std::vector<uint8_t> TrafficMimicry::extract_quic_payload(const std::vector<uint
 
     size_t pos = 5;
     if (pos >= data.size()) return {};
-    uint8_t dcid_len = data[pos++]; pos += dcid_len;
-    if (pos >= data.size()) return {};
+    uint8_t dcid_len = data[pos++];
+    if (pos + dcid_len > data.size()) return {};
+
+    // Extract DCID to derive key
+    const uint8_t* dcid = &data[pos];
+    pos += dcid_len;
+
+    uint8_t quic_key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
+    uint8_t quic_info[] = "NCP-QUIC-INITIAL-KEY-v1";
+    crypto_generichash(quic_key, sizeof(quic_key),
+                       dcid, dcid_len,
+                       quic_info, sizeof(quic_info) - 1);
+
+    if (pos >= data.size()) { sodium_memzero(quic_key, sizeof(quic_key)); return {}; }
     uint8_t scid_len = data[pos++]; pos += scid_len;
-    if (pos >= data.size()) return {};
+    if (pos >= data.size()) { sodium_memzero(quic_key, sizeof(quic_key)); return {}; }
     uint8_t token_len = data[pos++]; pos += token_len;
 
-    if (pos >= data.size()) return {};
+    // Length field
+    if (pos >= data.size()) { sodium_memzero(quic_key, sizeof(quic_key)); return {}; }
     if (data[pos] & 0x40) { pos += 2; } else { pos += 1; }
 
+    // Packet number (4 bytes)
     pos += 4;
 
-    if (pos + 4 > data.size()) return {};
-    uint32_t payload_len = (static_cast<uint32_t>(data[pos]) << 24) |
-                           (static_cast<uint32_t>(data[pos+1]) << 16) |
-                           (static_cast<uint32_t>(data[pos+2]) << 8) |
-                            static_cast<uint32_t>(data[pos+3]);
-    pos += 4;
-    if (pos + payload_len > data.size()) return {};
-    return std::vector<uint8_t>(data.begin() + pos, data.begin() + pos + payload_len);
+    // Nonce (24 bytes)
+    if (pos + crypto_aead_xchacha20poly1305_ietf_NPUBBYTES > data.size()) {
+        sodium_memzero(quic_key, sizeof(quic_key)); return {};
+    }
+    const uint8_t* nonce = &data[pos];
+    pos += crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+
+    // Find actual ciphertext end (strip random padding after 1200-byte mark)
+    // We don't know exact ct_len from header, so we try decrypting all remaining data
+    // up to data.size(). The AEAD tag will validate the correct boundary.
+    // Try shrinking from the end until decryption succeeds.
+    size_t remaining = data.size() - pos;
+    if (remaining < crypto_aead_xchacha20poly1305_ietf_ABYTES) {
+        sodium_memzero(quic_key, sizeof(quic_key)); return {};
+    }
+
+    // We need to figure out ciphertext length. The ciphertext is:
+    //   (4 + payload_size) + 16 (AEAD tag) = ct_len
+    // Try decryption with decreasing sizes until it succeeds
+    std::vector<uint8_t> plaintext;
+    bool decrypted = false;
+    for (size_t try_len = remaining; try_len >= crypto_aead_xchacha20poly1305_ietf_ABYTES; --try_len) {
+        plaintext.resize(try_len);
+        unsigned long long pt_len = 0;
+        if (crypto_aead_xchacha20poly1305_ietf_decrypt(
+                plaintext.data(), &pt_len,
+                nullptr,
+                &data[pos], try_len,
+                nullptr, 0,
+                nonce, quic_key) == 0) {
+            plaintext.resize(static_cast<size_t>(pt_len));
+            decrypted = true;
+            break;
+        }
+    }
+
+    sodium_memzero(quic_key, sizeof(quic_key));
+    if (!decrypted || plaintext.size() < 4) return {};
+
+    // Extract payload from plaintext (skip 4-byte length prefix)
+    uint32_t payload_len = (static_cast<uint32_t>(plaintext[0]) << 24) |
+                           (static_cast<uint32_t>(plaintext[1]) << 16) |
+                           (static_cast<uint32_t>(plaintext[2]) << 8) |
+                            static_cast<uint32_t>(plaintext[3]);
+    if (4 + payload_len > plaintext.size()) return {};
+    return std::vector<uint8_t>(plaintext.begin() + 4, plaintext.begin() + 4 + payload_len);
 }
 
 // ==================== BitTorrent ====================
@@ -956,10 +1208,15 @@ std::vector<uint8_t> TrafficMimicry::create_generic_tcp_wrapper(const std::vecto
     return result;
 }
 
+// FIX #49: Use uint32_t length prefix instead of uint16_t to avoid
+// truncation for payloads >65535 bytes. Format now matches generic TCP wrapper.
 std::vector<uint8_t> TrafficMimicry::create_generic_udp_wrapper(const std::vector<uint8_t>& payload) {
     std::vector<uint8_t> result;
-    uint16_t len = static_cast<uint16_t>(payload.size());
-    result.push_back((len >> 8) & 0xFF); result.push_back(len & 0xFF);
+    uint32_t len = static_cast<uint32_t>(payload.size());
+    result.push_back((len >> 24) & 0xFF);
+    result.push_back((len >> 16) & 0xFF);
+    result.push_back((len >> 8) & 0xFF);
+    result.push_back(len & 0xFF);
     result.insert(result.end(), payload.begin(), payload.end());
     return result;
 }
