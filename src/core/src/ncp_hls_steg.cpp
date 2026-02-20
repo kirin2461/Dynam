@@ -9,6 +9,11 @@
  *     (makes stuffing statistically indistinguishable from random padding)
  *   - M3U8PlaylistGenerator produces valid playlists
  *   - TSPacketBuilder builds valid MPEG-TS packets from scratch
+ *
+ * FIX #111:
+ *   - generate_segment() now returns stats via out-param for proper counting
+ *   - receive() no longer double-counts payload_bytes_extracted
+ *   - get_playlist() reads segment_counter_ under stats_mutex_
  */
 
 #include "include/ncp_covert_channel.hpp"
@@ -296,6 +301,10 @@ std::vector<uint8_t> HLSSegmentCodec::generate_segment(
     uint8_t video_cc = 0;
     uint8_t null_cc = 0;
 
+    // FIX #111: Track packet type counts locally for stats update by caller
+    uint64_t local_null_injected = 0;
+    uint64_t local_af_stuffing = 0;
+
     for (size_t i = 0; i < n_packets; ++i) {
         // Decide packet type
         bool inject_null =
@@ -327,6 +336,7 @@ std::vector<uint8_t> HLSSegmentCodec::generate_segment(
 
             segment.insert(segment.end(), pkt.begin(), pkt.end());
             covert_offset += to_embed;
+            local_null_injected++;  // FIX #111
 
         } else if (inject_stuffing) {
             // Fake video packet with AF stuffing carrying covert data
@@ -354,6 +364,7 @@ std::vector<uint8_t> HLSSegmentCodec::generate_segment(
 
             segment.insert(segment.end(), pkt.begin(), pkt.end());
             covert_offset += to_embed;
+            local_af_stuffing++;  // FIX #111
 
         } else {
             // Normal fake video packet (no covert data)
@@ -363,6 +374,11 @@ std::vector<uint8_t> HLSSegmentCodec::generate_segment(
 
         pkt_index++;
     }
+
+    // FIX #111: Store local counts in segment metadata
+    // Caller (get_encoded_segment) will add these to HLSStegStats
+    last_segment_null_packets_ = local_null_injected;
+    last_segment_af_packets_ = local_af_stuffing;
 
     return segment;
 }
@@ -479,7 +495,8 @@ size_t HLSStegChannel::receive(uint8_t* buf, size_t max_len) {
         std::lock_guard<std::mutex> slock(stats_mutex_);
         base_stats_.bytes_received += to_copy;
         base_stats_.messages_received++;
-        hls_stats_.payload_bytes_extracted += to_copy;
+        // FIX #111: removed payload_bytes_extracted increment here —
+        // already counted in feed_segment() to avoid double counting
     }
     return to_copy;
 }
@@ -542,13 +559,15 @@ void HLSStegChannel::feed_segment(const std::vector<uint8_t>& segment_data) {
     }
     rx_cv_.notify_one();
 
+    bool should_update_stealth = false;
     {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         hls_stats_.segments_parsed++;
         hls_stats_.payload_bytes_extracted += extracted.size();
         stealth_update_counter_++;
+        should_update_stealth = (stealth_update_counter_ % 5 == 0);
     }
-    if (stealth_update_counter_ % 5 == 0) {
+    if (should_update_stealth) {
         update_stealth_score();
     }
 }
@@ -577,6 +596,9 @@ std::vector<uint8_t> HLSStegChannel::get_encoded_segment() {
         std::lock_guard<std::mutex> lock(stats_mutex_);
         hls_stats_.segments_created++;
         hls_stats_.ts_packets_written += segment.size() / TS_PACKET_SIZE;
+        // FIX #111: Now properly track af_stuffing and null packet counts
+        hls_stats_.af_stuffing_packets += codec_->last_segment_af_packets_;
+        hls_stats_.null_packets_injected += codec_->last_segment_null_packets_;
         segment_counter_++;
     }
 
@@ -584,7 +606,15 @@ std::vector<uint8_t> HLSStegChannel::get_encoded_segment() {
 }
 
 std::string HLSStegChannel::get_playlist() const {
-    return playlist_gen_->generate_playlist(5, segment_counter_);
+    // FIX #111: Read segment_counter_ under stats_mutex_ — it's a plain
+    // uint64_t written by get_encoded_segment(), so unsynchronized read
+    // would be a data race (UB per C++11 §1.10).
+    uint64_t seg_count;
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        seg_count = segment_counter_;
+    }
+    return playlist_gen_->generate_playlist(5, seg_count);
 }
 
 void HLSStegChannel::update_stealth_score() {
