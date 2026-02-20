@@ -30,8 +30,8 @@ enum class E2ESessionState {
  */
 enum class KeyExchangeProtocol {
     X25519,      // Curve25519 Diffie-Hellman (libsodium)
-    X448,        // X448 (not supported by libsodium, throws at runtime)
-    ECDH_P256,   // ECDH P-256 (not supported by libsodium, throws at runtime)
+    X448,        // X448 via OpenSSL EVP API
+    ECDH_P256,   // ECDH P-256 via OpenSSL EC_KEY API
     Kyber1024    // Post-quantum KEM (requires liboqs)
 };
 
@@ -50,6 +50,17 @@ struct KeyPair {
     KeyExchangeProtocol protocol = KeyExchangeProtocol::X25519;
     std::chrono::system_clock::time_point created_at;
     std::chrono::system_clock::time_point expires_at;
+};
+
+/**
+ * @brief Result of KEM encapsulation (Kyber1024)
+ *
+ * Encaps produces both a ciphertext (to send to peer) and a shared secret.
+ * The peer calls decapsulate_shared_secret(sk, ciphertext) to recover the same secret.
+ */
+struct KEMEncapsResult {
+    SecureMemory shared_secret;
+    std::vector<uint8_t> ciphertext;  // Send this to the peer
 };
 
 struct MessageHeader {
@@ -99,11 +110,33 @@ public:
         const KeyPair& local_keys
     );
 
-    // Shared secret and key derivation
+    // Shared secret computation (DH-based: X25519, X448, ECDH_P256)
     SecureMemory compute_shared_secret(
         const KeyPair& local_keypair,
         const std::vector<uint8_t>& peer_public_key
     );
+
+    /**
+     * @brief KEM encapsulation (Bob's side for Kyber1024)
+     *
+     * Given a peer's public key, produce (ciphertext, shared_secret).
+     * Send ciphertext to the peer; they call decapsulate_shared_secret().
+     */
+    KEMEncapsResult encapsulate_shared_secret(
+        const std::vector<uint8_t>& peer_public_key
+    );
+
+    /**
+     * @brief KEM decapsulation (Alice's side for Kyber1024)
+     *
+     * Given our secret key and the ciphertext from the peer, recover shared_secret.
+     */
+    SecureMemory decapsulate_shared_secret(
+        const KeyPair& local_keypair,
+        const std::vector<uint8_t>& ciphertext
+    );
+
+    // Key derivation
     SecureMemory derive_keys(
         const SecureMemory& shared_secret,
         const std::string& context,
@@ -146,6 +179,7 @@ public:
 
 private:
     void init_ratchet_keys();
+    std::vector<uint8_t> build_aad() const;
 
     struct Impl;
     std::unique_ptr<Impl> pImpl_;
