@@ -655,15 +655,19 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     std::vector<uint8_t> working_data(data, data + len);
     
     const auto& cfg = impl_->config;
-    // Note: removed unused 'techniques' variable (was line 659 - C4189 warning)
     
     // Check if this is TLS ClientHello
     bool is_client_hello = (len > 5 && data[0] == 0x16 && 
                             data[1] == 0x03 && data[5] == 0x01);
     
-    // Apply pattern obfuscation
-    if (cfg.base_config.enable_pattern_obfuscation && is_client_hello) {
-        // Inject GREASE for TLS fingerprint randomization
+    // ===== Issue #57: When mimicry manages TLS framing, skip TLS-level
+    // modifications that would corrupt the already-structured records.
+    // Transport-level ops (padding, obfuscation, timing) still apply. =====
+    
+    // Apply pattern obfuscation (GREASE injection)
+    // GUARD: skip when mimicry already framed the TLS record
+    if (!cfg.mimicry_managed_tls &&
+        cfg.base_config.enable_pattern_obfuscation && is_client_hello) {
         working_data = impl_->tls_manip->inject_grease(
             working_data.data(),
             working_data.size()
@@ -673,11 +677,12 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         impl_->stats.grease_injected++;
     }
     
-    // Apply decoy SNI
-    if (cfg.base_config.enable_decoy_sni && is_client_hello &&
+    // Apply decoy SNI (fake ClientHello before real one)
+    // GUARD: skip when mimicry already emitted its own ClientHello
+    if (!cfg.mimicry_managed_tls &&
+        cfg.base_config.enable_decoy_sni && is_client_hello &&
         !cfg.base_config.decoy_sni_domains.empty()) {
         
-        // Send fake ClientHello with decoy SNI first
         for (const auto& decoy_domain : cfg.base_config.decoy_sni_domains) {
             auto fake_hello = impl_->tls_manip->create_fake_client_hello(decoy_domain);
             result.push_back(std::move(fake_hello));
@@ -687,8 +692,10 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
     
-    // Apply multi-layer split - Fix C2664: convert vector<int> to vector<size_t>
-    if (cfg.base_config.enable_multi_layer_split && is_client_hello &&
+    // Apply multi-layer split or SNI-based split
+    // GUARD: skip TLS-aware splitting when mimicry manages framing
+    if (!cfg.mimicry_managed_tls &&
+        cfg.base_config.enable_multi_layer_split && is_client_hello &&
         !cfg.base_config.split_positions.empty()) {
         
         // Convert vector<int> to vector<size_t>
@@ -710,8 +717,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.tcp_segments_split += segments.size();
-    } else if (is_client_hello) {
-        // Standard SNI-based split
+    } else if (!cfg.mimicry_managed_tls && is_client_hello) {
+        // Standard SNI-based split (only when mimicry is NOT managing TLS)
         auto split_points = impl_->tls_manip->find_sni_split_points(
             working_data.data(),
             working_data.size()
@@ -747,7 +754,7 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         result.push_back(working_data);
     }
     
-    // Apply padding if enabled
+    // Apply padding if enabled (transport-level — always safe)
     if (cfg.padding.enabled && cfg.padding.max_padding > 0) {
         for (auto& segment : result) {
             size_t padding_size = cfg.padding.random_padding
@@ -768,7 +775,7 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
     
-    // Apply obfuscation
+    // Apply obfuscation (transport-level — always safe)
     if (impl_->obfuscator) {
         for (auto& segment : result) {
             segment = impl_->obfuscator->obfuscate(segment.data(), segment.size());
@@ -778,9 +785,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
     
-    // Apply timing jitter if enabled
+    // Apply timing jitter if enabled (transport-level — always safe)
     if (cfg.base_config.enable_timing_jitter && result.size() > 1) {
-        // Add small delays between segments (caller should handle this)
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.timing_delays_applied += result.size() - 1;
     }
@@ -824,6 +830,11 @@ void AdvancedDPIBypass::set_technique_enabled(EvasionTechnique technique, bool e
 
 std::vector<EvasionTechnique> AdvancedDPIBypass::get_active_techniques() const {
     return impl_->config.techniques;
+}
+
+void AdvancedDPIBypass::set_mimicry_managed_tls(bool managed) {
+    impl_->config.mimicry_managed_tls = managed;
+    impl_->log(std::string("mimicry_managed_tls set to ") + (managed ? "true" : "false"));
 }
 
 void AdvancedDPIBypass::apply_preset(BypassPreset preset) {
@@ -908,11 +919,9 @@ std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
     const std::string& real_domain
 ) {
     // Simple domain fronting: replace SNI with front domain
-    // (Simplified implementation)
     std::vector<uint8_t> result = data;
     
     // Find and replace SNI hostname
-    // (In real implementation, would parse TLS properly)
     auto pos = std::search(
         result.begin(), result.end(),
         real_domain.begin(), real_domain.end()
@@ -932,7 +941,7 @@ namespace Presets {
 AdvancedDPIConfig create_tspu_preset() {
     AdvancedDPIConfig config;
     
-    // Base config for Russian TSPU (ТСПУ РКН)
+    // Base config for Russian TSPU
     config.base_config.mode = DPIMode::PROXY;
     config.base_config.enable_tcp_split = true;
     config.base_config.split_at_sni = true;
