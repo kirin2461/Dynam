@@ -168,6 +168,15 @@ public:
     std::vector<uint8_t> add_oob_marker(
         const uint8_t* data, size_t len, size_t urgent_position);
     
+    /**
+     * @brief Reorder segments using Fisher-Yates shuffle (libsodium CSPRNG)
+     *
+     * Uses cryptographically secure randomness from libsodium internally.
+     * No external RNG state is needed.
+     */
+    void shuffle_segments(
+        std::vector<std::vector<uint8_t>>& segments
+    );
     void shuffle_segments(
         std::vector<std::vector<uint8_t>>& segments,
         void* unused_param = nullptr);
