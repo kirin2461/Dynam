@@ -51,63 +51,154 @@ SecureMemory Crypto::generate_random(size_t size) {
     return result;
 }
 
+// ==================== ChaCha20-Poly1305 IETF (RFC 8439) ====================
+//
+// Wire format versioning to avoid timing oracle:
+//
+// v2 (current, ChaCha20-Poly1305 IETF):
+//   [VERSION_BYTE:1][nonce:12][ciphertext + Poly1305 tag:N+16]
+//   VERSION_BYTE = 0x02
+//
+// v1 (legacy, XSalsa20-Poly1305 via crypto_secretbox):
+//   [nonce:24][ciphertext + Poly1305 tag:N+16]
+//   No version byte prefix — detected by absence of 0x02 prefix.
+//
+// Decryption selects algorithm deterministically by checking the first
+// byte, eliminating the try-catch timing oracle from the previous
+// implementation.
+
+// --- Constants ---
+static constexpr uint8_t VERSION_CHACHA20_IETF = 0x02;
+static constexpr size_t CHACHA20_NONCE_LEN = crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // 12
+static constexpr size_t CHACHA20_TAG_LEN   = crypto_aead_chacha20poly1305_ietf_ABYTES;    // 16
+static constexpr size_t XSALSA20_NONCE_LEN = crypto_secretbox_NONCEBYTES;                 // 24
+static constexpr size_t XSALSA20_TAG_LEN   = crypto_secretbox_MACBYTES;                   // 16
+
 SecureMemory Crypto::encrypt_chacha20(
     const SecureMemory& plaintext,
     const SecureMemory& key
 ) {
-    if (key.size() != crypto_secretbox_KEYBYTES) {
-        throw std::runtime_error("Invalid key size for ChaCha20");
+    if (key.size() != crypto_aead_chacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Invalid key size for ChaCha20-Poly1305 (expected 32 bytes)");
     }
     
-    // Generate random nonce
-    SecureMemory nonce(crypto_secretbox_NONCEBYTES);
-    randombytes_buf(nonce.data(), nonce.size());
+    SecureMemory nonce(CHACHA20_NONCE_LEN);
+    randombytes_buf(nonce.data(), CHACHA20_NONCE_LEN);
     
-    // Ciphertext will be: nonce + encrypted_data + auth_tag
-    SecureMemory ciphertext(crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES + plaintext.size());
+    // v2 format: [version_byte][nonce][ciphertext+tag]
+    const size_t output_len = 1 + CHACHA20_NONCE_LEN + plaintext.size() + CHACHA20_TAG_LEN;
+    SecureMemory ciphertext(output_len);
     
-    // Copy nonce to beginning
-    std::memcpy(ciphertext.data(), nonce.data(), nonce.size());
+    // Write version byte
+    ciphertext.data()[0] = VERSION_CHACHA20_IETF;
     
-    // Encrypt
-    if (crypto_secretbox_easy(
-            ciphertext.data() + crypto_secretbox_NONCEBYTES,
+    // Write nonce after version byte
+    std::memcpy(ciphertext.data() + 1, nonce.data(), CHACHA20_NONCE_LEN);
+    
+    unsigned long long ciphertext_len = 0;
+    if (crypto_aead_chacha20poly1305_ietf_encrypt(
+            ciphertext.data() + 1 + CHACHA20_NONCE_LEN,
+            &ciphertext_len,
             plaintext.data(), plaintext.size(),
-            nonce.data(), key.data()) != 0) {
-        throw std::runtime_error("Encryption failed");
+            nullptr, 0,
+            nullptr,
+            nonce.data(),
+            key.data()) != 0) {
+        throw std::runtime_error("ChaCha20-Poly1305 encryption failed");
     }
     
     return ciphertext;
 }
 
- SecureMemory Crypto::decrypt_chacha20(
+// Legacy XSalsa20-Poly1305 decryption (for old data without version prefix)
+static SecureMemory decrypt_legacy_xsalsa20(
     const SecureMemory& ciphertext,
     const SecureMemory& key
 ) {
-    if (key.size() != crypto_secretbox_KEYBYTES) {
-        throw std::runtime_error("Invalid key size for ChaCha20");
-    }
-    
-    if (ciphertext.size() < crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES) {
-        throw std::runtime_error("Ciphertext too short");
-    }
-    
-    // Extract nonce
     const uint8_t* nonce = ciphertext.data();
-    const uint8_t* encrypted_data = ciphertext.data() + crypto_secretbox_NONCEBYTES;
-    size_t encrypted_len = ciphertext.size() - crypto_secretbox_NONCEBYTES;
+    const uint8_t* encrypted_data = ciphertext.data() + XSALSA20_NONCE_LEN;
+    size_t encrypted_len = ciphertext.size() - XSALSA20_NONCE_LEN;
     
-    // Decrypt
-     SecureMemory plaintext(encrypted_len - crypto_secretbox_MACBYTES);
+    SecureMemory plaintext(encrypted_len - XSALSA20_TAG_LEN);
     
     if (crypto_secretbox_open_easy(
             plaintext.data(),
-                encrypted_data, encrypted_len,
+            encrypted_data, encrypted_len,
             nonce, key.data()) != 0) {
-        throw std::runtime_error("Decryption failed or authentication failed");
+        throw std::runtime_error("Legacy XSalsa20 decryption failed or authentication failed");
     }
     
     return plaintext;
+}
+
+// New ChaCha20-Poly1305 IETF decryption (data after version byte)
+static SecureMemory decrypt_chacha20_ietf_v2(
+    const uint8_t* data, size_t data_len,
+    const SecureMemory& key
+) {
+    // data points past the version byte: [nonce:12][ciphertext+tag]
+    if (data_len < CHACHA20_NONCE_LEN + CHACHA20_TAG_LEN) {
+        throw std::runtime_error("ChaCha20 v2 ciphertext too short");
+    }
+    
+    const uint8_t* nonce = data;
+    const uint8_t* encrypted_data = data + CHACHA20_NONCE_LEN;
+    size_t encrypted_len = data_len - CHACHA20_NONCE_LEN;
+    
+    SecureMemory plaintext(encrypted_len - CHACHA20_TAG_LEN);
+    unsigned long long plaintext_len = 0;
+    
+    if (crypto_aead_chacha20poly1305_ietf_decrypt(
+            plaintext.data(),
+            &plaintext_len,
+            nullptr,
+            encrypted_data, encrypted_len,
+            nullptr, 0,
+            nonce,
+            key.data()) != 0) {
+        throw std::runtime_error("ChaCha20-Poly1305 decryption failed or authentication failed");
+    }
+    
+    return plaintext;
+}
+
+SecureMemory Crypto::decrypt_chacha20(
+    const SecureMemory& ciphertext,
+    const SecureMemory& key
+) {
+    if (key.size() != 32) {
+        throw std::runtime_error("Invalid key size for ChaCha20-Poly1305 (expected 32 bytes)");
+    }
+    
+    if (ciphertext.empty()) {
+        throw std::runtime_error("Ciphertext is empty");
+    }
+    
+    // Deterministic format selection by version byte.
+    // This eliminates the timing oracle from the previous try-catch approach.
+    const uint8_t first_byte = ciphertext.data()[0];
+    
+    if (first_byte == VERSION_CHACHA20_IETF) {
+        // v2 format: [0x02][nonce:12][ciphertext+tag]
+        // Minimum: 1 (version) + 12 (nonce) + 16 (tag) = 29
+        if (ciphertext.size() < 1 + CHACHA20_NONCE_LEN + CHACHA20_TAG_LEN) {
+            throw std::runtime_error("ChaCha20 v2 ciphertext too short");
+        }
+        return decrypt_chacha20_ietf_v2(
+            ciphertext.data() + 1,
+            ciphertext.size() - 1,
+            key);
+    }
+    
+    // Legacy format: [nonce:24][ciphertext+tag]
+    // Minimum: 24 (nonce) + 16 (tag) = 40
+    if (ciphertext.size() >= XSALSA20_NONCE_LEN + XSALSA20_TAG_LEN) {
+        return decrypt_legacy_xsalsa20(ciphertext, key);
+    }
+    
+    throw std::runtime_error(
+        "Decryption failed: ciphertext is not valid ChaCha20-Poly1305 v2 "
+        "or legacy XSalsa20-Poly1305 format");
 }
 
 SecureMemory Crypto::hash_sha256(const SecureMemory& data) {

@@ -13,6 +13,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -25,8 +26,14 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <fwpmu.h>
+#ifdef HAVE_WINDIVERT
+#include <windivert.h>
+#endif
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "fwpuclnt.lib")
+#ifdef HAVE_WINDIVERT
+#pragma comment(lib, "WinDivert.lib")
+#endif
 #endif
 
 namespace ncp {
@@ -60,13 +67,17 @@ struct GREHeader {
     uint32_t key;           // Optional: GRE key (if K bit set in flags)
 };
 
+// FIX #31: VXLANHeader corrected to 8 bytes (was 12 due to erroneous reserved2[4])
+// VXLAN header per RFC 7348: flags(1) + reserved(3) + VNI(3) + reserved(1) = 8 bytes
 struct VXLANHeader {
     uint8_t  flags;         // 0x08 = VNI present
     uint8_t  reserved1[3];
-    uint32_t vni;           // VNI (24 bits) + reserved (8 bits)
-    uint8_t  reserved2[4];
+    uint8_t  vni[3];        // VNI (24 bits), stored as 3 bytes
+    uint8_t  reserved2;     // 1 byte reserved (was erroneously uint8_t reserved2[4])
 };
 #pragma pack(pop)
+
+static_assert(sizeof(VXLANHeader) == 8, "VXLANHeader must be exactly 8 bytes per RFC 7348");
 
 static constexpr uint8_t IPPROTO_GRE = 47;
 static constexpr uint8_t IPPROTO_IPIP = 4;
@@ -76,6 +87,99 @@ static constexpr uint16_t GRE_PROTO_IPV4 = 0x0800;
 // Forward declaration
 static std::vector<uint8_t> encapsulate_packet(const std::vector<uint8_t>& packet,
                                                const PacketInterceptor::Config& cfg);
+
+// ==================== Iptables RAII Helper (FIX #33) ====================
+
+#ifdef __linux__
+// Safe iptables execution via execvp (no shell, no injection risk)
+static bool iptables_exec(const char* action, int queue_num) {
+    std::string queue_str = std::to_string(queue_num);
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        // Child — exec iptables directly, no shell involved
+        const char* argv[] = {
+            "iptables", action, "OUTPUT",
+            "-j", "NFQUEUE",
+            "--queue-num", queue_str.c_str(),
+            nullptr
+        };
+        execvp("iptables", const_cast<char* const*>(argv));
+        _exit(127); // exec failed
+    }
+    // Parent — wait for child
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+#endif
+
+// ==================== FIX #32: Resolve local source IP ====================
+
+#ifdef __linux__
+// Determine local source IP for a given destination via a connected UDP socket
+static uint32_t resolve_local_saddr(const char* remote_ip) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return 0;
+
+    struct sockaddr_in remote{};
+    remote.sin_family = AF_INET;
+    remote.sin_port = htons(80); // arbitrary port
+    inet_pton(AF_INET, remote_ip, &remote.sin_addr);
+
+    // connect() on UDP doesn't send anything, just binds to a local route
+    if (connect(sock, reinterpret_cast<struct sockaddr*>(&remote), sizeof(remote)) < 0) {
+        close(sock);
+        return 0;
+    }
+
+    struct sockaddr_in local{};
+    socklen_t len = sizeof(local);
+    if (getsockname(sock, reinterpret_cast<struct sockaddr*>(&local), &len) < 0) {
+        close(sock);
+        return 0;
+    }
+    close(sock);
+    return local.sin_addr.s_addr; // already in network byte order
+}
+#endif
+
+// ==================== FIX #29: ChaCha20 stream cipher obfuscation ====================
+
+// Applies ChaCha20 stream cipher instead of single-byte XOR.
+// Uses a per-packet random nonce prepended to the payload for decryption.
+// The key is derived from cfg.obfuscation_key (32 bytes) via crypto_generichash if needed.
+static void apply_stream_obfuscation(std::vector<uint8_t>& result, size_t payload_offset,
+                                     const uint8_t* key_material, size_t key_len) {
+    if (payload_offset >= result.size()) return;
+
+    // Derive a 32-byte key from whatever key material we have
+    uint8_t derived_key[crypto_stream_chacha20_KEYBYTES]; // 32
+    crypto_generichash(derived_key, sizeof(derived_key),
+                       key_material, key_len,
+                       nullptr, 0);
+
+    // Generate a random nonce per packet
+    uint8_t nonce[crypto_stream_chacha20_NONCEBYTES]; // 8
+    randombytes_buf(nonce, sizeof(nonce));
+
+    size_t payload_len = result.size() - payload_offset;
+
+    // XOR payload with ChaCha20 keystream (in-place)
+    crypto_stream_chacha20_xor(
+        result.data() + payload_offset,   // output (in-place)
+        result.data() + payload_offset,   // input
+        payload_len,
+        nonce,
+        derived_key);
+
+    // Prepend nonce so the receiver can decrypt
+    // Insert nonce bytes at payload_offset
+    result.insert(result.begin() + payload_offset, nonce, nonce + sizeof(nonce));
+
+    // Wipe derived key
+    sodium_memzero(derived_key, sizeof(derived_key));
+}
 
 // ==================== Platform-Specific Implementation ====================
 
@@ -147,11 +251,11 @@ public:
             return false;
         }
 
-        // Set iptables rule: iptables -A OUTPUT -j NFQUEUE --queue-num <num>
-        std::string cmd = "iptables -A OUTPUT -j NFQUEUE --queue-num " +
-                          std::to_string(cfg.nfqueue_num);
-        if (system(cmd.c_str()) != 0) {
-            parent->log("[NFQUEUE] Warning: Failed to add iptables rule. Run manually: " + cmd);
+        // FIX #33: Use execvp-based iptables invocation (no shell injection risk)
+        if (!iptables_exec("-A", cfg.nfqueue_num)) {
+            parent->log("[NFQUEUE] Warning: Failed to add iptables rule. "
+                        "Run manually: iptables -A OUTPUT -j NFQUEUE --queue-num " +
+                        std::to_string(cfg.nfqueue_num));
         } else {
             iptables_rule_added_ = true;
         }
@@ -203,11 +307,9 @@ public:
             nfq_handle_ = nullptr;
         }
 
-        // Remove iptables rule
+        // FIX #33: Remove iptables rule safely via execvp
         if (iptables_rule_added_) {
-            std::string cmd = "iptables -D OUTPUT -j NFQUEUE --queue-num " +
-                              std::to_string(config_.nfqueue_num);
-            system(cmd.c_str());
+            iptables_exec("-D", config_.nfqueue_num);
             iptables_rule_added_ = false;
         }
     }
@@ -280,8 +382,161 @@ private:
 };
 #endif // __linux__ && HAVE_NFQUEUE
 
+// ==================== FIX #83: WinDivert Backend (Windows) ====================
+//
+// Replaces the WFP placeholder with a functional WinDivert-based backend.
+// WinDivert provides userspace packet interception on Windows without
+// requiring a custom kernel-mode driver.
+//
+// Architecture mirrors NFQUEUEBackend:
+//   initialize() -> open WinDivert handle
+//   start()      -> spawn worker thread calling WinDivertRecv() in a loop
+//   packet_callback() -> call parent->packet_handler_ or default_packet_handler()
+//   stop()       -> close handle, join worker thread
+
+#if defined(_WIN32) && defined(HAVE_WINDIVERT)
+class WinDivertBackend : public PacketInterceptor::Impl {
+public:
+    WinDivertBackend() = default;
+    ~WinDivertBackend() override { stop(); }
+
+    bool initialize(const Config& cfg) override {
+        config_ = cfg;
+
+        // Open WinDivert handle with the configured filter
+        handle_ = WinDivertOpen(
+            cfg.windivert_filter.c_str(),
+            WINDIVERT_LAYER_NETWORK,    // Intercept at network (IP) layer
+            cfg.windivert_priority,
+            cfg.windivert_flags
+        );
+
+        if (handle_ == INVALID_HANDLE_VALUE) {
+            DWORD err = GetLastError();
+            parent->log("[WinDivert] WinDivertOpen failed, error=" + std::to_string(err));
+            if (err == ERROR_FILE_NOT_FOUND) {
+                parent->log("[WinDivert] WinDivert driver not found. "
+                           "Ensure WinDivert.sys and WinDivert.dll are in PATH or application directory.");
+            } else if (err == ERROR_ACCESS_DENIED) {
+                parent->log("[WinDivert] Access denied. Run as Administrator.");
+            }
+            return false;
+        }
+
+        // Set queue parameters for high throughput
+        WinDivertSetParam(handle_, WINDIVERT_PARAM_QUEUE_LENGTH, 8192);
+        WinDivertSetParam(handle_, WINDIVERT_PARAM_QUEUE_TIME, 1024);   // ms
+        WinDivertSetParam(handle_, WINDIVERT_PARAM_QUEUE_SIZE, 4194304); // 4MB
+
+        parent->log("[WinDivert] Initialized with filter: " + cfg.windivert_filter);
+        return true;
+    }
+
+    bool start() override {
+        if (running_) return true;
+        running_ = true;
+
+        worker_thread_ = std::thread([this]() {
+            // Buffer for received packets (max jumbo frame)
+            std::vector<uint8_t> recv_buf(65535 + 40); // max IP packet + WINDIVERT_ADDRESS
+            WINDIVERT_ADDRESS addr;
+            UINT recv_len = 0;
+
+            parent->log("[WinDivert] Worker thread started");
+
+            while (running_) {
+                // Blocking receive — returns when a packet matches the filter
+                if (!WinDivertRecv(handle_, recv_buf.data(),
+                                   static_cast<UINT>(recv_buf.size()),
+                                   &recv_len, &addr))
+                {
+                    DWORD err = GetLastError();
+                    if (!running_) break; // Graceful shutdown
+                    if (err == ERROR_NO_DATA || err == ERROR_INSUFFICIENT_BUFFER) continue;
+                    parent->log("[WinDivert] WinDivertRecv failed, error=" + std::to_string(err));
+                    break;
+                }
+
+                // Copy packet data into a vector for processing
+                std::vector<uint8_t> packet(recv_buf.begin(), recv_buf.begin() + recv_len);
+                bool is_outbound = (addr.Outbound != 0);
+
+                parent->stats_.packets_intercepted++;
+                parent->stats_.bytes_processed += packet.size();
+
+                // Call packet handler (same pattern as NFQUEUEBackend)
+                PacketInterceptor::Verdict verdict;
+                if (parent->packet_handler_) {
+                    verdict = parent->packet_handler_(packet, is_outbound);
+                } else {
+                    verdict = parent->default_packet_handler(packet, is_outbound);
+                }
+
+                // Apply verdict
+                switch (verdict) {
+                    case PacketInterceptor::Verdict::ACCEPT:
+                        // Re-inject original packet
+                        WinDivertSend(handle_, recv_buf.data(), recv_len, nullptr, &addr);
+                        break;
+
+                    case PacketInterceptor::Verdict::DROP:
+                        // Don't re-inject — packet is silently dropped
+                        parent->stats_.packets_dropped++;
+                        break;
+
+                    case PacketInterceptor::Verdict::MODIFIED:
+                        // Re-inject modified packet; recalculate checksums
+                        WinDivertHelperCalcChecksums(packet.data(),
+                                                     static_cast<UINT>(packet.size()),
+                                                     &addr, 0);
+                        WinDivertSend(handle_, packet.data(),
+                                      static_cast<UINT>(packet.size()),
+                                      nullptr, &addr);
+                        parent->stats_.packets_modified++;
+                        break;
+
+                    case PacketInterceptor::Verdict::QUEUE:
+                        // Re-inject and let the system re-process
+                        WinDivertSend(handle_, recv_buf.data(), recv_len, nullptr, &addr);
+                        break;
+                }
+            }
+
+            parent->log("[WinDivert] Worker thread stopped");
+        });
+
+        parent->log("[WinDivert] Started");
+        return true;
+    }
+
+    void stop() override {
+        if (!running_) return;
+        running_ = false;
+
+        // Close handle — this unblocks WinDivertRecv() in the worker thread
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            WinDivertClose(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+
+        if (worker_thread_.joinable()) {
+            worker_thread_.join();
+        }
+    }
+
+    bool is_running() const override { return running_; }
+
+private:
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+    std::atomic<bool> running_{false};
+    std::thread worker_thread_;
+    Config config_;
+};
+#endif // _WIN32 && HAVE_WINDIVERT
+
 #ifdef _WIN32
-// ==================== WFP Backend (Windows) ====================
+// ==================== WFP Backend (Windows, legacy placeholder) ====================
+// Kept for backward compatibility. Prefer WinDivertBackend for actual packet interception.
 
 class WFPBackend : public PacketInterceptor::Impl {
 public:
@@ -305,14 +560,16 @@ public:
         // This is a placeholder showing the structure.
         // Real implementation needs a signed kernel driver.
 
-        parent->log("[WFP] Initialized (Note: Full packet modification requires kernel callout driver)");
+        parent->log("[WFP] Initialized (legacy placeholder — use WINDIVERT backend for packet interception)");
         return true;
     }
 
     bool start() override {
         if (running_) return true;
         running_ = true;
-        parent->log("[WFP] Started (Note: Userspace WFP has limited packet interception)");
+        parent->log("[WFP] Started (WARNING: WFP backend is a placeholder, "
+                    "packet interception is NOT functional. "
+                    "Use Backend::WINDIVERT or Backend::AUTO for actual packet processing)");
         return true;
     }
 
@@ -345,6 +602,7 @@ bool PacketInterceptor::initialize(const Config& config) {
 
     std::lock_guard<std::mutex> lock(config_mutex_);
     config_ = config;
+    config_version_++;  // FIX #30: bump version on init
 
     Backend backend = config.backend;
     if (backend == Backend::AUTO) {
@@ -367,6 +625,26 @@ bool PacketInterceptor::initialize(const Config& config) {
         }
         initialized_ = true;
         return true;
+    }
+#endif
+
+#if defined(_WIN32) && defined(HAVE_WINDIVERT)
+    // FIX #83: Prefer WinDivert for actual packet interception on Windows
+    if (backend == Backend::WINDIVERT || backend == Backend::AUTO) {
+        impl_ = std::make_unique<WinDivertBackend>();
+        impl_->parent = this;
+        if (!impl_->initialize(config)) {
+            impl_.reset();
+            // Fall through to WFP if WinDivert fails
+            if (backend == Backend::AUTO) {
+                log("[PacketInterceptor] WinDivert failed, falling back to WFP (limited)");
+            } else {
+                return false;
+            }
+        } else {
+            initialized_ = true;
+            return true;
+        }
     }
 #endif
 
@@ -418,6 +696,7 @@ bool PacketInterceptor::is_running() const {
 bool PacketInterceptor::update_config(const Config& config) {
     std::lock_guard<std::mutex> lock(config_mutex_);
     config_ = config;
+    config_version_++;  // FIX #30: bump version so L3Stealth re-initializes
     return true;
 }
 
@@ -453,6 +732,34 @@ void PacketInterceptor::log(const std::string& msg) {
     }
 }
 
+// ==================== FIX #84: Shared L3Stealth initialization ====================
+//
+// Replaces the per-thread `static thread_local L3Stealth` with a single
+// shared instance. L3Stealth already uses internal mutexes for thread safety
+// (dest_ipid_mutex_, flow_label_mutex_, config_mutex_, atomic global_ipid_counter_),
+// so a shared instance is safe and ensures consistent state:
+//   - Per-destination IPID cache shared across threads (no IPID collisions)
+//   - Global IPID counter monotonicity preserved
+//   - IPv6 flow labels consistent per 5-tuple (RFC 6437)
+//   - TCP timestamp epoch/offset consistent across connections
+//   - Statistics aggregated in one place
+
+void PacketInterceptor::ensure_l3stealth_initialized(const Config& cfg, uint64_t current_version) {
+    std::lock_guard<std::mutex> lock(l3stealth_mutex_);
+    if (!l3stealth_ || l3stealth_config_version_ != current_version) {
+        if (!l3stealth_) {
+            l3stealth_ = std::make_unique<L3Stealth>();
+        }
+        L3Stealth::Config l3cfg;
+        l3cfg.enable_ipid_randomization = true;
+        l3cfg.enable_ttl_normalization = true;
+        l3cfg.enable_mss_clamping = true;
+        l3cfg.enable_tcp_timestamp_normalization = true;
+        l3stealth_->initialize(l3cfg);
+        l3stealth_config_version_ = current_version;
+    }
+}
+
 // ==================== Default Packet Handler ====================
 
 PacketInterceptor::Verdict PacketInterceptor::default_packet_handler(
@@ -461,35 +768,30 @@ PacketInterceptor::Verdict PacketInterceptor::default_packet_handler(
     if (!is_outbound) return Verdict::ACCEPT; // Only process outbound
 
     Config cfg;
+    uint64_t current_version;
     {
         std::lock_guard<std::mutex> lock(config_mutex_);
         cfg = config_;
+        current_version = config_version_;
     }
 
     bool modified = false;
 
     // 1. L3Stealth integration
+    // FIX #84: Use shared L3Stealth instance instead of thread_local.
+    // This ensures all threads share the same IPID cache, flow label cache,
+    // timestamp epoch, and statistics — preventing DPI-detectable inconsistencies.
     if (cfg.integrate_l3_stealth) {
-        static thread_local L3Stealth l3stealth;
-        static thread_local bool l3_initialized = false;
-        if (!l3_initialized) {
-            L3Stealth::Config l3cfg;
-            l3cfg.enable_ipid_randomization = true;
-            l3cfg.enable_ttl_normalization = true;
-            l3cfg.enable_mss_clamping = true;
-            l3cfg.enable_tcp_timestamp_normalization = true;
-            l3stealth.initialize(l3cfg);
-            l3_initialized = true;
-        }
+        ensure_l3stealth_initialized(cfg, current_version);
 
-        if (packet.size() >= 20) {
+        if (packet.size() >= 20 && l3stealth_) {
             uint8_t ver = (packet[0] >> 4) & 0x0F;
             if (ver == 4) {
-                if (l3stealth.process_ipv4_packet(packet)) {
+                if (l3stealth_->process_ipv4_packet(packet)) {
                     modified = true;
                 }
             } else if (ver == 6) {
-                if (l3stealth.process_ipv6_packet(packet)) {
+                if (l3stealth_->process_ipv6_packet(packet)) {
                     modified = true;
                 }
             }
@@ -547,9 +849,6 @@ PacketInterceptor::Verdict PacketInterceptor::default_packet_handler(
 static std::vector<uint8_t> encapsulate_packet(const std::vector<uint8_t>& packet,
                                                const PacketInterceptor::Config& cfg)
 {
-    // This is a simplified encapsulation example.
-    // Real implementation needs proper header construction.
-
     if (cfg.tunnel_remote_ip.empty()) return {};
 
     std::vector<uint8_t> result;
@@ -566,7 +865,8 @@ static std::vector<uint8_t> encapsulate_packet(const std::vector<uint8_t>& packe
             tunnel_hdr_len = 0; // IPIP is just IP-in-IP, no extra header
             break;
         case PacketInterceptor::TunnelProtocol::VXLAN:
-            tunnel_hdr_len = 8 + 8; // UDP + VXLAN
+            // FIX #31: UDP(8) + VXLAN(8) = 16 total, VXLAN struct is now correctly 8 bytes
+            tunnel_hdr_len = 8 + 8; // UDP + VXLAN (both 8 bytes each)
             break;
         case PacketInterceptor::TunnelProtocol::GRE_OBFUSCATED:
             tunnel_hdr_len = 8 + 8; // UDP + GRE (obfuscated)
@@ -599,10 +899,16 @@ static std::vector<uint8_t> encapsulate_packet(const std::vector<uint8_t>& packe
 
     // Parse remote IP
     inet_pton(AF_INET, cfg.tunnel_remote_ip.c_str(), &outer_ip->daddr);
-    // saddr = local IP (should be obtained from routing table, simplified here)
-    outer_ip->saddr = 0; // Kernel will fill
 
-    outer_ip->check = 0; // Kernel will recalculate
+    // FIX #32: Resolve local source address via routing table lookup
+    // instead of relying on kernel to fill saddr=0 (not portable to BSD)
+#ifdef __linux__
+    outer_ip->saddr = resolve_local_saddr(cfg.tunnel_remote_ip.c_str());
+#else
+    outer_ip->saddr = 0; // Fallback: on Windows with WFP, kernel fills this
+#endif
+
+    outer_ip->check = 0; // Kernel will recalculate with IP_HDRINCL
 
     // Build tunnel header
     size_t tunnel_offset = outer_ip_len;
@@ -628,25 +934,41 @@ static std::vector<uint8_t> encapsulate_packet(const std::vector<uint8_t>& packe
         auto* udp = reinterpret_cast<UDPHeader*>(result.data() + tunnel_offset);
         udp->source = htons(cfg.fake_udp_src_port);
         udp->dest = htons(VXLAN_PORT);
-        udp->len = htons(static_cast<uint16_t>(8 + 8 + packet.size()));
+        udp->len = htons(static_cast<uint16_t>(8 + sizeof(VXLANHeader) + packet.size()));
         udp->check = 0;
         tunnel_offset += 8;
 
+        // FIX #31: Write exactly 8 bytes for VXLAN header (struct is now correct)
         auto* vxlan = reinterpret_cast<VXLANHeader*>(result.data() + tunnel_offset);
+        std::memset(vxlan, 0, sizeof(VXLANHeader));
         vxlan->flags = 0x08; // VNI present
-        std::memset(vxlan->reserved1, 0, 3);
-        vxlan->vni = htonl(cfg.tunnel_id << 8); // VNI is 24 bits
-        std::memset(vxlan->reserved2, 0, 4);
-        tunnel_offset += 8;
+        // VNI is 24 bits stored in 3 bytes (big-endian)
+        uint32_t vni_val = cfg.tunnel_id & 0x00FFFFFF;
+        vxlan->vni[0] = static_cast<uint8_t>((vni_val >> 16) & 0xFF);
+        vxlan->vni[1] = static_cast<uint8_t>((vni_val >> 8) & 0xFF);
+        vxlan->vni[2] = static_cast<uint8_t>(vni_val & 0xFF);
+        tunnel_offset += sizeof(VXLANHeader); // exactly 8
     }
 
     // Copy inner packet
     std::memcpy(result.data() + tunnel_offset, packet.data(), packet.size());
 
-    // XOR obfuscation if enabled
-    if (cfg.enable_protocol_obfuscation && cfg.xor_key != 0) {
-        for (size_t i = tunnel_offset; i < result.size(); i++) {
-            result[i] ^= cfg.xor_key;
+    // FIX #29: Replace single-byte XOR with ChaCha20 stream cipher
+    if (cfg.enable_protocol_obfuscation) {
+        if (!cfg.obfuscation_key.empty()) {
+            // Use provided key material for ChaCha20
+            apply_stream_obfuscation(result, tunnel_offset,
+                                     cfg.obfuscation_key.data(),
+                                     cfg.obfuscation_key.size());
+            // Update outer IP total length (nonce was prepended)
+            auto* ip = reinterpret_cast<IPv4Header*>(result.data());
+            ip->tot_len = htons(static_cast<uint16_t>(result.size()));
+        } else if (cfg.xor_key != 0) {
+            // Legacy fallback: single-byte XOR (deprecated, warn)
+            // Kept for backward compat but should be migrated
+            for (size_t i = tunnel_offset; i < result.size(); i++) {
+                result[i] ^= cfg.xor_key;
+            }
         }
     }
 
@@ -689,6 +1011,21 @@ bool PacketInterceptor::is_nfqueue_available() {
 #endif
 }
 
+// FIX #83: WinDivert availability check
+bool PacketInterceptor::is_windivert_available() {
+#if defined(_WIN32) && defined(HAVE_WINDIVERT)
+    // Try opening a WinDivert handle with a minimal filter to check availability
+    HANDLE h = WinDivertOpen("false", WINDIVERT_LAYER_NETWORK, 0, WINDIVERT_FLAG_SNIFF);
+    if (h != INVALID_HANDLE_VALUE) {
+        WinDivertClose(h);
+        return true;
+    }
+    return false;
+#else
+    return false;
+#endif
+}
+
 bool PacketInterceptor::is_wfp_available() {
 #ifdef _WIN32
     HANDLE engine;
@@ -708,6 +1045,10 @@ PacketInterceptor::Backend PacketInterceptor::detect_backend() {
 #if defined(__linux__) && defined(HAVE_NFQUEUE)
     if (is_nfqueue_available()) return Backend::NFQUEUE;
 #elif defined(_WIN32)
+    // FIX #83: Prefer WinDivert over WFP on Windows
+#ifdef HAVE_WINDIVERT
+    if (is_windivert_available()) return Backend::WINDIVERT;
+#endif
     if (is_wfp_available()) return Backend::WFP;
 #endif
     return Backend::NONE;

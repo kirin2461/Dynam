@@ -82,18 +82,23 @@ static constexpr uint16_t IP_FLAG_DF = 0x4000;
 static constexpr uint16_t IP_FLAG_MF = 0x2000;
 static constexpr uint16_t IP_OFFSET_MASK = 0x1FFF;
 
+// Flow label cache eviction constants
+static constexpr size_t FLOW_LABEL_CACHE_MAX = 10000;
+static constexpr auto FLOW_LABEL_TTL = std::chrono::minutes(5);
+
 // ==================== L3Stealth Implementation ====================
 
 L3Stealth::L3Stealth() = default;
 L3Stealth::~L3Stealth() = default;
 
 bool L3Stealth::initialize(const Config& config) {
+    // FIX #28: Properly handle sodium_init() failure.
+    // sodium_init() returns 0 on success, 1 if already initialized, -1 on failure.
     if (sodium_init() < 0) {
-        // sodium_init returns 0 on success, 1 if already initialized, -1 on failure
-        // Actually -1 is failure, 0 and 1 are both OK
+        log("FATAL: sodium_init() failed — libsodium cannot be initialized");
+        initialized_ = false;
+        return false;
     }
-    // Re-check: sodium_init returns -1 only on failure
-    // 0 = first init, 1 = already init — both fine
 
     std::lock_guard<std::mutex> lock(config_mutex_);
     config_ = config;
@@ -106,8 +111,10 @@ bool L3Stealth::initialize(const Config& config) {
         config_.ttl_profile = config_.os_profile;
     }
 
-    // Initialize IPID counter with random start
-    global_ipid_counter_ = static_cast<uint16_t>(randombytes_uniform(65536));
+    // FIX #26: Use atomic store for thread-safe initialization of IPID counter
+    global_ipid_counter_.store(
+        static_cast<uint16_t>(randombytes_uniform(65536)),
+        std::memory_order_relaxed);
 
     // Initialize timestamp offset
     if (config_.randomize_timestamp_offset) {
@@ -420,9 +427,11 @@ uint16_t L3Stealth::generate_ipid(uint32_t dest_ip) {
             return static_cast<uint16_t>(randombytes_uniform(65536));
 
         case IPIDStrategy::INCREMENTAL_RANDOM: {
+            // FIX #26: Use atomic fetch_add to prevent data race.
+            // Multiple threads can call generate_ipid() concurrently from
+            // packet processing; plain += on non-atomic was undefined behavior.
             uint16_t inc = static_cast<uint16_t>(1 + randombytes_uniform(64));
-            global_ipid_counter_ += inc;
-            return global_ipid_counter_;
+            return global_ipid_counter_.fetch_add(inc, std::memory_order_relaxed) + inc;
         }
 
         case IPIDStrategy::ZERO:
@@ -444,7 +453,8 @@ uint16_t L3Stealth::generate_ipid(uint32_t dest_ip) {
         }
 
         case IPIDStrategy::GLOBAL_COUNTER:
-            return ++global_ipid_counter_;
+            // FIX #26: Use atomic fetch_add instead of non-atomic ++.
+            return global_ipid_counter_.fetch_add(1, std::memory_order_relaxed) + 1;
 
         default:
             return static_cast<uint16_t>(randombytes_uniform(65536));
@@ -468,18 +478,59 @@ uint32_t L3Stealth::generate_flow_label(uint64_t flow_hash) {
         std::lock_guard<std::mutex> lock(flow_label_mutex_);
         auto it = flow_label_cache_.find(flow_hash);
         if (it != flow_label_cache_.end()) {
-            return it->second;
+            // Update last_used timestamp on access
+            it->second.last_used = std::chrono::steady_clock::now();
+            return it->second.label;
         }
         uint32_t label = randombytes_uniform(0xFFFFF + 1); // 0 to 0xFFFFF
         if (label == 0) label = 1; // Avoid 0 as it means "no label"
-        flow_label_cache_[flow_hash] = label;
 
-        // Evict old entries if cache grows too large
-        if (flow_label_cache_.size() > 10000) {
-            // Simple eviction: clear half
-            auto mid = flow_label_cache_.begin();
-            std::advance(mid, flow_label_cache_.size() / 2);
-            flow_label_cache_.erase(flow_label_cache_.begin(), mid);
+        flow_label_cache_[flow_hash] = {label, std::chrono::steady_clock::now()};
+
+        // FIX #27: Age-based eviction instead of arbitrary half-erase.
+        // unordered_map iteration order is non-deterministic, so erasing
+        // [begin, mid) would delete arbitrary entries — potentially fresh ones.
+        // Now we evict entries older than FLOW_LABEL_TTL first, then if still
+        // over the limit, find and erase the oldest entries.
+        if (flow_label_cache_.size() > FLOW_LABEL_CACHE_MAX) {
+            auto now = std::chrono::steady_clock::now();
+            auto cutoff = now - FLOW_LABEL_TTL;
+
+            // Phase 1: Remove entries older than TTL
+            for (auto iter = flow_label_cache_.begin(); iter != flow_label_cache_.end(); ) {
+                if (iter->second.last_used < cutoff) {
+                    iter = flow_label_cache_.erase(iter);
+                } else {
+                    ++iter;
+                }
+            }
+
+            // Phase 2: If still over limit, remove oldest entries until at 75% capacity.
+            // Use partial_sort via a sorted vector of iterators to achieve O(n log k)
+            // instead of O(n²) from repeated full scans. k = entries to remove.
+            if (flow_label_cache_.size() > FLOW_LABEL_CACHE_MAX) {
+                size_t target_size = FLOW_LABEL_CACHE_MAX * 3 / 4;
+                size_t to_remove = flow_label_cache_.size() - target_size;
+
+                // Collect all iterators
+                std::vector<decltype(flow_label_cache_)::iterator> entries;
+                entries.reserve(flow_label_cache_.size());
+                for (auto it = flow_label_cache_.begin(); it != flow_label_cache_.end(); ++it) {
+                    entries.push_back(it);
+                }
+
+                // Partial sort: move the `to_remove` oldest entries to the front — O(n log k)
+                std::partial_sort(entries.begin(), entries.begin() + static_cast<ptrdiff_t>(to_remove),
+                                  entries.end(),
+                                  [](const auto& a, const auto& b) {
+                                      return a->second.last_used < b->second.last_used;
+                                  });
+
+                // Erase the oldest entries
+                for (size_t i = 0; i < to_remove; ++i) {
+                    flow_label_cache_.erase(entries[i]);
+                }
+            }
         }
         return label;
     }

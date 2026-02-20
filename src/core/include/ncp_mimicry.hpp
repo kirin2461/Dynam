@@ -7,9 +7,26 @@
 #include <chrono>
 #include <map>
 #include <functional>
+#include <atomic>
+#include <mutex>
 #include "ncp_csprng.hpp"
 
 namespace ncp {
+
+/**
+ * @brief TLS session phase — tracks the state machine so that
+ *        Mimicry never emits Application Data (0x17) before a
+ *        complete handshake sequence (0x16) has been sent.
+ *
+ * Issue #57: Orchestrator was sending 0x17 without prior 0x16,
+ * which is an instant DPI anomaly signal.
+ */
+enum class TlsSessionPhase {
+    IDLE,                   // No TLS records sent yet
+    CLIENT_HELLO_SENT,      // ClientHello (0x16) emitted
+    HANDSHAKE_COMPLETE,     // Fake ServerHello+Finished emitted
+    APPLICATION_DATA        // Ready for Application Data (0x17)
+};
 
 /**
  * @brief Advanced Traffic Mimicry with realistic protocol emulation
@@ -17,6 +34,21 @@ namespace ncp {
  */
 class TrafficMimicry {
 public:
+    /**
+     * @brief Wire format version for mimicry protocols.
+     *
+     * Both peers MUST use the same MIMICRY_WIRE_VERSION for wrap/unwrap
+     * to succeed.  Embedded in TLS ClientHello (Random[24]),
+     * QUIC Initial (plaintext[0]), and BitTorrent (reserved[4]).
+     *
+     * Increment on ANY breaking wire-format change.
+     *
+     * History:
+     *   v1 — legacy (XOR ClientHello, no ct_len in QUIC, payload-leak BT)
+     *   v2 — AEAD-only ClientHello, QUIC ct_len field, safe BT info_hash
+     */
+    static constexpr uint8_t MIMICRY_WIRE_VERSION = 2;
+
     enum class MimicProfile {
         HTTP_GET,            // HTTP/1.1 GET request
         HTTP_POST,           // HTTP/1.1 POST request
@@ -57,18 +89,37 @@ public:
     };
     
     struct MimicStats {
-        uint64_t packets_wrapped = 0;
-        uint64_t packets_unwrapped = 0;
-        uint64_t bytes_original = 0;
-        uint64_t bytes_mimicked = 0;
+        std::atomic<uint64_t> packets_wrapped{0};
+        std::atomic<uint64_t> packets_unwrapped{0};
+        std::atomic<uint64_t> bytes_original{0};
+        std::atomic<uint64_t> bytes_mimicked{0};
         double average_overhead_percent = 0.0;
+
+        MimicStats() = default;
+        MimicStats(const MimicStats& o)
+            : packets_wrapped(o.packets_wrapped.load()),
+              packets_unwrapped(o.packets_unwrapped.load()),
+              bytes_original(o.bytes_original.load()),
+              bytes_mimicked(o.bytes_mimicked.load()),
+              average_overhead_percent(o.average_overhead_percent) {}
+        MimicStats& operator=(const MimicStats& o) {
+            if (this != &o) {
+                packets_wrapped.store(o.packets_wrapped.load());
+                packets_unwrapped.store(o.packets_unwrapped.load());
+                bytes_original.store(o.bytes_original.load());
+                bytes_mimicked.store(o.bytes_mimicked.load());
+                average_overhead_percent = o.average_overhead_percent;
+            }
+            return *this;
+        }
     };
+
+    static constexpr size_t MAX_DNS_PAYLOAD = 100;
     
     TrafficMimicry();
     explicit TrafficMimicry(const MimicConfig& config);
     ~TrafficMimicry();
     
-    // Transform data to look like a specific protocol
     std::vector<uint8_t> wrap_payload(
         const std::vector<uint8_t>& payload,
         MimicProfile profile
@@ -77,8 +128,17 @@ public:
     std::vector<uint8_t> wrap_payload(
         const std::vector<uint8_t>& payload
     );
+
+    std::vector<uint8_t> wrap_tls_session_aware(
+        const std::vector<uint8_t>& payload,
+        std::vector<std::vector<uint8_t>>& handshake_preamble
+    );
+
+    std::vector<std::vector<uint8_t>> generate_tls_handshake_sequence();
+    void reset_tls_session();
+    TlsSessionPhase get_tls_session_phase() const;
+    bool is_tls_managed() const;
     
-    // Extract original data from a mimicked packet
     std::vector<uint8_t> unwrap_payload(
         const std::vector<uint8_t>& mimicked_data,
         MimicProfile profile
@@ -88,72 +148,70 @@ public:
         const std::vector<uint8_t>& mimicked_data
     );
     
-    // Configuration
     void set_config(const MimicConfig& config);
     MimicConfig get_config() const;
     
-    // Statistics
     MimicStats get_stats() const;
     void reset_stats();
     
-    // Protocol detection (for unwrapping)
     MimicProfile detect_profile(const std::vector<uint8_t>& data);
-    
-    // Timing simulation
     std::chrono::milliseconds get_next_packet_delay();
+
+    void set_tls_session_key(const std::vector<uint8_t>& key);
+    std::vector<uint8_t> get_tls_session_key() const;
     
 private:
-    // HTTP mimicry
     std::vector<uint8_t> create_http_get_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_http_post_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_http_payload(const std::vector<uint8_t>& data);
     
-    // HTTPS/TLS mimicry
     std::vector<uint8_t> create_https_client_hello_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_https_application_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_tls_payload(const std::vector<uint8_t>& data);
+
+    std::vector<uint8_t> create_fake_server_hello();
+    std::vector<uint8_t> create_fake_change_cipher_spec();
+    std::vector<uint8_t> create_fake_finished();
     
-    // DNS mimicry
     std::vector<uint8_t> create_dns_query_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_dns_response_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_dns_payload(const std::vector<uint8_t>& data);
     
-    // QUIC mimicry
     std::vector<uint8_t> create_quic_initial_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_quic_payload(const std::vector<uint8_t>& data);
     
-    // WebSocket mimicry
     std::vector<uint8_t> create_websocket_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_websocket_payload(const std::vector<uint8_t>& data);
     
-    // Application-specific mimicry
     std::vector<uint8_t> create_bittorrent_wrapper(const std::vector<uint8_t>& payload);
+    std::vector<uint8_t> extract_bittorrent_payload(const std::vector<uint8_t>& data);
     std::vector<uint8_t> create_skype_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_zoom_wrapper(const std::vector<uint8_t>& payload);
     
-    // Generic wrappers
     std::vector<uint8_t> create_generic_tcp_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_generic_udp_wrapper(const std::vector<uint8_t>& payload);
     
-    // Utilities
     std::string generate_random_http_path();
     std::string generate_random_user_agent();
     std::string generate_random_hostname();
     uint16_t generate_random_port();
     std::vector<uint8_t> generate_random_padding(size_t min_size, size_t max_size);
-    
-    // Timing utilities
     std::chrono::milliseconds calculate_realistic_delay(MimicProfile profile, size_t packet_size);
     
     MimicConfig config_;
     MimicStats stats_;
-    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
+    mutable std::mutex stats_overhead_mutex_;
     std::chrono::steady_clock::time_point last_packet_time_;
     
-    // Protocol-specific state
-    uint32_t tls_sequence_number_;
+    uint32_t tls_seq_;
+    uint32_t skype_seq_;
+    uint32_t zoom_seq_;
     uint16_t dns_transaction_id_;
+    int      dns_last_domain_idx_;
     uint64_t quic_packet_number_;
+
+    TlsSessionPhase tls_session_phase_ = TlsSessionPhase::IDLE;
+    std::vector<uint8_t> tls_session_key_;
 };
 
 } // namespace ncp

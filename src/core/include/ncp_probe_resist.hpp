@@ -25,9 +25,11 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+#include <shared_mutex>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -309,13 +311,20 @@ private:
     void emit_event(const ProbeEvent& event);
     void cleanup_stale_data();
 
+    // FIX #26: config_ protected by shared_mutex (readers use shared_lock,
+    // set_config uses unique_lock). process_connection() snapshots config_
+    // under shared_lock once, then operates on the snapshot lock-free.
     ProbeResistConfig config_;
+    mutable std::shared_mutex config_mutex_;
+
     ProbeResistStats stats_;
     ProbeEventCallback event_callback_;
 
     // Nonce window: hash → expiry time
+    // FIX #25: hex_str stored alongside hash to avoid O(n) recomputation on eviction
     struct NonceEntry {
-        std::array<uint8_t, 32> hash;  // SHA256 of nonce
+        std::array<uint8_t, 32> hash;  // raw nonce bytes (zero-padded)
+        std::string hex_str;           // pre-computed hex for O(1) set erase
         std::chrono::steady_clock::time_point expiry;
     };
     std::deque<NonceEntry> nonce_window_;
@@ -324,6 +333,10 @@ private:
 
     // IP reputation store
     std::unordered_map<std::string, IPReputation> ip_reputation_;
+    // FIX #27: Eviction index ordered by (last_seen, ip) for O(log n) eviction
+    // instead of O(n) full scan. Maintained in sync with ip_reputation_ under ip_mutex_.
+    using EvictionKey = std::pair<std::chrono::system_clock::time_point, std::string>;
+    std::set<EvictionKey> ip_eviction_index_;
     mutable std::mutex ip_mutex_;
 
     // Rate limiter
@@ -340,6 +353,7 @@ private:
     // JA3 sets
     std::unordered_set<std::string> ja3_allowlist_;
     std::unordered_set<std::string> ja3_scanner_set_;
+    mutable std::mutex ja3_mutex_;  // FIX #24: protects ja3_allowlist_ and ja3_scanner_set_
 };
 
 } // namespace DPI

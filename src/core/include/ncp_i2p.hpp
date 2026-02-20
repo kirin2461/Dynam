@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <chrono>
 
 namespace ncp {
@@ -56,6 +57,10 @@ public:
         bool enable_encrypted_leaseset = true;
         bool enable_blinded_destinations = true;
         int destination_expiration_hours = 24;
+
+        // Cover traffic
+        size_t cover_traffic_bytes_per_minute = 0;
+        int tunnel_build_rate_per_minute = 2;
     };
 
     struct TunnelInfo {
@@ -147,6 +152,15 @@ private:
     bool is_initialized_ = false;
     std::string current_dest_;
     std::map<std::string, TunnelInfo> tunnels_;
+
+    // FIX #95: Mutex protecting tunnels_, config_, current_dest_
+    // Used by create_tunnel(), destroy_tunnel(), rotate_tunnels(),
+    // get_active_tunnels(), get_statistics(), enable_traffic_mixing().
+    // Mutable so const methods (get_active_tunnels, get_statistics) can lock.
+    mutable std::mutex mutex_;
+
+    // Active transports tracking
+    std::vector<EncryptionLayer> active_transports_;
     
     // Internal tunnel operations
     std::vector<std::string> select_tunnel_hops(int length);

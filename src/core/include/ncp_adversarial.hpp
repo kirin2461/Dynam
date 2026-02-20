@@ -24,6 +24,7 @@
 #include <functional>
 #include <array>
 #include <chrono>
+#include <mutex>
 #include "ncp_csprng.hpp"
 
 namespace ncp {
@@ -175,8 +176,14 @@ public:
     
     /// Apply adversarial padding to outgoing packet payload.
     /// Returns padded payload. Original data can be extracted with unpad().
-    /// The first byte is a control byte: [strategy:4][pre_len_hi:4]
-    /// Second byte: [pre_len_lo:8] — allows up to 4095 bytes pre-padding.
+    ///
+    /// Always writes V2 control header (4 bytes):
+    ///   Byte 0: [strategy:4 bits][pre_len bits 11..8]
+    ///   Byte 1: [pre_len bits 7..0]              => 12-bit pre_len (max 4095)
+    ///   Byte 2: [payload_len bits 15..8]
+    ///   Byte 3: [payload_len bits 7..0]           => 16-bit payload_len (max 65535)
+    ///
+    /// Wire format: [ctrl0..ctrl3][pre_padding][original_payload][post_padding]
     std::vector<uint8_t> pad(
         const uint8_t* payload, size_t len
     );
@@ -184,6 +191,10 @@ public:
     std::vector<uint8_t> pad(const std::vector<uint8_t>& payload);
     
     /// Remove adversarial padding, restore original payload.
+    ///
+    /// Auto-detects header version:
+    ///   - V2 (4-byte): uses payload_len to precisely strip post-padding.
+    ///   - V1 (2-byte, legacy): returns payload + post-padding (caller strips).
     std::vector<uint8_t> unpad(
         const uint8_t* padded_data, size_t len
     );
@@ -210,11 +221,25 @@ public:
     // ===== Dummy Packet Generation =====
     
     /// Generate a dummy packet that looks like real traffic.
+    /// Uses HMAC-derived session marker (or legacy 0xDEADBEEF if no key set).
     /// Should be injected into the flow at random intervals.
     std::vector<uint8_t> generate_dummy_packet();
     
     /// Check if a received packet is a dummy (to discard on receive side).
+    /// Checks HMAC marker first, then falls back to legacy 0xDEADBEEF.
     bool is_dummy_packet(const uint8_t* data, size_t len) const;
+    
+    // ===== Session Dummy Key Management =====
+    
+    /// Get the current session dummy key (32 bytes).
+    /// Used for key exchange: call on one side, transmit securely,
+    /// then set_session_dummy_key() on the other side.
+    std::vector<uint8_t> get_session_dummy_key() const;
+    
+    /// Set session dummy key received from the remote peer.
+    /// Re-derives the 4-byte HMAC marker from the new key.
+    void set_session_dummy_key(const uint8_t* key, size_t len);
+    void set_session_dummy_key(const std::vector<uint8_t>& key);
     
     // ===== Adaptive Feedback =====
     
@@ -239,7 +264,7 @@ public:
 
 private:
     // Padding generators per strategy
-    std::vector<uint8_t> generate_random_padding(size_t len);
+    std::vector<uint8_t> generate_random_padding(size_t len);   // Caller must hold mutex_
     std::vector<uint8_t> generate_http_mimic_padding(size_t len);
     std::vector<uint8_t> generate_tls_mimic_padding(size_t len);
     std::vector<uint8_t> generate_quic_mimic_padding(size_t len);
@@ -247,8 +272,8 @@ private:
     std::vector<uint8_t> generate_padding(AdversarialStrategy strategy, size_t len);
     
     // Size selection
-    size_t select_pre_padding_size();
-    size_t select_post_padding_size();
+    size_t select_pre_padding_size();    // Caller must hold mutex_
+    size_t select_post_padding_size();   // Caller must hold mutex_
     size_t find_nearest_target_size(size_t current_size) const;
     
     // TCP mutation helpers
@@ -257,25 +282,27 @@ private:
     void jitter_timestamps(uint8_t* tcp_header, size_t header_len);
     
     // Adaptive strategy selection
-    void evaluate_adaptive_strategy();
-    AdversarialStrategy select_best_strategy() const;
+    void evaluate_adaptive_strategy();   // Caller must hold mutex_
+    AdversarialStrategy select_best_strategy() const; // Caller must hold mutex_
     
-    // Dummy packet internals
-    static constexpr uint8_t DUMMY_MAGIC_0 = 0xDE;
-    static constexpr uint8_t DUMMY_MAGIC_1 = 0xAD;
-    static constexpr uint8_t DUMMY_MAGIC_2 = 0xBE;
-    static constexpr uint8_t DUMMY_MAGIC_3 = 0xEF;
+    // Dummy marker derivation from session key
+    void derive_dummy_marker();          // Caller must hold mutex_
     
-    // Control byte encoding
-    // Byte 0: [strategy:4 bits][pre_len high 4 bits]
-    // Byte 1: [pre_len low 8 bits]
-    // This gives 12-bit pre_len = max 4095 bytes
-    static constexpr size_t CONTROL_HEADER_SIZE = 2;
+    // Legacy dummy magic (kept for backward-compat detection)
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_0 = 0xDE;
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_1 = 0xAD;
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_2 = 0xBE;
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_3 = 0xEF;
+    
+    // Control header versioning
+    static constexpr size_t CONTROL_HEADER_SIZE_V1 = 2;   // Legacy
+    static constexpr size_t CONTROL_HEADER_SIZE_V2 = 4;   // Current
+    static constexpr size_t CONTROL_HEADER_SIZE = CONTROL_HEADER_SIZE_V2;
+    static constexpr size_t MAX_PRE_PADDING = 4095;   // 12-bit limit
+    static constexpr size_t MAX_PAYLOAD_LEN = 65535;   // 16-bit limit
     
     AdversarialConfig config_;
     AdversarialStats stats_;
-    
-    // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     
     // Adaptive state
     AdversarialStrategy active_strategy_;
@@ -284,6 +311,17 @@ private:
     
     // Per-strategy score (lower = better, means less detection)
     std::array<double, 7> strategy_scores_;  // indexed by AdversarialStrategy
+    
+    // Session dummy key (32 bytes, CSPRNG-generated or set via key exchange)
+    std::vector<uint8_t> session_dummy_key_;  // 32 bytes
+    uint8_t dummy_marker_[4] = {};            // HMAC-derived 4-byte marker
+    bool has_session_key_ = false;            // true once key is set/generated
+    
+    // Thread safety: protects config_, active_strategy_, feedback_history_,
+    // strategy_scores_, packets_since_evaluation_, session_dummy_key_,
+    // dummy_marker_, has_session_key_.
+    // Stats use atomics and don't need the mutex for reads.
+    mutable std::mutex mutex_;
 };
 
 } // namespace DPI

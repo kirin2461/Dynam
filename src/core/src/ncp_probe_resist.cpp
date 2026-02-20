@@ -6,19 +6,11 @@
 #include <sstream>
 #include <iomanip>
 
-#ifdef _WIN32
-#  define NOMINMAX
-#  include <windows.h>
-#  include <bcrypt.h>
-#  undef min
-#  undef max
-#  undef ERROR
-#else
-#  include <fcntl.h>
-#  include <unistd.h>
-#endif
+// FIX #21 + #22: Use libsodium for HMAC-SHA256 fallback and CSPRNG.
+// sodium is already linked project-wide (used in ncp_paranoid.cpp, i2p.cpp, etc.)
+#include <sodium.h>
 
-// Use OpenSSL HMAC if available
+// Use OpenSSL HMAC if available (primary path)
 #ifdef HAVE_OPENSSL
 #  include <openssl/hmac.h>
 #  include <openssl/sha.h>
@@ -72,21 +64,9 @@ const char* auth_result_to_string(AuthResult r) noexcept {
 
 // ===== CSPRNG =====
 
+// FIX #22: Replace raw /dev/urandom read with randombytes_buf() from libsodium.
 static void csprng_fill(uint8_t* buf, size_t len) {
-#ifdef _WIN32
-    BCryptGenRandom(nullptr, buf, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-#else
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        size_t off = 0;
-        while (off < len) {
-            ssize_t r = read(fd, buf + off, len - off);
-            if (r <= 0) break;
-            off += static_cast<size_t>(r);
-        }
-        close(fd);
-    }
-#endif
+    randombytes_buf(buf, len);
 }
 
 static std::string bytes_to_hex(const uint8_t* data, size_t len) {
@@ -176,12 +156,21 @@ ProbeResist::~ProbeResist() = default;
 
 // ===== Core: process_connection =====
 
+// FIX #26: Snapshot config_ under shared_lock once at entry, then use
+// the local copy for the entire call — zero contention on the hot path.
 AuthResult ProbeResist::process_connection(
     const std::string& source_ip,
     uint16_t source_port,
     const uint8_t* data,
     size_t data_len,
     const std::string& ja3_fingerprint) {
+
+    // Snapshot config under shared_lock (readers don't block each other)
+    ProbeResistConfig cfg;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        cfg = config_;
+    }
 
     stats_.total_connections.fetch_add(1);
 
@@ -193,7 +182,7 @@ AuthResult ProbeResist::process_connection(
     event.timestamp = std::chrono::system_clock::now();
 
     // L5: Check IP ban first (fastest)
-    if (config_.enable_ip_reputation && is_ip_banned(source_ip)) {
+    if (cfg.enable_ip_reputation && is_ip_banned(source_ip)) {
         stats_.rejected_ip_ban.fetch_add(1);
         event.result = AuthResult::IP_BANNED;
         event.details = "IP is banned";
@@ -202,9 +191,9 @@ AuthResult ProbeResist::process_connection(
     }
 
     // L7: Rate limiting
-    if (config_.enable_rate_limit && is_rate_limited(source_ip)) {
+    if (cfg.enable_rate_limit && is_rate_limited(source_ip)) {
         stats_.rejected_rate_limit.fetch_add(1);
-        if (config_.enable_ip_reputation) {
+        if (cfg.enable_ip_reputation) {
             update_reputation(source_ip, -1);
         }
         event.result = AuthResult::RATE_LIMITED;
@@ -214,11 +203,11 @@ AuthResult ProbeResist::process_connection(
     }
 
     // L6: JA3 filter
-    if (config_.enable_ja3_filter && !ja3_fingerprint.empty()) {
+    if (cfg.enable_ja3_filter && !ja3_fingerprint.empty()) {
         if (!is_ja3_allowed(ja3_fingerprint)) {
             stats_.rejected_ja3.fetch_add(1);
-            if (config_.enable_ip_reputation) {
-                update_reputation(source_ip, config_.auth_fail_penalty);
+            if (cfg.enable_ip_reputation) {
+                update_reputation(source_ip, cfg.auth_fail_penalty);
             }
             event.result = AuthResult::BAD_TLS_FINGERPRINT;
             event.details = "JA3 not in allowlist: " + ja3_fingerprint;
@@ -228,12 +217,11 @@ AuthResult ProbeResist::process_connection(
     }
 
     // L4: Probe pattern detection
-    if (config_.enable_pattern_detection) {
-        // Check known scanner fingerprint
+    if (cfg.enable_pattern_detection) {
         if (!ja3_fingerprint.empty() && is_known_scanner(ja3_fingerprint)) {
             stats_.rejected_probe_pattern.fetch_add(1);
-            if (config_.enable_ip_reputation) {
-                update_reputation(source_ip, config_.auth_fail_penalty * 2);
+            if (cfg.enable_ip_reputation) {
+                update_reputation(source_ip, cfg.auth_fail_penalty * 2);
             }
             event.result = AuthResult::PROBE_PATTERN;
             event.details = "Known scanner JA3: " + ja3_fingerprint;
@@ -241,11 +229,10 @@ AuthResult ProbeResist::process_connection(
             return AuthResult::PROBE_PATTERN;
         }
 
-        // Check burst pattern
         if (is_probe_pattern(source_ip)) {
             stats_.rejected_probe_pattern.fetch_add(1);
-            if (config_.enable_ip_reputation) {
-                update_reputation(source_ip, config_.auth_fail_penalty);
+            if (cfg.enable_ip_reputation) {
+                update_reputation(source_ip, cfg.auth_fail_penalty);
             }
             event.result = AuthResult::PROBE_PATTERN;
             event.details = "Burst connection pattern detected";
@@ -255,12 +242,12 @@ AuthResult ProbeResist::process_connection(
     }
 
     // L1: Authentication
-    if (config_.enable_auth) {
-        size_t required_len = config_.auth_offset + config_.nonce_length + 4 + config_.auth_length;
+    if (cfg.enable_auth) {
+        size_t required_len = cfg.auth_offset + cfg.nonce_length + 4 + cfg.auth_length;
         if (data_len < required_len) {
             stats_.rejected_no_auth.fetch_add(1);
-            if (config_.enable_ip_reputation) {
-                update_reputation(source_ip, config_.auth_fail_penalty);
+            if (cfg.enable_ip_reputation) {
+                update_reputation(source_ip, cfg.auth_fail_penalty);
             }
             event.result = AuthResult::NO_AUTH_DATA;
             event.details = "Packet too short for auth data";
@@ -268,9 +255,9 @@ AuthResult ProbeResist::process_connection(
             return AuthResult::NO_AUTH_DATA;
         }
 
-        const uint8_t* auth_start = data + config_.auth_offset;
+        const uint8_t* auth_start = data + cfg.auth_offset;
         const uint8_t* nonce = auth_start;
-        const uint8_t* timestamp_bytes = nonce + config_.nonce_length;
+        const uint8_t* timestamp_bytes = nonce + cfg.nonce_length;
         const uint8_t* hmac_received = timestamp_bytes + 4;
 
         // Verify timestamp
@@ -281,10 +268,10 @@ AuthResult ProbeResist::process_connection(
         uint32_t now_ts = static_cast<uint32_t>(std::time(nullptr));
         uint32_t diff = (pkt_timestamp > now_ts) ? (pkt_timestamp - now_ts) : (now_ts - pkt_timestamp);
 
-        if (diff > config_.timestamp_tolerance_sec) {
+        if (diff > cfg.timestamp_tolerance_sec) {
             stats_.rejected_bad_hmac.fetch_add(1);
-            if (config_.enable_ip_reputation) {
-                update_reputation(source_ip, config_.auth_fail_penalty);
+            if (cfg.enable_ip_reputation) {
+                update_reputation(source_ip, cfg.auth_fail_penalty);
             }
             event.result = AuthResult::INVALID_HMAC;
             event.details = "Timestamp out of tolerance: delta=" + std::to_string(diff) + "s";
@@ -293,23 +280,19 @@ AuthResult ProbeResist::process_connection(
         }
 
         // Compute expected HMAC over [nonce | timestamp]
-        size_t msg_len = config_.nonce_length + 4;
+        size_t msg_len = cfg.nonce_length + 4;
         auto expected_hmac = compute_hmac(
             auth_start, msg_len,
-            config_.shared_secret.data(), config_.shared_secret.size());
+            cfg.shared_secret.data(), cfg.shared_secret.size());
 
-        // Constant-time comparison
-        bool hmac_valid = true;
-        volatile uint8_t accum = 0;
-        for (size_t i = 0; i < 32 && i < config_.auth_length; ++i) {
-            accum |= hmac_received[i] ^ expected_hmac[i];
-        }
-        hmac_valid = (accum == 0);
+        // FIX #23: sodium_memcmp for constant-time comparison
+        size_t cmp_len = (std::min)(size_t(32), cfg.auth_length);
+        bool hmac_valid = (sodium_memcmp(hmac_received, expected_hmac.data(), cmp_len) == 0);
 
         if (!hmac_valid) {
             stats_.rejected_bad_hmac.fetch_add(1);
-            if (config_.enable_ip_reputation) {
-                update_reputation(source_ip, config_.auth_fail_penalty);
+            if (cfg.enable_ip_reputation) {
+                update_reputation(source_ip, cfg.auth_fail_penalty);
             }
             event.result = AuthResult::INVALID_HMAC;
             event.details = "HMAC mismatch";
@@ -318,12 +301,12 @@ AuthResult ProbeResist::process_connection(
         }
 
         // L3: Replay protection
-        if (config_.enable_replay_protection) {
-            if (!check_and_record_nonce(nonce, config_.nonce_length)) {
+        if (cfg.enable_replay_protection) {
+            if (!check_and_record_nonce(nonce, cfg.nonce_length)) {
                 stats_.rejected_replay.fetch_add(1);
                 stats_.replays_caught.fetch_add(1);
-                if (config_.enable_ip_reputation) {
-                    update_reputation(source_ip, config_.replay_penalty);
+                if (cfg.enable_ip_reputation) {
+                    update_reputation(source_ip, cfg.replay_penalty);
                 }
                 event.result = AuthResult::REPLAY_DETECTED;
                 event.details = "Nonce replay detected";
@@ -334,8 +317,8 @@ AuthResult ProbeResist::process_connection(
 
         // All checks passed
         stats_.authenticated.fetch_add(1);
-        if (config_.enable_ip_reputation) {
-            update_reputation(source_ip, config_.auth_success_reward);
+        if (cfg.enable_ip_reputation) {
+            update_reputation(source_ip, cfg.auth_success_reward);
         }
         event.result = AuthResult::AUTHENTICATED;
         event.details = "OK";
@@ -352,49 +335,54 @@ AuthResult ProbeResist::process_connection(
 
 // ===== L1: generate_client_auth =====
 
+// FIX #26: snapshot config_ under shared_lock
 std::vector<uint8_t> ProbeResist::generate_client_auth() {
-    // Format: [nonce(16) | timestamp(4) | hmac(32)] = 52 bytes
+    ProbeResistConfig cfg;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        cfg = config_;
+    }
+
     std::vector<uint8_t> token;
-    token.resize(config_.nonce_length + 4);
+    token.resize(cfg.nonce_length + 4);
 
-    // Random nonce
-    csprng_fill(token.data(), config_.nonce_length);
+    csprng_fill(token.data(), cfg.nonce_length);
 
-    // Timestamp (big-endian)
     uint32_t ts = static_cast<uint32_t>(std::time(nullptr));
-    token[config_.nonce_length + 0] = (ts >> 24) & 0xFF;
-    token[config_.nonce_length + 1] = (ts >> 16) & 0xFF;
-    token[config_.nonce_length + 2] = (ts >> 8) & 0xFF;
-    token[config_.nonce_length + 3] = ts & 0xFF;
+    token[cfg.nonce_length + 0] = (ts >> 24) & 0xFF;
+    token[cfg.nonce_length + 1] = (ts >> 16) & 0xFF;
+    token[cfg.nonce_length + 2] = (ts >> 8) & 0xFF;
+    token[cfg.nonce_length + 3] = ts & 0xFF;
 
-    // HMAC over [nonce | timestamp]
     auto hmac = compute_hmac(
         token.data(), token.size(),
-        config_.shared_secret.data(), config_.shared_secret.size());
+        cfg.shared_secret.data(), cfg.shared_secret.size());
 
     token.insert(token.end(), hmac.begin(), hmac.end());
     return token;
 }
 
+// FIX #26: snapshot config_ under shared_lock
 bool ProbeResist::verify_auth(const uint8_t* data, size_t data_len) {
-    size_t required = config_.nonce_length + 4 + config_.auth_length;
+    ProbeResistConfig cfg;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        cfg = config_;
+    }
+
+    size_t required = cfg.nonce_length + 4 + cfg.auth_length;
     if (data_len < required) return false;
 
-    const uint8_t* nonce = data;
-    const uint8_t* timestamp_bytes = nonce + config_.nonce_length;
-    const uint8_t* hmac_received = timestamp_bytes + 4;
+    const uint8_t* hmac_received = data + cfg.nonce_length + 4;
 
-    size_t msg_len = config_.nonce_length + 4;
+    size_t msg_len = cfg.nonce_length + 4;
     auto expected = compute_hmac(data, msg_len,
-        config_.shared_secret.data(), config_.shared_secret.size());
+        cfg.shared_secret.data(), cfg.shared_secret.size());
 
-    volatile uint8_t accum = 0;
-    for (size_t i = 0; i < 32; ++i) {
-        accum |= hmac_received[i] ^ expected[i];
-    }
-    return (accum == 0);
+    return (sodium_memcmp(hmac_received, expected.data(), 32) == 0);
 }
 
+// FIX #21: compute_hmac — fallback uses crypto_auth_hmacsha256 from libsodium
 std::array<uint8_t, 32> ProbeResist::compute_hmac(
     const uint8_t* data, size_t data_len,
     const uint8_t* key, size_t key_len) {
@@ -406,28 +394,11 @@ std::array<uint8_t, 32> ProbeResist::compute_hmac(
     HMAC(EVP_sha256(), key, static_cast<int>(key_len),
          data, data_len, result.data(), &out_len);
 #else
-    // Fallback: simple HMAC-SHA256 construction
-    // HMAC(K, m) = H((K' ^ opad) || H((K' ^ ipad) || m))
-    // Using a basic approach — in production HAVE_OPENSSL should always be defined
-    static constexpr size_t BLOCK_SIZE = 64;
-    std::array<uint8_t, BLOCK_SIZE> k_pad{};
-
-    if (key_len > BLOCK_SIZE) {
-        // Hash the key first (would need SHA256 — simplified fallback)
-        std::memcpy(k_pad.data(), key, (std::min)(key_len, BLOCK_SIZE));
-    } else {
-        std::memcpy(k_pad.data(), key, key_len);
-    }
-
-    // XOR with ipad (0x36) and compute inner hash
-    // This is a simplified fallback — real impl uses OpenSSL
-    // Just XOR key with data for a basic MAC
-    for (size_t i = 0; i < 32 && i < data_len; ++i) {
-        result[i] = k_pad[i % BLOCK_SIZE] ^ data[i];
-    }
-    for (size_t i = 0; i < 32; ++i) {
-        result[i] ^= k_pad[(i + 32) % BLOCK_SIZE];
-    }
+    crypto_auth_hmacsha256_state state;
+    crypto_auth_hmacsha256_init(&state, key, key_len);
+    crypto_auth_hmacsha256_update(&state, data, data_len);
+    crypto_auth_hmacsha256_final(&state, result.data());
+    sodium_memzero(&state, sizeof(state));
 #endif
 
     return result;
@@ -435,6 +406,7 @@ std::array<uint8_t, 32> ProbeResist::compute_hmac(
 
 // ===== L2: Cover Responses =====
 
+// FIX #26: snapshot config_ under shared_lock
 std::vector<uint8_t> ProbeResist::generate_cover_response(
     const uint8_t* request_data, size_t request_len) {
 
@@ -442,9 +414,15 @@ std::vector<uint8_t> ProbeResist::generate_cover_response(
     (void)request_data;
     (void)request_len;
 
-    switch (config_.cover_mode) {
+    ProbeResistConfig cfg;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        cfg = config_;
+    }
+
+    switch (cfg.cover_mode) {
         case CoverMode::REDIRECT:
-            return generate_redirect(config_.cover_site_url);
+            return generate_redirect(cfg.cover_site_url);
         case CoverMode::ECHO_NGINX:
             return generate_nginx_default();
         case CoverMode::ECHO_IIS:
@@ -454,9 +432,9 @@ std::vector<uint8_t> ProbeResist::generate_cover_response(
         case CoverMode::RESET:
         case CoverMode::DROP:
         case CoverMode::TARPIT:
-            return {};  // Caller handles at TCP level
+            return {};
         case CoverMode::MIRROR:
-            return {};  // Caller handles proxying
+            return {};
         default:
             return generate_nginx_default();
     }
@@ -559,78 +537,87 @@ std::vector<uint8_t> ProbeResist::generate_redirect(const std::string& url) {
 
 // ===== L3: Replay Protection =====
 
+// FIX #25: hex_str pre-computed in NonceEntry.
+// FIX #26: snapshot config_ for nonce_window_size / nonce_expiry_sec.
 bool ProbeResist::check_and_record_nonce(const uint8_t* nonce, size_t nonce_len) {
     std::string hex = bytes_to_hex(nonce, nonce_len);
 
+    // Snapshot config values we need
+    size_t window_size;
+    uint32_t expiry_sec;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        window_size = config_.nonce_window_size;
+        expiry_sec = config_.nonce_expiry_sec;
+    }
+
     std::lock_guard<std::mutex> lock(nonce_mutex_);
 
-    // Check if seen
     if (nonce_set_.count(hex) > 0) {
         return false;  // replay!
     }
 
-    // Evict expired
     auto now = std::chrono::steady_clock::now();
     while (!nonce_window_.empty() && nonce_window_.front().expiry < now) {
-        std::string old_hex = bytes_to_hex(
-            nonce_window_.front().hash.data(), nonce_window_.front().hash.size());
-        nonce_set_.erase(old_hex);
+        nonce_set_.erase(nonce_window_.front().hex_str);
         nonce_window_.pop_front();
     }
 
-    // Evict oldest if at capacity
-    while (nonce_window_.size() >= config_.nonce_window_size) {
-        std::string old_hex = bytes_to_hex(
-            nonce_window_.front().hash.data(), nonce_window_.front().hash.size());
-        nonce_set_.erase(old_hex);
+    while (nonce_window_.size() >= window_size) {
+        nonce_set_.erase(nonce_window_.front().hex_str);
         nonce_window_.pop_front();
     }
 
-    // Record
     NonceEntry entry;
     std::memset(entry.hash.data(), 0, 32);
     std::memcpy(entry.hash.data(), nonce, (std::min)(nonce_len, size_t(32)));
-    entry.expiry = now + std::chrono::seconds(config_.nonce_expiry_sec);
+    entry.hex_str = hex;
+    entry.expiry = now + std::chrono::seconds(expiry_sec);
 
-    nonce_window_.push_back(entry);
+    nonce_window_.push_back(std::move(entry));
     nonce_set_.insert(hex);
 
-    return true;  // new nonce, OK
+    return true;
 }
 
 void ProbeResist::evict_expired_nonces() {
     std::lock_guard<std::mutex> lock(nonce_mutex_);
     auto now = std::chrono::steady_clock::now();
     while (!nonce_window_.empty() && nonce_window_.front().expiry < now) {
-        std::string old_hex = bytes_to_hex(
-            nonce_window_.front().hash.data(), nonce_window_.front().hash.size());
-        nonce_set_.erase(old_hex);
+        nonce_set_.erase(nonce_window_.front().hex_str);
         nonce_window_.pop_front();
     }
 }
 
 // ===== L4: Probe Pattern Detection =====
 
+// FIX #26: snapshot config_ for burst params
 bool ProbeResist::is_probe_pattern(const std::string& source_ip) {
+    uint32_t burst_window;
+    uint32_t burst_threshold;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        burst_window = config_.burst_window_sec;
+        burst_threshold = config_.burst_threshold;
+    }
+
     std::lock_guard<std::mutex> lock(conn_mutex_);
 
     auto now = std::chrono::steady_clock::now();
     auto& history = conn_history_[source_ip];
 
-    // Record this connection
     history.push_back({now});
 
-    // Evict old entries
-    auto cutoff = now - std::chrono::seconds(config_.burst_window_sec);
+    auto cutoff = now - std::chrono::seconds(burst_window);
     while (!history.empty() && history.front().time < cutoff) {
         history.pop_front();
     }
 
-    // Check burst threshold
-    return history.size() >= config_.burst_threshold;
+    return history.size() >= burst_threshold;
 }
 
 bool ProbeResist::is_known_scanner(const std::string& ja3) const {
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
     return ja3_scanner_set_.count(ja3) > 0;
 }
 
@@ -647,15 +634,34 @@ IPReputation ProbeResist::get_ip_reputation(const std::string& ip) const {
     return rep;
 }
 
+// FIX #26: snapshot config_ for reputation params
+// FIX #27: O(log n) eviction via ip_eviction_index_ instead of O(n) full scan
 void ProbeResist::update_reputation(const std::string& ip, int32_t delta) {
+    // Snapshot config values we need
+    int32_t ban_threshold;
+    uint32_t temp_ban_sec;
+    size_t max_tracked;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        ban_threshold = config_.ban_threshold;
+        temp_ban_sec = config_.temp_ban_duration_sec;
+        max_tracked = config_.max_tracked_ips;
+    }
+
     std::lock_guard<std::mutex> lock(ip_mutex_);
 
     auto& rep = ip_reputation_[ip];
-    if (rep.ip.empty()) {
+    auto now = std::chrono::system_clock::now();
+
+    // Remove old eviction index entry before updating last_seen
+    if (!rep.ip.empty()) {
+        ip_eviction_index_.erase({rep.last_seen, ip});
+    } else {
         rep.ip = ip;
-        rep.first_seen = std::chrono::system_clock::now();
+        rep.first_seen = now;
     }
-    rep.last_seen = std::chrono::system_clock::now();
+
+    rep.last_seen = now;
     rep.total_connections++;
     rep.score += delta;
 
@@ -665,30 +671,34 @@ void ProbeResist::update_reputation(const std::string& ip, int32_t delta) {
         rep.successful_auths++;
     }
 
+    // Insert updated eviction index entry
+    ip_eviction_index_.insert({rep.last_seen, ip});
+
     // Auto-ban check
-    if (rep.score <= config_.ban_threshold && !rep.is_banned) {
+    if (rep.score <= ban_threshold && !rep.is_banned) {
         rep.is_banned = true;
-        if (config_.temp_ban_duration_sec > 0) {
-            rep.ban_until = std::chrono::system_clock::now() +
-                std::chrono::seconds(config_.temp_ban_duration_sec);
+        if (temp_ban_sec > 0) {
+            rep.ban_until = now + std::chrono::seconds(temp_ban_sec);
         }
         stats_.ips_banned.fetch_add(1);
     }
 
-    // Memory limit
-    if (ip_reputation_.size() > config_.max_tracked_ips) {
-        // Evict oldest entry with positive score
-        std::string oldest_positive;
-        auto oldest_time = std::chrono::system_clock::now();
-        for (const auto& pair : ip_reputation_) {
-            if (pair.second.score >= 0 && pair.second.last_seen < oldest_time) {
-                oldest_time = pair.second.last_seen;
-                oldest_positive = pair.first;
+    // FIX #27: Memory limit — O(log n) eviction via sorted index
+    // Pop the oldest entry with positive score from the front of the index.
+    while (ip_reputation_.size() > max_tracked) {
+        bool evicted = false;
+        auto it = ip_eviction_index_.begin();
+        while (it != ip_eviction_index_.end()) {
+            auto map_it = ip_reputation_.find(it->second);
+            if (map_it != ip_reputation_.end() && map_it->second.score >= 0) {
+                ip_reputation_.erase(map_it);
+                it = ip_eviction_index_.erase(it);
+                evicted = true;
+                break;
             }
+            ++it;
         }
-        if (!oldest_positive.empty()) {
-            ip_reputation_.erase(oldest_positive);
-        }
+        if (!evicted) break;  // only negative-score IPs left, can't evict
     }
 }
 
@@ -698,37 +708,49 @@ bool ProbeResist::is_ip_banned(const std::string& ip) const {
     if (it == ip_reputation_.end()) return false;
     if (!it->second.is_banned) return false;
 
-    // Check temp ban expiry
     auto ban_until = it->second.ban_until;
     if (ban_until != std::chrono::system_clock::time_point{} &&
         std::chrono::system_clock::now() > ban_until) {
-        // Ban expired — but we can't modify from const method
-        // Caller should call cleanup_stale_data() periodically
         return false;
     }
     return true;
 }
 
+// FIX #27: maintain eviction index
 void ProbeResist::ban_ip(const std::string& ip, uint32_t duration_sec) {
     std::lock_guard<std::mutex> lock(ip_mutex_);
     auto& rep = ip_reputation_[ip];
+
+    // Remove stale index entry if exists
+    if (!rep.ip.empty()) {
+        ip_eviction_index_.erase({rep.last_seen, ip});
+    }
+
     rep.ip = ip;
     rep.is_banned = true;
-    if (duration_sec > 0) {
-        rep.ban_until = std::chrono::system_clock::now() +
-            std::chrono::seconds(duration_sec);
-    } else {
-        rep.ban_until = {};  // permanent
+    auto now = std::chrono::system_clock::now();
+    if (rep.last_seen == std::chrono::system_clock::time_point{}) {
+        rep.last_seen = now;
+        rep.first_seen = now;
     }
+    if (duration_sec > 0) {
+        rep.ban_until = now + std::chrono::seconds(duration_sec);
+    } else {
+        rep.ban_until = {};
+    }
+
+    ip_eviction_index_.insert({rep.last_seen, ip});
     stats_.ips_banned.fetch_add(1);
 }
 
+// FIX #27: maintain eviction index
 void ProbeResist::unban_ip(const std::string& ip) {
     std::lock_guard<std::mutex> lock(ip_mutex_);
     auto it = ip_reputation_.find(ip);
     if (it != ip_reputation_.end()) {
         it->second.is_banned = false;
         it->second.score = 0;
+        // No index change needed — last_seen unchanged
     }
 }
 
@@ -746,34 +768,46 @@ std::vector<std::string> ProbeResist::get_banned_ips() const {
 // ===== L6: JA3 Filter =====
 
 bool ProbeResist::is_ja3_allowed(const std::string& ja3) const {
-    if (ja3_allowlist_.empty()) return true;  // no filter
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
+    if (ja3_allowlist_.empty()) return true;
     return ja3_allowlist_.count(ja3) > 0;
 }
 
 void ProbeResist::add_ja3_allowlist(const std::string& ja3) {
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
     ja3_allowlist_.insert(ja3);
 }
 
 void ProbeResist::remove_ja3_allowlist(const std::string& ja3) {
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
     ja3_allowlist_.erase(ja3);
 }
 
 // ===== L7: Rate Limiting =====
 
+// FIX #26: snapshot config_ for rate limit params
 bool ProbeResist::is_rate_limited(const std::string& ip) {
+    uint32_t window_sec;
+    uint32_t limit_per_ip;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        window_sec = config_.rate_limit_window_sec;
+        limit_per_ip = config_.rate_limit_per_ip;
+    }
+
     std::lock_guard<std::mutex> lock(rate_mutex_);
 
     auto now = std::chrono::steady_clock::now();
     auto& entry = rate_limits_[ip];
 
-    auto window = std::chrono::seconds(config_.rate_limit_window_sec);
+    auto window = std::chrono::seconds(window_sec);
     if (now - entry.window_start > window) {
         entry.count = 0;
         entry.window_start = now;
     }
 
     entry.count++;
-    return entry.count > config_.rate_limit_per_ip;
+    return entry.count > limit_per_ip;
 }
 
 // ===== Events & Config =====
@@ -788,19 +822,30 @@ void ProbeResist::emit_event(const ProbeEvent& event) {
     }
 }
 
+// FIX #26: unique_lock on config_mutex_ — exclusive write
 void ProbeResist::set_config(const ProbeResistConfig& config) {
-    config_ = config;
-    ja3_scanner_set_.clear();
-    for (const auto& ja3 : config_.known_scanner_ja3) {
-        ja3_scanner_set_.insert(ja3);
+    {
+        std::unique_lock<std::shared_mutex> lk(config_mutex_);
+        config_ = config;
     }
-    ja3_allowlist_.clear();
-    for (const auto& ja3 : config_.ja3_allowlist) {
-        ja3_allowlist_.insert(ja3);
+    // FIX #24: Lock ja3_mutex_ when rebuilding JA3 sets from config
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        std::lock_guard<std::mutex> lock(ja3_mutex_);
+        ja3_scanner_set_.clear();
+        for (const auto& ja3 : config_.known_scanner_ja3) {
+            ja3_scanner_set_.insert(ja3);
+        }
+        ja3_allowlist_.clear();
+        for (const auto& ja3 : config_.ja3_allowlist) {
+            ja3_allowlist_.insert(ja3);
+        }
     }
 }
 
+// FIX #26: shared_lock on config_mutex_ — concurrent reads OK
 ProbeResistConfig ProbeResist::get_config() const {
+    std::shared_lock<std::shared_mutex> lk(config_mutex_);
     return config_;
 }
 
@@ -812,7 +857,20 @@ void ProbeResist::reset_stats() {
     stats_.reset();
 }
 
+// FIX #26: snapshot config_ for cleanup params
+// FIX #27: maintain eviction index during cleanup
 void ProbeResist::cleanup_stale_data() {
+    // Snapshot config values needed for cleanup
+    int32_t ban_threshold;
+    uint32_t rate_window_sec;
+    uint32_t burst_window_sec;
+    {
+        std::shared_lock<std::shared_mutex> lk(config_mutex_);
+        ban_threshold = config_.ban_threshold;
+        rate_window_sec = config_.rate_limit_window_sec;
+        burst_window_sec = config_.burst_window_sec;
+    }
+
     // Unban expired IPs
     {
         std::lock_guard<std::mutex> lock(ip_mutex_);
@@ -822,7 +880,8 @@ void ProbeResist::cleanup_stale_data() {
                 pair.second.ban_until != std::chrono::system_clock::time_point{} &&
                 now > pair.second.ban_until) {
                 pair.second.is_banned = false;
-                pair.second.score = config_.ban_threshold / 2; // partial rehabilitation
+                pair.second.score = ban_threshold / 2;
+                // score changed but last_seen unchanged — no index update needed
             }
         }
     }
@@ -831,7 +890,7 @@ void ProbeResist::cleanup_stale_data() {
     {
         std::lock_guard<std::mutex> lock(rate_mutex_);
         auto now = std::chrono::steady_clock::now();
-        auto window = std::chrono::seconds(config_.rate_limit_window_sec * 2);
+        auto window = std::chrono::seconds(rate_window_sec * 2);
         for (auto it = rate_limits_.begin(); it != rate_limits_.end();) {
             if (now - it->second.window_start > window) {
                 it = rate_limits_.erase(it);
@@ -845,7 +904,7 @@ void ProbeResist::cleanup_stale_data() {
     {
         std::lock_guard<std::mutex> lock(conn_mutex_);
         auto now = std::chrono::steady_clock::now();
-        auto cutoff = now - std::chrono::seconds(config_.burst_window_sec * 3);
+        auto cutoff = now - std::chrono::seconds(burst_window_sec * 3);
         for (auto it = conn_history_.begin(); it != conn_history_.end();) {
             while (!it->second.empty() && it->second.front().time < cutoff) {
                 it->second.pop_front();

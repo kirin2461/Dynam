@@ -8,6 +8,7 @@
 #include <mutex>
 #include <functional>
 #include <chrono>
+#include <unordered_map>
 
 namespace ncp {
 
@@ -267,11 +268,21 @@ private:
     };
     mutable std::mutex dest_ipid_mutex_;
     std::unordered_map<uint32_t, DestIPIDState> dest_ipid_map_;
-    uint16_t global_ipid_counter_ = 0;
 
-    // --- Flow label cache ---
+    // FIX #26: Changed from uint16_t to std::atomic<uint16_t> to prevent
+    // data race in generate_ipid() for INCREMENTAL_RANDOM and GLOBAL_COUNTER
+    // strategies which are called from multi-threaded packet processing.
+    std::atomic<uint16_t> global_ipid_counter_{0};
+
+    // --- Flow label cache (with LRU eviction) ---
+    // FIX #27: Added timestamp to each entry for age-based eviction
+    // instead of arbitrary half-erase on unordered_map.
+    struct FlowLabelEntry {
+        uint32_t label;
+        std::chrono::steady_clock::time_point last_used;
+    };
     mutable std::mutex flow_label_mutex_;
-    std::unordered_map<uint64_t, uint32_t> flow_label_cache_;
+    std::unordered_map<uint64_t, FlowLabelEntry> flow_label_cache_;
 
     // --- Timestamp state ---
     uint32_t timestamp_offset_ = 0;

@@ -7,6 +7,7 @@
 #include <functional>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include <chrono>
 
 namespace ncp {
@@ -134,11 +135,19 @@ public:
         std::string hostname;
         std::vector<std::string> dns_servers;
         
-        // NEW: Original SMBIOS/HW identifiers
+        // Full resolv.conf backup for complete restoration
+        // (preserves search/domain/options directives, not just nameservers)
+        std::vector<std::string> resolv_conf_lines;
+        
+        // Original SMBIOS/HW identifiers
         std::string original_board_serial;
         std::string original_system_serial;
         std::string original_system_uuid;
         std::string original_disk_serial;
+
+        // Windows: adapter registry subkey index (e.g. "0001") for MAC spoofing
+        // Discovered during save_original_identity() by matching adapter GUID
+        std::string adapter_reg_index;
     };
     
     // Spoof status
@@ -149,20 +158,20 @@ public:
         bool dns_spoofed = false;
         bool hostname_spoofed = false;
         bool hw_info_spoofed = false;
-        bool smbios_spoofed = false;          // NEW
-        bool disk_serial_spoofed = false;     // NEW
-        bool dhcp_client_id_spoofed = false;  // NEW
-        bool tcp_fingerprint_spoofed = false; // NEW
+        bool smbios_spoofed = false;
+        bool disk_serial_spoofed = false;
+        bool dhcp_client_id_spoofed = false;
+        bool tcp_fingerprint_spoofed = false;
         
         std::string current_ipv4;
         std::string current_ipv6;
         std::string current_mac;
         std::string current_hostname;
         std::string current_hw_serial;
-        std::string current_board_serial;     // NEW
-        std::string current_system_serial;    // NEW
-        std::string current_disk_serial;      // NEW
-        std::string current_dhcp_client_id;   // NEW
+        std::string current_board_serial;
+        std::string current_system_serial;
+        std::string current_disk_serial;
+        std::string current_dhcp_client_id;
         std::vector<std::string> current_dns;
         
         std::chrono::steady_clock::time_point last_ipv4_rotation;
@@ -171,8 +180,8 @@ public:
         std::chrono::steady_clock::time_point last_dns_rotation;
         std::chrono::steady_clock::time_point last_hostname_rotation;
         std::chrono::steady_clock::time_point last_hw_info_rotation;
-        std::chrono::steady_clock::time_point last_smbios_rotation;      // NEW
-        std::chrono::steady_clock::time_point last_disk_serial_rotation; // NEW
+        std::chrono::steady_clock::time_point last_smbios_rotation;
+        std::chrono::steady_clock::time_point last_disk_serial_rotation;
     };
     
     NetworkSpoofer();
@@ -183,8 +192,11 @@ public:
     bool disable();
     bool is_enabled() const { return enabled_; }
     
-    // Get current status
-    SpoofStatus get_status() const { return status_; }
+    // Get current status (thread-safe copy)
+    SpoofStatus get_status() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return status_;
+    }
     NetworkIdentity get_original_identity() const { return original_identity_; }
     
     // Manual rotation
@@ -194,19 +206,19 @@ public:
     bool rotate_dns();
     bool rotate_hostname();
     bool rotate_hw_info();
-    bool rotate_smbios();       // NEW
-    bool rotate_disk_serial();  // NEW
+    bool rotate_smbios();
+    bool rotate_disk_serial();
     bool rotate_all();
     
-    // Set custom values
+    // Set custom values (thread-safe)
     bool set_custom_ipv4(const std::string& ipv4);
     bool set_custom_ipv6(const std::string& ipv6);
     bool set_custom_mac(const std::string& mac);
     bool set_custom_hostname(const std::string& hostname);
     bool set_custom_hw_serial(const std::string& serial);
     bool set_custom_dns(const std::vector<std::string>& dns_servers);
-    bool set_custom_smbios(const std::string& board_serial, const std::string& system_serial, const std::string& uuid); // NEW
-    bool set_custom_disk_serial(const std::string& disk_serial); // NEW
+    bool set_custom_smbios(const std::string& board_serial, const std::string& system_serial, const std::string& uuid);
+    bool set_custom_disk_serial(const std::string& disk_serial);
     
     // Random value generators
     std::string generate_random_ipv4();
@@ -214,10 +226,10 @@ public:
     std::string generate_random_mac();
     std::string generate_random_hostname();
     std::string generate_random_hw_serial();
-    std::string generate_random_board_serial();  // NEW
-    std::string generate_random_system_serial(); // NEW
-    std::string generate_random_uuid();          // NEW
-    std::string generate_random_disk_serial();   // NEW
+    std::string generate_random_board_serial();
+    std::string generate_random_system_serial();
+    std::string generate_random_uuid();
+    std::string generate_random_disk_serial();
     
     // Callbacks for rotation events
     using RotationCallback = std::function<void(const std::string& type, const std::string& old_value, const std::string& new_value)>;
@@ -234,10 +246,9 @@ private:
     bool apply_dns(const std::vector<std::string>& dns_servers);
     bool apply_hostname(const std::string& hostname);
     bool apply_hw_info(const std::string& serial);
-    bool apply_smbios(const std::string& board_serial, const std::string& system_serial, const std::string& uuid); // NEW
-    bool apply_disk_serial(const std::string& disk_serial); // NEW
-    bool apply_dhcp_client_id(const std::string& client_id); // NEW
-    bool apply_tcp_fingerprint(const TcpFingerprintProfile& profile); // NEW
+    bool apply_smbios(const std::string& board_serial, const std::string& system_serial, const std::string& uuid);
+    bool apply_disk_serial(const std::string& disk_serial);
+    bool apply_tcp_fingerprint(const TcpFingerprintProfile& profile);
     // Overloaded declarations matching .cpp implementations
     bool apply_smbios(const std::string& bios_vendor, const std::string& bios_version,
         const std::string& board_manufacturer, const std::string& board_product,
@@ -253,9 +264,14 @@ private:
     std::atomic<bool> rotation_running_{false};
     std::thread rotation_thread_;
     
-    SpoofConfig config_;
+    // FIX #49.2: Mutex protecting config_ and status_ from data races
+    // between rotation_thread_func() and public API calls.
+    // Must be held when reading or writing config_ or status_.
+    mutable std::mutex mu_;
+    
+    SpoofConfig config_;            // GUARDED_BY(mu_)
     NetworkIdentity original_identity_;
-    SpoofStatus status_;
+    SpoofStatus status_;            // GUARDED_BY(mu_)
     
     RotationCallback rotation_callback_;
     

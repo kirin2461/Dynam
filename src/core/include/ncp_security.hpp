@@ -25,7 +25,7 @@ namespace ncp {
  * @brief Security enhancement features for NCP
  * 
  * Implements recommended security features:
- * - Certificate Pinning
+ * - Certificate Pinning (with TOFU, expiry, backup pins, and mismatch reporting)
  * - Latency Monitoring
  * - Traffic Padding
  * - Forensic Logging
@@ -37,6 +37,9 @@ namespace ncp {
 
 /**
  * @brief Certificate pinning for DoH servers
+ * 
+ * Supports TOFU (Trust On First Use), pin expiry via max_age,
+ * backup pin fallback on primary mismatch, and mismatch reporting.
  */
 class CertificatePinner {
 public:
@@ -44,30 +47,59 @@ public:
         std::string hostname;
         std::string sha256_hash;  // Base64 encoded SHA256 of certificate
         bool is_backup;           // Backup pin for key rotation
+        std::chrono::system_clock::time_point added_at;   // TOFU: when the pin was first seen/added
+        std::chrono::seconds max_age{0};                  // Pin expiry duration (0 = no expiry)
     };
+
+    struct PinMismatchReport {
+        std::string hostname;
+        std::string expected_hash;
+        std::string actual_hash;
+        bool backup_matched;      // true if a backup pin matched instead
+        std::chrono::system_clock::time_point timestamp;
+    };
+
+    using MismatchCallback = std::function<void(const PinMismatchReport&)>;
 
     CertificatePinner();
     ~CertificatePinner();
 
-    // Add pinned certificates
-    void add_pin(const std::string& hostname, const std::string& sha256_hash, bool is_backup = false);
+    // Add pinned certificates (with optional max_age for expiry)
+    void add_pin(const std::string& hostname, const std::string& sha256_hash,
+                 bool is_backup = false,
+                 std::chrono::seconds max_age = std::chrono::seconds{0});
     void add_pins(const std::vector<PinnedCert>& pins);
+    
+    // TOFU: add pin on first connection if no pins exist for hostname
+    bool trust_on_first_use(const std::string& hostname, const std::string& cert_hash,
+                            std::chrono::seconds max_age = std::chrono::seconds{86400 * 30});
     
     // Load default pins for known DoH providers
     void load_default_pins();
     
-    // Verify certificate against pins
+    // Verify certificate against pins (checks expiry, tries backup on mismatch)
     bool verify_certificate(const std::string& hostname, const std::string& cert_hash) const;
     
     // Get pins for hostname
     std::vector<PinnedCert> get_pins(const std::string& hostname) const;
+    
+    // Pin maintenance
+    void remove_expired_pins();
+    bool is_pin_expired(const PinnedCert& pin) const;
+    
+    // Set callback for pin mismatch reporting (report-uri analogue)
+    void set_mismatch_callback(MismatchCallback callback);
     
     // Clear all pins
     void clear_pins();
 
 private:
     std::vector<PinnedCert> pins_;
+    MismatchCallback mismatch_callback_;
     mutable std::mutex mutex_;
+    
+    void report_mismatch(const std::string& hostname, const std::string& expected,
+                         const std::string& actual, bool backup_matched) const;
 };
 
 // ==================== Latency Monitoring ====================
@@ -184,16 +216,26 @@ private:
 
 /**
  * @brief Add random padding to DNS queries to prevent traffic analysis
+ *
+ * Padding envelope format (authenticated via HMAC-SHA256):
+ *   [32-byte HMAC] [4-byte orig_len (big-endian)] [original data] [random padding]
+ *
+ * HMAC covers: orig_len || original_data
+ * Key is generated per instance and securely wiped in destructor.
+ *
+ * NOTE: This is a breaking change from the previous unauthenticated format
+ *       ([4-byte orig_len] [data] [padding]). Old padded data will fail
+ *       HMAC verification and be returned as-is (graceful fallback).
  */
 class TrafficPadder {
 public:
     TrafficPadder(uint32_t min_size = 128, uint32_t max_size = 512);
-    ~TrafficPadder();
+    ~TrafficPadder();  // Securely wipes hmac_key_ via sodium_memzero
 
     // Add padding to data
     std::vector<uint8_t> add_padding(const std::vector<uint8_t>& data);
     
-    // Remove padding from data
+    // Remove padding from data (verifies HMAC integrity first)
     std::vector<uint8_t> remove_padding(const std::vector<uint8_t>& data);
     
     // Configure padding size range
@@ -206,6 +248,7 @@ public:
 private:
     uint32_t min_size_;
     uint32_t max_size_;
+    std::vector<uint8_t> hmac_key_;  // HMAC-SHA256 key for padding integrity (#58)
     // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     std::mutex mutex_;
 };
@@ -447,6 +490,11 @@ private:
 
 /**
  * @brief Anti-forensics manager to prevent evidence collection
+ * 
+ * Note: secure_delete_file() uses storage-aware deletion:
+ * - HDD: multi-pass pattern overwrite
+ * - SSD: attempts TRIM/SECURE ERASE via ioctl, falls back to overwrite + warning
+ * - CoW FS (btrfs, ZFS): logs warning about ineffective overwrite
  */
 class AntiForensics {
 public:
@@ -460,12 +508,23 @@ public:
         bool clear_logs = false;            // Clear application logs
     };
     
+    /// Storage type classification for secure deletion strategy
+    enum class StorageType {
+        HDD,        // Traditional spinning disk — overwrite is effective
+        SSD,        // Solid state — needs TRIM/SECURE ERASE
+        COW_FS,     // Copy-on-write FS (btrfs, ZFS) — overwrite is ineffective
+        UNKNOWN     // Could not detect — treat as SSD (conservative)
+    };
+    
     AntiForensics();
     explicit AntiForensics(const Config& config);
     
-    // Secure file operations
+    // Secure file operations (storage-aware)
     bool secure_delete_file(const std::string& path);
     bool secure_delete_directory(const std::string& path);
+    
+    // Detect storage type for a given path
+    StorageType detect_storage_type(const std::string& path) const;
     
     // Memory protection
     bool lock_memory(void* ptr, size_t size);     // Prevent swapping
@@ -477,13 +536,20 @@ public:
     bool enable_aslr();                            // Address space randomization
     bool set_process_dumpable(bool dumpable);
     
-    // Cleanup
+    // Cleanup — clears bash, zsh, and fish history; also unsets HISTFILE
+    bool clear_shell_history();
+    [[deprecated("Use clear_shell_history() instead")]]
     bool clear_bash_history();
     bool clear_system_logs();
     bool clear_browser_cache();
     
 private:
     Config config_;
+    
+    // Storage-specific secure deletion
+    bool secure_delete_hdd(const std::string& path);
+    bool secure_delete_ssd(const std::string& path);
+    bool secure_delete_cow(const std::string& path);
 };
 
 /**

@@ -9,6 +9,9 @@
  *   Phase 2: FlowShaper          — flow-level timing/size shaping
  *   Phase 3: ProbeResist          — server-side active probe defense
  *   +        TrafficMimicry       — protocol wrapping (HTTPS/DNS/QUIC)
+ *   Phase 2+: TLSFingerprint     — realistic TLS fingerprinting (JA3/JA4)
+ *   Phase 2+: AdvancedDPIBypass   — multi-technique DPI evasion
+ *   Phase 3D: ECH                — Encrypted Client Hello
  *
  * into a single send()/receive() API with automatic strategy selection.
  */
@@ -17,6 +20,9 @@
 #include "ncp_flow_shaper.hpp"
 #include "ncp_probe_resist.hpp"
 #include "ncp_mimicry.hpp"
+#include "ncp_tls_fingerprint.hpp"
+#include "ncp_dpi_advanced.hpp"
+#include "ncp_ech.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -35,28 +41,28 @@ namespace DPI {
 // ===== Threat Level =====
 
 enum class ThreatLevel {
-    NONE     = 0,  // No DPI detected
-    LOW      = 1,  // Basic SNI filtering only
-    MEDIUM   = 2,  // Signature-based DPI (zapret-level)
-    HIGH     = 3,  // ML-based flow classification
-    CRITICAL = 4   // Active probing + ML + fingerprinting
+    NONE     = 0,
+    LOW      = 1,
+    MEDIUM   = 2,
+    HIGH     = 3,
+    CRITICAL = 4
 };
 
 const char* threat_level_to_string(ThreatLevel t) noexcept;
 ThreatLevel threat_level_from_int(int level) noexcept;
 
-// ===== Detection Feedback (from network) =====
+// ===== Detection Feedback =====
 
 struct DetectionEvent {
     enum class Type {
-        CONNECTION_RESET,    // RST received after handshake
-        CONNECTION_TIMEOUT,  // No response / black-holed
-        THROTTLED,           // Bandwidth suddenly dropped
-        PROBE_RECEIVED,      // Server got an active probe
-        TLS_ALERT,           // Unexpected TLS alert
-        DNS_POISONED,        // DNS response doesn't match
-        IP_BLOCKED,          // Can't reach server at all
-        SUCCESS              // Connection worked fine
+        CONNECTION_RESET,
+        CONNECTION_TIMEOUT,
+        THROTTLED,
+        PROBE_RECEIVED,
+        TLS_ALERT,
+        DNS_POISONED,
+        IP_BLOCKED,
+        SUCCESS
     };
     Type type = Type::SUCCESS;
     std::string details;
@@ -85,8 +91,21 @@ struct OrchestratorStrategy {
     bool enable_mimicry = true;
     TrafficMimicry::MimicProfile mimic_profile = TrafficMimicry::MimicProfile::HTTPS_APPLICATION;
 
+    // Phase 2+: TLS Fingerprint configuration
+    bool enable_tls_fingerprint = true;
+    ncp::BrowserType tls_browser_profile = ncp::BrowserType::CHROME;
+    bool tls_rotate_per_connection = false;
+
+    // Phase 2+: Advanced DPI bypass
+    bool enable_advanced_dpi = false;
+    AdvancedDPIBypass::BypassPreset dpi_preset = AdvancedDPIBypass::BypassPreset::MODERATE;
+
+    // Phase 3D: ECH (only used when advanced_dpi is disabled as fallback)
+    bool enable_ech_fallback = false;
+
     // Presets
     static OrchestratorStrategy stealth();       // max protection, higher overhead
+    static OrchestratorStrategy paranoid();      // CRITICAL: max entropy + constant rate
     static OrchestratorStrategy balanced();      // good protection, moderate overhead
     static OrchestratorStrategy performance();   // min overhead, basic protection
     static OrchestratorStrategy max_compat();    // maximum compatibility
@@ -97,31 +116,26 @@ struct OrchestratorStrategy {
 struct OrchestratorConfig {
     bool enabled = true;
 
-    // Adaptive mode: auto-escalate on detection, de-escalate on success
     bool adaptive = true;
-    int escalation_threshold = 3;     // N failures before escalating
-    int deescalation_threshold = 20;  // N successes before de-escalating
-    int deescalation_cooldown_sec = 300; // wait 5min after escalation
+    int escalation_threshold = 3;
+    int deescalation_threshold = 20;
+    int deescalation_cooldown_sec = 300;
 
-    // Initial strategy
     OrchestratorStrategy strategy;
 
-    // Role
-    bool is_server = false;  // true = enable probe_resist; false = client mode
-
-    // Shared secret for probe resistance auth
+    bool is_server = false;
     std::vector<uint8_t> shared_secret;
-
-    // Health check interval
     int health_check_interval_sec = 30;
 
-    // Callback when strategy changes
+    // Phase 2+: ECH configuration (optional)
+    std::vector<uint8_t> ech_config_data;
+    bool ech_enabled = false;
+
     using StrategyChangeCallback = std::function<void(
         ThreatLevel old_level, ThreatLevel new_level,
         const std::string& reason)>;
     StrategyChangeCallback on_strategy_change;
 
-    // Presets
     static OrchestratorConfig client_default();
     static OrchestratorConfig server_default();
 };
@@ -129,23 +143,26 @@ struct OrchestratorConfig {
 // ===== Combined Statistics =====
 
 struct OrchestratorStats {
-    // Pipeline
     std::atomic<uint64_t> packets_sent{0};
     std::atomic<uint64_t> packets_received{0};
     std::atomic<uint64_t> bytes_original{0};
     std::atomic<uint64_t> bytes_on_wire{0};
 
-    // Adaptive
     std::atomic<uint64_t> escalations{0};
     std::atomic<uint64_t> deescalations{0};
     std::atomic<uint64_t> detection_events{0};
     std::atomic<uint64_t> successful_sends{0};
 
-    // Current state
+    // Phase 2+: TLS fingerprint stats
+    std::atomic<uint64_t> tls_fingerprints_applied{0};
+    std::atomic<uint64_t> ech_encryptions{0};
+
+    // Phase 4A: Advanced DPI stats
+    std::atomic<uint64_t> advanced_dpi_segments{0};
+
     ThreatLevel current_threat = ThreatLevel::NONE;
     std::string current_strategy_name;
 
-    // Per-phase overhead
     double adversarial_overhead_pct = 0.0;
     double flow_shaping_overhead_pct = 0.0;
     double mimicry_overhead_pct = 0.0;
@@ -156,6 +173,8 @@ struct OrchestratorStats {
         bytes_original.store(0); bytes_on_wire.store(0);
         escalations.store(0); deescalations.store(0);
         detection_events.store(0); successful_sends.store(0);
+        tls_fingerprints_applied.store(0); ech_encryptions.store(0);
+        advanced_dpi_segments.store(0);
     }
 
     OrchestratorStats() = default;
@@ -168,6 +187,9 @@ struct OrchestratorStats {
           deescalations(o.deescalations.load()),
           detection_events(o.detection_events.load()),
           successful_sends(o.successful_sends.load()),
+          tls_fingerprints_applied(o.tls_fingerprints_applied.load()),
+          ech_encryptions(o.ech_encryptions.load()),
+          advanced_dpi_segments(o.advanced_dpi_segments.load()),
           current_threat(o.current_threat),
           current_strategy_name(o.current_strategy_name),
           adversarial_overhead_pct(o.adversarial_overhead_pct),
@@ -184,8 +206,6 @@ struct OrchestratedPacket {
     bool is_dummy = false;
 };
 
-// ===== Send Callback =====
-
 using OrchestratorSendCallback = std::function<void(const OrchestratedPacket&)>;
 
 // ===== Main Class =====
@@ -199,28 +219,13 @@ public:
     ProtocolOrchestrator(const ProtocolOrchestrator&) = delete;
     ProtocolOrchestrator& operator=(const ProtocolOrchestrator&) = delete;
 
-    // ===== Lifecycle =====
-
     void start(OrchestratorSendCallback send_cb);
     void stop();
     bool is_running() const;
 
-    // ===== Client Pipeline =====
-
-    /// Full client send pipeline:
-    /// payload → adversarial_pad → mimicry_wrap → auth_prepend → flow_shape
-    /// Returns shaped packets ready for the wire.
     std::vector<OrchestratedPacket> send(const std::vector<uint8_t>& payload);
-
-    /// Async send: enqueues for background processing via callback.
     void send_async(const std::vector<uint8_t>& payload);
 
-    // ===== Server Pipeline =====
-
-    /// Full server receive pipeline:
-    /// wire_data → auth_verify → flow_unshape → mimicry_unwrap → adversarial_unpad
-    /// Returns original payload or empty if auth failed.
-    /// auth_result is set to the authentication outcome.
     std::vector<uint8_t> receive(
         const std::vector<uint8_t>& wire_data,
         const std::string& source_ip,
@@ -228,32 +233,27 @@ public:
         const std::string& ja3 = "",
         AuthResult* auth_result = nullptr);
 
-    /// Generate cover response for failed auth (server-side).
     std::vector<uint8_t> generate_cover_response();
 
-    // ===== Adaptive Control =====
-
-    /// Report a detection event (connection reset, timeout, etc.).
     void report_detection(const DetectionEvent& event);
-
-    /// Report successful communication.
     void report_success();
-
-    /// Get current threat level.
     ThreatLevel get_threat_level() const;
-
-    /// Manually set threat level (disables adaptive for this level).
     void set_threat_level(ThreatLevel level);
-
-    // ===== Strategy Management =====
 
     void set_strategy(const OrchestratorStrategy& strategy);
     OrchestratorStrategy get_strategy() const;
-
-    /// Apply a named preset.
     void apply_preset(const std::string& name);
 
-    // ===== Component Access =====
+    /// Derive and synchronize the adversarial dummy key from a shared secret.
+    /// Both peers calling this with the same secret will get the same dummy
+    /// marker, eliminating the need for separate key exchange.
+    ///
+    /// Uses: HKDF-SHA256(secret, salt="NCP-ADV-DUMMY-KEY-v1", len=32)
+    ///
+    /// Called automatically from the constructor and set_config() when
+    /// config_.shared_secret is non-empty. Can also be called manually
+    /// after E2E key exchange completes.
+    void synchronize_dummy_key(const std::vector<uint8_t>& shared_secret);
 
     AdversarialPadding& adversarial();
     FlowShaper& flow_shaper();
@@ -265,11 +265,20 @@ public:
     const ProbeResist& probe_resist() const;
     const TrafficMimicry& mimicry() const;
 
-    // ===== Config & Stats =====
+    // Phase 2+: TLS Fingerprint access
+    ncp::TLSFingerprint& tls_fingerprint();
+    const ncp::TLSFingerprint& tls_fingerprint() const;
+
+    // Phase 4A: Advanced DPI bypass access (may be nullptr if disabled)
+    AdvancedDPIBypass* advanced_dpi();
+    const AdvancedDPIBypass* advanced_dpi() const;
+
+    // Phase 3D: ECH config access
+    const ECH::ECHConfig& ech_config() const;
+    bool is_ech_initialized() const;
 
     void set_config(const OrchestratorConfig& config);
     OrchestratorConfig get_config() const;
-
     OrchestratorStats get_stats() const;
     void reset_stats();
 
@@ -280,6 +289,21 @@ private:
     OrchestratorStrategy strategy_for_threat(ThreatLevel level);
     void health_monitor_func();
     void update_overhead_stats();
+
+    // FIX #73: Unified send pipeline — snapshots strategy under lock
+    std::vector<uint8_t> prepare_payload(
+        const std::vector<uint8_t>& payload,
+        OrchestratorStrategy& snapshot);
+
+    // FIX #74: Lock-free inner impl (must be called with strategy_mutex_ held)
+    void report_success_locked();
+
+    // Phase 4A: Initialize/rebuild AdvancedDPIBypass from current strategy
+    void init_advanced_dpi_();
+    void rebuild_advanced_dpi_();
+
+    /// Internal: derive dummy key from shared_secret (caller must hold strategy_mutex_)
+    void derive_dummy_key_from_secret_(const std::vector<uint8_t>& secret);
 
     OrchestratorConfig config_;
     OrchestratorStats stats_;
@@ -292,13 +316,22 @@ private:
     ProbeResist probe_resist_;
     TrafficMimicry mimicry_;
 
-    // Adaptive state
+    // Phase 2+: TLS Fingerprint component
+    ncp::TLSFingerprint tls_fingerprint_;
+
+    // Phase 4A: Advanced DPI bypass component (owned)
+    std::unique_ptr<AdvancedDPIBypass> advanced_dpi_;
+
+    // Phase 3D: ECH state
+    ECH::ECHConfig ech_config_;
+    bool ech_initialized_ = false;
+    std::vector<uint8_t> ech_private_key_;
+
     int consecutive_failures_ = 0;
     int consecutive_successes_ = 0;
     std::chrono::steady_clock::time_point last_escalation_;
     mutable std::mutex strategy_mutex_;
 
-    // Background
     std::atomic<bool> running_{false};
     OrchestratorSendCallback send_callback_;
     std::thread health_thread_;

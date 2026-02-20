@@ -222,10 +222,14 @@ SecureString hash_password(
     }
 
     constexpr size_t hash_len = 32;
-    char hash[hash_len];
+
+    // SECURITY FIX: Use SecureMemory instead of stack buffer so the hash
+    // is automatically zeroed when hash_buf goes out of scope.
+    // Previously: char hash[hash_len] leaked secret material on the stack.
+    SecureMemory hash_buf(hash_len);
 
     if (crypto_pwhash(
-            reinterpret_cast<unsigned char*>(hash), hash_len,
+            hash_buf.data(), hash_len,
             password.c_str(), password.length(),
             salt.data(),
             crypto_pwhash_OPSLIMIT_INTERACTIVE,
@@ -234,7 +238,8 @@ SecureString hash_password(
         return SecureString();
     }
 
-    return SecureString(hash, hash_len);
+    // Copy into SecureString before hash_buf destructor zeros the memory
+    return SecureString(reinterpret_cast<const char*>(hash_buf.data()), hash_len);
 }
 
 } // namespace SecureOps

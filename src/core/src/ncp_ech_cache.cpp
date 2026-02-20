@@ -213,8 +213,11 @@ std::optional<ECHConfig> ECHConfigCache::get(const std::string& domain) {
 
     // Check expiration
     if (impl_->is_expired(entry)) {
+        // FIX: Save list iterator BEFORE erasing from map,
+        // because `it` is invalidated by cache_map.erase().
+        auto list_it = it->second;
         impl_->cache_map.erase(it);
-        impl_->lru_list.erase(it->second);
+        impl_->lru_list.erase(list_it);
         impl_->stats.expirations++;
         impl_->stats.misses++;
         return std::nullopt;

@@ -169,8 +169,8 @@ constexpr uint8_t PROTOCOL_VERSION_MAJOR = 1;
 /// NCP protocol minor version
 constexpr uint8_t PROTOCOL_VERSION_MINOR = 2;
 
-/// NCP protocol patch version
-constexpr uint8_t PROTOCOL_VERSION_PATCH = 0;
+/// NCP protocol patch version (bumped for mimicry wire format v2)
+constexpr uint8_t PROTOCOL_VERSION_PATCH = 1;
 
 // ==================== Helper Functions ====================
 
