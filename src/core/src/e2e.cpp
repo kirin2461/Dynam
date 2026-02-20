@@ -11,6 +11,8 @@
 #include <openssl/ec.h>
 #include <openssl/obj_mac.h>
 #include <openssl/err.h>
+#include <openssl/param_build.h>
+#include <openssl/core_names.h>
 
 #ifdef HAVE_LIBOQS
 #include <oqs/oqs.h>
@@ -23,6 +25,9 @@ struct E2ESession::Impl {
     E2EConfig config;
     std::mutex mutex;
     std::string session_id;
+    
+    // FIX #61: Store last KEM ciphertext for Kyber sender to pass to receiver
+    SecureMemory last_kem_ciphertext;
 
     explicit Impl(const E2EConfig& cfg) : config(cfg) {
             generate_session_id();
@@ -187,7 +192,19 @@ KeyPair E2ESession::generate_key_pair() {
     return kp;
 }
 
-// ===== Phase 2.3: compute_shared_secret() — X448 + ECDH_P256 implementation =====
+// =============================================================================
+// FIX #60: ECDH_P256 compute_shared_secret() — EVP_PKEY_new_raw_private_key
+// does NOT support EVP_PKEY_EC. Use EVP_PKEY_fromdata() instead with
+// OSSL_PARAM for EC private key scalar.
+// =============================================================================
+
+// =============================================================================
+// FIX #61: Kyber1024 compute_shared_secret() — receiver must call decaps,
+// not encaps. We detect mode by checking peer_public_key size:
+//   - If size == kem->length_public_key → sender mode (encaps)
+//   - If size == kem->length_ciphertext → receiver mode (decaps)
+// Sender stores ciphertext in pImpl_->last_kem_ciphertext for transmission.
+// =============================================================================
 SecureMemory E2ESession::compute_shared_secret(
     const KeyPair& local_keypair,
     const std::vector<uint8_t>& peer_public_key
@@ -286,20 +303,51 @@ SecureMemory E2ESession::compute_shared_secret(
         }
 
         case KeyExchangeProtocol::ECDH_P256: {
-            // ECDH P-256 shared secret computation via OpenSSL EVP_PKEY_derive
-            if (peer_public_key.size() != 65) {  // Uncompressed point: 0x04 + 32 + 32
+            // FIX #60: ECDH P-256 shared secret computation via EVP_PKEY_fromdata()
+            // EVP_PKEY_new_raw_private_key(EVP_PKEY_EC) is NOT supported.
+            if (peer_public_key.size() != 65) {
                 throw std::runtime_error("Invalid peer public key size for ECDH P-256 (expected 65 bytes)");
             }
 
-            // Load local private key
-            EVP_PKEY* local_pkey = EVP_PKEY_new_raw_private_key(
-                EVP_PKEY_EC, nullptr,
-                local_keypair.private_key.data(),
-                local_keypair.private_key.size()
-            );
-            if (!local_pkey) {
-                throw std::runtime_error("Failed to load ECDH P-256 local private key");
+            // Build private key from raw scalar using OSSL_PARAM
+            OSSL_PARAM_BLD* param_bld = OSSL_PARAM_BLD_new();
+            if (!param_bld) {
+                throw std::runtime_error("Failed to create OSSL_PARAM_BLD for ECDH P-256");
             }
+
+            if (!OSSL_PARAM_BLD_push_utf8_string(param_bld, OSSL_PKEY_PARAM_GROUP_NAME, "prime256v1", 0)) {
+                OSSL_PARAM_BLD_free(param_bld);
+                throw std::runtime_error("Failed to set EC group name");
+            }
+
+            if (!OSSL_PARAM_BLD_push_BN_pad(param_bld, OSSL_PKEY_PARAM_PRIV_KEY,
+                                             local_keypair.private_key.data(),
+                                             local_keypair.private_key.size())) {
+                OSSL_PARAM_BLD_free(param_bld);
+                throw std::runtime_error("Failed to set EC private key");
+            }
+
+            OSSL_PARAM* params = OSSL_PARAM_BLD_to_param(param_bld);
+            OSSL_PARAM_BLD_free(param_bld);
+            if (!params) {
+                throw std::runtime_error("Failed to build OSSL_PARAM for ECDH P-256");
+            }
+
+            EVP_PKEY_CTX* pkey_ctx = EVP_PKEY_CTX_new_from_name(nullptr, "EC", nullptr);
+            if (!pkey_ctx) {
+                OSSL_PARAM_free(params);
+                throw std::runtime_error("Failed to create EC PKEY context");
+            }
+
+            EVP_PKEY* local_pkey = nullptr;
+            if (EVP_PKEY_fromdata_init(pkey_ctx) <= 0 ||
+                EVP_PKEY_fromdata(pkey_ctx, &local_pkey, EVP_PKEY_KEYPAIR, params) <= 0) {
+                EVP_PKEY_CTX_free(pkey_ctx);
+                OSSL_PARAM_free(params);
+                throw std::runtime_error("Failed to create EVP_PKEY from EC private key");
+            }
+            EVP_PKEY_CTX_free(pkey_ctx);
+            OSSL_PARAM_free(params);
 
             // Load peer public key
             EVP_PKEY* peer_pkey = EVP_PKEY_new_raw_public_key(
@@ -365,17 +413,45 @@ SecureMemory E2ESession::compute_shared_secret(
                     throw std::runtime_error("Failed to initialize Kyber1024 KEM");
                 }
 
-                SecureMemory ciphertext(kem->length_ciphertext);
-                SecureMemory shared_secret(kem->length_shared_secret);
+                // FIX #61: Detect sender vs receiver by peer_public_key size
+                // Sender: peer_public_key.size() == kem->length_public_key → encaps
+                // Receiver: peer_public_key.size() == kem->length_ciphertext → decaps
+                
+                if (peer_public_key.size() == kem->length_public_key) {
+                    // SENDER MODE: encapsulate with peer's public key
+                    SecureMemory ciphertext(kem->length_ciphertext);
+                    SecureMemory shared_secret(kem->length_shared_secret);
 
-                if (OQS_KEM_encaps(kem, ciphertext.data(), shared_secret.data(),
-                                   peer_public_key.data()) != OQS_SUCCESS) {
+                    if (OQS_KEM_encaps(kem, ciphertext.data(), shared_secret.data(),
+                                       peer_public_key.data()) != OQS_SUCCESS) {
+                        OQS_KEM_free(kem);
+                        throw std::runtime_error("Failed to encapsulate with Kyber1024");
+                    }
+
+                    // Store ciphertext for transmission to peer
+                    pImpl_->last_kem_ciphertext = ciphertext;
+                    
                     OQS_KEM_free(kem);
-                    throw std::runtime_error("Failed to encapsulate with Kyber1024");
-                }
+                    return shared_secret;
+                    
+                } else if (peer_public_key.size() == kem->length_ciphertext) {
+                    // RECEIVER MODE: decapsulate with local private key + received ciphertext
+                    SecureMemory shared_secret(kem->length_shared_secret);
 
-                OQS_KEM_free(kem);
-                return shared_secret;
+                    if (OQS_KEM_decaps(kem, shared_secret.data(),
+                                       peer_public_key.data(),  // Actually the ciphertext
+                                       local_keypair.private_key.data()) != OQS_SUCCESS) {
+                        OQS_KEM_free(kem);
+                        throw std::runtime_error("Failed to decapsulate with Kyber1024");
+                    }
+
+                    OQS_KEM_free(kem);
+                    return shared_secret;
+                    
+                } else {
+                    OQS_KEM_free(kem);
+                    throw std::runtime_error("Invalid Kyber1024 input size (expected public key or ciphertext)");
+                }
             }
 #else
             throw std::runtime_error("Kyber1024 requires liboqs - recompile with HAVE_LIBOQS");
@@ -385,6 +461,12 @@ SecureMemory E2ESession::compute_shared_secret(
     throw std::runtime_error("Unsupported key exchange protocol");
 }
 
+// =============================================================================
+// FIX #62: derive_keys() — use crypto_generichash for context instead of
+// zero-padding with memset. Zero-padding causes weak domain separation when
+// contexts share prefixes ("tx" vs "txdata" → first 2 bytes identical).
+// Hash the context to produce a deterministic 8-byte value.
+// =============================================================================
 SecureMemory E2ESession::derive_keys(
     const SecureMemory& shared_secret,
     const std::string& context,
@@ -396,11 +478,12 @@ SecureMemory E2ESession::derive_keys(
 
     SecureMemory derived_key(key_length);
 
-    // Context must be exactly 8 bytes for crypto_kdf_derive_from_key
+    // FIX #62: Hash context to 8 bytes for KDF instead of zero-padding
+    // This ensures different contexts produce different KDF outputs even with short strings
     char kdf_context[crypto_kdf_CONTEXTBYTES];
-    std::memset(kdf_context, 0, sizeof(kdf_context));
-    size_t copy_len = std::min(context.size(), sizeof(kdf_context));
-    std::memcpy(kdf_context, context.data(), copy_len);
+    crypto_generichash(reinterpret_cast<uint8_t*>(kdf_context), sizeof(kdf_context),
+                       reinterpret_cast<const uint8_t*>(context.data()), context.size(),
+                       nullptr, 0);
 
     // Master key from shared secret
     uint8_t master_key[crypto_kdf_KEYBYTES];
