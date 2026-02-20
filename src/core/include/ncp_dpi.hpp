@@ -346,6 +346,19 @@ enum class LogLevel {
 using LogCallback = std::function<void(LogLevel, const std::string&)>;
 using ConfigChangeCallback = std::function<void(const DPIConfig&, const DPIConfig&)>;
 
+/**
+ * @brief Transform callback invoked on outgoing payload BEFORE fragmentation.
+ *
+ * Receives raw payload bytes, returns transformed bytes that will then be
+ * fragmented/split by the DPIBypass send pipeline.  If the callback returns
+ * an empty vector the original payload is used unchanged.
+ *
+ * Thread-safety: the callback may be invoked from any connection-handling
+ * thread.  Implementations must be re-entrant.
+ */
+using TransformCallback = std::function<std::vector<uint8_t>(
+    const std::vector<uint8_t>& payload)>;
+
 struct DPIStats {
     std::atomic<uint64_t> packets_total{0};
     std::atomic<uint64_t> packets_modified{0};
@@ -423,6 +436,20 @@ public:
     void set_log_callback(LogCallback callback);
     void set_config_change_callback(ConfigChangeCallback callback);
 
+    /**
+     * @brief Register a transform callback for the outgoing send pipeline.
+     *
+     * The callback is invoked on every outgoing payload BEFORE TCP
+     * fragmentation / advanced DPI processing.  This allows the
+     * ProtocolOrchestrator (or any external layer) to inject adversarial
+     * padding, mimicry wrapping, etc. into the DPIBypass send path.
+     *
+     * Pass nullptr / empty std::function to clear the callback.
+     *
+     * Thread-safe: may be called while the bypass is running.
+     */
+    void set_transform_callback(TransformCallback callback);
+
 private:
     void log(LogLevel level, const std::string& message);
     void notify_config_change(const DPIConfig& old_cfg, const DPIConfig& new_cfg);
@@ -438,6 +465,9 @@ private:
 
     mutable std::mutex config_cb_mutex_;
     ConfigChangeCallback config_change_callback_;
+
+    mutable std::mutex transform_cb_mutex_;
+    TransformCallback transform_callback_;
 
     DPIStats stats_;
 };
