@@ -200,6 +200,13 @@ public:
     void encrypt_stuffing(uint8_t* data, size_t len, uint64_t packet_index);
     void decrypt_stuffing(uint8_t* data, size_t len, uint64_t packet_index);
 
+    // FIX #111: Per-segment packet type counts.
+    // Written by generate_segment(), read by HLSStegChannel::get_encoded_segment()
+    // to propagate into HLSStegStats under stats_mutex_.
+    // Not thread-safe on their own — caller must synchronize.
+    uint64_t last_segment_null_packets_ = 0;
+    uint64_t last_segment_af_packets_ = 0;
+
 private:
     HLSStegConfig config_;
     std::unique_ptr<TSPacketBuilder> builder_;
