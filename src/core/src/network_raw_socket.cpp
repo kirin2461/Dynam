@@ -20,6 +20,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <poll.h>
 #endif
 
 namespace ncp {
@@ -138,12 +139,38 @@ public:
         capture_thread_ = std::thread([this]() {
             uint8_t buf[65535];
             while (capturing_) {
+                // FIX: Use poll()/select() with 500ms timeout before recvfrom()
+                // so the loop can check capturing_ flag and exit promptly on
+                // stop_capture() instead of blocking indefinitely in recvfrom().
 #ifdef _WIN32
+                fd_set read_fds;
+                FD_ZERO(&read_fds);
+                FD_SET(sock_, &read_fds);
+                struct timeval tv;
+                tv.tv_sec = 0;
+                tv.tv_usec = 500000; // 500ms
+                int sel = select(0, &read_fds, nullptr, nullptr, &tv);
+                if (sel <= 0) {
+                    continue; // timeout or error — re-check capturing_ flag
+                }
+
                 struct sockaddr_in from;
                 int fromlen = sizeof(from);
                 int n = recvfrom(sock_, (char*)buf, sizeof(buf), 0,
                                  (struct sockaddr*)&from, &fromlen);
 #else
+                struct pollfd pfd;
+                pfd.fd = sock_;
+                pfd.events = POLLIN;
+                pfd.revents = 0;
+                int poll_ret = poll(&pfd, 1, 500); // 500ms timeout
+                if (poll_ret <= 0) {
+                    continue; // timeout or error — re-check capturing_ flag
+                }
+                if (!(pfd.revents & POLLIN)) {
+                    continue;
+                }
+
                 struct sockaddr_in from;
                 socklen_t fromlen = sizeof(from);
                 ssize_t n = recvfrom(sock_, buf, sizeof(buf), 0,
@@ -304,7 +331,8 @@ public:
     bool requires_admin() const override { return false; }
 
 private:
-    bool initialized_ = false;
+    // FIX: Use atomic<bool> for thread-safe reads from multiple threads
+    std::atomic<bool> initialized_{false};
     std::string last_error_;
 };
 
