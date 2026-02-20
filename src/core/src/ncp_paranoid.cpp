@@ -15,6 +15,8 @@
 #pragma comment(lib, "fwpuclnt.lib")
 #include <io.h>
 #include <fcntl.h>
+#include <shlobj.h>
+#pragma comment(lib, "shell32.lib")
 #else
 #include <sys/mman.h>
 #include <sys/resource.h>
@@ -24,9 +26,89 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <glob.h>
+#include <pwd.h>
 #endif
 
 namespace ncp {
+
+// ---- Safe data directory resolution ------------------------------------
+// Returns the NCP-specific data directory. Never returns a dangerous path
+// like $HOME, /etc, /tmp, or C:\Windows.
+
+static std::string get_ncp_data_directory() {
+    std::string base_dir;
+
+#ifdef _WIN32
+    // Use %LOCALAPPDATA%\ncp\data
+    char appdata[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathA(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, appdata))) {
+        base_dir = std::string(appdata) + "\\ncp\\data";
+    } else {
+        // Fallback: use relative path
+        base_dir = ".\\ncp_data";
+    }
+#else
+    // Use $XDG_DATA_HOME/ncp or ~/.local/share/ncp
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    if (xdg && xdg[0] != '\0') {
+        base_dir = std::string(xdg) + "/ncp";
+    } else {
+        const char* home = std::getenv("HOME");
+        if (!home || home[0] == '\0') {
+            struct passwd* pw = getpwuid(getuid());
+            if (pw) home = pw->pw_dir;
+        }
+        if (home && home[0] != '\0') {
+            base_dir = std::string(home) + "/.local/share/ncp";
+        } else {
+            base_dir = "./ncp_data";
+        }
+    }
+#endif
+
+    return base_dir;
+}
+
+// Validate that the path is not a dangerous system directory
+static bool is_safe_shred_directory(const std::string& dir) {
+    if (dir.empty()) return false;
+
+    // Normalize: remove trailing slashes
+    std::string normalized = dir;
+    while (normalized.size() > 1 &&
+           (normalized.back() == '/' || normalized.back() == '\\')) {
+        normalized.pop_back();
+    }
+
+#ifdef _WIN32
+    // Block dangerous Windows paths (case-insensitive)
+    std::string lower = normalized;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+    if (lower == "c:" || lower == "c:\\" || lower == "c:/") return false;
+    if (lower.find("c:\\windows") == 0) return false;
+    if (lower.find("c:\\program files") == 0) return false;
+    if (lower.find("c:\\users") == 0 && lower.find("\\ncp") == std::string::npos) return false;
+
+    // Must contain "ncp" somewhere in path as a safety check
+    return lower.find("ncp") != std::string::npos;
+#else
+    // Block dangerous Unix paths
+    if (normalized == "/" || normalized == "/etc" || normalized == "/tmp" ||
+        normalized == "/var" || normalized == "/usr" || normalized == "/bin" ||
+        normalized == "/sbin" || normalized == "/lib" || normalized == "/boot" ||
+        normalized == "/dev" || normalized == "/proc" || normalized == "/sys") {
+        return false;
+    }
+
+    // Block bare $HOME (but allow $HOME/.local/share/ncp)
+    const char* home = std::getenv("HOME");
+    if (home && normalized == std::string(home)) return false;
+
+    // Must contain "ncp" somewhere in path as a safety check
+    return normalized.find("ncp") != std::string::npos;
+#endif
+}
 
 // ---- ParanoidMode::Impl (pimpl idiom) ---------------------------------
 
@@ -42,6 +124,40 @@ struct ParanoidMode::Impl {
     HANDLE wfp_engine_handle = nullptr;
     std::vector<UINT64> wfp_filter_ids;
 #endif
+
+    // Safe cleanup: clear all fields using proper C++ methods
+    // instead of sodium_memzero which would corrupt vtables/internal state
+    void safe_wipe() {
+        // Clear strings and vectors (calls destructors properly)
+        for (auto& circuit : active_circuits) {
+            // Overwrite string content before clearing
+            if (!circuit.empty()) {
+                sodium_memzero(&circuit[0], circuit.size());
+            }
+        }
+        active_circuits.clear();
+        active_circuits.shrink_to_fit();
+
+        for (auto& node : bridge_nodes) {
+            if (!node.empty()) {
+                sodium_memzero(&node[0], node.size());
+            }
+        }
+        bridge_nodes.clear();
+        bridge_nodes.shrink_to_fit();
+
+        // Reset primitives
+        cover_traffic_running = false;
+        kill_switch_active = false;
+        memory_protection_enabled = false;
+        last_rotation = {};
+
+#ifdef _WIN32
+        wfp_filter_ids.clear();
+        wfp_filter_ids.shrink_to_fit();
+        wfp_engine_handle = nullptr;
+#endif
+    }
 };
 
 // ---- Construction / Destruction ----------------------------------------
@@ -674,50 +790,68 @@ void ParanoidMode::execute_panic_protocol() {
     destroy_all_evidence();
 }
 
-// ===== Phase 2.2: destroy_all_evidence() — FULL IMPLEMENTATION =====
+// ===== SECURITY FIX: destroy_all_evidence() =====
+// Previously used getcwd() to shred *.db, *.log, *.conf in CWD.
+// If CWD was $HOME or /etc, this would destroy user/system files.
+//
+// Now uses get_ncp_data_directory() which resolves to a safe,
+// NCP-specific path, and validates it with is_safe_shred_directory()
+// before any file operations.
+//
+// Also: replaced sodium_memzero(impl_.get(), sizeof(Impl)) with
+// impl_->safe_wipe() to avoid UB from zeroing live C++ objects
+// (std::string, std::vector have internal pointers/vtables that
+// must not be corrupted before their destructors run).
 void ParanoidMode::destroy_all_evidence() {
-    // Get current working directory
-    char cwd[1024];
+    // Resolve the NCP data directory — NOT cwd
+    std::string data_dir = get_ncp_data_directory();
+
+    // Safety check: refuse to shred if path is dangerous
+    if (!is_safe_shred_directory(data_dir)) {
+        // Abort shredding — the path is too dangerous
+        // Still wipe in-memory state below
+    } else {
 #ifdef _WIN32
-    DWORD len = GetCurrentDirectoryA(sizeof(cwd), cwd);
-    if (len == 0 || len > sizeof(cwd)) return;
-
-    // Patterns to shred: *.db, *.log, *.conf
-    const char* patterns[] = {"*.db", "*.log", "*.conf"};
-    for (const char* pattern : patterns) {
-        std::string search_pattern = std::string(cwd) + "\\" + pattern;
-        WIN32_FIND_DATAA fd;
-        HANDLE hFind = FindFirstFileA(search_pattern.c_str(), &fd);
-        if (hFind != INVALID_HANDLE_VALUE) {
-            do {
-                if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-                    std::string full_path = std::string(cwd) + "\\" + fd.cFileName;
-                    shred_file(full_path, forensic_resistance_.overwrite_passes);
-                }
-            } while (FindNextFileA(hFind, &fd));
-            FindClose(hFind);
-        }
-    }
-#else
-    if (getcwd(cwd, sizeof(cwd)) == nullptr) return;
-
-    // Patterns to shred: *.db, *.log, *.conf
-    const char* patterns[] = {"*.db", "*.log", "*.conf"};
-    for (const char* pattern : patterns) {
-        std::string glob_pattern = std::string(cwd) + "/" + pattern;
-        glob_t globbuf;
-        if (glob(glob_pattern.c_str(), GLOB_NOSORT, nullptr, &globbuf) == 0) {
-            for (size_t i = 0; i < globbuf.gl_pathc; ++i) {
-                shred_file(globbuf.gl_pathv[i], forensic_resistance_.overwrite_passes);
+        const char* patterns[] = {"\\*.db", "\\*.log", "\\*.conf"};
+        for (const char* pattern : patterns) {
+            std::string search_pattern = data_dir + pattern;
+            WIN32_FIND_DATAA fd;
+            HANDLE hFind = FindFirstFileA(search_pattern.c_str(), &fd);
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                        std::string full_path = data_dir + "\\" + fd.cFileName;
+                        shred_file(full_path, forensic_resistance_.overwrite_passes);
+                    }
+                } while (FindNextFileA(hFind, &fd));
+                FindClose(hFind);
             }
-            globfree(&globbuf);
         }
-    }
+#else
+        const char* patterns[] = {"/*.db", "/*.log", "/*.conf"};
+        for (const char* pattern : patterns) {
+            std::string glob_pattern = data_dir + pattern;
+            glob_t globbuf;
+            if (glob(glob_pattern.c_str(), GLOB_NOSORT, nullptr, &globbuf) == 0) {
+                for (size_t i = 0; i < globbuf.gl_pathc; ++i) {
+                    shred_file(globbuf.gl_pathv[i], forensic_resistance_.overwrite_passes);
+                }
+                globfree(&globbuf);
+            }
+        }
 #endif
+    }
 
-    // Wipe impl_ memory
+    // FIX: Use safe_wipe() instead of sodium_memzero(impl_.get(), sizeof(Impl))
+    // sodium_memzero on a live C++ object with std::string/std::vector fields
+    // corrupts internal pointers and vtables. When unique_ptr<Impl> then calls
+    // ~Impl(), the destructors of those corrupted fields invoke UB (double-free,
+    // wild pointer dereference, etc).
+    //
+    // safe_wipe() uses proper C++ methods (clear(), shrink_to_fit()) to release
+    // memory, and sodium_memzero() only on raw string content buffers.
     if (impl_) {
-        sodium_memzero(impl_.get(), sizeof(Impl));
+        impl_->safe_wipe();
     }
 
     // Call system-wide trace cleanup
