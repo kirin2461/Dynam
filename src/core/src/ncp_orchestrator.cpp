@@ -184,10 +184,20 @@ void ProtocolOrchestrator::stop() {
     if (health_thread_.joinable()) {
         health_thread_.join();
     }
+
+    // Issue #57: reset TLS session so next start() re-emits handshake
+    mimicry_.reset_tls_session();
 }
 
 bool ProtocolOrchestrator::is_running() const {
     return running_.load();
+}
+
+// ===== Helper: is current profile HTTPS-based? =====
+
+static bool is_https_profile(TrafficMimicry::MimicProfile p) {
+    return p == TrafficMimicry::MimicProfile::HTTPS_APPLICATION ||
+           p == TrafficMimicry::MimicProfile::HTTPS_CLIENT_HELLO;
 }
 
 // ===== Client Pipeline: send =====
@@ -212,8 +222,30 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
     }
 
     // Step 2: Protocol Mimicry (wrap in HTTPS/DNS/QUIC)
+    //
+    // Issue #57 FIX: For HTTPS profiles, use the session-aware wrapper
+    // so that the first packet on a connection automatically gets a
+    // full TLS handshake preamble (CH → SH → CCS → Finished) before
+    // Application Data. This prevents the "0x17 without 0x16" anomaly.
+    std::vector<OrchestratedPacket> preamble_packets;
+
     if (current_strategy_.enable_mimicry) {
-        data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
+        if (is_https_profile(current_strategy_.mimic_profile)) {
+            // TLS session-aware path
+            std::vector<std::vector<uint8_t>> handshake_preamble;
+            data = mimicry_.wrap_tls_session_aware(data, handshake_preamble);
+
+            // Handshake records must be sent BEFORE the Application Data
+            for (auto& hs_record : handshake_preamble) {
+                OrchestratedPacket hs_op;
+                hs_op.data = std::move(hs_record);
+                stats_.bytes_on_wire.fetch_add(hs_op.data.size());
+                preamble_packets.push_back(std::move(hs_op));
+            }
+        } else {
+            // Non-TLS profiles (DNS, QUIC, etc.) — direct wrap
+            data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
+        }
     }
 
     // Step 3: Prepend auth token (Phase 3 client-side)
@@ -226,6 +258,12 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
     if (current_strategy_.enable_flow_shaping) {
         auto shaped = flow_shaper_.shape_sync(data, true);
         std::vector<OrchestratedPacket> result;
+
+        // Preamble first (handshake records bypass flow shaping)
+        result.insert(result.end(),
+                      std::make_move_iterator(preamble_packets.begin()),
+                      std::make_move_iterator(preamble_packets.end()));
+
         for (auto& sp : shaped) {
             OrchestratedPacket op;
             op.data = std::move(sp.data);
@@ -238,12 +276,18 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         return result;
     }
 
-    // No flow shaping — return single packet
+    // No flow shaping — return preamble + single data packet
+    std::vector<OrchestratedPacket> result;
+    result.insert(result.end(),
+                  std::make_move_iterator(preamble_packets.begin()),
+                  std::make_move_iterator(preamble_packets.end()));
+
     OrchestratedPacket op;
     op.data = std::move(data);
     stats_.bytes_on_wire.fetch_add(op.data.size());
+    result.push_back(std::move(op));
     update_overhead_stats();
-    return {op};
+    return result;
 }
 
 void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
@@ -254,16 +298,36 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 
     std::vector<uint8_t> data = payload;
 
-    // Steps 1-3 synchronous
+    // Step 1: Adversarial Padding
     if (current_strategy_.enable_adversarial) {
         data = adversarial_.pad(data);
     }
+
+    // Step 2: Protocol Mimicry (TLS session-aware for HTTPS)
+    // Issue #57 FIX: same session-aware logic as sync send()
+    std::vector<std::vector<uint8_t>> handshake_preamble;
+
     if (current_strategy_.enable_mimicry) {
-        data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
+        if (is_https_profile(current_strategy_.mimic_profile)) {
+            data = mimicry_.wrap_tls_session_aware(data, handshake_preamble);
+        } else {
+            data = mimicry_.wrap_payload(data, current_strategy_.mimic_profile);
+        }
     }
+
+    // Step 3: Auth token
     if (current_strategy_.enable_probe_resist && !config_.is_server) {
         auto token = probe_resist_.generate_client_auth();
         data.insert(data.begin(), token.begin(), token.end());
+    }
+
+    // Send handshake preamble first (synchronously via callback)
+    if (send_callback_) {
+        for (auto& hs_record : handshake_preamble) {
+            OrchestratedPacket hs_op;
+            hs_op.data = std::move(hs_record);
+            send_callback_(hs_op);
+        }
     }
 
     // Step 4: Enqueue for async flow shaping
@@ -431,6 +495,10 @@ void ProtocolOrchestrator::escalate(const std::string& reason) {
     auto new_strategy = strategy_for_threat(threat_level_);
     apply_strategy(new_strategy);
 
+    // Issue #57: reset TLS session on strategy change so new
+    // handshake sequence matches the new mimicry config
+    mimicry_.reset_tls_session();
+
     if (config_.on_strategy_change) {
         config_.on_strategy_change(old_level, threat_level_, reason);
     }
@@ -448,6 +516,9 @@ void ProtocolOrchestrator::deescalate(const std::string& reason) {
 
     auto new_strategy = strategy_for_threat(threat_level_);
     apply_strategy(new_strategy);
+
+    // Issue #57: reset TLS session on strategy change
+    mimicry_.reset_tls_session();
 
     if (config_.on_strategy_change) {
         config_.on_strategy_change(old_level, threat_level_, reason);
@@ -481,6 +552,8 @@ void ProtocolOrchestrator::set_threat_level(ThreatLevel level) {
     stats_.current_threat = level;
     auto new_strategy = strategy_for_threat(level);
     apply_strategy(new_strategy);
+    // Issue #57: reset TLS session on manual override
+    mimicry_.reset_tls_session();
     if (config_.on_strategy_change && old != level) {
         config_.on_strategy_change(old, level, "Manual override");
     }
@@ -517,6 +590,8 @@ void ProtocolOrchestrator::apply_strategy(const OrchestratorStrategy& strategy) 
 void ProtocolOrchestrator::set_strategy(const OrchestratorStrategy& strategy) {
     std::lock_guard<std::mutex> lock(strategy_mutex_);
     apply_strategy(strategy);
+    // Issue #57: reset TLS session when strategy changes
+    mimicry_.reset_tls_session();
 }
 
 OrchestratorStrategy ProtocolOrchestrator::get_strategy() const {
@@ -529,6 +604,8 @@ void ProtocolOrchestrator::apply_preset(const std::string& name) {
     else if (name == "balanced") apply_strategy(OrchestratorStrategy::balanced());
     else if (name == "performance") apply_strategy(OrchestratorStrategy::performance());
     else if (name == "max_compat") apply_strategy(OrchestratorStrategy::max_compat());
+    // Issue #57: reset TLS session on preset change
+    mimicry_.reset_tls_session();
 }
 
 // ===== Component Access =====
