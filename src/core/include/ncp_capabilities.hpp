@@ -10,6 +10,7 @@
 #include <map>
 #include <cstring>
 #include <algorithm>
+#include <functional>
 
 namespace ncp {
 
@@ -26,9 +27,12 @@ enum class E2EMessageType : uint8_t {
     CAPS_CONFIRM     = 0x02,   // Confirmation HMAC of negotiated config
 };
 
-/// Magic prefix for capabilities-aware messages.
-static constexpr uint8_t NCP_MSG_MAGIC[3] = {'N', 'C', 'P'};
-static constexpr size_t  NCP_MSG_TAG_SIZE = 4;  // magic[3] + type[1]
+// FIX: inline constexpr (C++17) instead of static constexpr
+// static constexpr at namespace scope = internal linkage = each TU gets
+// its own copy. If address is taken (memcmp, etc.) → ODR violation.
+// inline constexpr = single definition across all TUs.
+inline constexpr uint8_t NCP_MSG_MAGIC[3] = {'N', 'C', 'P'};
+inline constexpr size_t  NCP_MSG_TAG_SIZE = 4;  // magic[3] + type[1]
 
 // ======================================================================
 //  Stage Flags — bitmap of pipeline stages
@@ -119,7 +123,7 @@ inline const char* stage_flag_name(StageFlag flag) {
 // ======================================================================
 
 /// Maximum size of a single stage config blob (prevents DoS).
-static constexpr uint16_t MAX_STAGE_CONFIG_SIZE = 4096;
+inline constexpr uint16_t MAX_STAGE_CONFIG_SIZE = 4096;
 
 struct StageConfigEntry {
     StageFlag stage_id;
@@ -139,9 +143,9 @@ struct StageConfigEntry {
 //      [stage_id_bits:4][config_len:2][config_data:N]  (max N=4096)
 //    [reserved:16]  — zero-filled, for future extensions
 
-static constexpr uint16_t NCP_CAPS_VERSION = 1;
-static constexpr size_t   NCP_MORPH_SEED_SIZE = 32;
-static constexpr size_t   NCP_CAPS_RESERVED_SIZE = 16;
+inline constexpr uint16_t NCP_CAPS_VERSION = 1;
+inline constexpr size_t   NCP_MORPH_SEED_SIZE = 32;
+inline constexpr size_t   NCP_CAPS_RESERVED_SIZE = 16;
 
 struct NCPCapabilities {
     uint16_t  version = NCP_CAPS_VERSION;
@@ -349,7 +353,7 @@ struct NCPCapabilities {
 // ======================================================================
 
 struct NegotiatedConfig {
-    uint16_t version = NCP_CAPS_VERSION;           // FIX: Include in HMAC
+    uint16_t version = NCP_CAPS_VERSION;           // Included in HMAC
     StageFlag active_stages = StageFlag::NONE;     // Intersection of both peers
 
     // Resolved parameters
@@ -367,7 +371,7 @@ struct NegotiatedConfig {
 
     /// Serialize for confirmation HMAC computation.
     /// Deterministic byte representation of the negotiated config.
-    /// FIX: Now includes version to prevent cross-version HMAC collisions.
+    /// Includes version to prevent cross-version HMAC collisions.
     std::vector<uint8_t> serialize_for_hmac() const {
         std::vector<uint8_t> out;
 
@@ -512,19 +516,6 @@ struct MorphSeedDerivation {
 // ======================================================================
 //  Helper: derive_and_apply_morph_seed
 // ======================================================================
-//
-//  Combines salt construction + HKDF derivation into a single call.
-//  Prevents callers from forgetting the HKDF step after negotiate().
-//
-//  Usage:
-//    auto negotiated = negotiate(local_caps, peer_caps);
-//    derive_and_apply_morph_seed(
-//        negotiated, shared_secret,
-//        local_caps.morph_seed, peer_caps.morph_seed,
-//        is_initiator,
-//        hkdf_fn  // = E2EUtils::derive_key or equivalent
-//    );
-//    // negotiated.morph_seed is now set
 
 using HkdfDeriveFn = std::function<std::vector<uint8_t>(
     const uint8_t* ikm, size_t ikm_len,
@@ -541,9 +532,9 @@ inline void derive_and_apply_morph_seed(
     HkdfDeriveFn hkdf_fn) {
 
     auto salt = MorphSeedDerivation::build_salt(local_seed, peer_seed, is_initiator);
-    auto info = MorphSeedDerivation::info();
+    auto hkdf_info = MorphSeedDerivation::info();
     auto derived = hkdf_fn(shared_secret, shared_secret_len,
-                           salt, info, NCP_MORPH_SEED_SIZE);
+                           salt, hkdf_info, NCP_MORPH_SEED_SIZE);
 
     size_t copy_len = std::min(derived.size(),
                                static_cast<size_t>(NCP_MORPH_SEED_SIZE));
@@ -553,23 +544,6 @@ inline void derive_and_apply_morph_seed(
 // ======================================================================
 //  Capabilities Exchange Protocol
 // ======================================================================
-//
-//  Sequence (2 RTT total):
-//
-//  1. Both peers reach SessionEstablished (after E2E key exchange)
-//  2. Both peers immediately encrypt(serialize(local_caps))
-//     with NCP magic + E2EMessageType::CAPABILITIES tag prepended
-//  3. Both peers wait for peer capabilities (5s timeout)
-//  4. negotiate(local_caps, peer_caps) → NegotiatedConfig
-//  5. derive_and_apply_morph_seed(negotiated, ...)
-//  6. Both peers send HMAC(session_key, serialize(negotiated))
-//     with NCP magic + E2EMessageType::CAPS_CONFIRM tag
-//  7. Both peers verify peer's HMAC matches their own
-//  8. If HMAC mismatch → abort (MITM detected) or fallback
-//  9. apply_negotiated_config(negotiated) → Orchestrator
-//
-//  If allow_in_band_negotiation = false (default):
-//    Skip steps 2-8, use pre-shared OrchestratorConfig directly.
 
 struct CapabilitiesExchange {
 
