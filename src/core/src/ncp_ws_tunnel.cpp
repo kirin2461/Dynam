@@ -3,6 +3,7 @@
 #include <libwebsockets.h>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
 #include <queue>
 #include <atomic>
 #include <chrono>
@@ -34,6 +35,15 @@ struct WSTunnel::Impl {
     
     int reconnect_count = 0;
     
+    // FIX #22: Reconnect thread — persistent joinable thread instead of
+    // detached threads. Uses a condition_variable to sleep for the backoff
+    // delay, which can be interrupted by stop() for clean shutdown.
+    std::thread reconnect_thread;
+    std::mutex reconnect_mutex;
+    std::condition_variable reconnect_cv;
+    bool reconnect_pending = false;
+    int reconnect_delay = 0;
+    
     // lws protocols
     static const struct lws_protocols protocols[];
     
@@ -44,6 +54,7 @@ struct WSTunnel::Impl {
     void service_loop();
     bool connect_to_server();
     bool schedule_reconnect();
+    void reconnect_loop();
     
     // Parse URL into host, port, path, ssl flag
     struct ParsedURL {
@@ -185,6 +196,54 @@ void WSTunnel::Impl::service_loop()
 }
 
 // ---------------------------------------------------------------------------
+// FIX #22: Reconnect loop — persistent joinable thread
+// Waits on a condition_variable for reconnect requests. The CV is
+// also notified on stop() so the thread wakes up and exits cleanly.
+// No detached threads, no raw `this` capture in lambdas.
+// ---------------------------------------------------------------------------
+void WSTunnel::Impl::reconnect_loop()
+{
+    while (running.load()) {
+        std::unique_lock<std::mutex> lock(reconnect_mutex);
+        
+        // Wait until a reconnect is requested or we're shutting down
+        reconnect_cv.wait(lock, [this] {
+            return reconnect_pending || !running.load();
+        });
+        
+        if (!running.load()) break;
+        
+        // Grab the delay and reset the flag
+        int delay = reconnect_delay;
+        reconnect_pending = false;
+        lock.unlock();
+        
+        // Sleep for backoff delay, but in small increments so we can
+        // respond to stop() quickly (check running every 100ms)
+        auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(delay);
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (!running.load()) return;
+            // Use CV wait_until for interruptible sleep
+            std::unique_lock<std::mutex> sleep_lock(reconnect_mutex);
+            auto wake_time = std::min(
+                deadline,
+                std::chrono::steady_clock::now() + std::chrono::milliseconds(100)
+            );
+            reconnect_cv.wait_until(sleep_lock, wake_time, [this] {
+                return !running.load();
+            });
+            if (!running.load()) return;
+        }
+        
+        // Attempt reconnection
+        if (running.load()) {
+            connect_to_server();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Connect / reconnect
 // ---------------------------------------------------------------------------
 bool WSTunnel::Impl::connect_to_server()
@@ -216,6 +275,9 @@ bool WSTunnel::Impl::connect_to_server()
     return wsi != nullptr;
 }
 
+// FIX #22: schedule_reconnect() no longer spawns detached threads.
+// Instead it sets a flag + delay and notifies the persistent reconnect
+// thread via condition_variable.
 bool WSTunnel::Impl::schedule_reconnect()
 {
     if (!running.load()) return false;
@@ -231,11 +293,12 @@ bool WSTunnel::Impl::schedule_reconnect()
     int delay = config.reconnect_delay_ms * (1 << std::min(reconnect_count - 1, 5));
     delay = std::min(delay, 30000);
     
-    std::thread([this, delay]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(delay));
-        if (running.load())
-            connect_to_server();
-    }).detach();
+    {
+        std::lock_guard<std::mutex> lock(reconnect_mutex);
+        reconnect_delay = delay;
+        reconnect_pending = true;
+    }
+    reconnect_cv.notify_one();
     
     return true;
 }
@@ -278,9 +341,15 @@ bool WSTunnel::start()
     if (!impl_->context) return false;
     impl_->running = true;
     
+    // FIX #22: Start persistent reconnect thread (joinable, no detach)
+    impl_->reconnect_thread = std::thread(&Impl::reconnect_loop, impl_.get());
+    
     // Connect to relay server
     if (!impl_->connect_to_server()) {
         impl_->running = false;
+        impl_->reconnect_cv.notify_all();
+        if (impl_->reconnect_thread.joinable())
+            impl_->reconnect_thread.join();
         return false;
     }
     
@@ -293,6 +362,12 @@ void WSTunnel::stop()
 {
     impl_->running = false;
     impl_->connected = false;
+    
+    // FIX #22: Wake up reconnect thread so it exits immediately
+    impl_->reconnect_cv.notify_all();
+    
+    if (impl_->reconnect_thread.joinable())
+        impl_->reconnect_thread.join();
     
     if (impl_->service_thread.joinable())
         impl_->service_thread.join();
