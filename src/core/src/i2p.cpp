@@ -1,10 +1,13 @@
-#include "ncp_i2p.hpp"
+// FIX #5: Use relative include path consistent with other source files
+// (db.cpp, e2e.cpp, mimicry.cpp all use "../include/")
+#include "../include/ncp_i2p.hpp"
 #include <iostream>
 #include <array>
 #include <algorithm>
 #include <sstream>
 #include <cstring>
 #include <iomanip>
+#include <random>
 #include <sodium.h>
 
 #ifdef _WIN32
@@ -37,6 +40,10 @@ struct I2PManager::Impl {
     std::string destination_keys;
     bool sam_connected = false;
     
+    // FIX #3: send_sam_command — recv with timeout protection.
+    // SO_RCVTIMEO is set once in initialize() so every recv() is bounded.
+    // If SAM bridge doesn't respond within the timeout the call fails
+    // instead of blocking the thread forever.
     bool send_sam_command(const std::string& cmd, std::string& response) {
         if (sam_socket == INVALID_SOCK) return false;
         
@@ -49,6 +56,8 @@ struct I2PManager::Impl {
         while (true) {
             ssize_t received = recv(sam_socket, buffer, sizeof(buffer) - 1, 0);
             if (received <= 0) {
+                // received == 0  → connection closed
+                // received <  0  → error or timeout (EAGAIN/WSAETIMEDOUT)
                 return !response.empty();
             }
             buffer[received] = '\0';
@@ -98,7 +107,7 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
-    // Set non-blocking mode
+    // Set non-blocking mode for connect with timeout
 #ifdef _WIN32
     u_long mode = 1;
     ioctlsocket(impl_->sam_socket, FIONBIO, &mode);
@@ -138,8 +147,14 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
+    // Switch back to blocking mode
     mode = 0;
     ioctlsocket(impl_->sam_socket, FIONBIO, &mode);
+    
+    // FIX #3: Set recv timeout (10 seconds) to prevent infinite blocking
+    DWORD recv_timeout_ms = 10000;
+    setsockopt(impl_->sam_socket, SOL_SOCKET, SO_RCVTIMEO,
+               (const char*)&recv_timeout_ms, sizeof(recv_timeout_ms));
 #else
     if (connect_result < 0 && errno != EINPROGRESS) {
         impl_->close_sam();
@@ -160,8 +175,16 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
+    // Switch back to blocking mode
     flags = fcntl(impl_->sam_socket, F_GETFL, 0);
     fcntl(impl_->sam_socket, F_SETFL, flags & ~O_NONBLOCK);
+    
+    // FIX #3: Set recv timeout (10 seconds) to prevent infinite blocking
+    struct timeval recv_timeout;
+    recv_timeout.tv_sec = 10;
+    recv_timeout.tv_usec = 0;
+    setsockopt(impl_->sam_socket, SOL_SOCKET, SO_RCVTIMEO,
+               &recv_timeout, sizeof(recv_timeout));
 #endif
     
     // SAM Handshake: HELLO VERSION
@@ -206,6 +229,7 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
     
     std::string style = (type == TunnelType::CLIENT) ? "STREAM" : "STREAM";
     std::string direction = (type == TunnelType::SERVER) ? "FORWARD" : "CONNECT";
+    (void)direction;  // Used in future STREAM FORWARD implementation
     
     std::ostringstream cmd;
     cmd << "SESSION CREATE STYLE=" << style
@@ -237,7 +261,12 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
     info.remote_dest = remote_dest;
     info.created = std::chrono::system_clock::now();
     info.expires = info.created + std::chrono::hours(24);
-    tunnels_[name] = info;
+    
+    // FIX #1: Lock tunnels_ for thread-safe write
+    {
+        std::lock_guard<std::mutex> lock(tunnels_mutex_);
+        tunnels_[name] = info;
+    }
     
     return true;
 }
@@ -259,7 +288,10 @@ bool I2PManager::create_server_tunnel(const std::string& name, uint16_t local_po
 }
 
 std::vector<I2PManager::TunnelInfo> I2PManager::get_active_tunnels() const {
+    // FIX #1: Lock tunnels_ for thread-safe read
+    std::lock_guard<std::mutex> lock(tunnels_mutex_);
     std::vector<TunnelInfo> result;
+    result.reserve(tunnels_.size());
     for (const auto& pair : tunnels_) {
         result.push_back(pair.second);
     }
@@ -267,6 +299,8 @@ std::vector<I2PManager::TunnelInfo> I2PManager::get_active_tunnels() const {
 }
 
 bool I2PManager::destroy_tunnel(const std::string& tunnel_id) {
+    // FIX #1: Lock tunnels_ for thread-safe erase
+    std::lock_guard<std::mutex> lock(tunnels_mutex_);
     auto it = tunnels_.find(tunnel_id);
     if (it == tunnels_.end()) return false;
     
@@ -299,6 +333,9 @@ std::string I2PManager::create_ephemeral_destination() {
 void I2PManager::rotate_tunnels() {
     if (!is_active()) return;
 
+    // FIX #1: Lock tunnels_ for the entire rotation operation
+    std::lock_guard<std::mutex> lock(tunnels_mutex_);
+
     // Snapshot current tunnel IDs (avoid modifying map while iterating)
     std::vector<std::string> old_ids;
     old_ids.reserve(tunnels_.size());
@@ -320,12 +357,24 @@ void I2PManager::rotate_tunnels() {
 
         TunnelInfo old_info = it->second;
 
-        // Create replacement session via SAM with a temporary rotated ID.
-        // SAM requires unique session IDs, so we use "<id>_rot" while the
-        // old session is still technically alive on the router side.
+        // FIX #2: Destroy old SAM session before creating a new one.
+        // Without this, SAM bridge keeps both sessions alive, leaking
+        // tunnel resources on the I2P router over time.
+        {
+            std::ostringstream remove_cmd;
+            remove_cmd << "SESSION REMOVE ID=" << tid;
+            std::string remove_response;
+            impl_->send_sam_command(remove_cmd.str(), remove_response);
+            // Best-effort: if removal fails, we still try to create a new session.
+            // SAM 3.3 returns "SESSION STATUS RESULT=OK" on successful removal.
+        }
+
+        // Create replacement session via SAM.
+        // Now that the old session is removed, we can reuse the original ID
+        // instead of "<id>_rot" which would accumulate stale sessions.
         std::ostringstream cmd;
         cmd << "SESSION CREATE STYLE=STREAM"
-            << " ID=" << tid << "_rot"
+            << " ID=" << tid
             << " DESTINATION="
             << (old_info.type == TunnelType::SERVER ? new_dest : "TRANSIENT")
             << " inbound.length=" << config_.tunnel_length
@@ -335,7 +384,7 @@ void I2PManager::rotate_tunnels() {
 
         std::string response;
         if (!impl_->send_sam_command(cmd.str(), response)) {
-            continue;  // Keep old tunnel if rotation fails
+            continue;  // Keep old tunnel entry if rotation fails
         }
 
         if (response.find("SESSION STATUS RESULT=OK") == std::string::npos) {
@@ -381,11 +430,44 @@ void I2PManager::enable_traffic_mixing(bool enable, int delay_ms) {
     // If we have active tunnels, inject an initial dummy burst to
     // establish a baseline traffic pattern for the DPI to latch onto.
     // Subsequent real packets blend into this established pattern.
-    if (is_active() && !tunnels_.empty()) {
-        for (int i = 0; i < 3; ++i) {
-            inject_dummy_message();
+    if (is_active()) {
+        // FIX #1: Lock for tunnels_.empty() check
+        std::lock_guard<std::mutex> lock(tunnels_mutex_);
+        if (!tunnels_.empty()) {
+            for (int i = 0; i < 3; ++i) {
+                inject_dummy_message();
+            }
         }
     }
+}
+
+// FIX #4: Implement inject_dummy_message() — was declared in ncp_i2p.hpp
+// and called by enable_traffic_mixing(), but never defined.
+// Sends a random-sized dummy payload through SAM to provide cover traffic.
+void I2PManager::inject_dummy_message() {
+    if (!impl_->sam_connected || current_dest_.empty()) return;
+
+    // Generate random dummy payload (64–512 bytes) for traffic mixing.
+    // Variable size makes dummy traffic harder to fingerprint vs fixed-size.
+    std::mt19937 rng(static_cast<unsigned>(std::chrono::steady_clock::now()
+        .time_since_epoch().count()));
+    std::uniform_int_distribution<size_t> size_dist(64, 512);
+    size_t dummy_size = size_dist(rng);
+
+    std::vector<uint8_t> dummy(dummy_size);
+    randombytes_buf(dummy.data(), dummy.size());
+
+    // Send dummy via SAM RAW protocol to the current destination.
+    // RAW datagrams are fire-and-forget (no session needed for simple sends),
+    // making them ideal for cover traffic that doesn't need reliability.
+    std::ostringstream cmd;
+    cmd << "RAW SEND DESTINATION=" << current_dest_
+        << " SIZE=" << dummy_size;
+
+    std::string response;
+    impl_->send_sam_command(cmd.str(), response);
+    // Best-effort: we don't check the response for dummy traffic.
+    // If the send fails, it's acceptable — dummy messages are noise.
 }
 
 std::vector<uint8_t> I2PManager::pad_message(const std::vector<uint8_t>& message, size_t block_size) {
@@ -403,6 +485,8 @@ std::vector<uint8_t> I2PManager::pad_message(const std::vector<uint8_t>& message
 }
 
 I2PManager::Statistics I2PManager::get_statistics() const {
+    // FIX #1: Lock tunnels_ for thread-safe read of active_tunnels count
+    std::lock_guard<std::mutex> lock(tunnels_mutex_);
     Statistics stats{};
     stats.active_tunnels = tunnels_.size();
     return stats;

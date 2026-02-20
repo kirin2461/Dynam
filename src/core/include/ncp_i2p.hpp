@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <mutex>
 #include <chrono>
 
 namespace ncp {
@@ -147,6 +148,7 @@ private:
     bool is_initialized_ = false;
     std::string current_dest_;
     std::map<std::string, TunnelInfo> tunnels_;
+    mutable std::mutex tunnels_mutex_;  // FIX #1: protects tunnels_ from data races
     
     // Internal tunnel operations
     std::vector<std::string> select_tunnel_hops(int length);
