@@ -12,6 +12,21 @@
 namespace ncp {
 
 /**
+ * @brief TLS session phase — tracks the state machine so that
+ *        Mimicry never emits Application Data (0x17) before a
+ *        complete handshake sequence (0x16) has been sent.
+ *
+ * Issue #57: Orchestrator was sending 0x17 without prior 0x16,
+ * which is an instant DPI anomaly signal.
+ */
+enum class TlsSessionPhase {
+    IDLE,                   // No TLS records sent yet
+    CLIENT_HELLO_SENT,      // ClientHello (0x16) emitted
+    HANDSHAKE_COMPLETE,     // Fake ServerHello+Finished emitted
+    APPLICATION_DATA        // Ready for Application Data (0x17)
+};
+
+/**
  * @brief Advanced Traffic Mimicry with realistic protocol emulation
  * Disguises specialized traffic as common protocols with proper timing and behavior
  */
@@ -77,6 +92,65 @@ public:
     std::vector<uint8_t> wrap_payload(
         const std::vector<uint8_t>& payload
     );
+
+    // ----- TLS session-aware wrapping (Issue #57) -----
+
+    /**
+     * @brief Wrap payload with TLS session state tracking.
+     *
+     * On IDLE:
+     *   1. Generates a full fake TLS handshake preamble
+     *      (ClientHello + fake ServerHello + fake Finished),
+     *      returned via @p handshake_preamble.
+     *   2. Wraps the actual payload as Application Data (0x17).
+     *   3. Transitions to APPLICATION_DATA phase.
+     *
+     * On APPLICATION_DATA:
+     *   Wraps payload as Application Data directly.
+     *
+     * @param payload          Data to wrap.
+     * @param handshake_preamble [out] Packets that MUST be sent
+     *                          before the returned Application Data
+     *                          (non-empty only on session start).
+     * @return The wrapped Application Data packet.
+     */
+    std::vector<uint8_t> wrap_tls_session_aware(
+        const std::vector<uint8_t>& payload,
+        std::vector<std::vector<uint8_t>>& handshake_preamble
+    );
+
+    /**
+     * @brief Generate a fake TLS handshake sequence:
+     *        ClientHello -> ServerHello -> ChangeCipherSpec -> Finished.
+     *
+     * Each element is a complete TLS record ready to be sent on the wire.
+     * Caller must send them in order before any Application Data.
+     */
+    std::vector<std::vector<uint8_t>> generate_tls_handshake_sequence();
+
+    /**
+     * @brief Reset TLS session state to IDLE.
+     *
+     * Call when the underlying TCP connection is closed so the next
+     * wrap_tls_session_aware() will re-emit a handshake.
+     */
+    void reset_tls_session();
+
+    /**
+     * @brief Current TLS session phase.
+     */
+    TlsSessionPhase get_tls_session_phase() const;
+
+    /**
+     * @brief Whether the Mimicry module manages TLS framing.
+     *
+     * When true, external modules (AdvancedDPIBypass) must NOT
+     * inject their own GREASE / fake-ClientHello / SNI split on
+     * the already-framed packets.
+     */
+    bool is_tls_managed() const;
+
+    // ----- end TLS session-aware API -----
     
     // Extract original data from a mimicked packet
     std::vector<uint8_t> unwrap_payload(
@@ -112,6 +186,11 @@ private:
     std::vector<uint8_t> create_https_client_hello_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_https_application_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_tls_payload(const std::vector<uint8_t>& data);
+
+    // Fake handshake records (Issue #57)
+    std::vector<uint8_t> create_fake_server_hello();
+    std::vector<uint8_t> create_fake_change_cipher_spec();
+    std::vector<uint8_t> create_fake_finished();
     
     // DNS mimicry
     std::vector<uint8_t> create_dns_query_wrapper(const std::vector<uint8_t>& payload);
@@ -154,6 +233,9 @@ private:
     uint32_t tls_sequence_number_;
     uint16_t dns_transaction_id_;
     uint64_t quic_packet_number_;
+
+    // TLS session state machine (Issue #57)
+    TlsSessionPhase tls_session_phase_ = TlsSessionPhase::IDLE;
 };
 
 } // namespace ncp

@@ -151,6 +151,19 @@ struct AdvancedDPIConfig {
     // Russian DPI specific
     bool tspu_bypass = true;        // TSPU (Russian DPI) specific bypass
     bool china_gfw_bypass = false;  // China GFW specific techniques
+
+    // ===== Cross-module coordination (Issue #57) =====
+    //
+    // When true, TLS framing is managed by TrafficMimicry.
+    // DPIBypass will NOT:
+    //   - inject_grease() on the already-framed packet
+    //   - create_fake_client_hello() (conflicts with mimicry CH)
+    //   - use decoy_sni (mimicry already set RU-whitelist SNI)
+    // DPIBypass WILL still:
+    //   - split_segments() at transport level
+    //   - apply padding / obfuscation
+    //   - apply timing jitter
+    bool mimicry_managed_tls = false;
 };
 
 /**
@@ -392,6 +405,15 @@ public:
 
     void apply_preset(BypassPreset preset);
 
+    /**
+     * @brief Set mimicry_managed_tls flag at runtime (Issue #57).
+     *
+     * When true, process_outgoing() skips TLS-level modifications
+     * (GREASE, fake CH, decoy SNI) because TrafficMimicry already
+     * handles TLS framing.
+     */
+    void set_mimicry_managed_tls(bool managed);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
@@ -418,7 +440,7 @@ public:
  * @brief Preset configurations for different DPI systems
  */
 namespace Presets {
-    // Russian TSPU (ТСПУ) bypass preset
+    // Russian TSPU bypass preset
     AdvancedDPIConfig create_tspu_preset();
     
     // China GFW bypass preset  
