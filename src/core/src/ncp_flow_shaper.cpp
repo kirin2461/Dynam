@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cassert>
 #include <condition_variable>
+#include <sodium.h>
 
 namespace ncp {
 namespace DPI {
@@ -36,56 +37,35 @@ FlowProfile flow_profile_from_string(const std::string& name) noexcept {
 // ===== SizeDistribution presets =====
 
 SizeDistribution SizeDistribution::web_browsing() {
-    // Real HTTPS browsing: many small ACKs, some medium, few large
     return {{
-        {52, 0.30},     // TCP ACK (no payload)
-        {150, 0.15},    // small HTTP responses / headers
-        {350, 0.10},    // medium fragments
-        {580, 0.08},    // medium-large
-        {1200, 0.12},   // large content chunks
-        {1460, 0.25},   // MTU-sized segments
+        {52, 0.30}, {150, 0.15}, {350, 0.10}, {580, 0.08},
+        {1200, 0.12}, {1460, 0.25},
     }};
 }
 
 SizeDistribution SizeDistribution::video_stream() {
-    // Video: mostly large downstream, small ACKs upstream
     return {{
-        {52, 0.20},     // ACKs
-        {200, 0.05},    // control messages
-        {1200, 0.15},   // medium video chunks
-        {1460, 0.60},   // MTU-sized video frames
+        {52, 0.20}, {200, 0.05}, {1200, 0.15}, {1460, 0.60},
     }};
 }
 
 SizeDistribution SizeDistribution::messenger() {
-    // Chat: mostly small packets
     return {{
-        {52, 0.25},     // ACKs
-        {80, 0.20},     // typing indicator
-        {150, 0.25},    // short messages
-        {300, 0.15},    // medium messages
-        {600, 0.10},    // long messages
-        {1200, 0.05},   // images/stickers (chunked)
+        {52, 0.25}, {80, 0.20}, {150, 0.25}, {300, 0.15},
+        {600, 0.10}, {1200, 0.05},
     }};
 }
 
 SizeDistribution SizeDistribution::gaming() {
-    // Gaming: small uniform packets at high frequency
     return {{
-        {52, 0.10},     // ACKs
-        {64, 0.25},     // game state updates
-        {80, 0.25},     // input packets
-        {100, 0.20},    // slightly larger updates
-        {150, 0.15},    // position sync
-        {300, 0.05},    // occasional larger
+        {52, 0.10}, {64, 0.25}, {80, 0.25}, {100, 0.20},
+        {150, 0.15}, {300, 0.05},
     }};
 }
 
 SizeDistribution SizeDistribution::file_download() {
-    // Download: huge downstream, tiny upstream
     return {{
-        {52, 0.15},     // ACKs (upstream)
-        {1460, 0.85},   // MTU-sized data (downstream)
+        {52, 0.15}, {1460, 0.85},
     }};
 }
 
@@ -93,66 +73,46 @@ SizeDistribution SizeDistribution::file_download() {
 
 BurstModel BurstModel::web_browsing() {
     BurstModel m;
-    m.burst_packets_min = 8;
-    m.burst_packets_max = 35;
-    m.burst_inter_ms_min = 0.5;
-    m.burst_inter_ms_max = 15.0;
-    m.pause_ms_min = 1500.0;
-    m.pause_ms_max = 8000.0;
-    m.timing_distribution = Distribution::PARETO;
-    m.pareto_alpha = 1.5;
+    m.burst_packets_min = 8; m.burst_packets_max = 35;
+    m.burst_inter_ms_min = 0.5; m.burst_inter_ms_max = 15.0;
+    m.pause_ms_min = 1500.0; m.pause_ms_max = 8000.0;
+    m.timing_distribution = Distribution::PARETO; m.pareto_alpha = 1.5;
     return m;
 }
 
 BurstModel BurstModel::video_stream() {
     BurstModel m;
-    m.burst_packets_min = 50;
-    m.burst_packets_max = 200;
-    m.burst_inter_ms_min = 0.1;
-    m.burst_inter_ms_max = 5.0;
-    m.pause_ms_min = 10.0;
-    m.pause_ms_max = 50.0;   // almost no pauses
-    m.timing_distribution = Distribution::GAUSSIAN;
-    m.pareto_alpha = 2.0;
+    m.burst_packets_min = 50; m.burst_packets_max = 200;
+    m.burst_inter_ms_min = 0.1; m.burst_inter_ms_max = 5.0;
+    m.pause_ms_min = 10.0; m.pause_ms_max = 50.0;
+    m.timing_distribution = Distribution::GAUSSIAN; m.pareto_alpha = 2.0;
     return m;
 }
 
 BurstModel BurstModel::messenger() {
     BurstModel m;
-    m.burst_packets_min = 2;
-    m.burst_packets_max = 8;
-    m.burst_inter_ms_min = 5.0;
-    m.burst_inter_ms_max = 50.0;
-    m.pause_ms_min = 3000.0;
-    m.pause_ms_max = 30000.0;  // long idle between messages
-    m.timing_distribution = Distribution::EXPONENTIAL;
-    m.pareto_alpha = 1.2;
+    m.burst_packets_min = 2; m.burst_packets_max = 8;
+    m.burst_inter_ms_min = 5.0; m.burst_inter_ms_max = 50.0;
+    m.pause_ms_min = 3000.0; m.pause_ms_max = 30000.0;
+    m.timing_distribution = Distribution::EXPONENTIAL; m.pareto_alpha = 1.2;
     return m;
 }
 
 BurstModel BurstModel::gaming() {
     BurstModel m;
-    m.burst_packets_min = 100;
-    m.burst_packets_max = 1000;
-    m.burst_inter_ms_min = 15.0;   // ~60Hz
-    m.burst_inter_ms_max = 50.0;   // ~20Hz
-    m.pause_ms_min = 0.0;
-    m.pause_ms_max = 100.0;  // basically continuous
-    m.timing_distribution = Distribution::UNIFORM;
-    m.pareto_alpha = 3.0;
+    m.burst_packets_min = 100; m.burst_packets_max = 1000;
+    m.burst_inter_ms_min = 15.0; m.burst_inter_ms_max = 50.0;
+    m.pause_ms_min = 0.0; m.pause_ms_max = 100.0;
+    m.timing_distribution = Distribution::UNIFORM; m.pareto_alpha = 3.0;
     return m;
 }
 
 BurstModel BurstModel::file_download() {
     BurstModel m;
-    m.burst_packets_min = 100;
-    m.burst_packets_max = 500;
-    m.burst_inter_ms_min = 0.05;
-    m.burst_inter_ms_max = 2.0;
-    m.pause_ms_min = 5.0;
-    m.pause_ms_max = 50.0;
-    m.timing_distribution = Distribution::GAUSSIAN;
-    m.pareto_alpha = 2.5;
+    m.burst_packets_min = 100; m.burst_packets_max = 500;
+    m.burst_inter_ms_min = 0.05; m.burst_inter_ms_max = 2.0;
+    m.pause_ms_min = 5.0; m.pause_ms_max = 50.0;
+    m.timing_distribution = Distribution::GAUSSIAN; m.pareto_alpha = 2.5;
     return m;
 }
 
@@ -163,10 +123,8 @@ FlowShaperConfig FlowShaperConfig::web_browsing() {
     c.profile = FlowProfile::WEB_BROWSING;
     c.size_dist = SizeDistribution::web_browsing();
     c.burst_model = BurstModel::web_browsing();
-    c.target_upload_ratio = 0.15;
-    c.keepalive_interval_ms = 5000.0;
-    c.keepalive_size = 52;
-    c.dummy_ratio = 0.05;
+    c.target_upload_ratio = 0.15; c.keepalive_interval_ms = 5000.0;
+    c.keepalive_size = 52; c.dummy_ratio = 0.05;
     return c;
 }
 
@@ -175,10 +133,8 @@ FlowShaperConfig FlowShaperConfig::video_stream() {
     c.profile = FlowProfile::VIDEO_STREAM;
     c.size_dist = SizeDistribution::video_stream();
     c.burst_model = BurstModel::video_stream();
-    c.target_upload_ratio = 0.05;
-    c.keepalive_interval_ms = 1000.0;
-    c.keepalive_size = 52;
-    c.dummy_ratio = 0.02;
+    c.target_upload_ratio = 0.05; c.keepalive_interval_ms = 1000.0;
+    c.keepalive_size = 52; c.dummy_ratio = 0.02;
     return c;
 }
 
@@ -187,10 +143,8 @@ FlowShaperConfig FlowShaperConfig::messenger() {
     c.profile = FlowProfile::MESSENGER;
     c.size_dist = SizeDistribution::messenger();
     c.burst_model = BurstModel::messenger();
-    c.target_upload_ratio = 0.40;
-    c.keepalive_interval_ms = 15000.0;
-    c.keepalive_size = 52;
-    c.dummy_ratio = 0.08;
+    c.target_upload_ratio = 0.40; c.keepalive_interval_ms = 15000.0;
+    c.keepalive_size = 52; c.dummy_ratio = 0.08;
     return c;
 }
 
@@ -199,10 +153,8 @@ FlowShaperConfig FlowShaperConfig::gaming() {
     c.profile = FlowProfile::GAMING;
     c.size_dist = SizeDistribution::gaming();
     c.burst_model = BurstModel::gaming();
-    c.target_upload_ratio = 0.45;
-    c.keepalive_interval_ms = 2000.0;
-    c.keepalive_size = 64;
-    c.dummy_ratio = 0.03;
+    c.target_upload_ratio = 0.45; c.keepalive_interval_ms = 2000.0;
+    c.keepalive_size = 64; c.dummy_ratio = 0.03;
     return c;
 }
 
@@ -211,10 +163,8 @@ FlowShaperConfig FlowShaperConfig::file_download() {
     c.profile = FlowProfile::FILE_DOWNLOAD;
     c.size_dist = SizeDistribution::file_download();
     c.burst_model = BurstModel::file_download();
-    c.target_upload_ratio = 0.03;
-    c.keepalive_interval_ms = 3000.0;
-    c.keepalive_size = 52;
-    c.dummy_ratio = 0.01;
+    c.target_upload_ratio = 0.03; c.keepalive_interval_ms = 3000.0;
+    c.keepalive_size = 52; c.dummy_ratio = 0.01;
     return c;
 }
 
@@ -230,21 +180,48 @@ FlowShaper::FlowShaper(const FlowShaperConfig& config)
       current_burst_target_(0),
       upload_bytes_(0),
       download_bytes_(0) {
-    // Phase 0: Initialize libsodium CSPRNG (idempotent)
     ncp::csprng_init();
     last_packet_time_ = std::chrono::steady_clock::now();
+
+    // FIX #36: Generate random session key and derive dummy marker
+    randombytes_buf(session_key_.data(), session_key_.size());
+    derive_dummy_marker();
+
     apply_profile_defaults();
     precompute_weights();
 }
 
 FlowShaper::~FlowShaper() {
     stop();
+    // Wipe session key from memory
+    sodium_memzero(session_key_.data(), session_key_.size());
+    sodium_memzero(dummy_marker_.data(), dummy_marker_.size());
 }
 
 FlowShaper::FlowShaper(FlowShaper&&) noexcept = default;
 FlowShaper& FlowShaper::operator=(FlowShaper&&) noexcept = default;
 
+// FIX #36: Derive 4-byte dummy marker from session_key_ via keyed BLAKE2b.
+// Each FlowShaper instance gets a unique marker — DPI cannot build
+// a static signature. Both sides must share session_key_ (exchanged
+// during handshake) to recognize dummies.
+void FlowShaper::derive_dummy_marker() {
+    // BLAKE2b-32 (4 bytes output) keyed with session_key_
+    // context: "ncp.flow.dummy.marker" as personalization
+    static const uint8_t context[] = "ncp.flow.dummy.marker";
+    uint8_t hash[4];
+    crypto_generichash(hash, sizeof(hash),
+                       context, sizeof(context) - 1,
+                       session_key_.data(), session_key_.size());
+    std::memcpy(dummy_marker_.data(), hash, 4);
+}
+
+void FlowShaper::write_dummy_marker(uint8_t* dst) const {
+    std::memcpy(dst, dummy_marker_.data(), 4);
+}
+
 void FlowShaper::apply_profile_defaults() {
+    // NOTE: caller must hold config_mutex_ (unique_lock) when calling
     if (config_.size_dist.buckets.empty()) {
         switch (config_.profile) {
             case FlowProfile::WEB_BROWSING:  config_.size_dist = SizeDistribution::web_browsing(); break;
@@ -255,7 +232,6 @@ void FlowShaper::apply_profile_defaults() {
             default: config_.size_dist = SizeDistribution::web_browsing(); break;
         }
     }
-    // Burst model defaults based on profile if not set
     if (config_.burst_model.burst_packets_min == 5 &&
         config_.burst_model.burst_packets_max == 30 &&
         config_.profile != FlowProfile::WEB_BROWSING &&
@@ -271,6 +247,7 @@ void FlowShaper::apply_profile_defaults() {
 }
 
 void FlowShaper::precompute_weights() {
+    // NOTE: caller must hold config_mutex_ (unique_lock) when calling
     cumulative_weights_.clear();
     if (config_.size_dist.buckets.empty()) return;
     double sum = 0.0;
@@ -278,7 +255,6 @@ void FlowShaper::precompute_weights() {
         sum += b.weight;
         cumulative_weights_.push_back(sum);
     }
-    // Normalize
     if (sum > 0.0) {
         for (auto& w : cumulative_weights_) w /= sum;
     }
@@ -338,8 +314,16 @@ void FlowShaper::worker_thread_func() {
             double ms_since_keepalive = std::chrono::duration<double, std::milli>(
                 now - last_keepalive).count();
 
-            if (config_.enable_idle_keepalive &&
-                ms_since_keepalive >= config_.keepalive_interval_ms) {
+            // FIX #34: read config_ under shared lock
+            bool do_keepalive = false;
+            double ka_interval = 0.0;
+            {
+                std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+                do_keepalive = config_.enable_idle_keepalive;
+                ka_interval = config_.keepalive_interval_ms;
+            }
+
+            if (do_keepalive && ms_since_keepalive >= ka_interval) {
                 auto ka = generate_keepalive();
                 if (send_callback_) {
                     send_callback_(ka);
@@ -347,7 +331,6 @@ void FlowShaper::worker_thread_func() {
                 last_keepalive = now;
             }
 
-            // Sleep briefly to avoid busy-waiting
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
@@ -368,15 +351,26 @@ void FlowShaper::worker_thread_func() {
 
 void FlowShaper::enqueue(const std::vector<uint8_t>& packet, bool is_upload) {
     std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (packet_queue_.size() < config_.max_queue_depth) {
+    // FIX #34: read max_queue_depth under shared lock
+    size_t max_depth;
+    {
+        std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+        max_depth = config_.max_queue_depth;
+    }
+    if (packet_queue_.size() < max_depth) {
         packet_queue_.push({packet, is_upload});
     }
 }
 
 void FlowShaper::enqueue_batch(const std::vector<std::vector<uint8_t>>& packets, bool is_upload) {
     std::lock_guard<std::mutex> lock(queue_mutex_);
+    size_t max_depth;
+    {
+        std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+        max_depth = config_.max_queue_depth;
+    }
     for (const auto& p : packets) {
-        if (packet_queue_.size() >= config_.max_queue_depth) break;
+        if (packet_queue_.size() >= max_depth) break;
         packet_queue_.push({p, is_upload});
     }
 }
@@ -386,7 +380,14 @@ void FlowShaper::enqueue_batch(const std::vector<std::vector<uint8_t>>& packets,
 std::vector<ShapedPacket> FlowShaper::shape_sync(
     const std::vector<uint8_t>& packet, bool is_upload) {
 
-    if (!config_.enabled || packet.empty()) {
+    // FIX #34: snapshot config under shared lock
+    FlowShaperConfig cfg;
+    {
+        std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+        cfg = config_;
+    }
+
+    if (!cfg.enabled || packet.empty()) {
         ShapedPacket sp;
         sp.data = packet;
         sp.is_upload = is_upload;
@@ -399,15 +400,15 @@ std::vector<ShapedPacket> FlowShaper::shape_sync(
 
     std::vector<ShapedPacket> result;
 
-    // Step 1: Size shaping — split/pad to match distribution
+    // Step 1: Size shaping
     std::vector<std::vector<uint8_t>> sized;
-    if (config_.enable_size_shaping) {
+    if (cfg.enable_size_shaping) {
         sized = reshape_size(packet);
     } else {
         sized.push_back(packet);
     }
 
-    // Step 2: Apply timing to each output packet
+    // Step 2: Apply timing
     for (auto& pkt : sized) {
         ShapedPacket sp;
         sp.data = std::move(pkt);
@@ -415,7 +416,7 @@ std::vector<ShapedPacket> FlowShaper::shape_sync(
         sp.is_dummy = false;
         sp.is_keepalive = false;
 
-        if (config_.enable_timing_shaping) {
+        if (cfg.enable_timing_shaping) {
             sp.delay_before_send = next_delay();
         }
 
@@ -424,15 +425,15 @@ std::vector<ShapedPacket> FlowShaper::shape_sync(
         result.push_back(std::move(sp));
     }
 
-    // Step 3: Maybe inject dummy packet
-    if (config_.enable_flow_dummy) {
-        if (ncp::csprng_double() < config_.dummy_ratio) {
+    // Step 3: Maybe inject dummy
+    if (cfg.enable_flow_dummy) {
+        if (ncp::csprng_double() < cfg.dummy_ratio) {
             result.push_back(generate_dummy());
         }
     }
 
     // Step 4: Ratio balancing
-    if (config_.enable_ratio_shaping && needs_ratio_balance()) {
+    if (cfg.enable_ratio_shaping && needs_ratio_balance()) {
         result.push_back(generate_ratio_balance_packet());
     }
 
@@ -454,15 +455,16 @@ std::vector<std::vector<uint8_t>> FlowShaper::reshape_size(
     size_t target = select_target_size();
 
     if (packet.size() <= target) {
-        // Pad up
         return { pad_to_size(packet, target) };
     } else {
-        // Split into chunks matching distribution sizes
         return split_packet(packet, target);
     }
 }
 
 size_t FlowShaper::select_target_size() {
+    // FIX #34: read config under shared lock
+    std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+
     if (cumulative_weights_.empty()) return 1460;
 
     double r = ncp::csprng_double();
@@ -470,7 +472,6 @@ size_t FlowShaper::select_target_size() {
     for (size_t i = 0; i < cumulative_weights_.size(); ++i) {
         if (r <= cumulative_weights_[i]) {
             size_t base = config_.size_dist.buckets[i].size;
-            // Add small jitter (±10%) to avoid exact pattern
             int jitter_range = static_cast<int>(base / 10);
             int jitter = (jitter_range > 0) ? ncp::csprng_range(-jitter_range, jitter_range) : 0;
             int result = static_cast<int>(base) + jitter;
@@ -487,15 +488,14 @@ std::vector<uint8_t> FlowShaper::pad_to_size(
 
     std::vector<uint8_t> result = data;
     size_t pad_needed = target - data.size();
-
-    // Fill with CSPRNG bytes
     size_t old_size = result.size();
     result.resize(target);
     ncp::csprng_fill(result.data() + old_size, pad_needed);
-
     return result;
 }
 
+// FIX #35: split_packet uses 8-byte header with uint32_t for total_len and
+// chunk_offset. Supports packets up to 4GB (was 64KB with uint16_t).
 std::vector<std::vector<uint8_t>> FlowShaper::split_packet(
     const std::vector<uint8_t>& data, size_t max_size) {
 
@@ -503,21 +503,29 @@ std::vector<std::vector<uint8_t>> FlowShaper::split_packet(
     size_t offset = 0;
 
     while (offset < data.size()) {
-        // Each chunk gets a target size from distribution
         size_t chunk_target = (offset == 0) ? max_size : select_target_size();
-        // Reserve 4 bytes for length header
-        size_t data_space = (chunk_target > 4) ? chunk_target - 4 : chunk_target;
+        // Reserve CHUNK_HEADER_SIZE (8) bytes for header
+        size_t data_space = (chunk_target > CHUNK_HEADER_SIZE)
+                            ? chunk_target - CHUNK_HEADER_SIZE
+                            : chunk_target;
         size_t remaining = data.size() - offset;
         size_t take = (std::min)(data_space, remaining);
 
         std::vector<uint8_t> chunk;
-        // 4-byte header: [original_total_len:16][chunk_offset:16]
-        uint16_t total_len = static_cast<uint16_t>(data.size() & 0xFFFF);
-        uint16_t chunk_off = static_cast<uint16_t>(offset & 0xFFFF);
-        chunk.push_back(static_cast<uint8_t>((total_len >> 8) & 0xFF));
-        chunk.push_back(static_cast<uint8_t>(total_len & 0xFF));
-        chunk.push_back(static_cast<uint8_t>((chunk_off >> 8) & 0xFF));
-        chunk.push_back(static_cast<uint8_t>(chunk_off & 0xFF));
+        chunk.reserve(CHUNK_HEADER_SIZE + take);
+
+        // 8-byte header: [total_len:32 BE][chunk_offset:32 BE]
+        uint32_t total_len = static_cast<uint32_t>(data.size());
+        uint32_t chunk_off = static_cast<uint32_t>(offset);
+
+        chunk.push_back(static_cast<uint8_t>((total_len >> 24) & 0xFF));
+        chunk.push_back(static_cast<uint8_t>((total_len >> 16) & 0xFF));
+        chunk.push_back(static_cast<uint8_t>((total_len >> 8)  & 0xFF));
+        chunk.push_back(static_cast<uint8_t>( total_len        & 0xFF));
+        chunk.push_back(static_cast<uint8_t>((chunk_off >> 24) & 0xFF));
+        chunk.push_back(static_cast<uint8_t>((chunk_off >> 16) & 0xFF));
+        chunk.push_back(static_cast<uint8_t>((chunk_off >> 8)  & 0xFF));
+        chunk.push_back(static_cast<uint8_t>( chunk_off        & 0xFF));
 
         chunk.insert(chunk.end(), data.begin() + offset, data.begin() + offset + take);
 
@@ -551,9 +559,12 @@ std::chrono::microseconds FlowShaper::next_delay() {
         }
         // Pause over, start new burst
         burst_state_ = BurstState::BURSTING;
-        current_burst_target_ = ncp::csprng_range(
-            config_.burst_model.burst_packets_min,
-            config_.burst_model.burst_packets_max);
+        {
+            std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+            current_burst_target_ = ncp::csprng_range(
+                config_.burst_model.burst_packets_min,
+                config_.burst_model.burst_packets_max);
+        }
         packets_in_current_burst_ = 0;
         stats_.bursts_generated.fetch_add(1);
     }
@@ -566,8 +577,9 @@ bool FlowShaper::should_burst() const {
 }
 
 void FlowShaper::advance_burst_state() {
+    std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+
     if (burst_state_ == BurstState::IDLE) {
-        // Start first burst
         burst_state_ = BurstState::BURSTING;
         current_burst_target_ = ncp::csprng_range(
             config_.burst_model.burst_packets_min,
@@ -580,7 +592,6 @@ void FlowShaper::advance_burst_state() {
     if (burst_state_ == BurstState::BURSTING) {
         packets_in_current_burst_++;
         if (packets_in_current_burst_ >= current_burst_target_) {
-            // Burst complete — enter pause
             burst_state_ = BurstState::PAUSING;
             double pause_ms = ncp::csprng_double_range(
                 config_.burst_model.pause_ms_min,
@@ -592,13 +603,14 @@ void FlowShaper::advance_burst_state() {
 }
 
 std::chrono::microseconds FlowShaper::sample_delay() {
+    std::shared_lock<std::shared_mutex> rlock(config_mutex_);
     double delay_ms;
     const auto& bm = config_.burst_model;
 
     switch (bm.timing_distribution) {
         case BurstModel::Distribution::PARETO:
             delay_ms = sample_pareto(bm.pareto_alpha, bm.burst_inter_ms_min);
-            delay_ms = (std::min)(delay_ms, bm.burst_inter_ms_max * 3.0); // cap outliers
+            delay_ms = (std::min)(delay_ms, bm.burst_inter_ms_max * 3.0);
             break;
         case BurstModel::Distribution::EXPONENTIAL: {
             double mean = (bm.burst_inter_ms_min + bm.burst_inter_ms_max) / 2.0;
@@ -606,12 +618,10 @@ std::chrono::microseconds FlowShaper::sample_delay() {
             break;
         }
         case BurstModel::Distribution::GAUSSIAN: {
-            // Box-Muller transform with CSPRNG
             double mean = (bm.burst_inter_ms_min + bm.burst_inter_ms_max) / 2.0;
             double stddev = (bm.burst_inter_ms_max - bm.burst_inter_ms_min) / 4.0;
             double u1 = ncp::csprng_double();
             double u2 = ncp::csprng_double();
-            // Avoid log(0)
             if (u1 < 1e-10) u1 = 1e-10;
             double z = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
             delay_ms = mean + stddev * z;
@@ -625,7 +635,6 @@ std::chrono::microseconds FlowShaper::sample_delay() {
         }
     }
 
-    // Clamp
     if (delay_ms < 0.0) delay_ms = 0.0;
     if (delay_ms > bm.pause_ms_max) delay_ms = bm.pause_ms_max;
 
@@ -633,29 +642,25 @@ std::chrono::microseconds FlowShaper::sample_delay() {
 }
 
 double FlowShaper::sample_pareto(double alpha, double xm) {
-    // Pareto distribution: X = xm / U^(1/alpha), U ~ Uniform(0,1)
     double u = ncp::csprng_double();
-    if (u < 1e-10) u = 1e-10; // avoid division by zero
+    if (u < 1e-10) u = 1e-10;
     return xm / std::pow(u, 1.0 / alpha);
 }
 
 double FlowShaper::sample_exponential(double lambda) {
-    // Inverse transform: X = -ln(U) / lambda, U ~ Uniform(0,1)
     double u = ncp::csprng_double();
-    if (u < 1e-10) u = 1e-10; // avoid log(0)
+    if (u < 1e-10) u = 1e-10;
     return -std::log(u) / lambda;
 }
 
 // ===== Dummy / Keepalive =====
 
+// FIX #36: Use HMAC-derived marker instead of fixed magic bytes
 ShapedPacket FlowShaper::generate_dummy() {
     ShapedPacket sp;
     size_t sz = select_target_size();
     sp.data.resize(4 + sz);
-    sp.data[0] = FLOW_DUMMY_MAGIC_0;
-    sp.data[1] = FLOW_DUMMY_MAGIC_1;
-    sp.data[2] = FLOW_DUMMY_MAGIC_2;
-    sp.data[3] = FLOW_DUMMY_MAGIC_3;
+    write_dummy_marker(sp.data.data());
     if (sz > 0) {
         ncp::csprng_fill(sp.data.data() + 4, sz);
     }
@@ -668,13 +673,14 @@ ShapedPacket FlowShaper::generate_dummy() {
 
 ShapedPacket FlowShaper::generate_keepalive() {
     ShapedPacket sp;
-    sp.data.resize(config_.keepalive_size, 0);
-    // Minimal content — looks like TCP ACK
+    size_t ka_size;
+    {
+        std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+        ka_size = config_.keepalive_size;
+    }
+    sp.data.resize(ka_size, 0);
     if (sp.data.size() >= 4) {
-        sp.data[0] = FLOW_DUMMY_MAGIC_0;
-        sp.data[1] = FLOW_DUMMY_MAGIC_1;
-        sp.data[2] = FLOW_DUMMY_MAGIC_2;
-        sp.data[3] = FLOW_DUMMY_MAGIC_3;
+        write_dummy_marker(sp.data.data());
     }
     sp.is_keepalive = true;
     sp.is_dummy = true;
@@ -684,47 +690,59 @@ ShapedPacket FlowShaper::generate_keepalive() {
     return sp;
 }
 
-bool FlowShaper::is_flow_dummy(const uint8_t* data, size_t len) {
+// FIX #36: is_flow_dummy is now non-static and uses session-specific marker
+bool FlowShaper::is_flow_dummy(const uint8_t* data, size_t len) const {
     if (len < 4) return false;
-    return data[0] == FLOW_DUMMY_MAGIC_0 &&
-           data[1] == FLOW_DUMMY_MAGIC_1 &&
-           data[2] == FLOW_DUMMY_MAGIC_2 &&
-           data[3] == FLOW_DUMMY_MAGIC_3;
+    return data[0] == dummy_marker_[0] &&
+           data[1] == dummy_marker_[1] &&
+           data[2] == dummy_marker_[2] &&
+           data[3] == dummy_marker_[3];
 }
 
 // ===== Ratio Shaping =====
 
+// FIX #37: atomic operations for thread-safe byte tracking
 void FlowShaper::track_bytes(size_t bytes, bool is_upload) {
     if (is_upload) {
-        upload_bytes_ += bytes;
+        upload_bytes_.fetch_add(bytes, std::memory_order_relaxed);
     } else {
-        download_bytes_ += bytes;
+        download_bytes_.fetch_add(bytes, std::memory_order_relaxed);
     }
 }
 
 double FlowShaper::current_ratio() const {
-    uint64_t total = upload_bytes_ + download_bytes_;
+    uint64_t up = upload_bytes_.load(std::memory_order_relaxed);
+    uint64_t down = download_bytes_.load(std::memory_order_relaxed);
+    uint64_t total = up + down;
     if (total == 0) return 0.5;
-    return static_cast<double>(upload_bytes_) / total;
+    return static_cast<double>(up) / total;
 }
 
 bool FlowShaper::needs_ratio_balance() const {
     double ratio = current_ratio();
-    double target = config_.target_upload_ratio;
-    return std::abs(ratio - target) > config_.ratio_tolerance;
+    double target, tolerance;
+    {
+        std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+        target = config_.target_upload_ratio;
+        tolerance = config_.ratio_tolerance;
+    }
+    return std::abs(ratio - target) > tolerance;
 }
 
 ShapedPacket FlowShaper::generate_ratio_balance_packet() {
+    double target;
+    {
+        std::shared_lock<std::shared_mutex> rlock(config_mutex_);
+        target = config_.target_upload_ratio;
+    }
+
     ShapedPacket sp;
     double ratio = current_ratio();
-    bool need_upload = (ratio < config_.target_upload_ratio);
+    bool need_upload = (ratio < target);
 
     size_t sz = select_target_size();
     sp.data.resize(4 + sz);
-    sp.data[0] = FLOW_DUMMY_MAGIC_0;
-    sp.data[1] = FLOW_DUMMY_MAGIC_1;
-    sp.data[2] = FLOW_DUMMY_MAGIC_2;
-    sp.data[3] = FLOW_DUMMY_MAGIC_3;
+    write_dummy_marker(sp.data.data());
     if (sz > 0) {
         ncp::csprng_fill(sp.data.data() + 4, sz);
     }
@@ -739,17 +757,21 @@ ShapedPacket FlowShaper::generate_ratio_balance_packet() {
 
 // ===== Config & Stats =====
 
+// FIX #34: All config_ writes protected by unique_lock on config_mutex_
 void FlowShaper::set_config(const FlowShaperConfig& config) {
+    std::unique_lock<std::shared_mutex> wlock(config_mutex_);
     config_ = config;
     apply_profile_defaults();
     precompute_weights();
 }
 
 FlowShaperConfig FlowShaper::get_config() const {
+    std::shared_lock<std::shared_mutex> rlock(config_mutex_);
     return config_;
 }
 
 void FlowShaper::set_profile(FlowProfile profile) {
+    std::unique_lock<std::shared_mutex> wlock(config_mutex_);
     switch (profile) {
         case FlowProfile::WEB_BROWSING:  config_ = FlowShaperConfig::web_browsing(); break;
         case FlowProfile::VIDEO_STREAM:  config_ = FlowShaperConfig::video_stream(); break;
@@ -768,8 +790,8 @@ FlowShaperStats FlowShaper::get_stats() const {
 
 void FlowShaper::reset_stats() {
     stats_.reset();
-    upload_bytes_ = 0;
-    download_bytes_ = 0;
+    upload_bytes_.store(0, std::memory_order_relaxed);
+    download_bytes_.store(0, std::memory_order_relaxed);
 }
 
 } // namespace DPI
