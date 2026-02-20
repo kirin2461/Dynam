@@ -216,16 +216,26 @@ private:
 
 /**
  * @brief Add random padding to DNS queries to prevent traffic analysis
+ *
+ * Padding envelope format (authenticated via HMAC-SHA256):
+ *   [32-byte HMAC] [4-byte orig_len (big-endian)] [original data] [random padding]
+ *
+ * HMAC covers: orig_len || original_data
+ * Key is generated per instance and securely wiped in destructor.
+ *
+ * NOTE: This is a breaking change from the previous unauthenticated format
+ *       ([4-byte orig_len] [data] [padding]). Old padded data will fail
+ *       HMAC verification and be returned as-is (graceful fallback).
  */
 class TrafficPadder {
 public:
     TrafficPadder(uint32_t min_size = 128, uint32_t max_size = 512);
-    ~TrafficPadder();
+    ~TrafficPadder();  // Securely wipes hmac_key_ via sodium_memzero
 
     // Add padding to data
     std::vector<uint8_t> add_padding(const std::vector<uint8_t>& data);
     
-    // Remove padding from data
+    // Remove padding from data (verifies HMAC integrity first)
     std::vector<uint8_t> remove_padding(const std::vector<uint8_t>& data);
     
     // Configure padding size range
@@ -238,6 +248,7 @@ public:
 private:
     uint32_t min_size_;
     uint32_t max_size_;
+    std::vector<uint8_t> hmac_key_;  // HMAC-SHA256 key for padding integrity (#58)
     // Phase 0: mt19937 rng_ REMOVED — all randomness via ncp::csprng_*
     std::mutex mutex_;
 };
