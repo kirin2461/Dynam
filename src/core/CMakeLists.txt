@@ -77,7 +77,13 @@ if(ENABLE_LIBOQS OR HAVE_LIBOQS)
 endif()
 
 if(ENABLE_WEBSOCKETS OR HAVE_LIBWEBSOCKETS)
-    # mimicry.cpp uses libwebsockets
+    # WebSocket Tunnel Transport (Phase 3)
+    list(APPEND NCP_CORE_SRC_SOURCES
+        src/ncp_ws_tunnel.cpp
+    )
+    list(APPEND NCP_CORE_INCLUDE_HEADERS
+        include/ncp_ws_tunnel.hpp
+    )
 endif()
 
 # Always compile these with #ifdef guards inside
