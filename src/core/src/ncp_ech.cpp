@@ -185,6 +185,7 @@ struct ECHServerContext::Impl {
     HPKECipherSuite cipher_suite;
     OSSL_HPKE_CTX* hpke_ctx = nullptr;
     OSSL_HPKE_SUITE suite{};
+    ECHConfig ech_config;  // Store ECHConfig for info vector in decrypt()
 
     ~Impl() {
         if (hpke_ctx) {
@@ -201,10 +202,12 @@ ECHServerContext::~ECHServerContext() = default;
 
 bool ECHServerContext::init(
     const std::vector<uint8_t>& private_key,
-    const HPKECipherSuite& cipher_suite
+    const HPKECipherSuite& cipher_suite,
+    const ECHConfig& ech_config
 ) {
     impl_->cipher_suite = cipher_suite;
     impl_->suite = make_suite(cipher_suite);
+    impl_->ech_config = ech_config;
 
     if (impl_->suite.kem_id == 0 || impl_->suite.kdf_id == 0 || impl_->suite.aead_id == 0) {
         return false;
@@ -256,15 +259,15 @@ bool ECHServerContext::decrypt(
         return false;
     }
 
-    // Prepare info (should match client's info)
+    // Prepare info: "tls ech" || 0x00 || ECHConfig (must match client's info)
     std::vector<uint8_t> info;
     const char* label = "tls ech";
     info.insert(info.end(), label, label + 7);
     info.push_back(0x00);
-    // Note: ECHConfig should be available to server from its own config
+    info.insert(info.end(), impl_->ech_config.raw_config.begin(),
+                impl_->ech_config.raw_config.end());
 
     // Setup HPKE decapsulation (server side)
-    // OSSL_HPKE_decap takes EVP_PKEY* for the recipient private key
     if (OSSL_HPKE_decap(
             impl_->hpke_ctx,
             enc.data(), enc.size(),
@@ -371,7 +374,62 @@ std::vector<uint8_t> apply_ech(
 
 #else // !HAVE_OPENSSL
 
-// Stub implementations when OpenSSL is not available
+// ==================== Stub Implementations (no OpenSSL) ====================
+
+// Impl stubs — needed so std::make_unique<Impl>() compiles without OpenSSL
+
+struct ECHClientContext::Impl {
+    ECHConfig config;
+};
+
+ECHClientContext::ECHClientContext() : impl_(std::make_unique<Impl>()) {}
+ECHClientContext::~ECHClientContext() = default;
+
+bool ECHClientContext::init(const ECHConfig&) {
+    return false;
+}
+
+bool ECHClientContext::encrypt(
+    const std::vector<uint8_t>&,
+    const std::vector<uint8_t>&,
+    std::vector<uint8_t>&,
+    std::vector<uint8_t>&
+) {
+    return false;
+}
+
+HPKECipherSuite ECHClientContext::get_cipher_suite() const {
+    return HPKECipherSuite();
+}
+
+uint8_t ECHClientContext::get_config_id() const {
+    return 0;
+}
+
+struct ECHServerContext::Impl {
+    HPKECipherSuite cipher_suite;
+    ECHConfig ech_config;
+};
+
+ECHServerContext::ECHServerContext() : impl_(std::make_unique<Impl>()) {}
+ECHServerContext::~ECHServerContext() = default;
+
+bool ECHServerContext::init(
+    const std::vector<uint8_t>&,
+    const HPKECipherSuite&,
+    const ECHConfig&
+) {
+    return false;
+}
+
+bool ECHServerContext::decrypt(
+    const std::vector<uint8_t>&,
+    const std::vector<uint8_t>&,
+    const std::vector<uint8_t>&,
+    std::vector<uint8_t>&
+) {
+    return false;
+}
 
 bool parse_ech_config(const std::vector<uint8_t>&, ECHConfig&) {
     return false;

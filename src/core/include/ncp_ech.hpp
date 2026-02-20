@@ -159,14 +159,16 @@ public:
     ECHServerContext& operator=(ECHServerContext&&) noexcept = default;
 
     /**
-     * @brief Initialize with server private key
+     * @brief Initialize with server private key and ECHConfig
      * @param private_key HPKE private key
      * @param cipher_suite Supported cipher suite
+     * @param ech_config ECHConfig for HPKE info string (raw_config needed for decap)
      * @return true on success
      */
     bool init(
         const std::vector<uint8_t>& private_key,
-        const HPKECipherSuite& cipher_suite
+        const HPKECipherSuite& cipher_suite,
+        const ECHConfig& ech_config
     );
 
     /**
