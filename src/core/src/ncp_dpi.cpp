@@ -25,6 +25,7 @@
     #include <arpa/inet.h>
     #include <unistd.h>
     #include <netdb.h>
+    #include <poll.h>
     #define SOCKET int
     #define INVALID_SOCKET -1
     #define CLOSE_SOCKET close
@@ -83,6 +84,9 @@ static bool is_tls_client_hello(const uint8_t* data, size_t len) {
     return len > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01;
 }
 
+int find_sni_hostname_offset(const uint8_t* data, size_t len) {
+    if (!data || len < 5 + 4) return -1;
+    if (data[0] != 0x16 || data[1] != 0x03) return -1;
 /**
  * @brief Best-effort parser for TLS ClientHello to locate SNI hostname offset.
  */
@@ -100,6 +104,8 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
         return -1;
     }
 
+    size_t pos = 5;
+    if (pos + 4 > len) return -1;
     uint8_t handshake_type = data[pos];
     if (handshake_type != 0x01) {
         return -1;
@@ -319,6 +325,9 @@ public:
         return config;
     }
 
+    // =========================================================================
+    // FIX #55: proxy_listen_loop with poll() before accept() and connection limits
+    // =========================================================================
     void proxy_listen_loop() {
 #ifdef _WIN32
         WSADATA wsa_data;
@@ -376,7 +385,32 @@ public:
         thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
         log("DPI proxy listening on 127.0.0.1:" + std::to_string(listen_cfg.listen_port));
 
+        // FIX #55: Use poll() with timeout so the loop exits when running becomes false
         while (running) {
+#ifdef _WIN32
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(listen_sock, &read_fds);
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            int sel_ret = select(static_cast<int>(listen_sock + 1), &read_fds, nullptr, nullptr, &tv);
+            if (sel_ret <= 0) {
+                continue; // timeout or error — re-check running flag
+            }
+#else
+            struct pollfd pfd;
+            pfd.fd = listen_sock;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            int poll_ret = poll(&pfd, 1, 1000); // 1 second timeout
+            if (poll_ret <= 0) {
+                continue; // timeout or error — re-check running flag
+            }
+            if (!(pfd.revents & POLLIN)) {
+                continue;
+            }
+#endif
             // FIX #40: select() with 500ms timeout before accept()
             if (!wait_for_readable(listen_sock, 500)) {
                 continue;
@@ -397,21 +431,36 @@ public:
                 continue;
             }
 
+            // FIX #55: Enforce MAX_CONNECTIONS limit
+            int current = active_connections_.load();
+            if (current >= MAX_CONNECTIONS) {
+                log("DPI proxy: max connections reached (" + std::to_string(MAX_CONNECTIONS) + "), rejecting");
+                CLOSE_SOCKET(client_sock);
+                continue;
+            }
+
             {
                 std::lock_guard<std::mutex> lock(stats_mutex);
                 stats.connections_handled++;
             }
 
+            active_connections_++;
+            thread_pool_->submit([this, client_sock]() {
+                handle_proxy_connection(client_sock);
+                active_connections_--;
+            });
             thread_pool_->submit([this, client_sock]() { handle_proxy_connection(client_sock); });
         }
 
         CLOSE_SOCKET(listen_sock);
-
 #ifdef _WIN32
         WSACleanup();
 #endif
     }
 
+    // =========================================================================
+    // FIX #55: handle_proxy_connection — poll-based relay, NO sub-threads
+    // =========================================================================
     void handle_proxy_connection(SOCKET client_sock) {
         // FIX #39: config snapshot at connection start
         DPIConfig cfg_snap = snapshot_config();
@@ -462,6 +511,9 @@ public:
             return;
         }
 
+        // FIX #55: Single-thread poll-based bidirectional relay
+        // Instead of spawning 2 additional threads per connection (which
+        // defeats the purpose of a thread pool), use poll() to multiplex.
         // FIX #39: pass config snapshot by value to pipe thread
         std::thread t_cs(&Impl::pipe_client_to_server, this, client_sock, server_sock, cfg_snap);
         std::thread t_cs(&Impl::pipe_client_to_server, this, client_sock, server_sock);
@@ -479,7 +531,54 @@ public:
         std::vector<uint8_t> buffer(8192);
         bool client_hello_processed = false;
 
+#ifdef _WIN32
+        // Windows select-based relay
         while (running) {
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(client_sock, &read_fds);
+            FD_SET(server_sock, &read_fds);
+            SOCKET max_fd = std::max(client_sock, server_sock);
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            int sel = select(static_cast<int>(max_fd + 1), &read_fds, nullptr, nullptr, &tv);
+            if (sel < 0) break;
+            if (sel == 0) continue;
+
+            // client -> server
+            if (FD_ISSET(client_sock, &read_fds)) {
+                int received = recv(client_sock, reinterpret_cast<char*>(buffer.data()),
+                                    static_cast<int>(buffer.size()), 0);
+                if (received <= 0) break;
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.bytes_received += static_cast<uint64_t>(received);
+                    stats.packets_total++;
+                }
+                bool is_ch = false;
+                if (!client_hello_processed &&
+                    is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
+                    is_ch = true;
+                    client_hello_processed = true;
+                }
+                send_with_fragmentation(server_sock, buffer.data(),
+                                        static_cast<size_t>(received), is_ch);
+            }
+
+            // server -> client
+            if (FD_ISSET(server_sock, &read_fds)) {
+                int received = recv(server_sock, reinterpret_cast<char*>(buffer.data()),
+                                    static_cast<int>(buffer.size()), 0);
+                if (received <= 0) break;
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.bytes_received += static_cast<uint64_t>(received);
+                    stats.packets_total++;
+                }
+                send_with_fragmentation(client_sock, buffer.data(),
+                                        static_cast<size_t>(received), false);
+            }
             int received = recv(client_sock,
                                 reinterpret_cast<char*>(buffer.data()),
                                 static_cast<int>(buffer.size()), 0);
@@ -513,21 +612,55 @@ public:
                                         static_cast<size_t>(received), is_ch);
             }
         }
-    }
-
-    void pipe_server_to_client(SOCKET server_sock, SOCKET client_sock) {
-        std::vector<uint8_t> buffer(8192);
+#else
+        // POSIX poll-based relay
+        struct pollfd fds[2];
+        fds[0].fd = client_sock;
+        fds[0].events = POLLIN;
+        fds[1].fd = server_sock;
+        fds[1].events = POLLIN;
 
         while (running) {
+            int ret = poll(fds, 2, 1000);
+            if (ret < 0) break;
+            if (ret == 0) continue;
+
+            // client -> server
+            if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
+                int received = recv(client_sock, reinterpret_cast<char*>(buffer.data()),
+                                    static_cast<int>(buffer.size()), 0);
+                if (received <= 0) break;
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.bytes_received += static_cast<uint64_t>(received);
+                    stats.packets_total++;
+                }
+                bool is_ch = false;
+                if (!client_hello_processed &&
+                    is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
+                    is_ch = true;
+                    client_hello_processed = true;
+                }
+                send_with_fragmentation(server_sock, buffer.data(),
+                                        static_cast<size_t>(received), is_ch);
+            }
             int received = recv(server_sock,
                                 reinterpret_cast<char*>(buffer.data()),
                                 static_cast<int>(buffer.size()), 0);
             if (received <= 0) break;
 
-            {
-                std::lock_guard<std::mutex> lock(stats_mutex);
-                stats.bytes_received += static_cast<uint64_t>(received);
-                stats.packets_total++;
+            // server -> client
+            if (fds[1].revents & (POLLIN | POLLHUP | POLLERR)) {
+                int received = recv(server_sock, reinterpret_cast<char*>(buffer.data()),
+                                    static_cast<int>(buffer.size()), 0);
+                if (received <= 0) break;
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.bytes_received += static_cast<uint64_t>(received);
+                    stats.packets_total++;
+                }
+                send_with_fragmentation(client_sock, buffer.data(),
+                                        static_cast<size_t>(received), false);
             }
 
             size_t total_sent = 0;
@@ -545,6 +678,10 @@ public:
                 stats.bytes_sent += static_cast<uint64_t>(total_sent);
             }
         }
+#endif
+
+        CLOSE_SOCKET(client_sock);
+        CLOSE_SOCKET(server_sock);
     }
 
     // FIX #39: cfg passed by const ref (caller's stack copy)
@@ -655,6 +792,25 @@ public:
         };
 
         // =====================================================================
+        // FIX #48: Fake packet via TCP socket fundamentally does not work.
+        //
+        // TCP guarantees in-order reliable delivery. Setting a low TTL via
+        // setsockopt(IP_TTL) does NOT prevent the TCP stack from retransmitting
+        // the data — the fake bytes WILL reach the server and corrupt the TLS
+        // handshake. The low-TTL trick only works with raw sockets where you
+        // craft IP packets directly.
+        //
+        // In PROXY mode we only apply TCP fragmentation/splitting strategies
+        // (which DO work over TCP sockets) and skip fake packet injection.
+        //
+        // Noise (fake host preamble) is also disabled in PROXY mode for the same
+        // reason — injecting extra bytes into a TCP stream corrupts the protocol.
+        //
+        // For real fake-packet DPI evasion, use DRIVER mode (nfqueue/raw sockets).
+        // =====================================================================
+
+        if (is_client_hello && config.enable_noise && config.mode != DPIMode::PROXY) {
+            // Noise only works in non-proxy modes (raw socket / nfqueue)
         // FIX #38: REMOVED broken noise/fake-packet injection via TCP socket.
         //
         // The previous code sent HTTP GET junk and fake TLS records through the
@@ -704,6 +860,8 @@ public:
 #endif
         }
 
+        if (is_client_hello && config.enable_fake_packet && config.mode != DPIMode::PROXY) {
+            // Fake packets only work via raw sockets / nfqueue, not TCP proxy
         // Fake low-TTL probe before main ClientHello
         if (is_client_hello && config.enable_fake_packet) {
             for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
@@ -742,6 +900,7 @@ public:
             }
         }
 
+        // TCP split/fragmentation — this DOES work correctly over TCP sockets
         if (!is_client_hello || !config.enable_tcp_split) {
             size_t sent = send_all(data, len);
             std::lock_guard<std::mutex> lock(stats_mutex);
@@ -751,6 +910,7 @@ public:
 
         size_t first_len = 0;
         int sni_offset = -1;
+        if (config.split_at_sni) {
 
         if (cfg.split_at_sni) {
             sni_offset = find_sni_hostname_offset(data, len);
@@ -770,8 +930,9 @@ public:
         sent_total += sent_first;
 
         size_t remaining = (sent_first < len) ? (len - sent_first) : 0;
-
         if (remaining > 0) {
+            size_t base_frag_size = (config.fragment_size > 0)
+                                   ? static_cast<size_t>(config.fragment_size) : 2;
             size_t base_frag_size = (cfg.fragment_size > 0)
                                    ? static_cast<size_t>(cfg.fragment_size) : 2;
 
@@ -804,10 +965,16 @@ public:
         }
     }
 
-    // =========================================================================
-    // WebSocket Tunnel mode (Phase 3.4)
-    // =========================================================================
 #ifdef HAVE_LIBWEBSOCKETS
+    std::vector<uint8_t> process_outgoing_for_ws(const uint8_t* data, size_t len,
+                                                  bool is_client_hello) {
+        std::vector<uint8_t> out;
+        if (!data || len == 0) return out;
+
+        if (is_client_hello && config.enable_noise) {
+            if (!config.fake_host.empty()) {
+                std::string mask = "GET / HTTP/1.1\r\nHost: " + config.fake_host + "\r\n\r\n";
+                out.insert(out.end(), mask.begin(), mask.end());
 
     // =========================================================================
     // FIX #41: process_outgoing_for_ws now returns vector of separate frames.
@@ -837,6 +1004,8 @@ public:
             frames.push_back(std::move(noise_frame));
         }
 
+        if (is_client_hello && config.enable_fake_packet) {
+            int fakes = (config.fake_ttl > 2) ? 2 : 1;
         // --- Fake TLS probe (each as separate WS frame) ---
         if (is_client_hello && cfg.enable_fake_packet) {
             int fakes = (cfg.fake_ttl > 2) ? 2 : 1;
@@ -856,6 +1025,12 @@ public:
             }
         }
 
+        if (!is_client_hello || !config.enable_tcp_split) {
+            out.insert(out.end(), data, data + len);
+        } else {
+            size_t first_len = 0;
+            int sni_off = -1;
+            if (config.split_at_sni) sni_off = find_sni_hostname_offset(data, len);
         // --- TCP split / fragmentation (each fragment = separate WS frame) ---
         if (!is_client_hello || !cfg.enable_tcp_split) {
             frames.emplace_back(data, data + len);
@@ -873,6 +1048,9 @@ public:
             else
                 first_len = std::min<size_t>(len, 1);
 
+            out.insert(out.end(), data, data + first_len);
+            size_t base_frag = config.fragment_size > 0
+                                ? static_cast<size_t>(config.fragment_size) : 2;
             frames.emplace_back(data, data + first_len);
 
             size_t base_frag = cfg.fragment_size > 0
@@ -896,25 +1074,22 @@ public:
             if (is_client_hello && cfg.enable_tcp_split)
                 stats.packets_fragmented++;
         }
+        return out;
 
         return frames;
     }
 
     void send_to_client(const uint8_t* data, size_t len) {
         std::lock_guard<std::mutex> lock(ws_client_mutex_);
-        if (ws_active_client_ == INVALID_SOCKET || !data || len == 0)
-            return;
-
+        if (ws_active_client_ == INVALID_SOCKET || !data || len == 0) return;
         size_t total_sent = 0;
         while (total_sent < len) {
             int chunk = static_cast<int>(std::min<size_t>(len - total_sent, 8192));
             int sent = ::send(ws_active_client_,
-                              reinterpret_cast<const char*>(data + total_sent),
-                              chunk, 0);
+                              reinterpret_cast<const char*>(data + total_sent), chunk, 0);
             if (sent <= 0) break;
             total_sent += static_cast<size_t>(sent);
         }
-
         {
             std::lock_guard<std::mutex> slock(stats_mutex);
             stats.bytes_received += static_cast<uint64_t>(total_sent);
@@ -930,6 +1105,7 @@ public:
             return;
         }
 #endif
+        uint16_t local_port = config.ws_local_port > 0 ? config.ws_local_port : 8081;
         // FIX #39: snapshot config
         DPIConfig listen_cfg = snapshot_config();
         uint16_t local_port = listen_cfg.ws_local_port > 0
@@ -978,9 +1154,29 @@ public:
         thread_pool_ = std::make_unique<ncp::ThreadPool>(num_threads);
 
         log("WS_TUNNEL: listening on 127.0.0.1:" + std::to_string(local_port) +
+            " -> relay " + config.ws_server_url);
             " -> relay " + listen_cfg.ws_server_url);
 
+        // FIX #55: poll() before accept() in WS tunnel loop too
         while (running) {
+#ifdef _WIN32
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(listen_sock, &read_fds);
+            struct timeval tv;
+            tv.tv_sec = 1;
+            tv.tv_usec = 0;
+            int sel_ret = select(static_cast<int>(listen_sock + 1), &read_fds, nullptr, nullptr, &tv);
+            if (sel_ret <= 0) continue;
+#else
+            struct pollfd pfd;
+            pfd.fd = listen_sock;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            int poll_ret = poll(&pfd, 1, 1000);
+            if (poll_ret <= 0) continue;
+            if (!(pfd.revents & POLLIN)) continue;
+#endif
             // FIX #40: select() with timeout before accept()
             if (!wait_for_readable(listen_sock, 500)) {
                 continue;
@@ -1047,6 +1243,10 @@ public:
                 client_hello_processed = true;
             }
 
+            auto processed = process_outgoing_for_ws(
+                buffer.data(), static_cast<size_t>(received), is_ch);
+            if (!processed.empty() && ws_tunnel_) {
+                ws_tunnel_->send(processed.data(), processed.size());
             // FIX #41: Each frame sent as separate WebSocket message
             auto frames = process_outgoing_for_ws(
                 buffer.data(), static_cast<size_t>(received), is_ch, cfg_snap);
@@ -1088,6 +1288,7 @@ public:
         }
 
         ws_tunnel_->set_receive_callback(
+            [this](const uint8_t* data, size_t len) { send_to_client(data, len); });
             [this](const uint8_t* data, size_t len) {
                 send_to_client(data, len);
             });
@@ -1230,12 +1431,8 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
 
 DPIPreset preset_from_string(const std::string& name) {
     auto lower = to_lower_copy(name);
-    if (lower == "runet-soft" || lower == "runet_soft" || lower == "runetsoft") {
-        return DPIPreset::RUNET_SOFT;
-    }
-    if (lower == "runet-strong" || lower == "runet_strong" || lower == "runetstrong") {
-        return DPIPreset::RUNET_STRONG;
-    }
+    if (lower == "runet-soft" || lower == "runet_soft" || lower == "runetsoft") return DPIPreset::RUNET_SOFT;
+    if (lower == "runet-strong" || lower == "runet_strong" || lower == "runetstrong") return DPIPreset::RUNET_STRONG;
     return DPIPreset::NONE;
 }
 
@@ -1244,8 +1441,7 @@ const char* preset_to_string(DPIPreset preset) {
     case DPIPreset::RUNET_SOFT:   return "RuNet-Soft";
     case DPIPreset::RUNET_STRONG: return "RuNet-Strong";
     case DPIPreset::NONE:
-    default:
-        return "Custom";
+    default: return "Custom";
     }
 }
 
@@ -1253,6 +1449,7 @@ DPIBypass::DPIBypass() : impl_(std::make_unique<Impl>()) {}
 DPIBypass::~DPIBypass() { shutdown(); }
 
 bool DPIBypass::initialize(const DPIConfig& config) {
+    impl_->config = config;
     {
         std::lock_guard<std::mutex> lock(impl_->config_mutex);
         impl_->config = config;
@@ -1266,7 +1463,6 @@ bool DPIBypass::initialize(const DPIConfig& config) {
         case DPIMode::WS_TUNNEL:  mode_str = "ws_tunnel";  break;
         default:                  mode_str = "unknown";    break;
     }
-
     impl_->log("Initialize DPI (mode=" + mode_str +
               ", listen_port=" + std::to_string(config.listen_port) +
               ", fragment_size=" + std::to_string(config.fragment_size) + ")");
@@ -1322,6 +1518,9 @@ bool DPIBypass::start() {
             impl_->log("WS_TUNNEL: ws_server_url is not configured");
             return false;
         }
+        if (!impl_->start_ws_tunnel()) return false;
+        impl_->log("DPI bypass started (WebSocket tunnel mode -> " +
+                   impl_->config.ws_server_url + ")");
         if (!impl_->start_ws_tunnel()) {
             return false;
         }
@@ -1338,7 +1537,6 @@ bool DPIBypass::start() {
 
 void DPIBypass::stop() {
     impl_->running = false;
-
 #ifdef HAVE_LIBWEBSOCKETS
     impl_->stop_ws_tunnel();
 #endif
