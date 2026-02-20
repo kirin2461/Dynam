@@ -24,6 +24,7 @@
 #include <functional>
 #include <array>
 #include <chrono>
+#include <mutex>
 #include "ncp_csprng.hpp"
 
 namespace ncp {
@@ -221,10 +222,21 @@ public:
     
     /// Generate a dummy packet that looks like real traffic.
     /// Should be injected into the flow at random intervals.
+    /// Uses HMAC-derived per-session marker (not static magic bytes).
     std::vector<uint8_t> generate_dummy_packet();
     
     /// Check if a received packet is a dummy (to discard on receive side).
+    /// Checks HMAC-derived marker first, falls back to legacy 0xDEADBEEF.
     bool is_dummy_packet(const uint8_t* data, size_t len) const;
+    
+    /// Get the 32-byte session dummy key for sharing with peer.
+    /// Both sides must use the same key for is_dummy_packet() to work.
+    std::vector<uint8_t> get_session_dummy_key() const;
+    
+    /// Set session dummy key received from peer (32 bytes).
+    /// Call after key exchange to synchronize dummy detection.
+    void set_session_dummy_key(const uint8_t* key, size_t len);
+    void set_session_dummy_key(const std::vector<uint8_t>& key);
     
     // ===== Adaptive Feedback =====
     
@@ -270,11 +282,18 @@ private:
     void evaluate_adaptive_strategy();
     AdversarialStrategy select_best_strategy() const;
     
-    // Dummy packet internals
-    static constexpr uint8_t DUMMY_MAGIC_0 = 0xDE;
-    static constexpr uint8_t DUMMY_MAGIC_1 = 0xAD;
-    static constexpr uint8_t DUMMY_MAGIC_2 = 0xBE;
-    static constexpr uint8_t DUMMY_MAGIC_3 = 0xEF;
+    // Dummy packet marker — HMAC-derived per session (replaces fixed 0xDEADBEEF)
+    static constexpr size_t DUMMY_MARKER_SIZE = 4;
+    static constexpr size_t SESSION_DUMMY_KEY_SIZE = 32;
+    std::array<uint8_t, SESSION_DUMMY_KEY_SIZE> session_dummy_key_{};
+    std::array<uint8_t, DUMMY_MARKER_SIZE> dummy_marker_{};  // Derived from key
+    void derive_dummy_marker();  // HMAC(key, "NCP-DUMMY-MARKER-v1") → first 4 bytes
+    
+    // Legacy magic bytes for backward compatibility with older peers
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_0 = 0xDE;
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_1 = 0xAD;
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_2 = 0xBE;
+    static constexpr uint8_t LEGACY_DUMMY_MAGIC_3 = 0xEF;
     
     // Control header versioning
     //
@@ -298,8 +317,12 @@ private:
     static constexpr size_t MAX_PRE_PADDING = 4095;   // 12-bit limit
     static constexpr size_t MAX_PAYLOAD_LEN = 65535;   // 16-bit limit
     
+    // Thread safety: protects config_, active_strategy_, feedback_history_,
+    // strategy_scores_, packets_since_evaluation_, session_dummy_key_, dummy_marker_
+    mutable std::mutex mutex_;
+    
     AdversarialConfig config_;
-    AdversarialStats stats_;
+    AdversarialStats stats_;  // Uses atomics internally — no mutex needed for reads
     
     // Adaptive state
     AdversarialStrategy active_strategy_;
