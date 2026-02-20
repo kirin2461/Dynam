@@ -12,6 +12,7 @@ This implementation provides **production-ready Encrypted Client Hello (ECH)** u
 ✅ **AAD binding** for tamper protection
 ✅ **Comprehensive unit tests**
 ✅ **OpenSSL 3.2+ integration**
+✅ **Graceful fallback** when OpenSSL is unavailable
 
 ## Quick Start
 
@@ -54,9 +55,9 @@ client.init(config);
 std::vector<uint8_t> enc, encrypted;
 client.encrypt(inner_hello, outer_aad, enc, encrypted);
 
-// Server: Decrypt
+// Server: Decrypt (pass config for HPKE info vector)
 ECHServerContext server;
-server.init(private_key, suite);
+server.init(private_key, suite, config);
 
 std::vector<uint8_t> decrypted;
 server.decrypt(enc, encrypted, outer_aad, decrypted);
