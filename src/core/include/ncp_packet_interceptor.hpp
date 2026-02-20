@@ -12,12 +12,15 @@
 
 namespace ncp {
 
+// Forward declaration for shared L3Stealth instance (FIX #84)
+class L3Stealth;
+
 /**
  * @brief Packet Interceptor for Phase 2 L3 Stealth
  *
  * Intercepts ALL outgoing packets at kernel level via:
  *  - Linux: NFQUEUE (iptables -j NFQUEUE)
- *  - Windows: WFP (Windows Filtering Platform) callout driver
+ *  - Windows: WinDivert (userspace packet interception)
  *
  * Capabilities:
  *  - MTU enforcement (fragment packets >1500 before they leave)
@@ -29,15 +32,16 @@ namespace ncp {
  * Does NOT require:
  *  - Npcap
  *  - AF_PACKET
- *  - Kernel modules (uses existing netfilter on Linux, WFP API on Windows)
+ *  - Kernel modules (uses existing netfilter on Linux, WinDivert on Windows)
  */
 class PacketInterceptor {
 public:
     // ==================== Backend Types ====================
     enum class Backend {
-        AUTO,           // Auto-detect: NFQUEUE on Linux, WFP on Windows
+        AUTO,           // Auto-detect: NFQUEUE on Linux, WINDIVERT on Windows
         NFQUEUE,        // Linux netfilter_queue
-        WFP,            // Windows Filtering Platform
+        WINDIVERT,      // Windows WinDivert (userspace packet interception)
+        WFP,            // Windows Filtering Platform (legacy placeholder, prefer WINDIVERT)
         NONE            // Disabled (pass-through)
     };
 
@@ -74,7 +78,12 @@ public:
         bool nfqueue_outbound_only = true;  // Only intercept OUTPUT chain
         uint32_t nfqueue_max_len = 1024;    // Queue length
 
-        // --- WFP Config (Windows) ---
+        // --- WinDivert Config (Windows) --- (FIX #83)
+        std::string windivert_filter = "outbound and ip";  // WinDivert filter string
+        int16_t windivert_priority = 0;     // Filter priority (-30000 to 30000)
+        uint64_t windivert_flags = 0;       // Additional WinDivert flags
+
+        // --- WFP Config (Windows, legacy) ---
         std::string wfp_sublayer_name = "NCP_PacketInterceptor";
         uint64_t wfp_weight = 0x8000;       // Filter weight (higher = earlier)
 
@@ -164,7 +173,7 @@ public:
      * @brief Initialize with config.
      *
      * On Linux: Sets up NFQUEUE binding (requires root).
-     * On Windows: Registers WFP filters (requires admin).
+     * On Windows: Opens WinDivert handle (requires admin).
      *
      * @return true if backend initialized successfully
      */
@@ -191,7 +200,7 @@ public:
      * @brief Update config at runtime (thread-safe).
      *
      * Some settings (like backend type) cannot be changed after start.
-     * Bumps internal config version so thread_local caches re-initialize.
+     * Bumps internal config version so L3Stealth re-initializes.
      */
     bool update_config(const Config& config);
 
@@ -229,7 +238,12 @@ public:
     static bool is_nfqueue_available();
 
     /**
-     * @brief Check if WFP is available (Windows only).
+     * @brief Check if WinDivert is available (Windows only).
+     */
+    static bool is_windivert_available();
+
+    /**
+     * @brief Check if WFP is available (Windows only, legacy).
      */
     static bool is_wfp_available();
 
@@ -246,12 +260,21 @@ private:
     Config config_;
     bool initialized_ = false;
     std::atomic<bool> running_{false};
-    std::atomic<uint64_t> config_version_{0};  // Bumped on config changes for thread_local re-init
+    std::atomic<uint64_t> config_version_{0};
+
+    // FIX #84: Shared L3Stealth instance across all threads
+    // Replaces per-thread thread_local instances that couldn't share
+    // IPID caches, flow labels, timestamp epochs, and statistics.
+    std::unique_ptr<L3Stealth> l3stealth_;
+    std::mutex l3stealth_mutex_;
+    uint64_t l3stealth_config_version_ = 0;
+
     Stats stats_;
     LogCallback log_cb_;
     PacketHandler packet_handler_;
 
     void log(const std::string& msg);
+    void ensure_l3stealth_initialized(const Config& cfg, uint64_t current_version);
     Verdict default_packet_handler(std::vector<uint8_t>& packet, bool is_outbound);
 };
 

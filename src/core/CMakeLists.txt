@@ -44,7 +44,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
     # L3/L2 Stealth modules (Anti-ISP fingerprinting)
     src/ncp_l3_stealth.cpp       # Phase 1: IPID/TTL/MSS/FlowLabel normalization
-    src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WFP packet interception + tunneling
+    src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WinDivert packet interception + tunneling
     src/ncp_l2_stealth.cpp       # Phase 3: ARP/LLDP/VLAN (Npcap-optional)
     # Hybrid network backend sources
     src/network_raw_socket.cpp
@@ -227,6 +227,38 @@ elseif(WIN32)
 
     # bcrypt.lib for CSPRNG in anti-TSPU modules
     target_link_libraries(ncp_core PUBLIC bcrypt)
+endif()
+
+# ==================== Optional: WinDivert (FIX #83) ====================
+# WinDivert provides userspace packet interception on Windows.
+# Replaces the non-functional WFP placeholder backend.
+# Download from: https://reqrypt.org/windivert.html
+if(WIN32)
+    if(DEFINED WINDIVERT_DIR AND EXISTS "${WINDIVERT_DIR}/include")
+        target_include_directories(ncp_core PRIVATE "${WINDIVERT_DIR}/include")
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            target_link_directories(ncp_core PUBLIC "${WINDIVERT_DIR}/x64")
+        else()
+            target_link_directories(ncp_core PUBLIC "${WINDIVERT_DIR}/x86")
+        endif()
+        target_link_libraries(ncp_core PUBLIC WinDivert)
+        target_compile_definitions(ncp_core PRIVATE HAVE_WINDIVERT)
+        message(STATUS "Found WinDivert SDK at ${WINDIVERT_DIR}")
+    else()
+        find_library(WINDIVERT_LIBRARY NAMES WinDivert)
+        find_path(WINDIVERT_INCLUDE_DIR NAMES windivert.h)
+        if(WINDIVERT_LIBRARY AND WINDIVERT_INCLUDE_DIR)
+            target_link_libraries(ncp_core PUBLIC ${WINDIVERT_LIBRARY})
+            target_include_directories(ncp_core PRIVATE ${WINDIVERT_INCLUDE_DIR})
+            target_compile_definitions(ncp_core PRIVATE HAVE_WINDIVERT)
+            message(STATUS "Found WinDivert: ${WINDIVERT_LIBRARY}")
+        else()
+            message(STATUS "WinDivert not found - Windows packet interception will use WFP placeholder (limited)")
+        endif()
+    endif()
+
+    # WFP library for legacy WFP backend
+    target_link_libraries(ncp_core PUBLIC fwpuclnt)
 endif()
 
 # ==================== Optional: libnetfilter_queue ====================
