@@ -70,9 +70,9 @@ TEST_F(ECHTest, HPKEEncryptDecryptRoundTrip) {
     EXPECT_FALSE(encrypted.empty());
     EXPECT_NE(encrypted, client_hello_inner);  // Should be different
 
-    // Server: Initialize and decrypt
+    // Server: Initialize and decrypt (pass config for info vector match)
     ECHServerContext server;
-    ASSERT_TRUE(server.init(private_key, suite));
+    ASSERT_TRUE(server.init(private_key, suite, config));
 
     std::vector<uint8_t> decrypted;
     ASSERT_TRUE(server.decrypt(
@@ -169,7 +169,7 @@ TEST_F(ECHTest, DetectAADTampering) {
     std::vector<uint8_t> tampered_aad = {0x04, 0x05, 0x07};
 
     ECHServerContext server;
-    ASSERT_TRUE(server.init(private_key, suite));
+    ASSERT_TRUE(server.init(private_key, suite, config));
 
     std::vector<uint8_t> decrypted;
     // Should fail due to AAD mismatch
@@ -206,7 +206,7 @@ TEST_F(ECHTest, LargePayloadEncryption) {
     ASSERT_TRUE(client.encrypt(large_inner, aad, enc, encrypted));
 
     ECHServerContext server;
-    ASSERT_TRUE(server.init(private_key, suite));
+    ASSERT_TRUE(server.init(private_key, suite, config));
 
     std::vector<uint8_t> decrypted;
     ASSERT_TRUE(server.decrypt(enc, encrypted, aad, decrypted));
