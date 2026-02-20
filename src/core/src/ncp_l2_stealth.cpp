@@ -8,6 +8,9 @@
 #ifdef __linux__
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <cerrno>
 #elif defined(_WIN32)
 #include <windows.h>
 #endif
@@ -21,6 +24,60 @@
 #endif
 
 namespace ncp {
+
+// ==================== Safe exec (no shell) ====================
+
+#ifdef __linux__
+/**
+ * @brief Execute a command with explicit argv, bypassing shell entirely.
+ *
+ * Uses fork()+execvp() — no shell metacharacter interpretation.
+ * All arguments are passed as discrete C strings.
+ *
+ * @param argv  Null-terminated argument vector (argv[0] = binary name)
+ * @return process exit code, or -1 on fork/exec failure
+ */
+static int safe_exec(const char* const argv[]) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;  // fork failed
+
+    if (pid == 0) {
+        // Child: redirect stdout/stderr to /dev/null
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execvp(argv[0], const_cast<char* const*>(argv));
+        _exit(127);  // execvp failed
+    }
+
+    // Parent: wait for child
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return -1;
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+/**
+ * @brief Validate interface name: alphanumeric, dots, hyphens only.
+ *
+ * Rejects any string containing shell metacharacters.
+ * Max length 15 (IFNAMSIZ - 1 on Linux).
+ */
+static bool is_valid_ifname(const std::string& name) {
+    if (name.empty() || name.size() > 15) return false;
+    for (char c : name) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_')) {
+            return false;
+        }
+    }
+    return true;
+}
+#endif // __linux__
 
 // ==================== ARP Rate Limiter ====================
 
@@ -64,6 +121,11 @@ public:
 
     std::unique_ptr<ARPRateLimiter> arp_limiter_;
 
+    // Rollback tracking — which subsystems were successfully set up
+    bool arptables_setup_ = false;
+    bool ebtables_setup_ = false;
+    bool vlan_created_ = false;
+
 #ifdef HAVE_PCAP
     pcap_t* pcap_handle_ = nullptr;
 #endif
@@ -78,19 +140,37 @@ public:
 
         // Setup arptables rules (Linux)
         if (cfg.use_arptables && is_arptables_available()) {
-            setup_arptables_rules();
+            if (!setup_arptables_rules()) {
+                parent_->log("[L2Stealth] Warning: arptables setup failed");
+                // Non-fatal — continue
+            } else {
+                arptables_setup_ = true;
+            }
         }
 
         // Setup ebtables rules (Linux)
         if (cfg.use_ebtables && is_ebtables_available()) {
-            setup_ebtables_rules();
+            if (!setup_ebtables_rules()) {
+                parent_->log("[L2Stealth] Warning: ebtables setup failed");
+                // Rollback arptables if ebtables failed
+                if (arptables_setup_) {
+                    cleanup_arptables_rules();
+                    arptables_setup_ = false;
+                }
+                return false;
+            }
+            ebtables_setup_ = true;
         }
 
-        // Create VLAN interface
+        // Create VLAN interface — validate names first
         if (cfg.enable_vlan_management && cfg.vlan_id > 0) {
             if (!create_vlan_interface(cfg.parent_interface, cfg.vlan_id, cfg.vlan_interface_name)) {
                 parent_->log("[L2Stealth] Failed to create VLAN interface");
+                // Rollback previous setup
+                rollback_all();
+                return false;
             }
+            vlan_created_ = true;
         }
 
 #ifdef HAVE_PCAP
@@ -100,6 +180,8 @@ public:
             pcap_handle_ = pcap_open_live(cfg.parent_interface.c_str(), 65535, 1, 1000, errbuf);
             if (!pcap_handle_) {
                 parent_->log("[L2Stealth] pcap_open_live failed: " + std::string(errbuf));
+                rollback_all();
+                return false;
             } else {
                 parent_->log("[L2Stealth] Pcap handle opened for " + cfg.parent_interface);
             }
@@ -116,21 +198,7 @@ public:
             pcap_handle_ = nullptr;
         }
 #endif
-
-        // Remove arptables rules
-        if (config_.use_arptables && is_arptables_available()) {
-            cleanup_arptables_rules();
-        }
-
-        // Remove ebtables rules
-        if (config_.use_ebtables && is_ebtables_available()) {
-            cleanup_ebtables_rules();
-        }
-
-        // Delete VLAN interface
-        if (config_.enable_vlan_management && !config_.vlan_interface_name.empty()) {
-            delete_vlan_interface(config_.vlan_interface_name);
-        }
+        rollback_all();
     }
 
     bool process_arp_packet() {
@@ -153,64 +221,134 @@ public:
     }
 
 private:
-    void setup_arptables_rules() {
+    void rollback_all() {
+        if (arptables_setup_) {
+            cleanup_arptables_rules();
+            arptables_setup_ = false;
+        }
+        if (ebtables_setup_) {
+            cleanup_ebtables_rules();
+            ebtables_setup_ = false;
+        }
+        if (vlan_created_ && !config_.vlan_interface_name.empty()) {
+            delete_vlan_interface(config_.vlan_interface_name);
+            vlan_created_ = false;
+        }
+    }
+
+    bool setup_arptables_rules() {
 #ifdef __linux__
-        // Suppress gratuitous ARP
         if (config_.suppress_gratuitous_arp) {
-            // Gratuitous ARP: sender IP == target IP
-            std::string cmd = "arptables -A OUTPUT -j DROP --opcode Request --source-ip 0.0.0.0/0 --destination-ip 0.0.0.0/0";
-            int ret = system(cmd.c_str());
-            if (ret != 0) {
+            const char* argv[] = {
+                "arptables", "-A", "OUTPUT", "-j", "DROP",
+                "--opcode", "Request",
+                "--source-ip", "0.0.0.0/0",
+                "--destination-ip", "0.0.0.0/0",
+                nullptr
+            };
+            if (safe_exec(argv) != 0) {
                 parent_->log("[L2Stealth] Warning: arptables rule failed (may need root)");
+                return false;
             }
         }
+        return true;
+#else
+        return false;
 #endif
     }
 
     void cleanup_arptables_rules() {
 #ifdef __linux__
         if (config_.suppress_gratuitous_arp) {
-            system("arptables -D OUTPUT -j DROP --opcode Request --source-ip 0.0.0.0/0 --destination-ip 0.0.0.0/0 2>/dev/null");
+            const char* argv[] = {
+                "arptables", "-D", "OUTPUT", "-j", "DROP",
+                "--opcode", "Request",
+                "--source-ip", "0.0.0.0/0",
+                "--destination-ip", "0.0.0.0/0",
+                nullptr
+            };
+            safe_exec(argv);  // best-effort, ignore return
         }
 #endif
     }
 
-    void setup_ebtables_rules() {
+    bool setup_ebtables_rules() {
 #ifdef __linux__
+        bool ok = true;
+
         // Block LLDP (01:80:c2:00:00:0e)
         if (config_.suppress_lldp) {
-            system("ebtables -A OUTPUT -d 01:80:c2:00:00:0e -j DROP 2>/dev/null");
+            const char* argv[] = {
+                "ebtables", "-A", "OUTPUT",
+                "-d", "01:80:c2:00:00:0e", "-j", "DROP",
+                nullptr
+            };
+            if (safe_exec(argv) != 0) ok = false;
         }
 
         // Block CDP (01:00:0c:cc:cc:cc)
         if (config_.suppress_cdp) {
-            system("ebtables -A OUTPUT -d 01:00:0c:cc:cc:cc -j DROP 2>/dev/null");
+            const char* argv[] = {
+                "ebtables", "-A", "OUTPUT",
+                "-d", "01:00:0c:cc:cc:cc", "-j", "DROP",
+                nullptr
+            };
+            if (safe_exec(argv) != 0) ok = false;
         }
 
-        // Block SSDP (multicast)
+        // Block SSDP (multicast UDP 1900)
         if (config_.suppress_ssdp) {
-            system("ebtables -A OUTPUT -p IPv4 --ip-protocol udp --ip-destination-port 1900 -j DROP 2>/dev/null");
+            const char* argv[] = {
+                "ebtables", "-A", "OUTPUT",
+                "-p", "IPv4", "--ip-protocol", "udp",
+                "--ip-destination-port", "1900", "-j", "DROP",
+                nullptr
+            };
+            if (safe_exec(argv) != 0) ok = false;
         }
+
+        return ok;
+#else
+        return false;
 #endif
     }
 
     void cleanup_ebtables_rules() {
 #ifdef __linux__
         if (config_.suppress_lldp) {
-            system("ebtables -D OUTPUT -d 01:80:c2:00:00:0e -j DROP 2>/dev/null");
+            const char* argv[] = {
+                "ebtables", "-D", "OUTPUT",
+                "-d", "01:80:c2:00:00:0e", "-j", "DROP",
+                nullptr
+            };
+            safe_exec(argv);
         }
         if (config_.suppress_cdp) {
-            system("ebtables -D OUTPUT -d 01:00:0c:cc:cc:cc -j DROP 2>/dev/null");
+            const char* argv[] = {
+                "ebtables", "-D", "OUTPUT",
+                "-d", "01:00:0c:cc:cc:cc", "-j", "DROP",
+                nullptr
+            };
+            safe_exec(argv);
         }
         if (config_.suppress_ssdp) {
-            system("ebtables -D OUTPUT -p IPv4 --ip-protocol udp --ip-destination-port 1900 -j DROP 2>/dev/null");
+            const char* argv[] = {
+                "ebtables", "-D", "OUTPUT",
+                "-p", "IPv4", "--ip-protocol", "udp",
+                "--ip-destination-port", "1900", "-j", "DROP",
+                nullptr
+            };
+            safe_exec(argv);
         }
 #endif
     }
 
     static bool is_arptables_available() {
 #ifdef __linux__
-        return system("which arptables >/dev/null 2>&1") == 0;
+        // access() instead of system("which ...") — no shell invocation
+        return access("/usr/sbin/arptables", X_OK) == 0 ||
+               access("/sbin/arptables", X_OK) == 0 ||
+               access("/usr/bin/arptables", X_OK) == 0;
 #else
         return false;
 #endif
@@ -218,7 +356,9 @@ private:
 
     static bool is_ebtables_available() {
 #ifdef __linux__
-        return system("which ebtables >/dev/null 2>&1") == 0;
+        return access("/usr/sbin/ebtables", X_OK) == 0 ||
+               access("/sbin/ebtables", X_OK) == 0 ||
+               access("/usr/bin/ebtables", X_OK) == 0;
 #else
         return false;
 #endif
@@ -226,18 +366,50 @@ private:
 
     static bool create_vlan_interface(const std::string& parent, uint16_t vlan_id, const std::string& vlan_name) {
 #ifdef __linux__
-        std::string cmd = "ip link add link " + parent + " name " + vlan_name +
-                          " type vlan id " + std::to_string(vlan_id);
-        if (system(cmd.c_str()) != 0) return false;
+        // Validate interface names — prevents command injection
+        if (!is_valid_ifname(parent) || !is_valid_ifname(vlan_name)) {
+            return false;
+        }
+        if (vlan_id == 0 || vlan_id > 4094) {
+            return false;
+        }
 
-        cmd = "ip link set " + vlan_name + " up";
-        return system(cmd.c_str()) == 0;
+        std::string vid_str = std::to_string(vlan_id);
+
+        const char* add_argv[] = {
+            "ip", "link", "add", "link", parent.c_str(),
+            "name", vlan_name.c_str(),
+            "type", "vlan", "id", vid_str.c_str(),
+            nullptr
+        };
+        if (safe_exec(add_argv) != 0) return false;
+
+        const char* up_argv[] = {
+            "ip", "link", "set", vlan_name.c_str(), "up",
+            nullptr
+        };
+        return safe_exec(up_argv) == 0;
 #elif defined(_WIN32)
-        // PowerShell: Add-NetLbfoTeamNic -Team "NIC_Team" -VlanID <id>
-        // This requires LBFO (Load Balancing and Failover) NIC teaming
-        std::string cmd = "powershell -Command \"Add-NetLbfoTeamNic -Team 'NIC_Team' -VlanID " +
-                          std::to_string(vlan_id) + "\"";
-        return system(cmd.c_str()) == 0;
+        // Windows: PowerShell VLAN management
+        if (vlan_id == 0 || vlan_id > 4094) return false;
+
+        // Validate parent for safety
+        for (char c : parent) {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_')) {
+                return false;
+            }
+        }
+
+        std::string vid_str = std::to_string(vlan_id);
+
+        const char* argv[] = {
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            "Add-NetLbfoTeamNic", "-Team", "NIC_Team",
+            "-VlanID", vid_str.c_str(),
+            nullptr
+        };
+        return safe_exec(argv) == 0;
 #else
         return false;
 #endif
@@ -245,10 +417,14 @@ private:
 
     static bool delete_vlan_interface(const std::string& vlan_name) {
 #ifdef __linux__
-        std::string cmd = "ip link delete " + vlan_name;
-        return system(cmd.c_str()) == 0;
+        if (!is_valid_ifname(vlan_name)) return false;
+
+        const char* argv[] = {
+            "ip", "link", "delete", vlan_name.c_str(),
+            nullptr
+        };
+        return safe_exec(argv) == 0;
 #elif defined(_WIN32)
-        // PowerShell: Remove-NetLbfoTeamNic -Team "NIC_Team" -VlanID <id>
         return false; // Not implemented
 #else
         return false;
