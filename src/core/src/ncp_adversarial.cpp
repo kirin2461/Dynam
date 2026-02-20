@@ -4,6 +4,7 @@
 #include <cstring>
 #include <numeric>
 #include <cassert>
+#include <sodium.h>
 
 namespace ncp {
 namespace DPI {
@@ -115,17 +116,68 @@ AdversarialPadding::AdversarialPadding(const AdversarialConfig& config)
       active_strategy_(config.strategy == AdversarialStrategy::ADAPTIVE
                        ? AdversarialStrategy::TLS_MIMIC
                        : config.strategy),
-      packets_since_evaluation_(0) {
-    // Phase 0: Initialize libsodium CSPRNG (idempotent)
+      packets_since_evaluation_(0),
+      has_session_key_(false) {
     ncp::csprng_init();
     
-    strategy_scores_.fill(0.5); // neutral starting score
+    strategy_scores_.fill(0.5);
+    
+    // Generate initial session dummy key via CSPRNG
+    session_dummy_key_.resize(32);
+    ncp::csprng_fill(session_dummy_key_.data(), 32);
+    has_session_key_ = true;
+    derive_dummy_marker();
 }
 
-AdversarialPadding::~AdversarialPadding() = default;
+AdversarialPadding::~AdversarialPadding() {
+    // Wipe key material
+    if (!session_dummy_key_.empty()) {
+        sodium_memzero(session_dummy_key_.data(), session_dummy_key_.size());
+    }
+    sodium_memzero(dummy_marker_, sizeof(dummy_marker_));
+}
 
 AdversarialPadding::AdversarialPadding(AdversarialPadding&&) noexcept = default;
 AdversarialPadding& AdversarialPadding::operator=(AdversarialPadding&&) noexcept = default;
+
+// ===== Dummy Marker Derivation =====
+// Caller must hold mutex_
+
+void AdversarialPadding::derive_dummy_marker() {
+    // HMAC-SHA256(session_dummy_key_, "NCP-DUMMY-MARKER-v1") → first 4 bytes
+    static const char label[] = "NCP-DUMMY-MARKER-v1";
+    
+    uint8_t mac[crypto_auth_hmacsha256_BYTES];
+    crypto_auth_hmacsha256_state st;
+    crypto_auth_hmacsha256_init(&st, session_dummy_key_.data(),
+                                session_dummy_key_.size());
+    crypto_auth_hmacsha256_update(&st,
+                                  reinterpret_cast<const uint8_t*>(label),
+                                  sizeof(label) - 1);
+    crypto_auth_hmacsha256_final(&st, mac);
+    
+    std::memcpy(dummy_marker_, mac, 4);
+    sodium_memzero(mac, sizeof(mac));
+}
+
+// ===== Session Dummy Key Management =====
+
+std::vector<uint8_t> AdversarialPadding::get_session_dummy_key() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return session_dummy_key_;
+}
+
+void AdversarialPadding::set_session_dummy_key(const uint8_t* key, size_t len) {
+    if (!key || len == 0) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_dummy_key_.assign(key, key + len);
+    has_session_key_ = true;
+    derive_dummy_marker();
+}
+
+void AdversarialPadding::set_session_dummy_key(const std::vector<uint8_t>& key) {
+    set_session_dummy_key(key.data(), key.size());
+}
 
 // ===== Padding Generation =====
 
@@ -222,6 +274,7 @@ std::vector<uint8_t> AdversarialPadding::generate_dns_mimic_padding(size_t len) 
 
 std::vector<uint8_t> AdversarialPadding::generate_padding(
     AdversarialStrategy strategy, size_t len) {
+    // Caller must hold mutex_
     switch (strategy) {
         case AdversarialStrategy::RANDOM:     return generate_random_padding(len);
         case AdversarialStrategy::HTTP_MIMIC: return generate_http_mimic_padding(len);
@@ -246,6 +299,7 @@ std::vector<uint8_t> AdversarialPadding::generate_padding(
 // ===== Size Selection =====
 
 size_t AdversarialPadding::select_pre_padding_size() {
+    // Caller must hold mutex_
     if (!config_.enable_pre_padding) return 0;
     size_t min_s = config_.pre_padding_min;
     size_t max_s = (std::min)(config_.pre_padding_max, config_.max_padding_absolute);
@@ -254,6 +308,7 @@ size_t AdversarialPadding::select_pre_padding_size() {
 }
 
 size_t AdversarialPadding::select_post_padding_size() {
+    // Caller must hold mutex_
     if (!config_.enable_post_padding) return 0;
     size_t min_s = config_.post_padding_min;
     size_t max_s = (std::min)(config_.post_padding_max, config_.max_padding_absolute);
@@ -262,6 +317,7 @@ size_t AdversarialPadding::select_post_padding_size() {
 }
 
 size_t AdversarialPadding::find_nearest_target_size(size_t current_size) const {
+    // Caller must hold mutex_
     if (config_.target_sizes.empty()) return current_size;
     
     size_t best = config_.target_sizes[0];
@@ -279,12 +335,6 @@ size_t AdversarialPadding::find_nearest_target_size(size_t current_size) const {
 }
 
 // ===== Core: pad() =====
-// Always writes V2 (4-byte) control header.
-// Layout:
-//   Byte 0: [strategy:4][pre_len bits 11..8]
-//   Byte 1: [pre_len bits 7..0]              => 12-bit pre_len (max 4095)
-//   Byte 2: [payload_len bits 15..8]
-//   Byte 3: [payload_len bits 7..0]           => 16-bit payload_len (max 65535)
 
 std::vector<uint8_t> AdversarialPadding::pad(
     const uint8_t* payload, size_t len) {
@@ -293,10 +343,11 @@ std::vector<uint8_t> AdversarialPadding::pad(
         return std::vector<uint8_t>(payload, payload + len);
     }
     
+    std::lock_guard<std::mutex> lock(mutex_);
+    
     stats_.packets_processed.fetch_add(1);
     stats_.bytes_original.fetch_add(len);
     
-    // Check overhead limit
     uint64_t total_orig = stats_.bytes_original.load();
     uint64_t total_pad = stats_.bytes_padding_added.load();
     if (total_orig > 0) {
@@ -306,7 +357,6 @@ std::vector<uint8_t> AdversarialPadding::pad(
         }
     }
     
-    // Determine strategy
     AdversarialStrategy strat = config_.strategy;
     if (strat == AdversarialStrategy::ADAPTIVE) {
         strat = active_strategy_;
@@ -320,12 +370,10 @@ std::vector<uint8_t> AdversarialPadding::pad(
     size_t pre_len = select_pre_padding_size();
     size_t post_len = select_post_padding_size();
     
-    // Clamp pre_len to 12-bit max for control header encoding
     if (pre_len > MAX_PRE_PADDING) {
         pre_len = MAX_PRE_PADDING;
     }
     
-    // Payload >64KB: pass through unpadded (extremely rare at this layer)
     if (len > MAX_PAYLOAD_LEN) {
         return std::vector<uint8_t>(payload, payload + len);
     }
@@ -334,7 +382,6 @@ std::vector<uint8_t> AdversarialPadding::pad(
     std::vector<uint8_t> result;
     result.reserve(total);
     
-    // V2 control header (4 bytes)
     uint8_t strat_nibble = static_cast<uint8_t>(strat) & 0x0F;
     uint8_t pre_hi = static_cast<uint8_t>((pre_len >> 8) & 0x0F);
     result.push_back((strat_nibble << 4) | pre_hi);
@@ -344,16 +391,13 @@ std::vector<uint8_t> AdversarialPadding::pad(
     result.push_back(static_cast<uint8_t>((payload_len16 >> 8) & 0xFF));
     result.push_back(static_cast<uint8_t>(payload_len16 & 0xFF));
     
-    // Pre-padding
     if (pre_len > 0) {
         auto pre_pad = generate_padding(strat, pre_len);
         result.insert(result.end(), pre_pad.begin(), pre_pad.end());
     }
     
-    // Original payload
     result.insert(result.end(), payload, payload + len);
     
-    // Post-padding
     if (post_len > 0) {
         auto post_pad = generate_padding(strat, post_len);
         result.insert(result.end(), post_pad.begin(), post_pad.end());
@@ -370,35 +414,24 @@ std::vector<uint8_t> AdversarialPadding::pad(const std::vector<uint8_t>& payload
 }
 
 // ===== Core: unpad() =====
-// Auto-detects V1 (2-byte, legacy) vs V2 (4-byte) control header.
-//
-// Detection logic:
-//   1. Parse ctrl0:ctrl1 to get strategy and pre_len (same in both versions).
-//   2. If len >= 4, tentatively read ctrl2:ctrl3 as payload_len.
-//   3. Check V2 consistency: CONTROL_HEADER_SIZE_V2 + pre_len + payload_len <= len
-//      AND payload_len > 0 AND strategy nibble is valid (0..6).
-//   4. If consistent -> V2: return exactly [data_start, data_start + payload_len).
-//   5. If not -> V1 fallback: return [data_start_v1, end) (includes post-padding).
 
 std::vector<uint8_t> AdversarialPadding::unpad(
     const uint8_t* padded_data, size_t len) {
     
-    // Need at least V1 header (2 bytes) to do anything
     if (len < CONTROL_HEADER_SIZE_V1) {
         return std::vector<uint8_t>(padded_data, padded_data + len);
     }
     
-    // Decode bytes shared between V1 and V2
+    // unpad is stateless w.r.t. mutable fields — no lock needed
+    
     uint8_t ctrl0 = padded_data[0];
     uint8_t ctrl1 = padded_data[1];
     
     uint8_t strategy_nibble = (ctrl0 >> 4) & 0x0F;
     size_t pre_len = (static_cast<size_t>(ctrl0 & 0x0F) << 8) | ctrl1;
     
-    // Validate strategy nibble (AdversarialStrategy enum: 0..6)
     bool valid_strategy = (strategy_nibble <= 6);
     
-    // Try V2 (4-byte header) first
     if (valid_strategy && len >= CONTROL_HEADER_SIZE_V2) {
         uint8_t ctrl2 = padded_data[2];
         uint8_t ctrl3 = padded_data[3];
@@ -407,22 +440,14 @@ std::vector<uint8_t> AdversarialPadding::unpad(
         size_t data_start = CONTROL_HEADER_SIZE_V2 + pre_len;
         size_t data_end = data_start + payload_len;
         
-        // V2 consistency check:
-        //  - data_start must be within buffer
-        //  - data_end must be within buffer (post-padding may follow)
-        //  - payload_len must be > 0 (pad() rejects len==0)
-        //  - pre_len must be reasonable (not larger than len - header)
         if (payload_len > 0 &&
             data_start < len &&
             data_end <= len)
         {
-            // V2 detected: return exact original payload
             return std::vector<uint8_t>(padded_data + data_start, padded_data + data_end);
         }
     }
     
-    // V1 fallback (2-byte header): no payload_len available.
-    // Returns everything after control header + pre_padding (includes post-padding).
     size_t data_start_v1 = CONTROL_HEADER_SIZE_V1 + pre_len;
     if (data_start_v1 >= len) {
         return {};
@@ -439,6 +464,8 @@ std::vector<uint8_t> AdversarialPadding::unpad(const std::vector<uint8_t>& padde
 
 bool AdversarialPadding::mutate_tcp_header(uint8_t* tcp_header, size_t header_len) {
     if (!tcp_header || header_len < 20) return false;
+    
+    std::lock_guard<std::mutex> lock(mutex_);
     
     bool mutated = false;
     
@@ -458,7 +485,7 @@ bool AdversarialPadding::mutate_tcp_header(uint8_t* tcp_header, size_t header_le
     }
     
     if (config_.mutate_tcp_urgent) {
-        tcp_header[13] |= 0x20; // URG flag
+        tcp_header[13] |= 0x20;
         uint16_t urg;
         ncp::csprng_fill(&urg, sizeof(urg));
         tcp_header[18] = static_cast<uint8_t>((urg >> 8) & 0xFF);
@@ -485,7 +512,6 @@ void AdversarialPadding::randomize_window_size(uint8_t* tcp_header) {
     tcp_header[15] = static_cast<uint8_t>(win & 0xFF);
 }
 
-// FIX #71: Actually mutate TCP options instead of NOP->NOP no-op.
 void AdversarialPadding::randomize_tcp_options(uint8_t* tcp_header, size_t header_len) {
     size_t opts_start = 20;
     if (header_len <= opts_start) return;
@@ -494,15 +520,14 @@ void AdversarialPadding::randomize_tcp_options(uint8_t* tcp_header, size_t heade
     while (i < header_len) {
         uint8_t kind = tcp_header[i];
         
-        if (kind == 0x00) break; // EOL
+        if (kind == 0x00) break;
         
         if (kind == 0x01) {
-            // NOP: try to convert NOP pairs into experimental option kind=30 len=2
             uint32_t r = ncp::csprng_uniform(4);
             if ((r == 0 || r == 1) && i + 1 < header_len && tcp_header[i + 1] == 0x01) {
                 if (ncp::csprng_uniform(2) == 0) {
-                    tcp_header[i] = 30;     // kind = experimental (RFC 4727)
-                    tcp_header[i + 1] = 2;  // length = 2 (kind+len, no data)
+                    tcp_header[i] = 30;
+                    tcp_header[i + 1] = 2;
                     i += 2;
                     continue;
                 }
@@ -511,12 +536,10 @@ void AdversarialPadding::randomize_tcp_options(uint8_t* tcp_header, size_t heade
             continue;
         }
         
-        // Multi-byte option
         if (i + 1 >= header_len) break;
         uint8_t opt_len = tcp_header[i + 1];
         if (opt_len < 2 || i + opt_len > header_len) break;
         
-        // MSS (kind=2, len=4): jitter by +/-32
         if (kind == 2 && opt_len == 4 && i + 4 <= header_len) {
             uint16_t mss = (static_cast<uint16_t>(tcp_header[i + 2]) << 8) | tcp_header[i + 3];
             int new_mss = static_cast<int>(mss) + ncp::csprng_range(-32, 32);
@@ -526,7 +549,6 @@ void AdversarialPadding::randomize_tcp_options(uint8_t* tcp_header, size_t heade
             tcp_header[i + 3] = static_cast<uint8_t>(new_mss & 0xFF);
         }
         
-        // Window Scale (kind=3, len=3): jitter by +/-1
         if (kind == 3 && opt_len == 3 && i + 3 <= header_len) {
             int ws = static_cast<int>(tcp_header[i + 2]) + ncp::csprng_range(-1, 1);
             if (ws < 0) ws = 0;
@@ -573,7 +595,11 @@ void AdversarialPadding::jitter_timestamps(uint8_t* tcp_header, size_t header_le
 
 std::vector<uint8_t> AdversarialPadding::normalize_size(
     const std::vector<uint8_t>& data) {
-    if (!config_.enable_size_normalization || data.empty()) return data;
+    if (!config_.enabled || data.empty()) return data;
+    
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    if (!config_.enable_size_normalization) return data;
     
     size_t target = find_nearest_target_size(data.size());
     if (target <= data.size()) return data;
@@ -593,15 +619,25 @@ std::vector<uint8_t> AdversarialPadding::normalize_size(
 // ===== Dummy Packets =====
 
 std::vector<uint8_t> AdversarialPadding::generate_dummy_packet() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
     size_t sz = ncp::csprng_range_size(config_.dummy_min_size, config_.dummy_max_size);
     
     std::vector<uint8_t> dummy;
     dummy.reserve(4 + sz);
     
-    dummy.push_back(DUMMY_MAGIC_0);
-    dummy.push_back(DUMMY_MAGIC_1);
-    dummy.push_back(DUMMY_MAGIC_2);
-    dummy.push_back(DUMMY_MAGIC_3);
+    // Use HMAC-derived marker if session key is available, else legacy
+    if (has_session_key_) {
+        dummy.push_back(dummy_marker_[0]);
+        dummy.push_back(dummy_marker_[1]);
+        dummy.push_back(dummy_marker_[2]);
+        dummy.push_back(dummy_marker_[3]);
+    } else {
+        dummy.push_back(LEGACY_DUMMY_MAGIC_0);
+        dummy.push_back(LEGACY_DUMMY_MAGIC_1);
+        dummy.push_back(LEGACY_DUMMY_MAGIC_2);
+        dummy.push_back(LEGACY_DUMMY_MAGIC_3);
+    }
     
     auto content = generate_padding(active_strategy_, sz);
     dummy.insert(dummy.end(), content.begin(), content.end());
@@ -612,15 +648,31 @@ std::vector<uint8_t> AdversarialPadding::generate_dummy_packet() {
 
 bool AdversarialPadding::is_dummy_packet(const uint8_t* data, size_t len) const {
     if (len < 4) return false;
-    return data[0] == DUMMY_MAGIC_0 &&
-           data[1] == DUMMY_MAGIC_1 &&
-           data[2] == DUMMY_MAGIC_2 &&
-           data[3] == DUMMY_MAGIC_3;
+    
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    // Check HMAC-derived session marker first
+    if (has_session_key_) {
+        if (data[0] == dummy_marker_[0] &&
+            data[1] == dummy_marker_[1] &&
+            data[2] == dummy_marker_[2] &&
+            data[3] == dummy_marker_[3]) {
+            return true;
+        }
+    }
+    
+    // Legacy fallback: 0xDEADBEEF (for backward compat with old peers)
+    return data[0] == LEGACY_DUMMY_MAGIC_0 &&
+           data[1] == LEGACY_DUMMY_MAGIC_1 &&
+           data[2] == LEGACY_DUMMY_MAGIC_2 &&
+           data[3] == LEGACY_DUMMY_MAGIC_3;
 }
 
 // ===== Adaptive Strategy =====
 
 void AdversarialPadding::report_feedback(const DetectionFeedback& feedback) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
     feedback_history_.push_back(feedback);
     
     int idx = static_cast<int>(feedback.strategy_used);
@@ -642,6 +694,7 @@ void AdversarialPadding::report_feedback(const DetectionFeedback& feedback) {
 }
 
 void AdversarialPadding::evaluate_adaptive_strategy() {
+    // Caller must hold mutex_
     if (config_.strategy != AdversarialStrategy::ADAPTIVE) return;
     
     auto best = select_best_strategy();
@@ -652,6 +705,7 @@ void AdversarialPadding::evaluate_adaptive_strategy() {
 }
 
 AdversarialStrategy AdversarialPadding::select_best_strategy() const {
+    // Caller must hold mutex_
     double best_score = 1.0;
     AdversarialStrategy best_strat = AdversarialStrategy::TLS_MIMIC;
     
@@ -668,17 +722,20 @@ AdversarialStrategy AdversarialPadding::select_best_strategy() const {
 }
 
 void AdversarialPadding::force_strategy(AdversarialStrategy strategy) {
+    std::lock_guard<std::mutex> lock(mutex_);
     active_strategy_ = strategy;
     stats_.current_strategy = strategy;
 }
 
 AdversarialStrategy AdversarialPadding::current_strategy() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return active_strategy_;
 }
 
 // ===== Config & Stats =====
 
 void AdversarialPadding::set_config(const AdversarialConfig& config) {
+    std::lock_guard<std::mutex> lock(mutex_);
     config_ = config;
     if (config_.strategy != AdversarialStrategy::ADAPTIVE) {
         active_strategy_ = config_.strategy;
@@ -686,10 +743,12 @@ void AdversarialPadding::set_config(const AdversarialConfig& config) {
 }
 
 AdversarialConfig AdversarialPadding::get_config() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     return config_;
 }
 
 AdversarialStats AdversarialPadding::get_stats() const {
+    std::lock_guard<std::mutex> lock(mutex_);
     AdversarialStats s(stats_);
     s.current_strategy = active_strategy_;
     return s;
