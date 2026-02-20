@@ -106,6 +106,12 @@ public:
     explicit DoHClient(const Config& config);
     ~DoHClient();
 
+    // Non-copyable, movable
+    DoHClient(const DoHClient&) = delete;
+    DoHClient& operator=(const DoHClient&) = delete;
+    DoHClient(DoHClient&&) = default;
+    DoHClient& operator=(DoHClient&&) = default;
+
     // Configuration
     void set_config(const Config& config);
     Config get_config() const;
@@ -141,9 +147,10 @@ public:
     std::vector<std::string> get_available_providers() const;
 
 private:
-    // Internal implementation
+    // FIX #19: shared_ptr instead of unique_ptr — enables weak_ptr capture
+    // in detached async threads for safe lifetime management.
     struct Impl;
-    std::unique_ptr<Impl> pImpl;
+    std::shared_ptr<Impl> pImpl;
 
     // Helper methods
     DNSResult perform_doh_query(const std::string& hostname, RecordType type);

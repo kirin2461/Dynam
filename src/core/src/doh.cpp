@@ -58,7 +58,17 @@ struct DNSHeader {
 };
 #pragma pack(pop)
 
+// FIX #20: Maximum depth for DNS compression pointer following.
+// RFC 1035 compression pointers can reference other compressed names,
+// but a malicious response could create circular references.
+// 16 levels is far more than any legitimate DNS response needs.
+static constexpr int MAX_COMPRESSION_DEPTH = 16;
+
 // ==================== Implementation Structure ====================
+// FIX #19: Impl inherits enable_shared_from_this so resolve_async()
+// can capture a weak_ptr instead of a raw pointer. This eliminates
+// the TOCTOU race between shutting_down check and alive_mutex lock,
+// and removes the need for the unreliable sleep_for(10ms) in ~DoHClient.
 struct DoHClient::Impl : public std::enable_shared_from_this<DoHClient::Impl> {
     Config config;
     Statistics stats;
@@ -70,10 +80,6 @@ struct DoHClient::Impl : public std::enable_shared_from_this<DoHClient::Impl> {
     std::list<std::string> lru_order;
     std::map<std::string, std::list<std::string>::iterator> lru_map;
 
-    // Async lifetime safety
-    std::mutex alive_mutex;
-    std::atomic<bool> shutting_down{false};
-
 #ifdef HAVE_OPENSSL
     SSL_CTX* ssl_ctx = nullptr;
 #endif
@@ -83,7 +89,6 @@ struct DoHClient::Impl : public std::enable_shared_from_this<DoHClient::Impl> {
     }
 
     ~Impl() {
-        shutting_down.store(true);
         cleanup_ssl();
     }
 
@@ -142,7 +147,8 @@ struct DoHClient::Impl : public std::enable_shared_from_this<DoHClient::Impl> {
 
 // ==================== Constructor/Destructor ====================
 
-DoHClient::DoHClient() : pImpl(std::make_unique<Impl>()) {
+// FIX #19: pImpl is now shared_ptr — constructed via make_shared
+DoHClient::DoHClient() : pImpl(std::make_shared<Impl>()) {
 #ifdef _WIN32
     WSADATA wsa_data;
     WSAStartup(MAKEWORD(2, 2), &wsa_data);
@@ -153,10 +159,10 @@ DoHClient::DoHClient(const Config& config) : DoHClient() {
     pImpl->config = config;
 }
 
+// FIX #19: No more sleep_for(10ms) hack. When DoHClient is destroyed,
+// pImpl (shared_ptr) ref-count drops. If async threads still hold a
+// weak_ptr, their lock() calls will return nullptr — safe shutdown.
 DoHClient::~DoHClient() {
-    pImpl->shutting_down.store(true);
-    // Brief pause to let in-flight async threads notice shutdown flag
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 #ifdef _WIN32
     WSACleanup();
 #endif
@@ -231,6 +237,8 @@ std::vector<uint8_t> DoHClient::build_dns_query(const std::string& hostname, Rec
 }
 
 // ==================== DNS Response Parsing ====================
+// FIX #20: Added depth tracking for compression pointer following
+// in CNAME parsing to prevent infinite loops from malicious responses.
 
 DoHClient::DNSResult DoHClient::parse_dns_response(const std::vector<uint8_t>& response) {
     DNSResult result;
@@ -321,24 +329,46 @@ DoHClient::DNSResult DoHClient::parse_dns_response(const std::vector<uint8_t>& r
             result.addresses.push_back(ip_str);
             result.type = RecordType::AAAA;
         } else if (rtype == static_cast<uint16_t>(RecordType::CNAME)) {
+            // FIX #20: CNAME parsing with compression pointer depth limit
             std::string cname;
             size_t cname_offset = offset;
+            int compression_depth = 0;
             while (cname_offset < offset + rdlength) {
                 if ((response[cname_offset] & 0xC0) == 0xC0) {
+                    // Bounds check: need 2 bytes for compression pointer
+                    if (cname_offset + 1 >= response.size()) break;
+
                     size_t ptr = ((response[cname_offset] & 0x3F) << 8) | response[cname_offset + 1];
+
+                    // FIX #20: Follow compression pointer with depth limit
+                    // Prevents infinite loops from circular compression pointers
+                    // in malicious DNS responses.
+                    int ptr_depth = 0;
                     while (ptr < response.size() && response[ptr] != 0) {
-                        if ((response[ptr] & 0xC0) == 0xC0) break;
+                        if (ptr_depth++ >= MAX_COMPRESSION_DEPTH) break;
+                        if ((response[ptr] & 0xC0) == 0xC0) {
+                            // Nested compression pointer — follow it
+                            if (ptr + 1 >= response.size()) break;
+                            ptr = ((response[ptr] & 0x3F) << 8) | response[ptr + 1];
+                            continue;
+                        }
+                        // Bounds check for label length
+                        uint8_t label_len = response[ptr];
+                        if (ptr + 1 + label_len > response.size()) break;
                         if (!cname.empty()) cname += ".";
-                        cname.append(reinterpret_cast<const char*>(&response[ptr + 1]), response[ptr]);
-                        ptr += response[ptr] + 1;
+                        cname.append(reinterpret_cast<const char*>(&response[ptr + 1]), label_len);
+                        ptr += label_len + 1;
                     }
                     break;
                 } else if (response[cname_offset] == 0) {
                     break;
                 } else {
+                    uint8_t label_len = response[cname_offset];
+                    // Bounds check for inline label
+                    if (cname_offset + 1 + label_len > response.size()) break;
                     if (!cname.empty()) cname += ".";
-                    cname.append(reinterpret_cast<const char*>(&response[cname_offset + 1]), response[cname_offset]);
-                    cname_offset += response[cname_offset] + 1;
+                    cname.append(reinterpret_cast<const char*>(&response[cname_offset + 1]), label_len);
+                    cname_offset += label_len + 1;
                 }
             }
             result.cnames.push_back(cname);
@@ -637,48 +667,298 @@ DoHClient::DNSResult DoHClient::resolve_ipv6(const std::string& hostname) {
 }
 
 // ==================== Async Resolution ====================
-// FIX: resolve_async() use-after-free — detached thread captured raw `this`.
-// If DoHClient was destroyed while the thread was running, `this` would dangle.
-// Solution: capture a raw pointer guarded by an atomic shutdown flag + mutex
-// in pImpl. Thread checks shutting_down before accessing any state.
+// FIX #18 + #19: resolve_async() now performs actual DNS resolution.
+//
+// Previous implementation was a noop — always returned error
+// "Async resolution requires external thread management" because
+// it only had Impl* and couldn't call resolve() (needs DoHClient*).
+//
+// Solution: capture weak_ptr<Impl> instead of raw pointer. The thread
+// performs DoH query and caching inline using Impl methods directly.
+// If DoHClient is destroyed before thread completes, weak_ptr::lock()
+// returns nullptr and thread exits safely — no TOCTOU race, no
+// use-after-free, no need for shutting_down flag or sleep_for hack.
 
 void DoHClient::resolve_async(const std::string& hostname, RecordType type, ResolveCallback callback) {
-    // Capture pImpl as raw pointer — pImpl outlives the thread only if
-    // DoHClient is alive. We use shutting_down flag to detect destruction.
-    auto* impl = pImpl.get();
+    // Capture weak_ptr to Impl — safe if DoHClient is destroyed
+    std::weak_ptr<Impl> weak_impl = pImpl;
 
-    std::thread([impl, hostname, type, callback]() {
+    // Also need to capture the query-building and parsing as lambdas
+    // since they are member functions. We capture copies of what we need.
+    auto provider_url = get_provider_url(pImpl->config.provider);
+    auto config_copy = pImpl->config;
+
+    std::thread([weak_impl, hostname, type, callback, provider_url, config_copy]() {
         try {
-            // Check if owner is being destroyed
-            if (impl->shutting_down.load()) {
-                DNSResult error_result;
-                error_result.error_message = "DoH client shutting down";
-                if (callback) callback(error_result);
+            // Try to lock — if DoHClient is already destroyed, bail out
+            auto impl = weak_impl.lock();
+            if (!impl) {
+                if (callback) {
+                    DNSResult error_result;
+                    error_result.hostname = hostname;
+                    error_result.type = type;
+                    error_result.error_message = "DoH client was destroyed";
+                    callback(error_result);
+                }
                 return;
             }
 
-            std::lock_guard<std::mutex> alive_lock(impl->alive_mutex);
-            if (impl->shutting_down.load()) {
-                DNSResult error_result;
-                error_result.error_message = "DoH client shutting down";
-                if (callback) callback(error_result);
+            // Check cache first
+            std::string cache_key = hostname + ":" + std::to_string(static_cast<int>(type));
+            if (config_copy.enable_cache) {
+                std::lock_guard<std::mutex> lock(impl->cache_mutex);
+                auto it = impl->cache.find(cache_key);
+                if (it != impl->cache.end()) {
+                    auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::steady_clock::now() - it->second.second).count();
+                    if (age < it->second.first.ttl) {
+                        DNSResult result = it->second.first;
+                        result.from_cache = true;
+                        impl->stats.cached_queries++;
+                        impl->stats.successful_queries++;
+                        impl->lru_touch(cache_key);
+                        if (callback) callback(result);
+                        return;
+                    }
+                }
+            }
+
+            // Build DNS query
+            std::vector<uint8_t> query;
+            {
+                DNSHeader header = {};
+                header.id = htons(static_cast<uint16_t>(randombytes_uniform(65535) + 1));
+                header.flags = htons(0x0100);
+                header.qdcount = htons(1);
+                const uint8_t* hdr = reinterpret_cast<const uint8_t*>(&header);
+                query.insert(query.end(), hdr, hdr + sizeof(DNSHeader));
+
+                std::istringstream iss(hostname);
+                std::string label;
+                while (std::getline(iss, label, '.')) {
+                    query.push_back(static_cast<uint8_t>(label.length()));
+                    query.insert(query.end(), label.begin(), label.end());
+                }
+                query.push_back(0);
+
+                uint16_t qtype = htons(static_cast<uint16_t>(type));
+                query.push_back((qtype >> 8) & 0xFF);
+                query.push_back(qtype & 0xFF);
+                uint16_t qclass = htons(1);
+                query.push_back((qclass >> 8) & 0xFF);
+                query.push_back(qclass & 0xFF);
+            }
+
+            impl->stats.total_queries++;
+            auto start_time = std::chrono::steady_clock::now();
+
+            DNSResult result;
+            result.hostname = hostname;
+            result.type = type;
+
+#ifdef HAVE_OPENSSL
+            // Perform HTTPS DoH request inline
+            // Re-check impl is still alive before using ssl_ctx
+            auto impl2 = weak_impl.lock();
+            if (!impl2 || !impl2->ssl_ctx) {
+                result.error_message = "SSL context unavailable";
+                if (callback) callback(result);
                 return;
             }
 
-            // Build and perform query inline (avoid calling resolve() which
-            // would need the full DoHClient* — we only have Impl*)
-            // For safety, we just report an error in async mode and suggest
-            // the caller use resolve() in their own thread management.
-            DNSResult error_result;
-            error_result.error_message = "Async resolution requires external thread management";
-            if (callback) callback(error_result);
+            // Parse URL
+            std::string host, path;
+            size_t pos = provider_url.find("://");
+            if (pos != std::string::npos) {
+                std::string rest = provider_url.substr(pos + 3);
+                size_t path_pos = rest.find('/');
+                if (path_pos != std::string::npos) {
+                    host = rest.substr(0, path_pos);
+                    path = rest.substr(path_pos);
+                } else {
+                    host = rest;
+                    path = "/dns-query";
+                }
+            }
+
+            // Base64url encode
+            std::string encoded_query;
+            static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+            uint32_t val = 0; int bits = 0;
+            for (uint8_t byte : query) {
+                val = (val << 8) | byte; bits += 8;
+                while (bits >= 6) { bits -= 6; encoded_query += b64[(val >> bits) & 0x3F]; }
+            }
+            if (bits > 0) encoded_query += b64[(val << (6 - bits)) & 0x3F];
+
+            BIO* bio = BIO_new_ssl_connect(impl2->ssl_ctx);
+            std::string connect_str = host + ":443";
+            BIO_set_conn_hostname(bio, connect_str.c_str());
+            SSL* ssl = nullptr;
+            BIO_get_ssl(bio, &ssl);
+            if (ssl) SSL_set_tlsext_host_name(ssl, host.c_str());
+
+            if (BIO_do_connect(bio) <= 0) {
+                BIO_free_all(bio);
+                // Fallback to system DNS
+                struct addrinfo hints = {}, *res = nullptr;
+                hints.ai_family = (type == DoHClient::RecordType::AAAA) ? AF_INET6 : AF_INET;
+                hints.ai_socktype = SOCK_STREAM;
+                if (getaddrinfo(hostname.c_str(), nullptr, &hints, &res) == 0) {
+                    for (auto* p = res; p; p = p->ai_next) {
+                        char ip[INET6_ADDRSTRLEN];
+                        if (p->ai_family == AF_INET)
+                            inet_ntop(AF_INET, &((sockaddr_in*)p->ai_addr)->sin_addr, ip, sizeof(ip));
+                        else
+                            inet_ntop(AF_INET6, &((sockaddr_in6*)p->ai_addr)->sin6_addr, ip, sizeof(ip));
+                        result.addresses.push_back(ip);
+                    }
+                    freeaddrinfo(res);
+                    result.ttl = 300;
+                    impl->stats.fallback_queries++;
+                }
+            } else {
+                std::string req = "GET " + path + "?dns=" + encoded_query + " HTTP/1.1\r\n";
+                req += "Host: " + host + "\r\nAccept: application/dns-message\r\nConnection: close\r\n\r\n";
+                BIO_write(bio, req.c_str(), static_cast<int>(req.size()));
+
+                char buf[4096]; std::string http_resp; int len;
+                while ((len = BIO_read(bio, buf, sizeof(buf)-1)) > 0) {
+                    buf[len] = '\0'; http_resp.append(buf, len);
+                }
+                BIO_free_all(bio);
+
+                size_t body_start = http_resp.find("\r\n\r\n");
+                if (body_start != std::string::npos) {
+                    std::string hdrs = http_resp.substr(0, body_start);
+                    std::string body = http_resp.substr(body_start + 4);
+                    std::string hdrs_lower = hdrs;
+                    std::transform(hdrs_lower.begin(), hdrs_lower.end(), hdrs_lower.begin(), ::tolower);
+
+                    std::vector<uint8_t> dns_resp;
+                    if (hdrs_lower.find("transfer-encoding: chunked") != std::string::npos) {
+                        std::string decoded = parse_chunked_body(body);
+                        dns_resp.assign(decoded.begin(), decoded.end());
+                    } else {
+                        dns_resp.assign(body.begin(), body.end());
+                    }
+
+                    if (!dns_resp.empty()) {
+                        // Re-parse inline (parse_dns_response is a member but we
+                        // have the same parsing logic available — for simplicity
+                        // we construct a temporary DoHClient-less parse)
+                        // Actually, parse_dns_response is a static-like method
+                        // that only uses the response data, so we can call it
+                        // through a minimal approach. Since we can't easily call
+                        // member functions from a detached thread, we inline
+                        // the result extraction here.
+                        result.status_code = 200;
+                        // Minimal DNS response parsing for async path
+                        if (dns_resp.size() >= sizeof(DNSHeader)) {
+                            const DNSHeader* rhdr = reinterpret_cast<const DNSHeader*>(dns_resp.data());
+                            uint16_t rflags = ntohs(rhdr->flags);
+                            uint16_t rancount = ntohs(rhdr->ancount);
+                            if ((rflags & 0x000F) == 0 && rancount > 0) {
+                                // Skip question section
+                                size_t roff = sizeof(DNSHeader);
+                                uint16_t rqdcount = ntohs(rhdr->qdcount);
+                                for (int q = 0; q < rqdcount && roff < dns_resp.size(); ++q) {
+                                    while (roff < dns_resp.size() && dns_resp[roff] != 0) {
+                                        if ((dns_resp[roff] & 0xC0) == 0xC0) { roff += 2; break; }
+                                        roff += dns_resp[roff] + 1;
+                                    }
+                                    if (roff < dns_resp.size() && dns_resp[roff] == 0) roff++;
+                                    roff += 4;
+                                }
+                                // Parse answers
+                                for (int a = 0; a < rancount && roff < dns_resp.size(); ++a) {
+                                    while (roff < dns_resp.size()) {
+                                        if ((dns_resp[roff] & 0xC0) == 0xC0) { roff += 2; break; }
+                                        else if (dns_resp[roff] == 0) { roff++; break; }
+                                        else roff += dns_resp[roff] + 1;
+                                    }
+                                    if (roff + 10 > dns_resp.size()) break;
+                                    uint16_t art = (dns_resp[roff]<<8)|dns_resp[roff+1]; roff += 2;
+                                    roff += 2; // class
+                                    uint32_t attl = (dns_resp[roff]<<24)|(dns_resp[roff+1]<<16)|(dns_resp[roff+2]<<8)|dns_resp[roff+3]; roff += 4;
+                                    result.ttl = attl;
+                                    uint16_t ardlen = (dns_resp[roff]<<8)|dns_resp[roff+1]; roff += 2;
+                                    if (roff + ardlen > dns_resp.size()) break;
+                                    if (art == 1 && ardlen == 4) {
+                                        char ip[INET_ADDRSTRLEN];
+                                        snprintf(ip, sizeof(ip), "%d.%d.%d.%d", dns_resp[roff], dns_resp[roff+1], dns_resp[roff+2], dns_resp[roff+3]);
+                                        result.addresses.push_back(ip);
+                                        result.type = DoHClient::RecordType::A;
+                                    } else if (art == 28 && ardlen == 16) {
+                                        char ip[INET6_ADDRSTRLEN];
+                                        struct in6_addr a6; memcpy(&a6, &dns_resp[roff], 16);
+                                        inet_ntop(AF_INET6, &a6, ip, sizeof(ip));
+                                        result.addresses.push_back(ip);
+                                        result.type = DoHClient::RecordType::AAAA;
+                                    }
+                                    roff += ardlen;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+#else
+            // No OpenSSL — fallback to system DNS
+            struct addrinfo hints = {}, *res = nullptr;
+            hints.ai_family = (type == DoHClient::RecordType::AAAA) ? AF_INET6 : AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            if (getaddrinfo(hostname.c_str(), nullptr, &hints, &res) == 0) {
+                for (auto* p = res; p; p = p->ai_next) {
+                    char ip[INET6_ADDRSTRLEN];
+                    if (p->ai_family == AF_INET)
+                        inet_ntop(AF_INET, &((sockaddr_in*)p->ai_addr)->sin_addr, ip, sizeof(ip));
+                    else
+                        inet_ntop(AF_INET6, &((sockaddr_in6*)p->ai_addr)->sin6_addr, ip, sizeof(ip));
+                    result.addresses.push_back(ip);
+                }
+                freeaddrinfo(res);
+                result.ttl = 300;
+                result.status_code = 200;
+            } else {
+                result.error_message = "System DNS resolution failed";
+            }
+#endif
+
+            auto end_time = std::chrono::steady_clock::now();
+            result.response_time_ms = static_cast<uint32_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count());
+
+            // Update stats and cache (re-lock impl)
+            auto impl3 = weak_impl.lock();
+            if (impl3) {
+                if (!result.addresses.empty()) {
+                    impl3->stats.successful_queries++;
+                    if (config_copy.enable_cache) {
+                        std::lock_guard<std::mutex> lock(impl3->cache_mutex);
+                        impl3->cache[cache_key] = {result, std::chrono::steady_clock::now()};
+                        impl3->lru_touch(cache_key);
+                        while (impl3->cache.size() > config_copy.max_cache_size) {
+                            impl3->lru_evict_oldest();
+                        }
+                    }
+                } else {
+                    impl3->stats.failed_queries++;
+                }
+            }
+
+            if (callback) callback(result);
 
         } catch (const std::exception& e) {
             DNSResult error_result;
+            error_result.hostname = hostname;
+            error_result.type = type;
             error_result.error_message = std::string("Async resolution failed: ") + e.what();
             if (callback) callback(error_result);
         } catch (...) {
             DNSResult error_result;
+            error_result.hostname = hostname;
+            error_result.type = type;
             error_result.error_message = "Async resolution failed: unknown error";
             if (callback) callback(error_result);
         }
