@@ -101,6 +101,14 @@ public:
     
     // Timing simulation
     std::chrono::milliseconds get_next_packet_delay();
+
+    /// Set the symmetric key used for TLS ClientHello AEAD encryption.
+    /// Both sides of the tunnel must share the same key for wrap/unwrap to work.
+    /// Key must be exactly crypto_aead_xchacha20poly1305_ietf_KEYBYTES (32) bytes.
+    void set_tls_session_key(const std::vector<uint8_t>& key);
+
+    /// Get the current TLS session key (e.g. to transmit to the peer during handshake).
+    std::vector<uint8_t> get_tls_session_key() const;
     
 private:
     // HTTP mimicry
@@ -154,6 +162,10 @@ private:
     uint32_t tls_sequence_number_;
     uint16_t dns_transaction_id_;
     uint64_t quic_packet_number_;
+
+    /// Symmetric key for XChaCha20-Poly1305 encryption in TLS ClientHello wrapper.
+    /// Generated randomly in constructor; must be shared with peer for unwrap.
+    std::vector<uint8_t> tls_session_key_;
 };
 
 } // namespace ncp
