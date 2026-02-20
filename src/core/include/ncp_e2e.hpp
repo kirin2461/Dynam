@@ -120,7 +120,7 @@ public:
         const SecureMemory& decryption_key
     );
 
-    // Encryption/decryption (uses XChaCha20-Poly1305 with 24-byte nonce)
+    // Encryption/decryption with Double Ratchet (XChaCha20-Poly1305 + per-message keys)
     EncryptedMessage encrypt(
         const std::vector<uint8_t>& plaintext,
         const std::vector<uint8_t>& associated_data = {}
@@ -146,6 +146,13 @@ public:
 
 private:
     void init_ratchet_keys();
+
+    /// Internal: decrypt a message using an already-derived message key.
+    /// Used by decrypt() after resolving the key from ratchet chain or skipped storage.
+    std::optional<std::vector<uint8_t>> decrypt_with_key_(
+        const EncryptedMessage& msg,
+        const SecureMemory& message_key
+    );
 
     struct Impl;
     std::unique_ptr<Impl> pImpl_;

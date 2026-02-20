@@ -1,4 +1,7 @@
 #include "ncp_dpi.hpp"
+#include "ncp_dpi_advanced.hpp"
+#include "ncp_tls_fingerprint.hpp"
+#include "ncp_ech.hpp"
 #include "ncp_thread_pool.hpp"
 #include <thread>
 #include <mutex>
@@ -73,8 +76,7 @@ bool wait_for_readable(SOCKET sock, int timeout_ms) {
 
 } // namespace
 
-   // Using libsodium CSPRNG (randombytes_uniform) instead of mt19937
- // Replaced insecure std::mt19937 + std::uniform_int_distribution with randombytes_uniform()
+// Using libsodium CSPRNG (randombytes_uniform) instead of mt19937
 
 // TLS ClientHello detection
 static bool is_tls_client_hello(const uint8_t* data, size_t len) {
@@ -83,11 +85,6 @@ static bool is_tls_client_hello(const uint8_t* data, size_t len) {
 
 /**
  * @brief Best-effort parser for TLS ClientHello to locate SNI hostname offset.
- *
- * Returns offset (in bytes from start of record) where the SNI hostname bytes begin,
- * or -1 if SNI cannot be found / parsed.
- *
- * Exposed with external linkage so unit tests can validate parsing robustness.
  */
 int find_sni_hostname_offset(const uint8_t* data, size_t len) {
     if (!data || len < 5 + 4) {
@@ -107,6 +104,14 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
     if (handshake_type != 0x01) {
         return -1;
     }
+    if (!data || len < 5 + 4) return -1;
+    if (data[0] != 0x16 || data[1] != 0x03) return -1;
+
+    size_t pos = 5;
+    if (pos + 4 > len) return -1;
+
+    uint8_t handshake_type = data[pos];
+    if (handshake_type != 0x01) return -1;
 
     uint32_t hs_len = (static_cast<uint32_t>(data[pos + 1]) << 16) |
                       (static_cast<uint32_t>(data[pos + 2]) << 8) |
@@ -120,46 +125,44 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
 
     pos += 2;
     pos += 32;
+    if (pos + 2 + 32 + 1 > len) return -1;
+    pos += 2; // client_version
+    pos += 32; // random
 
     uint8_t session_id_len = data[pos];
     pos += 1;
-    if (pos + session_id_len > len) {
-        return -1;
-    }
+    if (pos + session_id_len > len) return -1;
     pos += session_id_len;
 
     if (pos + 2 > len) {
         return -1;
     }
+    if (pos + 2 > len) return -1;
     uint16_t cipher_suites_len = (static_cast<uint16_t>(data[pos]) << 8) |
                                  static_cast<uint16_t>(data[pos + 1]);
     pos += 2;
-    if (pos + cipher_suites_len > len) {
-        return -1;
-    }
+    if (pos + cipher_suites_len > len) return -1;
     pos += cipher_suites_len;
 
     if (pos + 1 > len) {
         return -1;
     }
+    if (pos + 1 > len) return -1;
     uint8_t compression_methods_len = data[pos];
     pos += 1;
-    if (pos + compression_methods_len > len) {
-        return -1;
-    }
+    if (pos + compression_methods_len > len) return -1;
     pos += compression_methods_len;
 
     if (pos + 2 > len) {
         return -1;
     }
+    if (pos + 2 > len) return -1;
     uint16_t extensions_len = (static_cast<uint16_t>(data[pos]) << 8) |
                               static_cast<uint16_t>(data[pos + 1]);
     pos += 2;
 
     size_t exts_end = pos + extensions_len;
-    if (exts_end > len) {
-        exts_end = len;
-    }
+    if (exts_end > len) exts_end = len;
 
     while (pos + 4 <= exts_end) {
         uint16_t ext_type = (static_cast<uint16_t>(data[pos]) << 8) |
@@ -167,6 +170,7 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
         uint16_t ext_data_len = (static_cast<uint16_t>(data[pos + 2]) << 8) |
                                 static_cast<uint16_t>(data[pos + 3]);
         pos += 4;
+        if (pos + ext_data_len > exts_end) break;
 
         if (pos + ext_data_len > exts_end) {
             break;
@@ -174,10 +178,7 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
 
         if (ext_type == 0x0000) {
             size_t sni_pos = pos;
-            if (sni_pos + 2 > exts_end) {
-                return -1;
-            }
-
+            if (sni_pos + 2 > exts_end) return -1;
             uint16_t list_len = (static_cast<uint16_t>(data[sni_pos]) << 8) |
                                 static_cast<uint16_t>(data[sni_pos + 1]);
             sni_pos += 2;
@@ -185,13 +186,11 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
                 return -1;
             }
 
+            if (sni_pos + list_len > exts_end || list_len < 3) return -1;
             uint8_t name_type = data[sni_pos];
             (void)name_type;
             sni_pos += 1;
-            if (sni_pos + 2 > exts_end) {
-                return -1;
-            }
-
+            if (sni_pos + 2 > exts_end) return -1;
             uint16_t host_len = (static_cast<uint16_t>(data[sni_pos]) << 8) |
                                 static_cast<uint16_t>(data[sni_pos + 1]);
             sni_pos += 2;
@@ -200,12 +199,11 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
                 return -1;
             }
 
+            if (sni_pos + host_len > exts_end) return -1;
             return static_cast<int>(sni_pos);
         }
-
         pos += ext_data_len;
     }
-
     return -1;
 }
 
@@ -227,6 +225,14 @@ public:
     std::thread worker_thread;
     std::function<void(const std::string&)> log_callback;
 
+    // === Phase 2: Advanced DPI bypass integration ===
+    std::unique_ptr<AdvancedDPIBypass> advanced_bypass_;
+    bool advanced_enabled_ = false;
+
+    // === Phase 2: TLS Fingerprint for realistic ClientHello ===
+    std::unique_ptr<ncp::TLSFingerprint> tls_fingerprint_;
+
+    // === Thread pool for connection handling ===
     std::unique_ptr<ncp::ThreadPool> thread_pool_;
     std::atomic<int> active_connections_{0};
     static constexpr int MAX_CONNECTIONS = 256;
@@ -236,6 +242,76 @@ public:
     std::mutex ws_client_mutex_;
     SOCKET ws_active_client_ = INVALID_SOCKET;
 #endif
+    // =========================================================
+    // Phase 2: Initialize AdvancedDPIBypass from DPIConfig
+    // Phase 3C: Forward TLSFingerprint to advanced bypass
+    // =========================================================
+    void init_advanced_bypass() {
+        AdvancedDPIConfig adv_config;
+        adv_config.base_config = config;
+
+        if (config.enable_tcp_split) {
+            adv_config.techniques.push_back(EvasionTechnique::SNI_SPLIT);
+            adv_config.techniques.push_back(EvasionTechnique::TCP_SEGMENTATION);
+        }
+        if (config.enable_fake_packet) {
+            adv_config.techniques.push_back(EvasionTechnique::IP_TTL_TRICKS);
+            adv_config.techniques.push_back(EvasionTechnique::FAKE_SNI);
+        }
+        if (config.enable_pattern_obfuscation) {
+            adv_config.techniques.push_back(EvasionTechnique::TLS_GREASE);
+        }
+        if (config.enable_timing_jitter) {
+            adv_config.techniques.push_back(EvasionTechnique::TIMING_JITTER);
+        }
+        if (config.enable_disorder) {
+            adv_config.techniques.push_back(EvasionTechnique::TCP_DISORDER);
+        }
+
+        if (config.enable_fake_packet && config.enable_tcp_split &&
+            config.enable_pattern_obfuscation) {
+            adv_config.tspu_bypass = true;
+        }
+
+        advanced_bypass_ = std::make_unique<AdvancedDPIBypass>();
+        advanced_bypass_->set_log_callback([this](const std::string& msg) {
+            log("[Advanced] " + msg);
+        });
+
+        // Phase 3C: Set TLS fingerprint BEFORE initialize so it's available
+        // during initialization, and again after in case initialize() recreates
+        // internal TLSManipulator
+        if (tls_fingerprint_) {
+            advanced_bypass_->set_tls_fingerprint(tls_fingerprint_.get());
+        }
+
+        if (advanced_bypass_->initialize(adv_config)) {
+            // Forward fingerprint again after initialize() creates TLSManipulator
+            if (tls_fingerprint_) {
+                advanced_bypass_->set_tls_fingerprint(tls_fingerprint_.get());
+            }
+            advanced_bypass_->start();
+            advanced_enabled_ = true;
+            log("Advanced DPI bypass layer initialized with " +
+                std::to_string(adv_config.techniques.size()) + " techniques" +
+                (tls_fingerprint_ ? " + TLS fingerprint" : ""));
+        } else {
+            log("Warning: Advanced DPI bypass initialization failed, using basic mode");
+            advanced_bypass_.reset();
+            advanced_enabled_ = false;
+        }
+    }
+
+    // =========================================================
+    // Phase 2: Initialize TLS Fingerprint
+    // =========================================================
+    void init_tls_fingerprint() {
+        tls_fingerprint_ = std::make_unique<ncp::TLSFingerprint>(ncp::BrowserType::CHROME);
+        if (!config.target_host.empty()) {
+            tls_fingerprint_->set_sni(config.target_host);
+        }
+        log("TLS fingerprint initialized (profile=Chrome, target=" + config.target_host + ")");
+    }
 
     // FIX #39: Thread-safe config snapshot helper
     DPIConfig snapshot_config() const {
@@ -273,6 +349,7 @@ public:
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_port = htons(listen_cfg.listen_port);
+        addr.sin_port = htons(config.listen_port);
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
         if (bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
@@ -371,6 +448,14 @@ public:
         }
 
         if (connect(server_sock, reinterpret_cast<sockaddr*>(&remote_addr), sizeof(remote_addr)) < 0) {
+        // Phase 2: Set TCP_NODELAY to prevent Nagle from coalescing fragments
+        int nodelay = 1;
+        setsockopt(server_sock, IPPROTO_TCP, TCP_NODELAY,
+                   reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
+
+        if (connect(server_sock,
+                    reinterpret_cast<sockaddr*>(&remote_addr),
+                    sizeof(remote_addr)) < 0) {
             log("DPI proxy: failed to connect to upstream server");
             CLOSE_SOCKET(client_sock);
             CLOSE_SOCKET(server_sock);
@@ -379,6 +464,7 @@ public:
 
         // FIX #39: pass config snapshot by value to pipe thread
         std::thread t_cs(&Impl::pipe_client_to_server, this, client_sock, server_sock, cfg_snap);
+        std::thread t_cs(&Impl::pipe_client_to_server, this, client_sock, server_sock);
         std::thread t_sc(&Impl::pipe_server_to_client, this, server_sock, client_sock);
 
         t_cs.join();
@@ -405,7 +491,7 @@ public:
                 stats.packets_total++;
             }
 
-            bool is_client_hello = false;
+            bool is_ch = false;
             if (!client_hello_processed &&
                 is_tls_client_hello(buffer.data(), static_cast<size_t>(received))) {
                 is_client_hello = true;
@@ -414,6 +500,18 @@ public:
 
             send_with_fragmentation(server_sock, buffer.data(),
                                     static_cast<size_t>(received), is_client_hello, cfg_snap);
+                is_ch = true;
+                client_hello_processed = true;
+            }
+
+            // Phase 2: Route ClientHello through AdvancedDPIBypass
+            if (is_ch && advanced_enabled_ && advanced_bypass_) {
+                send_via_advanced(server_sock, buffer.data(),
+                                 static_cast<size_t>(received));
+            } else {
+                send_with_fragmentation(server_sock, buffer.data(),
+                                        static_cast<size_t>(received), is_ch);
+            }
         }
     }
 
@@ -454,6 +552,92 @@ public:
         SOCKET sock, const uint8_t* data, size_t len,
         bool is_client_hello, const DPIConfig& cfg)
     {
+            // Phase 2: Incoming data through advanced deobfuscation if active
+            if (advanced_enabled_ && advanced_bypass_) {
+                auto deobf = advanced_bypass_->process_incoming(
+                    buffer.data(), static_cast<size_t>(received));
+                if (!deobf.empty()) {
+                    send_raw(client_sock, deobf.data(), deobf.size());
+                }
+            } else {
+                send_with_fragmentation(client_sock, buffer.data(),
+                                        static_cast<size_t>(received), false);
+            }
+        }
+    }
+
+    // =========================================================
+    // Phase 2: Send data through AdvancedDPIBypass pipeline
+    // =========================================================
+    void send_via_advanced(SOCKET sock, const uint8_t* data, size_t len) {
+        auto segments = advanced_bypass_->process_outgoing(data, len);
+
+        auto send_all = [&](const uint8_t* d, size_t l) -> size_t {
+            size_t total_sent = 0;
+            while (total_sent < l) {
+                int to_send = static_cast<int>(std::min<size_t>(l - total_sent, 1460));
+                int sent = send(sock,
+                                reinterpret_cast<const char*>(d + total_sent),
+                                to_send, 0);
+                if (sent <= 0) break;
+                total_sent += static_cast<size_t>(sent);
+            }
+            return total_sent;
+        };
+
+        size_t sent_total = 0;
+        for (size_t i = 0; i < segments.size(); ++i) {
+            const auto& seg = segments[i];
+
+            if (i > 0 && config.enable_timing_jitter &&
+                config.timing_jitter_min_us > 0) {
+                uint32_t delay = config.timing_jitter_min_us +
+                    randombytes_uniform(static_cast<uint32_t>(
+                        config.timing_jitter_max_us - config.timing_jitter_min_us + 1));
+                std::this_thread::sleep_for(std::chrono::microseconds(delay));
+            } else if (i > 0 && config.enable_disorder && config.disorder_delay_ms > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(config.disorder_delay_ms));
+            }
+
+            sent_total += send_all(seg.data(), seg.size());
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            stats.bytes_sent += static_cast<uint64_t>(sent_total);
+            if (segments.size() > 1) {
+                stats.packets_fragmented++;
+            }
+        }
+    }
+
+    // =========================================================
+    // Raw send helper (no fragmentation)
+    // =========================================================
+    size_t send_raw(SOCKET sock, const uint8_t* data, size_t len) {
+        size_t total_sent = 0;
+        while (total_sent < len) {
+            int to_send = static_cast<int>(std::min<size_t>(len - total_sent, 1460));
+            int sent = send(sock,
+                            reinterpret_cast<const char*>(data + total_sent),
+                            to_send, 0);
+            if (sent <= 0) break;
+            total_sent += static_cast<size_t>(sent);
+        }
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex);
+            stats.bytes_sent += static_cast<uint64_t>(total_sent);
+        }
+        return total_sent;
+    }
+
+    void send_with_fragmentation(
+        SOCKET sock,
+        const uint8_t* data,
+        size_t len,
+        bool is_client_hello
+    ) {
         if (!data || len == 0) return;
 
         auto send_all = [&](const uint8_t* d, size_t l) -> size_t {
@@ -461,6 +645,9 @@ public:
             while (total_sent < l) {
                 int to_send = static_cast<int>(std::min<size_t>(l - total_sent, 1460));
                 int sent = send(sock, reinterpret_cast<const char*>(d + total_sent), to_send, 0);
+                int sent = send(sock,
+                                reinterpret_cast<const char*>(d + total_sent),
+                                to_send, 0);
                 if (sent <= 0) break;
                 total_sent += static_cast<size_t>(sent);
             }
@@ -494,6 +681,68 @@ public:
         }
 
         if (!is_client_hello || !cfg.enable_tcp_split) {
+        // Noise/Junk before ClientHello
+        if (is_client_hello && config.enable_noise) {
+            std::vector<uint8_t> junk;
+            if (!config.fake_host.empty()) {
+                std::string mask = "GET / HTTP/1.1\r\nHost: " + config.fake_host + "\r\n\r\n";
+                junk.assign(mask.begin(), mask.end());
+            } else {
+                junk.resize(config.noise_size > 0 ? config.noise_size : 64);
+                for(auto& b : junk) b = static_cast<uint8_t>(randombytes_uniform(256));
+            }
+#ifdef IP_TTL
+            int original_ttl = 64;
+            socklen_t optlen = sizeof(original_ttl);
+            getsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<char*>(&original_ttl), &optlen);
+            int low_ttl = 2;
+            setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&low_ttl), sizeof(low_ttl));
+            send_all(junk.data(), junk.size());
+            setsockopt(sock, IPPROTO_IP, IP_TTL, reinterpret_cast<const char*>(&original_ttl), sizeof(original_ttl));
+#else
+            send_all(junk.data(), junk.size());
+#endif
+        }
+
+        // Fake low-TTL probe before main ClientHello
+        if (is_client_hello && config.enable_fake_packet) {
+            for (int i = 0; i < (config.fake_ttl > 2 ? 2 : 1); ++i) {
+                std::vector<uint8_t> fake_data = {
+                    0x16, 0x03, static_cast<uint8_t>(randombytes_uniform(256) % 4),
+                    static_cast<uint8_t>(randombytes_uniform(256)), static_cast<uint8_t>(randombytes_uniform(256)),
+                    0x01
+                };
+#ifdef IP_TTL
+                int original_ttl = 0;
+                socklen_t optlen = static_cast<socklen_t>(sizeof(original_ttl));
+                bool ttl_changed = false;
+                if (getsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<char*>(&original_ttl), &optlen) == 0) {
+                    int ttl = (config.fake_ttl > 0) ? (config.fake_ttl + i) : 2;
+                    if (setsockopt(sock, IPPROTO_IP, IP_TTL,
+                                   reinterpret_cast<const char*>(&ttl), sizeof(ttl)) == 0) {
+                        ttl_changed = true;
+                    }
+                }
+#endif
+                send_all(fake_data.data(), fake_data.size());
+                {
+                    std::lock_guard<std::mutex> lock(stats_mutex);
+                    stats.fake_packets_sent++;
+                }
+#ifdef IP_TTL
+                if (ttl_changed) {
+                    setsockopt(sock, IPPROTO_IP, IP_TTL,
+                               reinterpret_cast<const char*>(&original_ttl), sizeof(original_ttl));
+                }
+#endif
+                if (config.disorder_delay_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(config.disorder_delay_ms / 2));
+                }
+            }
+        }
+
+        if (!is_client_hello || !config.enable_tcp_split) {
             size_t sent = send_all(data, len);
             std::lock_guard<std::mutex> lock(stats_mutex);
             stats.bytes_sent += static_cast<uint64_t>(sent);
@@ -526,16 +775,19 @@ public:
             size_t base_frag_size = (cfg.fragment_size > 0)
                                    ? static_cast<size_t>(cfg.fragment_size) : 2;
 
+            size_t base_frag_size = (config.fragment_size > 0)
+                                   ? static_cast<size_t>(config.fragment_size)
+                                   : 2;
             size_t offset = 0;
             while (offset < remaining) {
                 size_t jitter = randombytes_uniform(3);
                 size_t current_frag = std::min(base_frag_size + jitter, remaining - offset);
 
                 if (cfg.enable_disorder && cfg.disorder_delay_ms > 0) {
+                if (config.enable_disorder && config.disorder_delay_ms > 0) {
                     std::this_thread::sleep_for(
                         std::chrono::milliseconds(cfg.disorder_delay_ms));
                 }
-
                 size_t sent = send_all(data + sent_first + offset, current_frag);
                 sent_total += sent;
                 if (sent == 0) break;
@@ -1018,6 +1270,27 @@ bool DPIBypass::initialize(const DPIConfig& config) {
     impl_->log("Initialize DPI (mode=" + mode_str +
               ", listen_port=" + std::to_string(config.listen_port) +
               ", fragment_size=" + std::to_string(config.fragment_size) + ")");
+
+    // Phase 2: Initialize TLS fingerprint for all modes
+    impl_->init_tls_fingerprint();
+
+    // Phase 2: Auto-detect when to enable advanced bypass
+    bool needs_advanced = config.enable_pattern_obfuscation ||
+                          config.enable_decoy_sni ||
+                          config.enable_multi_layer_split ||
+                          config.enable_adaptive_fragmentation ||
+                          config.enable_timing_jitter ||
+                          config.enable_tcp_options_randomization;
+
+    if (config.enable_fake_packet && config.enable_tcp_split &&
+        config.enable_noise && config.enable_disorder) {
+        needs_advanced = true;
+    }
+
+    if (needs_advanced) {
+        impl_->init_advanced_bypass();
+    }
+
     return true;
 }
 
@@ -1038,7 +1311,8 @@ bool DPIBypass::start() {
     if (cfg_snap.mode == DPIMode::PROXY) {
         impl_->running = true;
         impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl_.get());
-        impl_->log("DPI bypass started (TCP proxy mode)");
+        impl_->log("DPI bypass started (TCP proxy mode" +
+                  std::string(impl_->advanced_enabled_ ? " + Advanced" : "") + ")");
         return true;
     }
 
@@ -1069,6 +1343,9 @@ void DPIBypass::stop() {
     impl_->stop_ws_tunnel();
 #endif
 
+    if (impl_->advanced_bypass_) {
+        impl_->advanced_bypass_->stop();
+    }
     if (impl_->worker_thread.joinable()) impl_->worker_thread.join();
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     impl_->cleanup_nfqueue();
@@ -1135,5 +1412,4 @@ void DPIBypass::notify_config_change(const DPIConfig& old_cfg, const DPIConfig& 
 }
 
 } // namespace DPI
-
 } // namespace ncp
