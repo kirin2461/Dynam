@@ -12,11 +12,10 @@
  *     → crypto_.decrypt_aead(ciphertext, session_key_, channel_id_as_aad)
  *     → plaintext
  *
- * This ensures:
- *   - Channels stay thin (embed + transport only, no crypto)
- *   - No crypto code duplication across channels (DRY)
- *   - ProtocolOrchestrator manages keys centrally (HKDF from shared_secret)
- *   - channel_id as AAD authenticates which channel produced the ciphertext
+ * Thread safety:
+ *   - active_channel: always read/written under channels_mutex
+ *   - Lock order: channels_mutex → key_mutex (never reverse)
+ *   - escalation_cb: fired OUTSIDE any lock to prevent re-entrant deadlock
  */
 
 #include "include/ncp_covert_channel.hpp"
@@ -59,12 +58,11 @@ struct CovertChannelManager::Impl {
     std::vector<uint8_t> session_key; // 32 bytes for XChaCha20-Poly1305
     mutable std::mutex key_mutex;
 
-    // Registered channels
+    // Registered channels + active channel
+    // INVARIANT: active_channel is ALWAYS read/written under channels_mutex
     std::vector<std::shared_ptr<ICovertChannel>> channels;
+    std::shared_ptr<ICovertChannel> active_channel;  // guarded by channels_mutex
     mutable std::mutex channels_mutex;
-
-    // Active channel (best stealth score + open)
-    std::shared_ptr<ICovertChannel> active_channel;
 
     // Health check thread
     std::thread health_thread;
@@ -72,7 +70,8 @@ struct CovertChannelManager::Impl {
     std::condition_variable health_cv;
     std::mutex health_mutex;
 
-    // Escalation callback
+    // Escalation callback — guarded by escalation_mutex
+    // NEVER called under channels_mutex (deadlock prevention)
     std::function<void(const std::string&, const CovertDetectionEvent&)> escalation_cb;
     std::mutex escalation_mutex;
 
@@ -97,13 +96,11 @@ struct CovertChannelManager::Impl {
             channel_type.size());
     }
 
-    // Encrypt plaintext for sending through a specific channel
     std::vector<uint8_t> encrypt_for_channel(
         const uint8_t* data, size_t len,
         const std::string& channel_type) {
 
         if (!crypto || session_key.empty()) {
-            // No crypto configured — pass through raw
             return {data, data + len};
         }
 
@@ -121,7 +118,6 @@ struct CovertChannelManager::Impl {
         return {ct.data(), ct.data() + ct.size()};
     }
 
-    // Decrypt ciphertext received from a specific channel
     std::vector<uint8_t> decrypt_from_channel(
         const uint8_t* data, size_t len,
         const std::string& channel_type) {
@@ -146,8 +142,8 @@ struct CovertChannelManager::Impl {
 
     // --- Channel selection ---
 
-    std::shared_ptr<ICovertChannel> select_best_channel() {
-        std::lock_guard<std::mutex> lock(channels_mutex);
+    // PRECONDITION: caller holds channels_mutex
+    std::shared_ptr<ICovertChannel> select_best_channel_unlocked() {
         std::shared_ptr<ICovertChannel> best;
         double best_score = -1.0;
 
@@ -163,6 +159,23 @@ struct CovertChannelManager::Impl {
         return best;
     }
 
+    // Acquires channels_mutex internally
+    std::shared_ptr<ICovertChannel> select_best_channel() {
+        std::lock_guard<std::mutex> lock(channels_mutex);
+        return select_best_channel_unlocked();
+    }
+
+    // Snapshot active channel under lock.
+    // If stale (nullptr or closed), re-selects and updates active_channel.
+    // Returns channel (may be nullptr if none available).
+    std::shared_ptr<ICovertChannel> get_active_channel() {
+        std::lock_guard<std::mutex> lock(channels_mutex);
+        if (!active_channel || !active_channel->is_open()) {
+            active_channel = select_best_channel_unlocked();
+        }
+        return active_channel; // shared_ptr copy under lock — safe
+    }
+
     // --- Health check ---
 
     void health_check_loop() {
@@ -175,34 +188,66 @@ struct CovertChannelManager::Impl {
             }
             if (!running.load()) break;
 
-            // Re-evaluate active channel
-            auto best = select_best_channel();
-            if (best && best != active_channel) {
+            // === Phase 1: collect events under channels_mutex ===
+            // Never call callbacks under this lock.
+
+            struct EscalationEvent {
+                std::string channel_type;
+                CovertDetectionEvent event;
+            };
+            std::vector<EscalationEvent> pending_events;
+            std::string switched_to; // for logging outside lock
+
+            {
+                std::lock_guard<std::mutex> lock(channels_mutex);
+
+                // Re-evaluate active channel
+                auto best = select_best_channel_unlocked();
+                if (best && best != active_channel) {
+                    switched_to = best->channel_type();
+                    active_channel = best;
+                }
+
+                // Check for degraded channels
+                for (auto& ch : channels) {
+                    if (ch->state() == ChannelState::DEGRADED) {
+                        auto stats = ch->get_stats();
+                        if (stats.stealthiness_score < config.detection_threshold &&
+                            config.enable_failover) {
+
+                            EscalationEvent ev;
+                            ev.channel_type = ch->channel_type();
+                            ev.event.type = CovertDetectionEvent::Type::STATISTICAL_ANOMALY;
+                            ev.event.confidence = 1.0 - stats.stealthiness_score;
+                            ev.event.details = "stealth score below threshold";
+                            pending_events.push_back(std::move(ev));
+                        }
+                    }
+                }
+            }
+            // channels_mutex released here
+
+            // === Phase 2: fire callbacks OUTSIDE any lock ===
+            // Safe for callbacks to call remove_channel(), send(), etc.
+
+            if (!switched_to.empty()) {
                 NCP_LOG_INFO("CovertChannelManager: switching to channel '" +
-                             best->channel_type() + "'");
-                active_channel = best;
+                             switched_to + "'");
             }
 
-            // Check for degraded channels
-            std::lock_guard<std::mutex> lock(channels_mutex);
-            for (auto& ch : channels) {
-                if (ch->state() == ChannelState::DEGRADED) {
-                    auto stats = ch->get_stats();
-                    if (stats.stealthiness_score < config.detection_threshold) {
+            if (!pending_events.empty()) {
+                // Snapshot callback under its own lock
+                std::function<void(const std::string&, const CovertDetectionEvent&)> cb;
+                {
+                    std::lock_guard<std::mutex> elock(escalation_mutex);
+                    cb = escalation_cb;
+                }
+                // Fire outside all locks
+                if (cb) {
+                    for (const auto& ev : pending_events) {
                         NCP_LOG_WARN("CovertChannelManager: channel '" +
-                                     ch->channel_type() + "' below threshold");
-
-                        if (config.enable_failover) {
-                            // Notify escalation
-                            std::lock_guard<std::mutex> elock(escalation_mutex);
-                            if (escalation_cb) {
-                                CovertDetectionEvent event;
-                                event.type = CovertDetectionEvent::Type::STATISTICAL_ANOMALY;
-                                event.confidence = 1.0 - stats.stealthiness_score;
-                                event.details = "stealth score below threshold";
-                                escalation_cb(ch->channel_type(), event);
-                            }
-                        }
+                                     ev.channel_type + "' below threshold");
+                        cb(ev.channel_type, ev.event);
                     }
                 }
             }
@@ -245,7 +290,7 @@ void CovertChannelManager::remove_channel(const std::string& channel_type) {
 
     if (impl_->active_channel &&
         impl_->active_channel->channel_type() == channel_type) {
-        impl_->active_channel = impl_->select_best_channel();
+        impl_->active_channel = impl_->select_best_channel_unlocked();
     }
 }
 
@@ -261,15 +306,14 @@ std::vector<std::string> CovertChannelManager::active_channels() const {
 }
 
 size_t CovertChannelManager::send(const uint8_t* data, size_t len) {
-    auto channel = impl_->active_channel;
-    if (!channel || !channel->is_open()) {
-        channel = impl_->select_best_channel();
-        if (!channel) {
-            NCP_LOG_ERROR("CovertChannelManager: no active channel");
-            return 0;
-        }
-        impl_->active_channel = channel;
+    // Snapshot active channel under lock
+    auto channel = impl_->get_active_channel();
+    if (!channel) {
+        NCP_LOG_ERROR("CovertChannelManager: no active channel");
+        return 0;
     }
+    // channel is a shared_ptr copy — safe to use outside lock
+    // (channel stays alive even if active_channel is reassigned)
 
     // Encrypt: encrypt_aead(plaintext, session_key, channel_id_as_aad)
     auto ct = impl_->encrypt_for_channel(data, len, channel->channel_type());
@@ -280,12 +324,10 @@ size_t CovertChannelManager::send(const uint8_t* data, size_t len) {
 }
 
 size_t CovertChannelManager::receive(uint8_t* buf, size_t max_len) {
-    auto channel = impl_->active_channel;
-    if (!channel || !channel->is_open()) {
-        channel = impl_->select_best_channel();
-        if (!channel) return 0;
-        impl_->active_channel = channel;
-    }
+    // Snapshot active channel under lock
+    auto channel = impl_->get_active_channel();
+    if (!channel) return 0;
+    // channel is a shared_ptr copy — safe to use outside lock
 
     // Receive ciphertext from channel
     std::vector<uint8_t> ct_buf(max_len + 64); // room for nonce + tag
@@ -325,9 +367,9 @@ void CovertChannelManager::start() {
                 ch->open();
             }
         }
+        impl_->active_channel = impl_->select_best_channel_unlocked();
     }
 
-    impl_->active_channel = impl_->select_best_channel();
     impl_->running.store(true);
     impl_->health_thread = std::thread([this] { impl_->health_check_loop(); });
 
@@ -349,9 +391,9 @@ void CovertChannelManager::stop() {
         for (auto& ch : impl_->channels) {
             ch->close();
         }
+        impl_->active_channel.reset();
     }
 
-    impl_->active_channel.reset();
     NCP_LOG_INFO("CovertChannelManager stopped");
 }
 
@@ -370,7 +412,6 @@ ChannelStats CovertChannelManager::aggregate_stats() const {
         agg.messages_received += s.messages_received;
         agg.errors += s.errors;
         agg.retries += s.retries;
-        // Weighted average of stealth scores
         if (ch->is_open()) {
             agg.stealthiness_score = std::min(agg.stealthiness_score == 0.0
                 ? s.stealthiness_score : agg.stealthiness_score,
