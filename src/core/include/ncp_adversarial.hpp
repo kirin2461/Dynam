@@ -175,8 +175,15 @@ public:
     
     /// Apply adversarial padding to outgoing packet payload.
     /// Returns padded payload. Original data can be extracted with unpad().
-    /// The first byte is a control byte: [strategy:4][pre_len_hi:4]
-    /// Second byte: [pre_len_lo:8] — allows up to 4095 bytes pre-padding.
+    ///
+    /// Control header layout (4 bytes):
+    ///   Byte 0: [strategy:4 bits][pre_len bits 11..8]
+    ///   Byte 1: [pre_len bits 7..0]              => 12-bit pre_len (max 4095)
+    ///   Byte 2: [payload_len bits 15..8]
+    ///   Byte 3: [payload_len bits 7..0]           => 16-bit payload_len (max 65535)
+    ///
+    /// Wire format: [ctrl0..ctrl3][pre_padding][original_payload][post_padding]
+    /// unpad() uses payload_len to strip post-padding precisely.
     std::vector<uint8_t> pad(
         const uint8_t* payload, size_t len
     );
@@ -184,6 +191,7 @@ public:
     std::vector<uint8_t> pad(const std::vector<uint8_t>& payload);
     
     /// Remove adversarial padding, restore original payload.
+    /// Uses payload_len from control header to precisely strip post-padding.
     std::vector<uint8_t> unpad(
         const uint8_t* padded_data, size_t len
     );
@@ -266,11 +274,15 @@ private:
     static constexpr uint8_t DUMMY_MAGIC_2 = 0xBE;
     static constexpr uint8_t DUMMY_MAGIC_3 = 0xEF;
     
-    // Control byte encoding
+    // Control header encoding (4 bytes)
     // Byte 0: [strategy:4 bits][pre_len high 4 bits]
     // Byte 1: [pre_len low 8 bits]
-    // This gives 12-bit pre_len = max 4095 bytes
-    static constexpr size_t CONTROL_HEADER_SIZE = 2;
+    // Byte 2: [payload_len high 8 bits]
+    // Byte 3: [payload_len low 8 bits]
+    // pre_len: 12-bit (max 4095), payload_len: 16-bit (max 65535)
+    static constexpr size_t CONTROL_HEADER_SIZE = 4;
+    static constexpr size_t MAX_PRE_PADDING = 4095;   // 12-bit limit
+    static constexpr size_t MAX_PAYLOAD_LEN = 65535;   // 16-bit limit
     
     AdversarialConfig config_;
     AdversarialStats stats_;

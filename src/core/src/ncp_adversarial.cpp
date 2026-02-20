@@ -301,6 +301,51 @@ size_t AdversarialPadding::find_nearest_target_size(size_t current_size) const {
 }
 
 // ===== Core: pad() =====
+// FIX #69 + #70: Control header expanded to 4 bytes.
+// Layout: [ctrl0][ctrl1][ctrl2][ctrl3]
+//   ctrl0: [strategy:4 bits][pre_len_hi:4 bits]
+//   ctrl1: [pre_len_lo:8 bits]          => pre_len = 12 bits (up to 4095) — same as before for back-compat range
+//   ctrl2: [payload_len_hi:8 bits]
+//   ctrl3: [payload_len_lo:8 bits]      => payload_len = 16 bits (up to 65535)
+//
+// FIX #70: For pre_len > 4095, we use an extended encoding:
+//   If ctrl0 low nibble == 0x0F and ctrl1 == 0xFF (sentinel = 0x0FFF),
+//   then actual pre_len is stored in ctrl2:ctrl3 and payload_len follows in next 2 bytes (6-byte header).
+//   For simplicity and practical use (max_padding_absolute is typically <=128),
+//   we keep the 4-byte format with 16-bit pre_len using both ctrl0:ctrl1 fully:
+//
+// REVISED simpler layout (BREAKING CHANGE from 2-byte header):
+//   ctrl0: [strategy:4 bits][reserved:4 bits]
+//   ctrl1: [pre_len_hi:8 bits]
+//   ctrl2: [pre_len_lo:8 bits]          => pre_len = 16 bits (up to 65535)
+//   ctrl3: reserved (0x00), available for future flags
+//
+// payload_len is encoded as: total_len - CONTROL_HEADER_SIZE - pre_len - post_len
+// But since unpad() doesn't know post_len, we store original payload length explicitly.
+//
+// FINAL layout (4 bytes):
+//   Byte 0: [strategy:4][pre_len bits 15..12]
+//   Byte 1: [pre_len bits 11..4]
+//   Byte 2: [pre_len bits 3..0][payload_len bits 19..16]
+//   Byte 3: ... not enough room.
+//
+// Let's use the cleanest approach: 6-byte control header.
+//   Byte 0: [strategy:4][flags:4]
+//   Byte 1-2: pre_len (16-bit big-endian)
+//   Byte 3-4: payload_len (16-bit big-endian) — original payload length
+//   Byte 5: reserved (0x00)
+// This is unambiguous and fully self-contained for unpad().
+// But that's a lot of overhead for small packets. Let's do 4 bytes:
+//
+// FINAL FINAL (4 bytes):
+//   Byte 0: [strategy:4 bits][pre_len_hi:4 bits]   (pre_len bits 11..8)
+//   Byte 1: [pre_len_lo:8 bits]                     (pre_len bits 7..0) => 12-bit pre_len, max 4095
+//   Byte 2: [payload_len_hi:8 bits]                  (payload_len bits 15..8)
+//   Byte 3: [payload_len_lo:8 bits]                  (payload_len bits 7..0) => 16-bit payload_len
+//
+// This solves #69 (unpad knows exact payload length) and keeps pre_len at 12-bit which is
+// sufficient given max_padding_absolute defaults. The #70 issue about >4096 pre_len is
+// practically moot since no config preset exceeds 128 bytes, and we add a runtime clamp.
 
 std::vector<uint8_t> AdversarialPadding::pad(
     const uint8_t* payload, size_t len) {
@@ -337,19 +382,39 @@ std::vector<uint8_t> AdversarialPadding::pad(
     size_t pre_len = select_pre_padding_size();
     size_t post_len = select_post_padding_size();
     
-    // Encode: [control_byte_0][control_byte_1][pre_padding...][original_payload][post_padding...]
-    // control_byte_0: [strategy:4][pre_len_hi:4]
-    // control_byte_1: [pre_len_lo:8]
+    // FIX #70: Clamp pre_len to 12-bit max (4095) for control header encoding
+    if (pre_len > MAX_PRE_PADDING) {
+        pre_len = MAX_PRE_PADDING;
+    }
+    
+    // FIX #69: Clamp payload_len to 16-bit max (65535) for control header encoding
+    // Payloads >64KB are passed through unpadded (extremely rare at this layer)
+    if (len > MAX_PAYLOAD_LEN) {
+        return std::vector<uint8_t>(payload, payload + len);
+    }
+    
+    // FIX #69 + #70: New 4-byte control header
+    // Byte 0: [strategy:4][pre_len_hi:4]  (pre_len bits 11..8)
+    // Byte 1: [pre_len_lo:8]              (pre_len bits 7..0)
+    // Byte 2: [payload_len_hi:8]          (original payload length bits 15..8)
+    // Byte 3: [payload_len_lo:8]          (original payload length bits 7..0)
     
     size_t total = CONTROL_HEADER_SIZE + pre_len + len + post_len;
     std::vector<uint8_t> result;
     result.reserve(total);
     
-    // Control header
+    // Control header byte 0: strategy (high nibble) + pre_len high 4 bits (low nibble)
     uint8_t strat_nibble = static_cast<uint8_t>(strat) & 0x0F;
     uint8_t pre_hi = static_cast<uint8_t>((pre_len >> 8) & 0x0F);
     result.push_back((strat_nibble << 4) | pre_hi);
+    
+    // Control header byte 1: pre_len low 8 bits
     result.push_back(static_cast<uint8_t>(pre_len & 0xFF));
+    
+    // FIX #69: Control header bytes 2-3: original payload length (16-bit big-endian)
+    uint16_t payload_len16 = static_cast<uint16_t>(len);
+    result.push_back(static_cast<uint8_t>((payload_len16 >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(payload_len16 & 0xFF));
     
     // Pre-padding
     if (pre_len > 0) {
@@ -377,6 +442,7 @@ std::vector<uint8_t> AdversarialPadding::pad(const std::vector<uint8_t>& payload
 }
 
 // ===== Core: unpad() =====
+// FIX #69: Now decodes payload_len from control header to precisely strip post-padding.
 
 std::vector<uint8_t> AdversarialPadding::unpad(
     const uint8_t* padded_data, size_t len) {
@@ -385,23 +451,27 @@ std::vector<uint8_t> AdversarialPadding::unpad(
         return std::vector<uint8_t>(padded_data, padded_data + len);
     }
     
-    // Decode control header
+    // Decode control header (4 bytes)
     uint8_t ctrl0 = padded_data[0];
     uint8_t ctrl1 = padded_data[1];
+    uint8_t ctrl2 = padded_data[2];
+    uint8_t ctrl3 = padded_data[3];
     
     size_t pre_len = (static_cast<size_t>(ctrl0 & 0x0F) << 8) | ctrl1;
     
+    // FIX #69: Decode original payload length from bytes 2-3
+    size_t payload_len = (static_cast<size_t>(ctrl2) << 8) | ctrl3;
+    
     size_t data_start = CONTROL_HEADER_SIZE + pre_len;
-    if (data_start >= len) {
+    size_t data_end = data_start + payload_len;
+    
+    if (data_start >= len || data_end > len) {
         // Malformed — return empty
         return {};
     }
     
-    // Post-padding is implicit: we encoded original length in the protocol layer above.
-    // For standalone use, we strip control header + pre_padding, rest is payload + post_pad.
-    // The protocol layer knows the original length.
-    // For safety, return everything after pre-padding.
-    return std::vector<uint8_t>(padded_data + data_start, padded_data + len);
+    // Return exactly the original payload, no post-padding garbage
+    return std::vector<uint8_t>(padded_data + data_start, padded_data + data_end);
 }
 
 std::vector<uint8_t> AdversarialPadding::unpad(const std::vector<uint8_t>& padded_data) {
@@ -462,20 +532,88 @@ void AdversarialPadding::randomize_window_size(uint8_t* tcp_header) {
     tcp_header[15] = static_cast<uint8_t>(win & 0xFF);
 }
 
+// FIX #71: Actually mutate TCP options instead of NOP→NOP no-op.
+// Strategy: Walk the option list and apply meaningful mutations:
+//   - NOP (0x01): Replace with random choice among NOP/EOL/NOP-pair to vary padding layout
+//   - MSS (kind=2, len=4): Apply small jitter to MSS value (±32) for fingerprint diversity
+//   - Window Scale (kind=3, len=3): Jitter scale factor ±1
+//   - Collect contiguous NOP runs and occasionally shuffle their count
 void AdversarialPadding::randomize_tcp_options(uint8_t* tcp_header, size_t header_len) {
-    // TCP options start at offset 20.
-    // We look for NOP (0x01) and rewrite with random NOPs or padding.
     size_t opts_start = 20;
     if (header_len <= opts_start) return;
     
-    for (size_t i = opts_start; i < header_len; ++i) {
-        if (tcp_header[i] == 0x01) { // NOP
-            // Sometimes replace NOP with NOP (keep), sometimes leave as is
-            if (ncp::csprng_uniform(4) == 0) {
-                tcp_header[i] = 0x01; // keep NOP
-            }
-            // else leave as is
+    size_t i = opts_start;
+    while (i < header_len) {
+        uint8_t kind = tcp_header[i];
+        
+        if (kind == 0x00) {
+            // EOL — end of options
+            break;
         }
+        
+        if (kind == 0x01) {
+            // NOP — single byte. Mutate: 50% chance replace with random padding byte
+            // that is still valid (NOP=0x01 or EOL=0x00 at end of options area).
+            // To actually change the fingerprint, we can:
+            //   - Leave as NOP (25%)
+            //   - Replace with a different NOP position (shift NOPs around) — handled below
+            //   - Insert a no-op by writing 0x01 but with different surrounding context
+            // Most effective: randomly decide to keep or convert trailing NOPs to EOL+NOPs
+            uint32_t r = ncp::csprng_uniform(4);
+            if (r == 0 && i + 1 < header_len && tcp_header[i + 1] == 0x01) {
+                // Swap this NOP with next byte if next is also NOP (no visible change,
+                // but re-aligns option boundaries creating different parse trees for some DPI)
+                // Actually: convert a pair of NOPs into a single NOP + random padding
+                tcp_header[i] = 0x01;
+                // Write a different innocuous value that won't break TCP parsing:
+                // 0x01 is safest. But we can also use kind=30 (experimental) with len=2
+                // which is a valid no-op option that some fingerprinters key on.
+                if (ncp::csprng_uniform(2) == 0) {
+                    // Replace pair with Experimental option kind=30 len=2 (RFC 4727)
+                    tcp_header[i] = 30;     // kind = experimental
+                    tcp_header[i + 1] = 2;  // length = 2 (just kind+len, no data)
+                    i += 2;
+                    continue;
+                }
+            } else if (r == 1) {
+                // Convert NOP to kind=30 len=2 if there's room for 2 bytes
+                // and next byte is also a NOP we can consume
+                if (i + 1 < header_len && tcp_header[i + 1] == 0x01) {
+                    tcp_header[i] = 30;
+                    tcp_header[i + 1] = 2;
+                    i += 2;
+                    continue;
+                }
+            }
+            // else: leave NOP as-is (still valid mutation: we changed other NOPs)
+            i++;
+            continue;
+        }
+        
+        // Multi-byte option: kind at [i], length at [i+1]
+        if (i + 1 >= header_len) break;
+        uint8_t opt_len = tcp_header[i + 1];
+        if (opt_len < 2 || i + opt_len > header_len) break;
+        
+        // MSS (kind=2, len=4): jitter value by ±32
+        if (kind == 2 && opt_len == 4 && i + 4 <= header_len) {
+            uint16_t mss = (static_cast<uint16_t>(tcp_header[i + 2]) << 8) | tcp_header[i + 3];
+            int new_mss = static_cast<int>(mss) + ncp::csprng_range(-32, 32);
+            if (new_mss < 536) new_mss = 536;   // RFC 791 minimum
+            if (new_mss > 65535) new_mss = 65535;
+            tcp_header[i + 2] = static_cast<uint8_t>((new_mss >> 8) & 0xFF);
+            tcp_header[i + 3] = static_cast<uint8_t>(new_mss & 0xFF);
+        }
+        
+        // Window Scale (kind=3, len=3): jitter shift count by ±1
+        if (kind == 3 && opt_len == 3 && i + 3 <= header_len) {
+            int ws = static_cast<int>(tcp_header[i + 2]) + ncp::csprng_range(-1, 1);
+            if (ws < 0) ws = 0;
+            if (ws > 14) ws = 14; // RFC 7323 max
+            tcp_header[i + 2] = static_cast<uint8_t>(ws);
+        }
+        
+        i += opt_len;
     }
 }
 
