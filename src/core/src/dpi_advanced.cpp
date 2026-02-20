@@ -779,51 +779,38 @@ AdvancedDPIStats AdvancedDPIBypass::get_stats() const {
     return stats;
 }
 
+// =====================================================================
+// process_outgoing — unified pipeline (FIX #57 cleanup)
+//
+// All TLS-level manipulations (GREASE, ECH, decoy SNI, splitting) are
+// guarded by !cfg.mimicry_managed_tls to prevent corrupting records
+// already framed by the mimicry layer.
+// Transport-level ops (padding, obfuscation, timing) always apply.
+// =====================================================================
+
 std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     const uint8_t* data, size_t len) {
     if (!data || len == 0) return {};
     std::vector<std::vector<uint8_t>> result;
     std::vector<uint8_t> working_data(data, data + len);
     const auto& cfg = impl_->config;
-    
-    // Check if this is TLS ClientHello
-    bool is_client_hello = (len > 5 && data[0] == 0x16 && 
+
+    // Check if this is TLS ClientHello (single definition)
+    bool is_client_hello = (len > 5 && data[0] == 0x16 &&
                             data[1] == 0x03 && data[5] == 0x01);
-    
-    // ===== Issue #57: When mimicry manages TLS framing, skip TLS-level
-    // modifications that would corrupt the already-structured records.
-    // Transport-level ops (padding, obfuscation, timing) still apply. =====
-    
-    // Apply pattern obfuscation (GREASE injection)
-    // GUARD: skip when mimicry already framed the TLS record
+
+    // === GREASE injection (before ECH, before splits) ===
     if (!cfg.mimicry_managed_tls &&
         cfg.base_config.enable_pattern_obfuscation && is_client_hello) {
         working_data = impl_->tls_manip->inject_grease(
-            working_data.data(),
-            working_data.size()
-        );
-        
+            working_data.data(), working_data.size());
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.grease_injected++;
     }
-    
-    // Apply decoy SNI (fake ClientHello before real one)
-    // GUARD: skip when mimicry already emitted its own ClientHello
+
+    // === ECH application (after GREASE, before splits) ===
     if (!cfg.mimicry_managed_tls &&
-        cfg.base_config.enable_decoy_sni && is_client_hello &&
-        !cfg.base_config.decoy_sni_domains.empty()) {
-        
-    bool is_client_hello = (len > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01);
-
-    // === Phase 2.2: GREASE injection (before ECH, before splits) ===
-    if (cfg.base_config.enable_pattern_obfuscation && is_client_hello) {
-        working_data = impl_->tls_manip->inject_grease(working_data.data(), working_data.size());
-        std::lock_guard<std::mutex> lock(impl_->stats_mutex);
-        impl_->stats.grease_injected++;
-    }
-
-    // === Phase 3D: ECH application (after GREASE, before splits) ===
-    if (cfg.enable_ech && is_client_hello && impl_->ech_config_valid_) {
+        cfg.enable_ech && is_client_hello && impl_->ech_config_valid_) {
         auto ech_hello = ECH::apply_ech(working_data, impl_->ech_config_);
         if (ech_hello.size() > working_data.size()) {
             working_data = std::move(ech_hello);
@@ -833,8 +820,10 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         }
     }
 
-    // === Phase 2: Decoy SNI (uses fingerprinted ClientHello) ===
-    if (cfg.base_config.enable_decoy_sni && is_client_hello && !cfg.base_config.decoy_sni_domains.empty()) {
+    // === Decoy SNI (fingerprinted fake ClientHellos before real one) ===
+    if (!cfg.mimicry_managed_tls &&
+        cfg.base_config.enable_decoy_sni && is_client_hello &&
+        !cfg.base_config.decoy_sni_domains.empty()) {
         for (const auto& decoy_domain : cfg.base_config.decoy_sni_domains) {
             auto fake_hello = impl_->tls_manip->create_fake_client_hello(decoy_domain);
             result.push_back(std::move(fake_hello));
@@ -842,47 +831,25 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
             impl_->stats.fake_packets_injected++;
         }
     }
-    
-    // Apply multi-layer split or SNI-based split
-    // GUARD: skip TLS-aware splitting when mimicry manages framing
+
+    // === Splitting logic (multi-layer or SNI-based) ===
     if (!cfg.mimicry_managed_tls &&
         cfg.base_config.enable_multi_layer_split && is_client_hello &&
         !cfg.base_config.split_positions.empty()) {
-        
-        // Convert vector<int> to vector<size_t>
-        std::vector<size_t> split_positions_size_t;
-        split_positions_size_t.reserve(cfg.base_config.split_positions.size());
-        for (int pos : cfg.base_config.split_positions) {
-            if (pos >= 0) {
-                split_positions_size_t.push_back(static_cast<size_t>(pos));
-            }
-        }
-        
-        auto segments = impl_->tcp_manip->split_segments(
-            working_data.data(),
-            working_data.size(),
-            split_positions_size_t
-        );
-        
-
-    // === Splitting logic (SNI split or multi-layer split) ===
-    if (cfg.base_config.enable_multi_layer_split && is_client_hello && !cfg.base_config.split_positions.empty()) {
         std::vector<size_t> sp;
         sp.reserve(cfg.base_config.split_positions.size());
-        for (int pos : cfg.base_config.split_positions) { if (pos >= 0) sp.push_back(static_cast<size_t>(pos)); }
-        auto segments = impl_->tcp_manip->split_segments(working_data.data(), working_data.size(), sp);
+        for (int pos : cfg.base_config.split_positions) {
+            if (pos >= 0) sp.push_back(static_cast<size_t>(pos));
+        }
+        auto segments = impl_->tcp_manip->split_segments(
+            working_data.data(), working_data.size(), sp);
         result.insert(result.end(), segments.begin(), segments.end());
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.tcp_segments_split += segments.size();
     } else if (!cfg.mimicry_managed_tls && is_client_hello) {
-        // Standard SNI-based split (only when mimicry is NOT managing TLS)
+        // Standard SNI-based split
         auto split_points = impl_->tls_manip->find_sni_split_points(
-            working_data.data(),
-            working_data.size()
-        );
-        
-    } else if (is_client_hello) {
-        auto split_points = impl_->tls_manip->find_sni_split_points(working_data.data(), working_data.size());
+            working_data.data(), working_data.size());
         if (!split_points.empty()) {
             if (cfg.base_config.randomize_split_position) {
                 int jitter = static_cast<int>(secure_random(static_cast<uint32_t>(
@@ -891,7 +858,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
                 for (auto& pt : split_points)
                     pt = std::min(pt + static_cast<size_t>(jitter), working_data.size() - 1);
             }
-            auto segments = impl_->tcp_manip->split_segments(working_data.data(), working_data.size(), split_points);
+            auto segments = impl_->tcp_manip->split_segments(
+                working_data.data(), working_data.size(), split_points);
             result.insert(result.end(), segments.begin(), segments.end());
             std::lock_guard<std::mutex> lock(impl_->stats_mutex);
             impl_->stats.tls_records_split++;
@@ -901,10 +869,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     } else {
         result.push_back(working_data);
     }
-    
-    // Apply padding if enabled (transport-level — always safe)
 
-    // === Padding ===
+    // === Padding (transport-level — always safe) ===
     if (cfg.padding.enabled && cfg.padding.max_padding > 0) {
         for (auto& segment : result) {
             size_t ps = cfg.padding.random_padding
@@ -916,10 +882,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
             impl_->stats.bytes_padding += ps;
         }
     }
-    
-    // Apply obfuscation (transport-level — always safe)
 
-    // === Obfuscation ===
+    // === Obfuscation (transport-level — always safe) ===
     if (impl_->obfuscator) {
         for (auto& segment : result) {
             segment = impl_->obfuscator->obfuscate(segment.data(), segment.size());
@@ -927,9 +891,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
             impl_->stats.bytes_obfuscated += segment.size();
         }
     }
-    
-    // Apply timing jitter if enabled (transport-level — always safe)
 
+    // === Timing jitter (transport-level — always safe) ===
     if (cfg.base_config.enable_timing_jitter && result.size() > 1) {
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.timing_delays_applied += result.size() - 1;
@@ -1025,23 +988,18 @@ std::vector<uint8_t> DPIEvasion::apply_ech(
 std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
     const std::vector<uint8_t>& data,
     const std::string& front_domain,
-    const std::string& real_domain
-) {
-    // Simple domain fronting: replace SNI with front domain
+    const std::string& real_domain) {
     std::vector<uint8_t> result = data;
-    
-    // Find and replace SNI hostname
+
+    // Find and replace SNI hostname with the front domain
     auto pos = std::search(
         result.begin(), result.end(),
         real_domain.begin(), real_domain.end()
     );
-    
+
     if (pos != result.end() && front_domain.size() == real_domain.size()) {
-    const std::string& real_domain) {
-    std::vector<uint8_t> result = data;
-    auto pos = std::search(result.begin(), result.end(), real_domain.begin(), real_domain.end());
-    if (pos != result.end() && front_domain.size() == real_domain.size())
         std::copy(front_domain.begin(), front_domain.end(), pos);
+    }
     return result;
 }
 
