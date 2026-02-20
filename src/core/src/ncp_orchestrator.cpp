@@ -195,6 +195,8 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
 
     if (!config_.shared_secret.empty()) {
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
+        // Derive adversarial dummy key from shared secret so both peers match
+        derive_dummy_key_from_secret_(config_.shared_secret);
     }
 
     if (config_.ech_enabled) {
@@ -231,6 +233,50 @@ ProtocolOrchestrator::ProtocolOrchestrator(const OrchestratorConfig& config)
 
 ProtocolOrchestrator::~ProtocolOrchestrator() {
     stop();
+}
+
+// ===== Dummy Key Derivation =====
+
+void ProtocolOrchestrator::derive_dummy_key_from_secret_(
+    const std::vector<uint8_t>& secret) {
+    // HKDF-SHA256(ikm=secret, salt="NCP-ADV-DUMMY-KEY-v1", info="NCP-ADV-DUMMY", len=32)
+    static const std::string salt_str = "NCP-ADV-DUMMY-KEY-v1";
+    std::vector<uint8_t> salt(salt_str.begin(), salt_str.end());
+
+    // Extract: PRK = HMAC-SHA256(salt, IKM)
+    uint8_t prk[crypto_auth_hmacsha256_BYTES];
+    crypto_auth_hmacsha256_state st;
+    crypto_auth_hmacsha256_init(&st, salt.data(), salt.size());
+    crypto_auth_hmacsha256_update(&st, secret.data(), secret.size());
+    crypto_auth_hmacsha256_final(&st, prk);
+
+    // Expand: OKM = HMAC-SHA256(PRK, info || 0x01)
+    static const std::string info_str = "NCP-ADV-DUMMY";
+    uint8_t expand_input[64];
+    std::memcpy(expand_input, info_str.data(), info_str.size());
+    expand_input[info_str.size()] = 0x01;
+
+    uint8_t okm[crypto_auth_hmacsha256_BYTES];  // 32 bytes
+    crypto_auth_hmacsha256_state st2;
+    crypto_auth_hmacsha256_init(&st2, prk, sizeof(prk));
+    crypto_auth_hmacsha256_update(&st2, expand_input, info_str.size() + 1);
+    crypto_auth_hmacsha256_final(&st2, okm);
+
+    // Set the derived key on the adversarial padding instance
+    adversarial_.set_session_dummy_key(okm, 32);
+
+    // Wipe intermediates
+    sodium_memzero(prk, sizeof(prk));
+    sodium_memzero(okm, sizeof(okm));
+    sodium_memzero(expand_input, sizeof(expand_input));
+}
+
+void ProtocolOrchestrator::synchronize_dummy_key(
+    const std::vector<uint8_t>& shared_secret) {
+    std::lock_guard<std::mutex> lock(strategy_mutex_);
+    if (!shared_secret.empty()) {
+        derive_dummy_key_from_secret_(shared_secret);
+    }
 }
 
 // ===== Lifecycle =====
@@ -306,16 +352,13 @@ std::vector<uint8_t> ProtocolOrchestrator::prepare_payload(
     }
 
     // Step 2: Protocol Mimicry (wrap in HTTPS/DNS/QUIC)
-    // Issue #57 FIX: For HTTPS profiles, use the session-aware wrapper
     if (snapshot.enable_mimicry) {
         data = mimicry_.wrap_payload(data, snapshot.mimic_profile);
     }
 
     // Step 3: Prepend auth token with magic header (Phase 3 client-side)
-    // FIX #72: Add magic bytes + version before auth token so receiver can validate
     if (snapshot.enable_probe_resist && !config_.is_server) {
         auto token = probe_resist_.generate_client_auth();
-        // Prepend: [MAGIC:2][VERSION:1][auth_token:N]
         std::vector<uint8_t> header;
         header.reserve(NCP_AUTH_HEADER_SIZE + token.size());
         header.push_back(NCP_AUTH_MAGIC[0]);
@@ -342,7 +385,6 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
     stats_.packets_sent.fetch_add(1);
     stats_.bytes_original.fetch_add(payload.size());
 
-    // FIX #73: Use unified pipeline with strategy snapshot
     OrchestratorStrategy snapshot;
     std::vector<uint8_t> data = prepare_payload(payload, snapshot);
 
@@ -362,7 +404,6 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
         return result;
     }
 
-    // No flow shaping -- return single data packet
     OrchestratedPacket op;
     stats_.bytes_on_wire.fetch_add(data.size());
     op.data = std::move(data);
@@ -376,11 +417,9 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
     stats_.packets_sent.fetch_add(1);
     stats_.bytes_original.fetch_add(payload.size());
 
-    // FIX #73: Use unified pipeline with strategy snapshot
     OrchestratorStrategy snapshot;
     std::vector<uint8_t> data = prepare_payload(payload, snapshot);
 
-    // Step 4: Enqueue for async flow shaping
     if (snapshot.enable_flow_shaping && flow_shaper_.is_running()) {
         flow_shaper_.enqueue(data, true);
     } else if (send_callback_) {
@@ -394,7 +433,7 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
 // FIX #72/#73: Reordered receive pipeline:
 //   1. Probe auth token stripped first (outermost, with magic header validation)
 //   2. Flow dummy check
-//   3. Adversarial dummy check
+//   3. Adversarial dummy check (now uses instance method with HMAC marker)
 //   4. Mimicry unwrap
 //   5. Adversarial unpad (innermost layer)
 
@@ -412,7 +451,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     stats_.packets_received.fetch_add(1);
 
-    // FIX #73: Snapshot strategy for consistent receive pipeline
     OrchestratorStrategy snapshot;
     {
         std::lock_guard<std::mutex> lock(strategy_mutex_);
@@ -423,7 +461,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     // Step 1: Auth check (Phase 3 server-side)
     if (snapshot.enable_probe_resist && config_.is_server) {
-        // FIX #72: Validate magic header before stripping auth token.
         size_t auth_token_len = probe_resist_.get_config().nonce_length + 4 +
                                 probe_resist_.get_config().auth_length;
         size_t total_auth_len = NCP_AUTH_HEADER_SIZE + auth_token_len;
@@ -434,7 +471,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
                                 data[2] == NCP_AUTH_VERSION);
 
         if (has_auth_header) {
-            // Strip magic header, then verify auth token
             std::vector<uint8_t> auth_data(data.begin() + NCP_AUTH_HEADER_SIZE, data.end());
 
             AuthResult result = probe_resist_.process_connection(
@@ -446,14 +482,12 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
                 return {};
             }
 
-            // Strip auth token (magic already removed)
             if (auth_data.size() > auth_token_len) {
                 data.assign(auth_data.begin() + auth_token_len, auth_data.end());
             } else {
                 return {};
             }
         } else {
-            // No magic header -- legacy client or probe attempt
             AuthResult result = probe_resist_.process_connection(
                 source_ip, source_port, data.data(), data.size(), ja3);
 
@@ -462,7 +496,6 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
             if (result != AuthResult::AUTHENTICATED) {
                 return {};
             }
-            // Legacy client: data passes through without auth stripping
         }
     } else {
         if (auth_result) *auth_result = AuthResult::AUTHENTICATED;
@@ -476,8 +509,9 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
     }
 
     // Step 3: Discard adversarial dummies
+    // Uses instance method with HMAC-derived session marker + legacy fallback
     if (snapshot.enable_adversarial) {
-        if (AdversarialPadding::is_dummy(data.data(), data.size())) {
+        if (adversarial_.is_dummy_packet(data.data(), data.size())) {
             return {};
         }
     }
@@ -510,7 +544,6 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
 
     switch (event.type) {
         case DetectionEvent::Type::SUCCESS:
-            // FIX #74: report_success_locked() called under existing lock
             report_success_locked();
             return;
 
@@ -547,7 +580,6 @@ void ProtocolOrchestrator::report_detection(const DetectionEvent& event) {
     }
 }
 
-// FIX #74: Public report_success() acquires lock then delegates
 void ProtocolOrchestrator::report_success() {
     stats_.successful_sends.fetch_add(1);
 
@@ -557,7 +589,6 @@ void ProtocolOrchestrator::report_success() {
     report_success_locked();
 }
 
-// FIX #74: Private implementation -- must be called with strategy_mutex_ held
 void ProtocolOrchestrator::report_success_locked() {
     consecutive_successes_++;
     consecutive_failures_ = (std::max)(0, consecutive_failures_ - 1);
@@ -588,7 +619,6 @@ void ProtocolOrchestrator::escalate(const std::string& reason) {
     auto new_strategy = strategy_for_threat(threat_level_);
     apply_strategy(new_strategy);
 
-    // Issue #57: reset TLS session on strategy change
     mimicry_.reset_tls_session();
 
     if (config_.on_strategy_change) {
@@ -609,7 +639,6 @@ void ProtocolOrchestrator::deescalate(const std::string& reason) {
     auto new_strategy = strategy_for_threat(threat_level_);
     apply_strategy(new_strategy);
 
-    // Issue #57: reset TLS session on strategy change
     mimicry_.reset_tls_session();
 
     if (config_.on_strategy_change) {
@@ -617,7 +646,6 @@ void ProtocolOrchestrator::deescalate(const std::string& reason) {
     }
 }
 
-// FIX #75: HIGH and CRITICAL now have distinct strategies
 OrchestratorStrategy ProtocolOrchestrator::strategy_for_threat(ThreatLevel level) {
     switch (level) {
         case ThreatLevel::NONE:
@@ -802,10 +830,13 @@ bool ProtocolOrchestrator::is_ech_initialized() const { return ech_initialized_;
 // ===== Config & Stats =====
 
 void ProtocolOrchestrator::set_config(const OrchestratorConfig& config) {
+    std::lock_guard<std::mutex> lock(strategy_mutex_);
     config_ = config;
     if (!config_.shared_secret.empty()) {
         current_strategy_.probe_config.shared_secret = config_.shared_secret;
         probe_resist_.set_config(current_strategy_.probe_config);
+        // Re-derive adversarial dummy key when shared_secret changes
+        derive_dummy_key_from_secret_(config_.shared_secret);
     }
 }
 
@@ -842,13 +873,12 @@ void ProtocolOrchestrator::health_monitor_func() {
 
         if (!running_.load()) break;
 
-        // Periodic cleanup -- scope the lock properly
         {
             std::lock_guard<std::mutex> lock(strategy_mutex_);
             if (current_strategy_.enable_probe_resist) {
                 probe_resist_.cleanup_stale_data();
             }
-        }  // lock released here
+        }
 
         update_overhead_stats();
     }
