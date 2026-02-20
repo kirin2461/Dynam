@@ -1,4 +1,6 @@
-#include "ncp_i2p.hpp"
+// FIX #5: Use relative include path consistent with other source files
+// (db.cpp, e2e.cpp, mimicry.cpp all use "../include/")
+#include "../include/ncp_i2p.hpp"
 #include <iostream>
 #include <array>
 #include <algorithm>
@@ -37,6 +39,10 @@ struct I2PManager::Impl {
     std::string destination_keys;
     bool sam_connected = false;
     
+    // FIX #3: send_sam_command — recv with timeout protection.
+    // SO_RCVTIMEO is set once in initialize() so every recv() is bounded.
+    // If SAM bridge doesn't respond within the timeout the call fails
+    // instead of blocking the thread forever.
     bool send_sam_command(const std::string& cmd, std::string& response) {
         if (sam_socket == INVALID_SOCK) return false;
         
@@ -49,6 +55,8 @@ struct I2PManager::Impl {
         while (true) {
             ssize_t received = recv(sam_socket, buffer, sizeof(buffer) - 1, 0);
             if (received <= 0) {
+                // received == 0  -> connection closed
+                // received <  0  -> error or timeout (EAGAIN/WSAETIMEDOUT)
                 return !response.empty();
             }
             buffer[received] = '\0';
@@ -99,7 +107,7 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
-    // Set non-blocking mode
+    // Set non-blocking mode for connect with timeout
 #ifdef _WIN32
     u_long mode = 1;
     ioctlsocket(impl_->sam_socket, FIONBIO, &mode);
@@ -139,8 +147,17 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
+    // Switch back to blocking mode
     mode = 0;
     ioctlsocket(impl_->sam_socket, FIONBIO, &mode);
+    
+    // FIX #3: Set recv timeout (10 seconds) to prevent infinite blocking.
+    // After switching to blocking mode, recv() in send_sam_command() would
+    // block forever if SAM bridge stops responding. With SO_RCVTIMEO,
+    // recv() returns -1 with WSAETIMEDOUT after 10s.
+    DWORD recv_timeout_ms = 10000;
+    setsockopt(impl_->sam_socket, SOL_SOCKET, SO_RCVTIMEO,
+               (const char*)&recv_timeout_ms, sizeof(recv_timeout_ms));
 #else
     if (connect_result < 0 && errno != EINPROGRESS) {
         impl_->close_sam();
@@ -161,8 +178,18 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
+    // Switch back to blocking mode
     flags = fcntl(impl_->sam_socket, F_GETFL, 0);
     fcntl(impl_->sam_socket, F_SETFL, flags & ~O_NONBLOCK);
+    
+    // FIX #3: Set recv timeout (10 seconds) to prevent infinite blocking.
+    // Same rationale as Windows path above. On POSIX, SO_RCVTIMEO takes
+    // struct timeval. recv() returns -1 with errno=EAGAIN on timeout.
+    struct timeval recv_timeout;
+    recv_timeout.tv_sec = 10;
+    recv_timeout.tv_usec = 0;
+    setsockopt(impl_->sam_socket, SOL_SOCKET, SO_RCVTIMEO,
+               &recv_timeout, sizeof(recv_timeout));
 #endif
     
     // SAM Handshake: HELLO VERSION
@@ -387,12 +414,24 @@ void I2PManager::rotate_tunnels() {
 
         TunnelInfo old_info = it->second;
 
-        // Create replacement session via SAM with a temporary rotated ID.
-        // SAM requires unique session IDs, so we use "<id>_rot" while the
-        // old session is still technically alive on the router side.
+        // FIX #2: Destroy old SAM session before creating a new one.
+        // Without this, SAM bridge keeps both sessions alive, leaking
+        // tunnel resources on the I2P router over time.
+        {
+            std::ostringstream remove_cmd;
+            remove_cmd << "SESSION REMOVE ID=" << tid;
+            std::string remove_response;
+            impl_->send_sam_command(remove_cmd.str(), remove_response);
+            // Best-effort: if removal fails, we still try to create a new session.
+            // SAM 3.3 returns "SESSION STATUS RESULT=OK" on successful removal.
+        }
+
+        // Create replacement session via SAM.
+        // Now that the old session is removed, we can reuse the original ID
+        // instead of "<id>_rot" which would accumulate stale sessions.
         std::ostringstream cmd;
         cmd << "SESSION CREATE STYLE=STREAM"
-            << " ID=" << tid << "_rot"
+            << " ID=" << tid
             << " DESTINATION="
             << (old_info.type == TunnelType::SERVER ? new_dest : "TRANSIENT")
             << " inbound.length=" << config_.tunnel_length
@@ -402,7 +441,7 @@ void I2PManager::rotate_tunnels() {
 
         std::string response;
         if (!impl_->send_sam_command(cmd.str(), response)) {
-            continue;  // Keep old tunnel if rotation fails
+            continue;  // Keep old tunnel entry if rotation fails
         }
 
         if (response.find("SESSION STATUS RESULT=OK") == std::string::npos) {
