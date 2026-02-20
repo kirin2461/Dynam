@@ -816,6 +816,61 @@ bool NetworkSpoofer::apply_tcp_fingerprint(const TcpFingerprintProfile& profile)
 }
 
 // ==================== Platform-Specific HW Spoofing Methods ====================
+
+// Phase 1: SMBIOS/DMI Spoofing (Windows Registry / Linux sysfs)
+bool NetworkSpoofer::apply_smbios(const std::string& bios_vendor, const std::string& bios_version,
+                                   const std::string& board_manufacturer, const std::string& board_product,
+                                   const std::string& board_serial, const std::string& system_manufacturer,
+                                   const std::string& system_product, const std::string& system_serial) {
+    (void)bios_vendor;          // Suppress unused parameter warning - stub function
+    (void)bios_version;         // Suppress unused parameter warning - stub function
+    (void)board_manufacturer;   // Suppress unused parameter warning - stub function
+    (void)board_product;        // Suppress unused parameter warning - stub function
+    (void)system_manufacturer;  // Suppress unused parameter warning - stub function
+    (void)system_product;       // Suppress unused parameter warning - stub function
+    (void)system_serial;        // Suppress unused parameter warning - stub function
+    
+#ifdef _WIN32
+    // Windows: Modify HKLM\HARDWARE\DESCRIPTION\System\BIOS via Registry
+    // WARNING: Requires elevated privileges (Administrator)
+    // Note: Direct registry modification may be detected; kernel-mode driver preferred for production
+    
+    const char* registry_paths[] = {
+        "HARDWARE\\DESCRIPTION\\System\\BIOS",
+        "HARDWARE\\DESCRIPTION\\System\\MultifunctionAdapter\\0\\DiskController\\0"
+    };
+    
+    // Example: Set BaseBoardSerialNumber
+    // In production, use RegSetKeyValueA() or similar Win32 APIs
+    // This is a stub showing the approach:
+    
+    std::string cmd = "reg add \"HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS\" /v BaseBoardSerialNumber /t REG_SZ /d \"" + board_serial + "\" /f";
+    auto result = execute_command_safe("reg", {"add", "HKLM\\HARDWARE\\DESCRIPTION\\System\\BIOS", "/v", "BaseBoardSerialNumber", "/t", "REG_SZ", "/d", board_serial, "/f"});
+    
+    // Additional keys to spoof:
+    // - SystemManufacturer, SystemProductName, SystemSerialNumber
+    // - BIOSVendor, BIOSVersion, BIOSReleaseDate
+    
+    return result.find("Error") == std::string::npos;
+    
+#else
+    // Linux: Modify /sys/class/dmi/id/* (requires root + remount rw)
+    // This is read-only by default; kernel module required for persistent changes
+    
+    // Usermode approach (temporary, detection risk high):
+    // 1. Mount tmpfs over /sys/class/dmi/id
+    // 2. Create fake files with spoofed values
+    
+    std::string mount_cmd = "mount -t tmpfs tmpfs /sys/class/dmi/id";
+    auto result = execute_command_safe("mount", {"-t", "tmpfs", "tmpfs", "/sys/class/dmi/id"});
+    
+    // Write spoofed values
+    std::ofstream("/sys/class/dmi/id/board_serial") << board_serial;
+    std::ofstream("/sys/class/dmi/id/product_serial") << system_serial;
+    std::ofstream("/sys/class/dmi/id/sys_vendor") << system_manufacturer;
+    
+    return true;
+#endif
 bool NetworkSpoofer::apply_smbios(
     [[maybe_unused]] const std::string& bios_vendor,
     [[maybe_unused]] const std::string& bios_version,

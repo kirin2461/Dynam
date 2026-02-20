@@ -2,6 +2,14 @@
  * @file db.cpp
  * @brief Database operations for NCP
  * @note Requires sqlite3 when HAVE_SQLITE is defined
+ *
+ * PATTERN NOTE (Full-table encryption):
+ * If using application-level encryption on top of SQLite:
+ *   1. Always wrap decrypt → modify → re-encrypt in a transaction
+ *   2. Use begin_transaction() / commit() / rollback()
+ *   3. If re-encryption fails after decryption, rollback() will
+ *      restore the original encrypted data.
+ *   4. Never call close() between decrypt and re-encrypt.
  */
 
 #include "../include/ncp_db.hpp"
@@ -13,6 +21,17 @@
 
 #ifdef HAVE_SQLITE
 #include <sqlite3.h>
+
+// RAII guard for sqlite3_stmt — ensures finalize() is called on all paths
+namespace {
+struct SqliteStmtGuard {
+    sqlite3_stmt* stmt;
+    explicit SqliteStmtGuard(sqlite3_stmt* s) : stmt(s) {}
+    ~SqliteStmtGuard() { if (stmt) sqlite3_finalize(stmt); }
+    SqliteStmtGuard(const SqliteStmtGuard&) = delete;
+    SqliteStmtGuard& operator=(const SqliteStmtGuard&) = delete;
+};
+} // anonymous namespace
 #endif
 
 namespace ncp {
@@ -45,10 +64,7 @@ bool Database::open(const std::string& db_path, const std::string& password) {
         return false;
     }
 
-    // Enable SQLCipher encryption if password provided
-        // Enable SQLCipher encryption if password provided
     if (!password.empty()) {
-        // Use sqlite3_key_v2 API instead of SQL injection-prone PRAGMA
         rc = sqlite3_key_v2(db_handle_, "main", password.c_str(), password.length());
         if (rc != SQLITE_OK) {
             last_error_ = "Failed to set encryption key";
@@ -57,10 +73,12 @@ bool Database::open(const std::string& db_path, const std::string& password) {
             return false;
         }
     }
-return true;
+
+    is_connected_ = true;
+    db_path_ = db_path;
+    return true;
 #else
-    (void)password;  // Suppress unused parameter warning in fallback mode
-    // Fallback: use file-based storage
+    (void)password;
     db_path_ = db_path;
     is_connected_ = true;
     return true;
@@ -96,7 +114,7 @@ bool Database::execute(const std::string& sql) {
 
     char* err_msg = nullptr;
     int rc = sqlite3_exec(db_handle_, sql.c_str(), nullptr, nullptr, &err_msg);
-    
+
     if (rc != SQLITE_OK) {
         last_error_ = err_msg ? err_msg : "Unknown error";
         sqlite3_free(err_msg);
@@ -104,14 +122,12 @@ bool Database::execute(const std::string& sql) {
     }
     return true;
 #else
-    // Fallback: log SQL to file
     if (!is_connected_) {
         last_error_ = "Database not connected";
         return false;
     }
     std::ofstream log(db_path_ + ".log", std::ios::app);
     log << sql << std::endl;
-    (void)sql;  // Parameter used in log, but mark as intentionally unused for warning suppression
     return true;
 #endif
 }
@@ -128,20 +144,21 @@ Database::QueryResult Database::query(const std::string& sql) {
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_handle_, sql.c_str(), -1, &stmt, nullptr);
-    
+
     if (rc != SQLITE_OK) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return result;
     }
 
+    // FIX: RAII guard ensures finalize() even on early return / exception
+    SqliteStmtGuard guard(stmt);
+
     int col_count = sqlite3_column_count(stmt);
-    
-    // Get column names
+
     for (int i = 0; i < col_count; ++i) {
         result.columns.push_back(sqlite3_column_name(stmt, i));
     }
 
-    // Get rows
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         std::vector<std::string> row;
         for (int i = 0; i < col_count; ++i) {
@@ -151,8 +168,8 @@ Database::QueryResult Database::query(const std::string& sql) {
         result.rows.push_back(row);
     }
 
-    sqlite3_finalize(stmt);
-    
+    // Guard will call sqlite3_finalize(stmt) in destructor
+
     if (rc != SQLITE_DONE) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return result;
@@ -160,8 +177,7 @@ Database::QueryResult Database::query(const std::string& sql) {
 
     result.success = true;
 #else
-    (void)sql;  // Suppress unused parameter warning in fallback mode
-    // Fallback: return empty result
+    (void)sql;
     if (!is_connected_) {
         last_error_ = "Database not connected";
         return result;
@@ -187,47 +203,46 @@ bool Database::rollback() {
 
 // ==================== Table Management ====================
 
-bool Database::create_table(const std::string& table_name, 
+bool Database::create_table(const std::string& table_name,
                            const std::vector<std::pair<std::string, std::string>>& columns) {
     std::ostringstream sql;
     sql << "CREATE TABLE IF NOT EXISTS " << table_name << " (";
-    
+
     for (size_t i = 0; i < columns.size(); ++i) {
         sql << columns[i].first << " " << columns[i].second;
         if (i < columns.size() - 1) sql << ", ";
     }
     sql << ")";
-    
+
     return execute(sql.str());
 }
 
 bool Database::table_exists(const std::string& table_name) {
 #ifdef HAVE_SQLITE
-    // Use prepared statement to prevent SQL injection
     const char* sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?";
     sqlite3_stmt* stmt = nullptr;
-    
+
     int rc = sqlite3_prepare_v2(db_handle_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
-    
-    // Bind table_name parameter
+
+    SqliteStmtGuard guard(stmt);
+
     sqlite3_bind_text(stmt, 1, table_name.c_str(), -1, SQLITE_TRANSIENT);
-    
+
     bool exists = false;
     if (sqlite3_step(stmt) == SQLITE_ROW) {
         exists = true;
     }
-    
-    sqlite3_finalize(stmt);
+
     return exists;
 #else
-    (void)table_name;  // Suppress unused parameter warning in fallback mode
-    return true; // Assume exists in fallback mode
+    (void)table_name;
+    return true;
 #endif
-    }
+}
 
 // ==================== Data Operations ====================
 
@@ -238,19 +253,18 @@ bool Database::insert(const std::string& table_name,
         last_error_ = "Database not connected";
         return false;
     }
-    
+
     if (data.empty()) {
         last_error_ = "No data to insert";
         return false;
     }
-    
-    // Build SQL with placeholders
+
     std::ostringstream sql;
     sql << "INSERT INTO " << table_name << " (";
-    
+
     std::ostringstream placeholders;
     std::vector<std::string> values;
-    
+
     bool first = true;
     for (const auto& pair : data) {
         if (!first) {
@@ -262,36 +276,33 @@ bool Database::insert(const std::string& table_name,
         values.push_back(pair.second);
         first = false;
     }
-    
+
     sql << ") VALUES (" << placeholders.str() << ")";
-    
-    // Prepare statement
+
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
-    
-    // Bind all values
+
+    SqliteStmtGuard guard(stmt);
+
     for (size_t i = 0; i < values.size(); ++i) {
         sqlite3_bind_text(stmt, static_cast<int>(i + 1), values[i].c_str(), -1, SQLITE_TRANSIENT);
     }
-    
-    // Execute
+
     rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    
+
     if (rc != SQLITE_DONE) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
-    
+
     return true;
 #else
-    (void)table_name;  // Suppress unused parameter warning in fallback mode
-    (void)data;        // Suppress unused parameter warning in fallback mode
-    // Fallback: log to file
+    (void)table_name;
+    (void)data;
     if (!is_connected_) {
         last_error_ = "Database not connected";
         return false;
@@ -309,18 +320,17 @@ bool Database::update(const std::string& table_name,
         last_error_ = "Database not connected";
         return false;
     }
-    
+
     if (data.empty()) {
         last_error_ = "No data to update";
         return false;
     }
-    
-    // Build SQL with placeholders for SET clause
+
     std::ostringstream sql;
     sql << "UPDATE " << table_name << " SET ";
-    
+
     std::vector<std::string> values;
-    
+
     bool first = true;
     for (const auto& pair : data) {
         if (!first) sql << ", ";
@@ -328,42 +338,38 @@ bool Database::update(const std::string& table_name,
         values.push_back(pair.second);
         first = false;
     }
-    
-        // Add parameterized WHERE clause
+
     if (!where_column.empty()) {
         sql << " WHERE " << where_column << " = ?";
         values.push_back(where_value);
     }
 
-
-    // Prepare statement
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
-    
-    // Bind SET values
+
+    SqliteStmtGuard guard(stmt);
+
     for (size_t i = 0; i < values.size(); ++i) {
         sqlite3_bind_text(stmt, static_cast<int>(i + 1), values[i].c_str(), -1, SQLITE_TRANSIENT);
     }
-    
-    // Execute
+
     rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    
+
     if (rc != SQLITE_DONE) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
-    
+
     return true;
 #else
-    (void)table_name;    // Suppress unused parameter warning in fallback mode
-    (void)data;          // Suppress unused parameter warning in fallback mode
-    (void)where_column;  // Suppress unused parameter warning in fallback mode
-    (void)where_value;   // Suppress unused parameter warning in fallback mode
+    (void)table_name;
+    (void)data;
+    (void)where_column;
+    (void)where_value;
     if (!is_connected_) {
         last_error_ = "Database not connected";
         return false;
@@ -381,45 +387,39 @@ bool Database::remove(const std::string& table_name,
         last_error_ = "Database not connected";
         return false;
     }
-    
-    // Build DELETE SQL
-        // Build parameterized DELETE SQL
+
     std::ostringstream sql;
     sql << "DELETE FROM " << table_name;
-    
-    // Add parameterized WHERE clause
+
     if (!where_column.empty()) {
         sql << " WHERE " << where_column << " = ?";
     }
 
-
-    // Use prepared statement for execution
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_handle_, sql.str().c_str(), -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
-    
-    // Bind WHERE value if provided
+
+    SqliteStmtGuard guard(stmt);
+
     if (!where_column.empty()) {
         sqlite3_bind_text(stmt, 1, where_value.c_str(), -1, SQLITE_TRANSIENT);
     }
 
-    
     rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    
+
     if (rc != SQLITE_DONE) {
         last_error_ = sqlite3_errmsg(db_handle_);
         return false;
     }
-    
+
     return true;
 #else
-    (void)table_name;    // Suppress unused parameter warning in fallback mode
-    (void)where_column;  // Suppress unused parameter warning in fallback mode
-    (void)where_value;   // Suppress unused parameter warning in fallback mode
+    (void)table_name;
+    (void)where_column;
+    (void)where_value;
     if (!is_connected_) {
         last_error_ = "Database not connected";
         return false;
