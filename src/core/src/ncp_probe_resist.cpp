@@ -6,19 +6,11 @@
 #include <sstream>
 #include <iomanip>
 
-#ifdef _WIN32
-#  define NOMINMAX
-#  include <windows.h>
-#  include <bcrypt.h>
-#  undef min
-#  undef max
-#  undef ERROR
-#else
-#  include <fcntl.h>
-#  include <unistd.h>
-#endif
+// FIX #21 + #22: Use libsodium for HMAC-SHA256 fallback and CSPRNG.
+// sodium is already linked project-wide (used in ncp_paranoid.cpp, i2p.cpp, etc.)
+#include <sodium.h>
 
-// Use OpenSSL HMAC if available
+// Use OpenSSL HMAC if available (primary path)
 #ifdef HAVE_OPENSSL
 #  include <openssl/hmac.h>
 #  include <openssl/sha.h>
@@ -72,21 +64,13 @@ const char* auth_result_to_string(AuthResult r) noexcept {
 
 // ===== CSPRNG =====
 
+// FIX #22: Replace raw /dev/urandom read with randombytes_buf() from libsodium.
+// Old code: open("/dev/urandom") with no fd validation; if /dev/urandom unavailable,
+// buffer remains uninitialized (zero-filled by caller at best). Also Windows path
+// used BCryptGenRandom which was fine, but inconsistent with rest of codebase.
+// randombytes_buf() is cross-platform, never fails, and already used everywhere else.
 static void csprng_fill(uint8_t* buf, size_t len) {
-#ifdef _WIN32
-    BCryptGenRandom(nullptr, buf, static_cast<ULONG>(len), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-#else
-    int fd = open("/dev/urandom", O_RDONLY);
-    if (fd >= 0) {
-        size_t off = 0;
-        while (off < len) {
-            ssize_t r = read(fd, buf + off, len - off);
-            if (r <= 0) break;
-            off += static_cast<size_t>(r);
-        }
-        close(fd);
-    }
-#endif
+    randombytes_buf(buf, len);
 }
 
 static std::string bytes_to_hex(const uint8_t* data, size_t len) {
@@ -214,6 +198,7 @@ AuthResult ProbeResist::process_connection(
     }
 
     // L6: JA3 filter
+    // FIX #24: JA3 reads protected by ja3_mutex_
     if (config_.enable_ja3_filter && !ja3_fingerprint.empty()) {
         if (!is_ja3_allowed(ja3_fingerprint)) {
             stats_.rejected_ja3.fetch_add(1);
@@ -230,6 +215,7 @@ AuthResult ProbeResist::process_connection(
     // L4: Probe pattern detection
     if (config_.enable_pattern_detection) {
         // Check known scanner fingerprint
+        // FIX #24: JA3 reads protected by ja3_mutex_
         if (!ja3_fingerprint.empty() && is_known_scanner(ja3_fingerprint)) {
             stats_.rejected_probe_pattern.fetch_add(1);
             if (config_.enable_ip_reputation) {
@@ -298,13 +284,11 @@ AuthResult ProbeResist::process_connection(
             auth_start, msg_len,
             config_.shared_secret.data(), config_.shared_secret.size());
 
-        // Constant-time comparison
-        bool hmac_valid = true;
-        volatile uint8_t accum = 0;
-        for (size_t i = 0; i < 32 && i < config_.auth_length; ++i) {
-            accum |= hmac_received[i] ^ expected_hmac[i];
-        }
-        hmac_valid = (accum == 0);
+        // FIX #23: Use sodium_memcmp() for guaranteed constant-time comparison.
+        // Old code used `volatile uint8_t accum` which compilers may optimize.
+        // sodium_memcmp returns 0 if equal, -1 otherwise — always constant-time.
+        size_t cmp_len = (std::min)(size_t(32), config_.auth_length);
+        bool hmac_valid = (sodium_memcmp(hmac_received, expected_hmac.data(), cmp_len) == 0);
 
         if (!hmac_valid) {
             stats_.rejected_bad_hmac.fetch_add(1);
@@ -357,7 +341,7 @@ std::vector<uint8_t> ProbeResist::generate_client_auth() {
     std::vector<uint8_t> token;
     token.resize(config_.nonce_length + 4);
 
-    // Random nonce
+    // Random nonce (FIX #22: uses sodium-backed csprng_fill)
     csprng_fill(token.data(), config_.nonce_length);
 
     // Timestamp (big-endian)
@@ -381,20 +365,21 @@ bool ProbeResist::verify_auth(const uint8_t* data, size_t data_len) {
     if (data_len < required) return false;
 
     const uint8_t* nonce = data;
-    const uint8_t* timestamp_bytes = nonce + config_.nonce_length;
-    const uint8_t* hmac_received = timestamp_bytes + 4;
+    (void)nonce;  // nonce is part of the HMAC input range
+    const uint8_t* timestamp_bytes = data + config_.nonce_length;
+    (void)timestamp_bytes;
+    const uint8_t* hmac_received = data + config_.nonce_length + 4;
 
     size_t msg_len = config_.nonce_length + 4;
     auto expected = compute_hmac(data, msg_len,
         config_.shared_secret.data(), config_.shared_secret.size());
 
-    volatile uint8_t accum = 0;
-    for (size_t i = 0; i < 32; ++i) {
-        accum |= hmac_received[i] ^ expected[i];
-    }
-    return (accum == 0);
+    // FIX #23: sodium_memcmp for constant-time comparison
+    return (sodium_memcmp(hmac_received, expected.data(), 32) == 0);
 }
 
+// FIX #21: compute_hmac — fallback uses crypto_auth_hmacsha256 from libsodium
+// instead of broken XOR key⊕data which is not a MAC at all.
 std::array<uint8_t, 32> ProbeResist::compute_hmac(
     const uint8_t* data, size_t data_len,
     const uint8_t* key, size_t key_len) {
@@ -406,28 +391,18 @@ std::array<uint8_t, 32> ProbeResist::compute_hmac(
     HMAC(EVP_sha256(), key, static_cast<int>(key_len),
          data, data_len, result.data(), &out_len);
 #else
-    // Fallback: simple HMAC-SHA256 construction
-    // HMAC(K, m) = H((K' ^ opad) || H((K' ^ ipad) || m))
-    // Using a basic approach — in production HAVE_OPENSSL should always be defined
-    static constexpr size_t BLOCK_SIZE = 64;
-    std::array<uint8_t, BLOCK_SIZE> k_pad{};
-
-    if (key_len > BLOCK_SIZE) {
-        // Hash the key first (would need SHA256 — simplified fallback)
-        std::memcpy(k_pad.data(), key, (std::min)(key_len, BLOCK_SIZE));
-    } else {
-        std::memcpy(k_pad.data(), key, key_len);
-    }
-
-    // XOR with ipad (0x36) and compute inner hash
-    // This is a simplified fallback — real impl uses OpenSSL
-    // Just XOR key with data for a basic MAC
-    for (size_t i = 0; i < 32 && i < data_len; ++i) {
-        result[i] = k_pad[i % BLOCK_SIZE] ^ data[i];
-    }
-    for (size_t i = 0; i < 32; ++i) {
-        result[i] ^= k_pad[(i + 32) % BLOCK_SIZE];
-    }
+    // Fallback: use libsodium's HMAC-SHA256 (crypto_auth_hmacsha256).
+    // This is a proper HMAC construction, not the broken XOR that was here before.
+    // libsodium requires a 32-byte key for crypto_auth_hmacsha256.
+    // For arbitrary-length keys we use the streaming (Init/Update/Final) API
+    // which handles key hashing internally per RFC 2104.
+    crypto_auth_hmacsha256_state state;
+    crypto_auth_hmacsha256_init(&state, key, key_len);
+    crypto_auth_hmacsha256_update(&state, data, data_len);
+    crypto_auth_hmacsha256_final(&state, result.data());
+    
+    // Wipe HMAC state from stack to prevent key material leakage
+    sodium_memzero(&state, sizeof(state));
 #endif
 
     return result;
@@ -559,6 +534,10 @@ std::vector<uint8_t> ProbeResist::generate_redirect(const std::string& url) {
 
 // ===== L3: Replay Protection =====
 
+// FIX #25: Nonce eviction — hex_str pre-computed in NonceEntry.
+// Old code called bytes_to_hex() on every eviction from front of deque.
+// With nonce_window_size=100000, that's O(n) hex conversions per eviction pass.
+// Now hex is computed once at insertion and stored in NonceEntry.hex_str.
 bool ProbeResist::check_and_record_nonce(const uint8_t* nonce, size_t nonce_len) {
     std::string hex = bytes_to_hex(nonce, nonce_len);
 
@@ -569,30 +548,27 @@ bool ProbeResist::check_and_record_nonce(const uint8_t* nonce, size_t nonce_len)
         return false;  // replay!
     }
 
-    // Evict expired
+    // Evict expired — O(1) per entry using pre-computed hex_str
     auto now = std::chrono::steady_clock::now();
     while (!nonce_window_.empty() && nonce_window_.front().expiry < now) {
-        std::string old_hex = bytes_to_hex(
-            nonce_window_.front().hash.data(), nonce_window_.front().hash.size());
-        nonce_set_.erase(old_hex);
+        nonce_set_.erase(nonce_window_.front().hex_str);
         nonce_window_.pop_front();
     }
 
-    // Evict oldest if at capacity
+    // Evict oldest if at capacity — O(1) per entry
     while (nonce_window_.size() >= config_.nonce_window_size) {
-        std::string old_hex = bytes_to_hex(
-            nonce_window_.front().hash.data(), nonce_window_.front().hash.size());
-        nonce_set_.erase(old_hex);
+        nonce_set_.erase(nonce_window_.front().hex_str);
         nonce_window_.pop_front();
     }
 
-    // Record
+    // Record with pre-computed hex
     NonceEntry entry;
     std::memset(entry.hash.data(), 0, 32);
     std::memcpy(entry.hash.data(), nonce, (std::min)(nonce_len, size_t(32)));
+    entry.hex_str = hex;  // store hex once, reuse on eviction
     entry.expiry = now + std::chrono::seconds(config_.nonce_expiry_sec);
 
-    nonce_window_.push_back(entry);
+    nonce_window_.push_back(std::move(entry));
     nonce_set_.insert(hex);
 
     return true;  // new nonce, OK
@@ -601,10 +577,9 @@ bool ProbeResist::check_and_record_nonce(const uint8_t* nonce, size_t nonce_len)
 void ProbeResist::evict_expired_nonces() {
     std::lock_guard<std::mutex> lock(nonce_mutex_);
     auto now = std::chrono::steady_clock::now();
+    // FIX #25: Use pre-computed hex_str instead of bytes_to_hex()
     while (!nonce_window_.empty() && nonce_window_.front().expiry < now) {
-        std::string old_hex = bytes_to_hex(
-            nonce_window_.front().hash.data(), nonce_window_.front().hash.size());
-        nonce_set_.erase(old_hex);
+        nonce_set_.erase(nonce_window_.front().hex_str);
         nonce_window_.pop_front();
     }
 }
@@ -630,7 +605,9 @@ bool ProbeResist::is_probe_pattern(const std::string& source_ip) {
     return history.size() >= config_.burst_threshold;
 }
 
+// FIX #24: is_known_scanner now locks ja3_mutex_
 bool ProbeResist::is_known_scanner(const std::string& ja3) const {
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
     return ja3_scanner_set_.count(ja3) > 0;
 }
 
@@ -745,16 +722,20 @@ std::vector<std::string> ProbeResist::get_banned_ips() const {
 
 // ===== L6: JA3 Filter =====
 
+// FIX #24: All JA3 set access now protected by ja3_mutex_
 bool ProbeResist::is_ja3_allowed(const std::string& ja3) const {
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
     if (ja3_allowlist_.empty()) return true;  // no filter
     return ja3_allowlist_.count(ja3) > 0;
 }
 
 void ProbeResist::add_ja3_allowlist(const std::string& ja3) {
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
     ja3_allowlist_.insert(ja3);
 }
 
 void ProbeResist::remove_ja3_allowlist(const std::string& ja3) {
+    std::lock_guard<std::mutex> lock(ja3_mutex_);
     ja3_allowlist_.erase(ja3);
 }
 
@@ -790,13 +771,17 @@ void ProbeResist::emit_event(const ProbeEvent& event) {
 
 void ProbeResist::set_config(const ProbeResistConfig& config) {
     config_ = config;
-    ja3_scanner_set_.clear();
-    for (const auto& ja3 : config_.known_scanner_ja3) {
-        ja3_scanner_set_.insert(ja3);
-    }
-    ja3_allowlist_.clear();
-    for (const auto& ja3 : config_.ja3_allowlist) {
-        ja3_allowlist_.insert(ja3);
+    // FIX #24: Lock ja3_mutex_ when rebuilding JA3 sets from config
+    {
+        std::lock_guard<std::mutex> lock(ja3_mutex_);
+        ja3_scanner_set_.clear();
+        for (const auto& ja3 : config_.known_scanner_ja3) {
+            ja3_scanner_set_.insert(ja3);
+        }
+        ja3_allowlist_.clear();
+        for (const auto& ja3 : config_.ja3_allowlist) {
+            ja3_allowlist_.insert(ja3);
+        }
     }
 }
 
