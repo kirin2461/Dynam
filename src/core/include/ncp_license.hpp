@@ -93,8 +93,31 @@ public:
         bool code_integrity_failed = false;
     };
 
+    /// Default constructor — generates a fresh ephemeral keypair.
     License();
+
+    /// FIX #28: Construct with a persisted keypair (hex-encoded secret key).
+    /// Use export_secret_key_hex() to obtain the hex string, store it securely,
+    /// then pass it here on next startup to restore the same signing identity.
+    /// Format: 128 hex chars = 64 bytes (Ed25519 secret key, libsodium format).
+    explicit License(const std::string& secret_key_hex);
+
     ~License();
+
+    // ===== Keypair Persistence (FIX #28) =====
+
+    /// Export the Ed25519 public key as hex string (64 hex chars = 32 bytes).
+    /// Safe to embed in client binaries / distribute openly.
+    std::string export_public_key_hex() const;
+
+    /// Export the Ed25519 secret key as hex string (128 hex chars = 64 bytes).
+    /// ⚠ SENSITIVE — store encrypted, never log or transmit in plaintext.
+    std::string export_secret_key_hex() const;
+
+    /// Import a keypair from hex-encoded secret key.
+    /// Derives the public key from the secret key automatically.
+    /// Returns false if hex is malformed or key is invalid.
+    bool import_keypair(const std::string& secret_key_hex);
 
     // ===== Public Key Access (for embedding in validators) =====
     SecureMemory get_public_key() const;
@@ -110,6 +133,13 @@ public:
     ValidationResult validate_offline(
         const std::string& hwid,
         const std::string& license_file
+    );
+    /// FIX #28: Validate with an external public key (hex).
+    /// Use this on client side where only the public key is available.
+    ValidationResult validate_offline(
+        const std::string& hwid,
+        const std::string& license_file,
+        const std::string& public_key_hex
     );
     ValidationResult validate_online(
         const std::string& hwid,
@@ -192,7 +222,7 @@ private:
     std::unique_ptr<Crypto> crypto_;
 
     // Persistent signing keypair (generated once in constructor)
-    Crypto::Keypair signing_keypair_;
+    Crypto::KeyPair signing_keypair_;
     
     // Hardware fingerprinting
     std::string get_mac_address();
@@ -251,6 +281,10 @@ private:
     
     void invoke_tamper_callback(const std::string& reason);
     void schedule_next_validation();
+
+    // Internal hex helpers
+    static std::string mem_to_hex(const SecureMemory& mem);
+    static bool hex_to_bytes(const std::string& hex, std::vector<uint8_t>& out);
 };
 
 inline uint8_t operator|(License::AntiTamperFlag a, License::AntiTamperFlag b) {
