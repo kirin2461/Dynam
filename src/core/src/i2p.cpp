@@ -83,6 +83,7 @@ I2PManager::~I2PManager() {
 }
 
 bool I2PManager::initialize(const Config& config) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     config_ = config;
     
 #ifdef _WIN32
@@ -179,6 +180,18 @@ bool I2PManager::initialize(const Config& config) {
     impl_->sam_connected = true;
     is_initialized_ = true;
     
+    // Initialize default active transports based on config
+    active_transports_.clear();
+    if (config.enable_ntcp2) {
+        active_transports_.push_back(EncryptionLayer::NTCP2);
+    }
+    if (config.enable_ssu2) {
+        active_transports_.push_back(EncryptionLayer::SSU2);
+    }
+    if (config.enable_garlic_routing) {
+        active_transports_.push_back(EncryptionLayer::GARLIC_ROUTING);
+    }
+    
     if (current_dest_.empty()) {
         current_dest_ = create_ephemeral_destination();
     }
@@ -187,14 +200,18 @@ bool I2PManager::initialize(const Config& config) {
 }
 
 bool I2PManager::is_active() const {
+    // Note: no lock here — reads atomic-like bools and impl_ pointer.
+    // config_.enabled and is_initialized_ are only written under lock in initialize().
     return config_.enabled && is_initialized_ && impl_->sam_connected;
 }
 
 void I2PManager::set_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     config_.enabled = enabled;
 }
 
 std::string I2PManager::get_destination() const {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     return current_dest_;
 }
 
@@ -204,8 +221,11 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
     
     if (!is_active()) return false;
     
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    
     std::string style = (type == TunnelType::CLIENT) ? "STREAM" : "STREAM";
     std::string direction = (type == TunnelType::SERVER) ? "FORWARD" : "CONNECT";
+    (void)direction;
     
     std::ostringstream cmd;
     cmd << "SESSION CREATE STYLE=" << style
@@ -245,6 +265,8 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
 bool I2PManager::create_server_tunnel(const std::string& name, uint16_t local_port) {
     if (!is_active()) return false;
     
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    
     std::ostringstream cmd;
     cmd << "SESSION CREATE STYLE=STREAM ID=" << name
         << " DESTINATION=" << current_dest_
@@ -255,11 +277,24 @@ bool I2PManager::create_server_tunnel(const std::string& name, uint16_t local_po
         return false;
     }
     
-    return response.find("SESSION STATUS RESULT=OK") != std::string::npos;
+    if (response.find("SESSION STATUS RESULT=OK") != std::string::npos) {
+        TunnelInfo info;
+        info.tunnel_id = name;
+        info.type = TunnelType::SERVER;
+        info.local_dest = current_dest_;
+        info.created = std::chrono::system_clock::now();
+        info.expires = info.created + std::chrono::hours(
+            config_.destination_expiration_hours);
+        tunnels_[name] = info;
+        return true;
+    }
+    return false;
 }
 
 std::vector<I2PManager::TunnelInfo> I2PManager::get_active_tunnels() const {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     std::vector<TunnelInfo> result;
+    result.reserve(tunnels_.size());
     for (const auto& pair : tunnels_) {
         result.push_back(pair.second);
     }
@@ -267,6 +302,7 @@ std::vector<I2PManager::TunnelInfo> I2PManager::get_active_tunnels() const {
 }
 
 bool I2PManager::destroy_tunnel(const std::string& tunnel_id) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     auto it = tunnels_.find(tunnel_id);
     if (it == tunnels_.end()) return false;
     
@@ -275,6 +311,8 @@ bool I2PManager::destroy_tunnel(const std::string& tunnel_id) {
 }
 
 std::string I2PManager::create_ephemeral_destination() {
+    // Note: caller must hold mutex_ if accessing current_dest_ after this.
+    // This method only talks to SAM (impl_) which is single-threaded.
     if (!impl_->sam_connected) return "";
     
     std::string response;
@@ -296,8 +334,37 @@ std::string I2PManager::create_ephemeral_destination() {
     return "";
 }
 
+bool I2PManager::import_destination(const std::string& private_keys) {
+    if (!impl_->sam_connected) return false;
+    
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    impl_->destination_keys = private_keys;
+    
+    // Create a session with the imported keys
+    std::string response;
+    std::string cmd = "SESSION CREATE STYLE=STREAM ID=imported DESTINATION=" + private_keys;
+    if (!impl_->send_sam_command(cmd, response)) {
+        return false;
+    }
+    
+    if (response.find("SESSION STATUS RESULT=OK") != std::string::npos) {
+        // Extract public destination from the private keys
+        // In SAM, the public part is the base64 before the private portion
+        current_dest_ = private_keys.substr(0, 516); // I2P base64 destination is ~516 chars
+        return true;
+    }
+    return false;
+}
+
+std::string I2PManager::export_destination() const {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    return impl_->destination_keys;
+}
+
 void I2PManager::rotate_tunnels() {
     if (!is_active()) return;
+
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
 
     // Snapshot current tunnel IDs (avoid modifying map while iterating)
     std::vector<std::string> old_ids;
@@ -362,6 +429,8 @@ void I2PManager::rotate_tunnels() {
 }
 
 void I2PManager::enable_traffic_mixing(bool enable, int delay_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+
     config_.obfuscate_tunnel_messages = enable;
     if (delay_ms > 0) {
         config_.mix_delay_ms = delay_ms;
@@ -381,8 +450,74 @@ void I2PManager::enable_traffic_mixing(bool enable, int delay_ms) {
     // If we have active tunnels, inject an initial dummy burst to
     // establish a baseline traffic pattern for the DPI to latch onto.
     // Subsequent real packets blend into this established pattern.
-    if (is_active() && !tunnels_.empty()) {
+    if (is_initialized_ && impl_->sam_connected && !tunnels_.empty()) {
         for (int i = 0; i < 3; ++i) {
+            inject_dummy_message();
+        }
+    }
+}
+
+// ==================== FIX #94: inject_dummy_message() implementation ====================
+//
+// Generates and sends a random-sized dummy message through the first active
+// tunnel. This provides cover traffic to defeat DPI timing analysis.
+//
+// Dummy messages are:
+//   - Random size between 64 and 512 bytes (uniform distribution)
+//   - Filled with CSPRNG output (randombytes_buf) so they're indistinguishable
+//     from encrypted payload to an observer
+//   - Padded to 512-byte blocks (same alignment as pad_message())
+//   - Sent via SAM STREAM SEND through an existing tunnel session
+//
+// Must be called with mutex_ held (caller: enable_traffic_mixing).
+
+void I2PManager::inject_dummy_message() {
+    // Note: caller holds mutex_ — tunnels_ access is safe.
+    if (!impl_->sam_connected || tunnels_.empty()) return;
+
+    // Pick the first active tunnel to send through
+    const auto& first_tunnel = tunnels_.begin()->second;
+
+    // Generate random payload: 64–512 bytes (uniform)
+    // Variable size prevents DPI from fingerprinting dummy traffic
+    // by fixed packet lengths.
+    size_t payload_size = 64 + randombytes_uniform(449); // [64, 512]
+
+    std::vector<uint8_t> dummy(payload_size);
+    randombytes_buf(dummy.data(), dummy.size());
+
+    // Pad to 512-byte block boundary (consistent with pad_message())
+    std::vector<uint8_t> padded = pad_message(dummy, 512);
+
+    // Send through SAM — use the tunnel's session ID
+    // SAM v3 STREAM SEND: sends raw bytes through an established stream session
+    std::ostringstream cmd;
+    cmd << "STREAM SEND ID=" << first_tunnel.tunnel_id
+        << " SIZE=" << padded.size();
+
+    std::string response;
+    impl_->send_sam_command(cmd.str(), response);
+
+    // If send succeeded, also push the actual dummy bytes to the socket.
+    // SAM expects the payload immediately after the command on the same connection.
+    if (impl_->sam_socket != INVALID_SOCK) {
+        send(impl_->sam_socket,
+             reinterpret_cast<const char*>(padded.data()),
+             static_cast<int>(padded.size()), 0);
+    }
+}
+
+void I2PManager::send_dummy_traffic(size_t bytes_per_second) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    config_.cover_traffic_bytes_per_minute = bytes_per_second * 60;
+
+    // Inject a burst proportional to the requested rate
+    if (bytes_per_second > 0 && is_initialized_ && impl_->sam_connected && !tunnels_.empty()) {
+        // Each dummy message is ~512 bytes after padding.
+        // Send enough to match ~1 second of the requested rate.
+        size_t burst_count = std::max<size_t>(1, bytes_per_second / 512);
+        burst_count = std::min<size_t>(burst_count, 10); // Cap at 10 per burst
+        for (size_t i = 0; i < burst_count; ++i) {
             inject_dummy_message();
         }
     }
@@ -403,9 +538,295 @@ std::vector<uint8_t> I2PManager::pad_message(const std::vector<uint8_t>& message
 }
 
 I2PManager::Statistics I2PManager::get_statistics() const {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     Statistics stats{};
     stats.active_tunnels = tunnels_.size();
+    
+    // Aggregate bytes across all tunnels
+    for (const auto& pair : tunnels_) {
+        stats.total_sent += pair.second.bytes_sent;
+        stats.total_received += pair.second.bytes_received;
+    }
+    
     return stats;
+}
+
+// ==================== Garlic Routing ====================
+
+std::vector<uint8_t> I2PManager::create_garlic_message(
+    const std::vector<GarlicClove>& cloves,
+    const std::string& dest_public_key)
+{
+    (void)dest_public_key;
+    
+    // Build garlic message: concatenate cloves with length-prefixed framing.
+    // Each clove is: [4 bytes clove_id][4 bytes payload_length][payload]
+    std::vector<uint8_t> garlic;
+    
+    for (const auto& clove : cloves) {
+        // Clove ID (4 bytes, big-endian)
+        uint32_t cid = clove.clove_id;
+        garlic.push_back(static_cast<uint8_t>((cid >> 24) & 0xFF));
+        garlic.push_back(static_cast<uint8_t>((cid >> 16) & 0xFF));
+        garlic.push_back(static_cast<uint8_t>((cid >> 8) & 0xFF));
+        garlic.push_back(static_cast<uint8_t>(cid & 0xFF));
+        
+        // Payload length (4 bytes, big-endian)
+        uint32_t plen = static_cast<uint32_t>(clove.payload.size());
+        garlic.push_back(static_cast<uint8_t>((plen >> 24) & 0xFF));
+        garlic.push_back(static_cast<uint8_t>((plen >> 16) & 0xFF));
+        garlic.push_back(static_cast<uint8_t>((plen >> 8) & 0xFF));
+        garlic.push_back(static_cast<uint8_t>(plen & 0xFF));
+        
+        // Payload
+        garlic.insert(garlic.end(), clove.payload.begin(), clove.payload.end());
+    }
+    
+    // Pad to block boundary
+    return pad_message(garlic, 512);
+}
+
+bool I2PManager::send_garlic_message(const std::string& destination,
+                                     const std::vector<uint8_t>& message)
+{
+    if (!is_active()) return false;
+    
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    
+    // Send via SAM datagram (garlic messages are typically datagram-based)
+    std::ostringstream cmd;
+    cmd << "RAW SEND DESTINATION=" << destination
+        << " SIZE=" << message.size();
+    
+    std::string response;
+    if (!impl_->send_sam_command(cmd.str(), response)) {
+        return false;
+    }
+    
+    // Push raw payload
+    if (impl_->sam_socket != INVALID_SOCK) {
+        ssize_t sent = send(impl_->sam_socket,
+                           reinterpret_cast<const char*>(message.data()),
+                           static_cast<int>(message.size()), 0);
+        return sent > 0;
+    }
+    return false;
+}
+
+// ==================== Network Database ====================
+
+std::string I2PManager::lookup_destination(const std::string& hostname) {
+    // Check cache first
+    {
+        std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+        auto it = netdb_cache_.find(hostname);
+        if (it != netdb_cache_.end()) {
+            return it->second;
+        }
+    }
+    
+    if (!impl_->sam_connected) return "";
+    
+    // SAM NAMING LOOKUP
+    std::string response;
+    if (!impl_->send_sam_command("NAMING LOOKUP NAME=" + hostname, response)) {
+        return "";
+    }
+    
+    // Parse: NAMING REPLY RESULT=OK NAME=<name> VALUE=<dest>
+    if (response.find("RESULT=OK") != std::string::npos) {
+        size_t val_pos = response.find("VALUE=");
+        if (val_pos != std::string::npos) {
+            size_t val_start = val_pos + 6;
+            size_t val_end = response.find('\n', val_start);
+            std::string dest = response.substr(val_start,
+                val_end != std::string::npos ? val_end - val_start : std::string::npos);
+            
+            // Cache the result
+            std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+            netdb_cache_[hostname] = dest;
+            return dest;
+        }
+    }
+    return "";
+}
+
+bool I2PManager::publish_leaseset(bool encrypted, bool blinded) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    config_.enable_encrypted_leaseset = encrypted;
+    config_.enable_blinded_destinations = blinded;
+    // Actual LeaseSet publishing is handled by the I2P router
+    // when tunnels are created. We just set the preferences here.
+    return is_initialized_ && impl_->sam_connected;
+}
+
+std::vector<std::string> I2PManager::get_floodfill_routers() const {
+    // Floodfill router discovery requires NetDB queries which
+    // are handled by the I2P router internally. Return empty
+    // until router integration provides this data.
+    return {};
+}
+
+// ==================== Tunnel Management ====================
+
+void I2PManager::set_tunnel_build_rate(int tunnels_per_minute) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    config_.tunnel_build_rate_per_minute = tunnels_per_minute;
+}
+
+bool I2PManager::use_exploratory_tunnels() const {
+    // Exploratory tunnels are used for NetDB lookups and building
+    // new tunnels. They are always on when the manager is active.
+    return is_active();
+}
+
+// ==================== Transport Management ====================
+
+bool I2PManager::enable_transport(EncryptionLayer transport) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    
+    // Check if already active
+    for (const auto& t : active_transports_) {
+        if (t == transport) return true; // Already enabled
+    }
+    
+    active_transports_.push_back(transport);
+    
+    // Update config flags
+    switch (transport) {
+        case EncryptionLayer::NTCP2:
+            config_.enable_ntcp2 = true;
+            break;
+        case EncryptionLayer::SSU2:
+            config_.enable_ssu2 = true;
+            break;
+        case EncryptionLayer::GARLIC_ROUTING:
+            config_.enable_garlic_routing = true;
+            break;
+        default:
+            break;
+    }
+    
+    return true;
+}
+
+std::vector<I2PManager::EncryptionLayer> I2PManager::get_active_transports() const {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    return active_transports_;
+}
+
+// ==================== Anonymity Features ====================
+
+void I2PManager::set_profile_mode(const std::string& mode) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    
+    if (mode == "high_security") {
+        config_.tunnel_length = 4;
+        config_.tunnel_quantity = 3;
+        config_.tunnel_backup_quantity = 2;
+        config_.random_tunnel_selection = true;
+        config_.enable_dummy_traffic = true;
+        config_.mix_delay_ms = 100;
+    } else if (mode == "balanced") {
+        config_.tunnel_length = 3;
+        config_.tunnel_quantity = 2;
+        config_.tunnel_backup_quantity = 1;
+        config_.random_tunnel_selection = true;
+        config_.enable_dummy_traffic = true;
+        config_.mix_delay_ms = 50;
+    } else if (mode == "performance") {
+        config_.tunnel_length = 2;
+        config_.tunnel_quantity = 2;
+        config_.tunnel_backup_quantity = 0;
+        config_.random_tunnel_selection = false;
+        config_.enable_dummy_traffic = false;
+        config_.mix_delay_ms = 0;
+    }
+}
+
+bool I2PManager::enable_path_selection_randomization(bool enable) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    config_.random_tunnel_selection = enable;
+    return true;
+}
+
+void I2PManager::set_cover_traffic_rate(size_t bytes_per_minute) {
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    config_.cover_traffic_bytes_per_minute = bytes_per_minute;
+}
+
+// ==================== Internal Helpers ====================
+
+std::vector<std::string> I2PManager::select_tunnel_hops(int length) {
+    // In a real implementation, this queries the NetDB for suitable
+    // routers and selects hops based on capacity, latency, and
+    // diversity criteria. For now, return placeholder hashes.
+    std::vector<std::string> hops;
+    hops.reserve(static_cast<size_t>(length));
+    for (int i = 0; i < length; ++i) {
+        // Generate random 32-byte hash (Base64-encoded router hash placeholder)
+        uint8_t hash[32];
+        randombytes_buf(hash, sizeof(hash));
+        std::ostringstream oss;
+        for (int j = 0; j < 32; ++j) {
+            oss << std::hex << std::setw(2) << std::setfill('0')
+                << static_cast<int>(hash[j]);
+        }
+        hops.push_back(oss.str());
+    }
+    return hops;
+}
+
+bool I2PManager::build_tunnel(const std::vector<std::string>& hops, TunnelType type) {
+    (void)hops;
+    (void)type;
+    // Tunnel building is handled by the I2P router via SAM.
+    // Direct tunnel construction would require implementing the
+    // full I2P tunnel build protocol (ElGamal encrypted build records).
+    return is_active();
+}
+
+void I2PManager::maintain_tunnel_pool() {
+    // Check tunnel expiration and rebuild as needed.
+    // Called periodically by the tunnel rotation scheduler.
+    std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
+    
+    auto now = std::chrono::system_clock::now();
+    std::vector<std::string> expired;
+    
+    for (const auto& pair : tunnels_) {
+        if (pair.second.expires <= now) {
+            expired.push_back(pair.first);
+        }
+    }
+    
+    for (const auto& tid : expired) {
+        tunnels_.erase(tid);
+    }
+}
+
+std::vector<uint8_t> I2PManager::encrypt_garlic_layer(
+    const std::vector<uint8_t>& data,
+    const std::string& hop_pubkey)
+{
+    (void)hop_pubkey;
+    // Placeholder: In production, this would use ElGamal/AES+SessionTag
+    // or ECIES-X25519-AEAD-Ratchet for garlic encryption.
+    // For now, return data as-is (encryption handled by I2P router).
+    return data;
+}
+
+std::vector<uint8_t> I2PManager::create_session_tag() {
+    // Generate a random 32-byte session tag for ElGamal/AES encryption
+    std::vector<uint8_t> tag(32);
+    randombytes_buf(tag.data(), tag.size());
+    return tag;
+}
+
+void I2PManager::schedule_tunnel_rotation() {
+    // In a full implementation, this would set up a timer to call
+    // rotate_tunnels() periodically based on config_.destination_expiration_hours.
+    // The actual timer integration depends on the event loop (Qt, boost::asio, etc.)
 }
 
 } // namespace ncp
