@@ -1,108 +1,169 @@
 # Dynam (NCP C++) - Network Control Protocol
 
 > Multi-layered network anonymization and privacy platform with DPI bypass, traffic spoofing, paranoid mode, and advanced cryptography. Written in modern C++17.
->
-> ## Current Status
 
-**Version**: 1.4.0 (Active Development)
+## Current Status
+
+**Version**: 1.4.0-dev (Active Development)  
+**CMake Version**: 1.2.0 (pending sync)
+
+> ⚠️ **Security Audit**: 87 findings across 12 reviewed files (~50% of codebase). See [AUDIT.md](AUDIT.md) for details. 15 critical issues remain open.
 
 ### Implementation Progress
 
-**Core Library (libncp_core)**:
-- ✅ **Fully Implemented** (80-100%): Cryptography, DPI Bypass, DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, **CSPRNG**, **TLS Fingerprinting** (JA3/JA4, browser profiles), **ECH** (Encrypted Client Hello via HPKE), **Protocol Orchestrator** (adaptive strategy pipeline), **Adversarial Padding**, **Flow Shaping**, **Probe Resistance**
-- ⚠️ **Partial Implementation** (40-60%): Paranoid Mode (core features work, some advanced methods pending), E2E Encryption (X25519 done, X448/ECDH_P256 in progress)
-- 🚧 **Stub/Minimal** (10-30%): I2P Integration (API defined, SAM bridge implementation in progress), Traffic Mimicry (basic structure, full protocol emulation pending)
+**Core Library (libncp_core) — 42 modules** (49 headers, 46 source files):
+
+- ✅ **Fully Implemented** (80-100%): Cryptography, DPI Bypass, DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, CSPRNG, TLS Fingerprinting (JA3/JA4, browser profiles), Adversarial Padding, Flow Shaping, Probe Resistance, L2 Stealth, L3 Stealth, ARP Spoofing, DHCP Spoofing, Port Knocking, Packet Interceptor, Protocol Morphing, Burst Morphing, Entropy Masking, Geneva Engine/GA, Identity Management, Timing Protection, Thread Pool, Rotation Coordinator, Security Manager, Capabilities Framework
+- ⚠️ **Partial / Has Critical Bugs**:
+  - Protocol Orchestrator — works but auth stripping breaks legacy clients, no strategy lock (AUDIT #72-#75)
+  - ECH (Encrypted Client Hello) — **client/server info string mismatch causes decryption failure** (AUDIT #76-#78)
+  - E2E Encryption — X25519 works; **ECDH_P256 uses wrong OpenSSL API** (AUDIT #60), **Kyber1024 calls encaps instead of decaps on receiver** (AUDIT #61)
+  - Paranoid Mode — core features work, some advanced methods pending
+- 🚧 **Stub/Minimal** (10-30%): I2P Integration (API defined, SAM bridge in progress), Traffic Mimicry (basic structure, full protocol emulation pending)
 
 **Security Hardening (Phase 0)**:
 - ✅ Complete CSPRNG migration — all `std::mt19937` replaced with libsodium `randombytes_*`
 - ✅ New `ncp::CSPRNG` header-only wrapper with `random_bytes`, `uniform_uint32`, `uniform_double`, `shuffle`
 - ✅ 12 modules patched, 50+ replacement sites, 18 dedicated CSPRNG unit tests
+- ❌ **Unfixed**: XOR fallback HMAC in port_knock (AUDIT #64), timing oracle in probe_resist (AUDIT #5), SSL_CTX double-free in DoH (AUDIT #55)
 
 **DPI Advanced Pipeline (Phase 2+)**:
 - ✅ TLS Fingerprint-driven ClientHello generation (Chrome/Firefox/Safari/Edge profiles)
 - ✅ AdvancedDPIBypass integrated into proxy send path with 15+ evasion techniques
-- ✅ ECH (Encrypted Client Hello) with HPKE encryption (OpenSSL 3.2+)
-- ✅ Protocol Orchestrator with adaptive threat-level strategy switching (NONE→CRITICAL)
+- ⚠️ ECH (Encrypted Client Hello) — HPKE encryption implemented but **server decrypt broken** (info string mismatch)
+- ✅ Protocol Orchestrator with adaptive threat-level strategy switching (NONE→HIGH)
+- ⚠️ HIGH and CRITICAL threat levels map to same strategy — escalation to CRITICAL has no effect (AUDIT #75)
 - ✅ Per-connection TLS fingerprint rotation, GREASE injection, decoy SNI
 - ✅ 6 country/scenario presets: TSPU, GFW, Iran, Aggressive, Stealth, Compatible
-- ✅ 22 unit tests: mimicry roundtrip (7), ECH pipeline (6), advanced DPI (9)
+- ✅ Geneva Engine with genetic algorithm for DPI evasion strategy discovery
 
 **CLI Tool**:
 - ✅ **Working Commands**: `status`, `help`
 - 🚧 **In Active Development**: `run`, `stop`, `rotate`, `crypto`, `license`, `network`, `dpi`, `i2p`, `mimic`
-- ⚠️ **Note**: CLI handlers currently being refactored from stubs to full implementations
+- ⚠️ **Note**: Most CLI handlers are stubs being refactored to full implementations
 
-**Testing**:
-- ✅ Basic unit tests for core modules (crypto, DPI, networking)
-- ✅ Comprehensive test coverage for E2E, Paranoid Mode, Secure Memory, I2P modules
+**Testing** (22 test files):
+- ✅ Core module tests: crypto, DPI, networking, E2E (basic + extended), Paranoid, SecureMemory, I2P, License
 - ✅ CSPRNG unit tests (18 tests: bounds, distribution, uniqueness, shuffle)
-- ✅ DPI Advanced tests: mimicry roundtrip, ECH pipeline, advanced bypass (22 tests)
+- ✅ DPI Advanced tests: mimicry roundtrip, ECH pipeline, ECH cache, advanced DPI, DPI advanced integration
+- ✅ L3/L2 Stealth tests, Critical fixes tests, Integration tests
+- 🚧 Fuzzing tests in `tests/fuzz/`
 
-**Known Limitations**:
-- I2P integration requires external I2P router with SAM bridge enabled
-- Paranoid Mode advanced features (memory protection, kill switch, traffic morphing) are platform-specific and may require elevated privileges
-- ECH requires OpenSSL 3.2+ with HPKE support; builds without OpenSSL use stub path
-- Some CLI commands shown in documentation are not yet functional (marked above)
+**Known Critical Issues** (from [AUDIT.md](AUDIT.md)):
+- Off-by-one buffer read in `apply_tcp_split` (ncp_dpi.cpp)
+- Unbounded SNI extraction — OOB read via crafted ClientHello
+- HTTP header injection via unescaped host in CONNECT
+- Timing oracle in auth verification (ncp_probe_resist.cpp)
+- Nonce reuse after clock rollback (ncp_probe_resist.cpp)
+- UAF after FlowShaper destruction (ncp_flow_shaper.cpp)
+- SSL_CTX double-free in DoH (doh.cpp)
+- XOR used as HMAC fallback — no authenticity (ncp_port_knock.cpp)
+- TLS record > 16384 bytes in mimicry wrapper (mimicry.cpp)
+- ECH info string mismatch — decryption always fails (ncp_ech.cpp)
 
 **Roadmap**:
-1. ✅ **Phase 1** (Completed): CLI command handlers completion + RAII refactoring
+1. ✅ **Phase 1** (Completed): CLI command handlers + RAII refactoring
 2. ✅ **Phase 2** (Completed): I2P SAM implementation + Paranoid Mode advanced methods
 3. ✅ **Phase 3** (Completed): Security fixes (thread pool, CSPRNG migration)
 4. ✅ **Phase 4-6** (Completed): Code quality, testing, CI/CD, documentation
 5. ✅ **Phase 0** (Completed): Full CSPRNG migration — eliminate all `std::mt19937`
-6. ✅ **Phase 1-CI** (Completed): CI/CMake fixes, CSPRNG tests, lighter workflows
-7. ✅ **Phase 2+** (Completed): TLS Fingerprint integration, AdvancedDPIBypass pipeline, ECH, Protocol Orchestrator
-8. 🚧 **Phase 3+** (Next): Traffic Mimicry full protocol emulation, I2P SAM bridge, E2E X448/ECDH_P256
+6. ✅ **Phase 2+** (Completed): TLS Fingerprint, AdvancedDPIBypass, ECH, Protocol Orchestrator
+7. 🚧 **Phase 3+** (Current): Fix AUDIT critical findings, ECH server decrypt, E2E P256/Kyber
+8. 🔜 **Phase 4+** (Next): Traffic Mimicry full protocol emulation, I2P SAM bridge, thread safety audit
 
 
 
 ## Features
 
-### Core Library (libncp_core) - 21 modules
+### Core Library (libncp_core) — 42 modules
 
-- **CSPRNG** (`ncp_csprng.hpp`) - Header-only libsodium wrapper: `random_bytes`, `uniform_uint32`, `uniform_double`, `fill_random`, `shuffle` — replaces all `std::mt19937` usage
-- **Cryptography** (`ncp_crypto.hpp`) - Ed25519, Curve25519, ChaCha20-Poly1305, X25519 key exchange, AEAD encryption with `constexpr`/`noexcept` optimization
-- **DPI Bypass** (`ncp_dpi.hpp`) - TCP fragmentation, fake packets, disorder mode, SNI splitting, proxy/driver modes
-- **DPI Advanced** (`ncp_dpi_advanced.hpp`) - 15+ evasion techniques: TCPManipulator, TLSManipulator, TrafficObfuscator, GREASE injection, decoy SNI, multi-layer split, 6 country presets (TSPU/GFW/Iran/Aggressive/Stealth/Compatible)
-- **TLS Fingerprinting** (`ncp_tls_fingerprint.hpp`) - Browser profile emulation (Chrome/Firefox/Safari/Edge), JA3/JA3S/JA4 fingerprint generation, GREASE, ALPN, supported_versions, key_share x25519, per-connection rotation
-- **Encrypted Client Hello** (`ncp_ech.hpp`) - ECH draft implementation with HPKE (X25519+HKDF-SHA256+AES-128-GCM), ECH config parsing, extension insertion into ClientHello, OpenSSL 3.2+ backend
-- **Protocol Orchestrator** (`ncp_orchestrator.hpp`) - Unified anti-DPI pipeline: AdversarialPadding → FlowShaper → ProbeResist → TrafficMimicry → TLSFingerprint → AdvancedDPIBypass → ECH. Adaptive threat-level switching (NONE/LOW/MEDIUM/HIGH/CRITICAL), 4 strategy presets (stealth/balanced/performance/max_compat)
-- **Network Spoofing** (`ncp_spoofer.hpp`) - IPv4/IPv6/MAC/DNS spoofing with automatic identity rotation, SMBIOS serial spoofing, disk serial randomization, DHCP client ID spoofing, TCP/IP fingerprint emulation (Windows 10/Linux 5.x/macOS profiles)
-- **Network Operations** (`ncp_network.hpp`) - libpcap packet capture, raw sockets, typed `unique_ptr` handles, bypass techniques (HTTP/TLS mimicry)
-- **Paranoid Mode** (`ncp_paranoid.hpp`) - 8-layer protection: entry obfuscation, multi-anonymization (VPN→Tor→I2P), traffic morphing, timing protection, metadata stripping, post-quantum crypto, anti-correlation, system-level memory protection
-- **Traffic Mimicry** (`ncp_mimicry.hpp`) - HTTP/TLS/WebSocket/DNS/QUIC protocol emulation for traffic camouflage, wrap/unwrap with TLS session key management
-- **Adversarial Padding** (`ncp_adversarial.hpp`) - Packet-level adversarial byte injection to defeat ML-based traffic classifiers
-- **Flow Shaping** (`ncp_flow_shaper.hpp`) - Flow-level timing/size shaping with dummy packet injection
-- **Probe Resistance** (`ncp_probe_resist.hpp`) - Server-side active probe defense with HMAC authentication
-- **I2P Integration** (`ncp_i2p.hpp`) - I2P garlic routing, SAM bridge, tunnel management
-- **E2E Encryption** (`ncp_e2e.hpp`) - End-to-end encryption with X448, ECDH_P256, forward secrecy
-- **Secure Memory** (`ncp_secure_memory.hpp`) - Memory-safe containers with automatic zeroing on destruction, `mlock` support
-- **Secure Buffer** (`ncp_secure_buffer.hpp`) - RAII buffer with `sodium_memzero` wipe, `mlock`/`VirtualLock` page locking, move semantics, custom `SecureDeleter`
-- **DNS over HTTPS** (`ncp_doh.hpp`) - Encrypted DNS resolution via DoH providers
-- **Database** (`ncp_db.hpp`) - SQLite3 + SQLCipher encrypted storage
-- **License Management** (`ncp_license.hpp`) - Hardware ID-based offline validation
+#### Cryptography & Security
+- **CSPRNG** (`ncp_csprng.hpp`) — Header-only libsodium wrapper: `random_bytes`, `uniform_uint32`, `uniform_double`, `fill_random`, `shuffle`
+- **Cryptography** (`ncp_crypto.hpp` + `ncp_crypto_constants.hpp`) — Ed25519, Curve25519, ChaCha20-Poly1305, X25519 key exchange, AEAD encryption
+- **E2E Encryption** (`ncp_e2e.hpp` + `ncp_e2e_caps_patch.hpp`) — End-to-end encryption with X25519 (working), X448/ECDH_P256/Kyber1024 (⚠️ broken)
+- **Secure Memory** (`ncp_secure_memory.hpp`) — Memory-safe containers with automatic zeroing, `mlock` support
+- **Secure Buffer** (`ncp_secure_buffer.hpp`) — RAII buffer with `sodium_memzero` wipe, `mlock`/`VirtualLock` page locking
+- **Security Manager** (`ncp_security.hpp`) — Comprehensive security operations (47KB implementation)
+- **Capabilities** (`ncp_capabilities.hpp`) — Runtime capability detection and feature flags (25KB header-only)
+
+#### DPI Bypass & Evasion
+- **DPI Bypass** (`ncp_dpi.hpp`) — TCP fragmentation, fake packets, disorder mode, SNI splitting, proxy/driver modes
+- **DPI Advanced** (`ncp_dpi_advanced.hpp`) — 15+ evasion techniques: TCPManipulator, TLSManipulator, TrafficObfuscator, GREASE injection, decoy SNI, 6 country presets
+- **Geneva Engine** (`ncp_geneva_engine.hpp`) — Packet manipulation engine based on Geneva framework
+- **Geneva GA** (`ncp_geneva_ga.hpp`) — Genetic algorithm for evolving DPI evasion strategies
+
+#### TLS & ECH
+- **TLS Fingerprinting** (`ncp_tls_fingerprint.hpp`) — Browser profile emulation (Chrome/Firefox/Safari/Edge), JA3/JA3S/JA4, per-connection rotation
+- **TLS Record Padding** (`ncp_tls_record_padding.hpp`) — TLS record-level padding for traffic analysis resistance
+- **ECH** (`ncp_ech.hpp`) — Encrypted Client Hello draft with HPKE (⚠️ server decrypt broken)
+- **ECH Cache** (`ncp_ech_cache.hpp`) — Caching layer for ECH configurations
+- **ECH Fetch** (`ncp_ech_fetch.hpp`) — ECH config fetching from DNS/HTTPS
+- **ECH Retry** (`ncp_ech_retry.hpp`) — ECH retry logic with fallback handling
+
+#### Network & Spoofing
+- **Network Spoofing** (`ncp_spoofer.hpp`) — IPv4/IPv6/MAC/DNS spoofing with identity rotation, SMBIOS/disk serial spoofing
+- **Network Operations** (`ncp_network.hpp` + `ncp_network_backend.hpp`) — libpcap capture, raw sockets, typed handles
+- **Raw Socket** — Low-level packet construction and injection (`network_raw_socket.cpp`)
+- **ARP Spoofing** (`ncp_arp.hpp`) — ARP cache poisoning and spoofing
+- **DHCP Spoofing** (`ncp_dhcp_spoofer.hpp`) — DHCP client ID spoofing
+- **SMBIOS Hook** — Hardware serial number spoofing (`smbios_hook.cpp`)
+- **Identity Management** (`ncp_identity.hpp`) — Unified identity management and rotation
+
+#### Traffic Shaping & Obfuscation
+- **Traffic Mimicry** (`ncp_mimicry.hpp`) — HTTP/TLS/WebSocket/DNS/QUIC protocol emulation (🚧 partial)
+- **Protocol Morphing** (`ncp_protocol_morph.hpp`) — Runtime protocol transformation
+- **Adversarial Padding** (`ncp_adversarial.hpp`) — Packet-level adversarial bytes to defeat ML classifiers
+- **Adversary Tester** (`ncp_adversary_tester.hpp`) — Testing framework for adversarial techniques
+- **Flow Shaping** (`ncp_flow_shaper.hpp`) — Timing/size shaping with dummy packet injection
+- **Burst Morphing** (`ncp_burst_morpher.hpp`) — Traffic burst pattern transformation
+- **Entropy Masking** (`ncp_entropy_masking.hpp`) — Entropy-level traffic normalization
+- **Dummy Traffic** (`ncp_dummy.hpp`) — Cover traffic generation
+
+#### Stealth & Defense
+- **L2 Stealth** (`ncp_l2_stealth.hpp`) — Data link layer stealth operations
+- **L3 Stealth** (`ncp_l3_stealth.hpp`) — Network layer stealth (30KB implementation)
+- **Packet Interceptor** (`ncp_packet_interceptor.hpp`) — Packet interception and modification (36KB)
+- **Paranoid Mode** (`ncp_paranoid.hpp`) — 8-layer protection system (TINFOIL_HAT level)
+- **Port Knocking** (`ncp_port_knock.hpp`) — Cryptographic port knock sequences with TOTP
+- **Probe Resistance** (`ncp_probe_resist.hpp`) — Server-side active probe defense with HMAC auth
+- **Timing Protection** (`ncp_timing.hpp`) — Anti-timing-analysis measures
+
+#### Orchestration & Infrastructure
+- **Protocol Orchestrator** (`ncp_orchestrator.hpp` + `ncp_orchestrator_caps_patch.hpp`) — Unified send/receive pipeline with adaptive threat-level switching
+- **Rotation Coordinator** (`ncp_rotation_coordinator.hpp`) — Coordinated identity/key/circuit rotation
+- **Thread Pool** (`ncp_thread_pool.hpp`) — Worker thread management
+- **DNS over HTTPS** (`ncp_doh.hpp`) — Encrypted DNS resolution via DoH providers
+- **I2P Integration** (`ncp_i2p.hpp`) — I2P garlic routing, SAM bridge (🚧 partial)
+- **WebSocket Tunnel** (`ncp_ws_tunnel.hpp`) — WebSocket-based tunneling
+
+#### Utility
+- **Database** (`ncp_db.hpp`) — SQLite3 + SQLCipher encrypted storage
+- **License** (`ncp_license.hpp`) — Hardware ID-based offline validation
+- **Logger** (`ncp_logger.hpp`) — Configurable logging
+- **Configuration** (`ncp_config.hpp`) — Application configuration management
+- **WinSock RAII** (`ncp_winsock_raii.hpp`) — Windows socket initialization wrapper
 
 ### CLI Tool
 
-| Command | Description |
-|---------|-------------|
-| `run [iface]` | Start PARANOID mode with all 8 protection layers + spoofing + DPI bypass |
-| `stop` | Stop spoofing and restore original settings |
-| `status` | View current protection status |
-| `rotate` | Rotate all identities (IP/MAC/DNS) |
-| `crypto keygen` | Generate Ed25519 keypair |
-| `crypto random <size>` | Generate cryptographically secure random bytes |
-| `license hwid` | Get system hardware ID |
-| `license info` | Show license status |
-| `network interfaces` | List network interfaces |
-| `network stats` | Show traffic statistics |
-| `dpi [options]` | DPI bypass proxy (--mode proxy/driver/passive, --preset RuNet-Soft/RuNet-Strong) |
-| `i2p <enable/disable/status>` | I2P integration management |
-| `mimic <http/tls/none>` | Set traffic mimicry type |
-| `tor` | Configure Tor proxy (bridges/hops) |
-| `obfuscate` | Toggle advanced traffic obfuscation |
-| `dns-secure` | Toggle DNS leak protection |
-| `help` | Show available commands |
+| Command | Status | Description |
+|---------|--------|-------------|
+| `status` | ✅ Working | View current protection status |
+| `help` | ✅ Working | Show available commands |
+| `run [iface]` | 🚧 Dev | Start PARANOID mode with all protections |
+| `stop` | 🚧 Dev | Stop spoofing and restore settings |
+| `rotate` | 🚧 Dev | Rotate all identities (IP/MAC/DNS) |
+| `crypto keygen` | 🚧 Dev | Generate Ed25519 keypair |
+| `crypto random <size>` | 🚧 Dev | Generate random bytes |
+| `license hwid` | 🚧 Dev | Get system hardware ID |
+| `license info` | 🚧 Dev | Show license status |
+| `network interfaces` | 🚧 Dev | List network interfaces |
+| `network stats` | 🚧 Dev | Show traffic statistics |
+| `dpi [options]` | 🚧 Dev | DPI bypass proxy |
+| `i2p <enable/disable/status>` | 🚧 Dev | I2P integration management |
+| `mimic <http/tls/none>` | 🚧 Dev | Set traffic mimicry type |
+| `tor` | 🚧 Dev | Configure Tor proxy |
+| `obfuscate` | 🚧 Dev | Toggle traffic obfuscation |
+| `dns-secure` | 🚧 Dev | Toggle DNS leak protection |
 
 ### Architecture
 
@@ -118,7 +179,6 @@
 ### Windows (automated)
 
 ```bash
-# Clone and build
 git clone https://github.com/kirin2461/Dynam.git
 cd Dynam
 build.bat
@@ -127,10 +187,8 @@ build.bat
 ### Linux / macOS
 
 ```bash
-# Install dependencies
 sudo apt-get install -y cmake build-essential git libsodium-dev libssl-dev libpcap-dev libgtest-dev pkg-config
 
-# Build
 git clone https://github.com/kirin2461/Dynam.git
 cd Dynam
 mkdir build && cd build
@@ -142,7 +200,6 @@ ctest --output-on-failure
 ### Windows (manual)
 
 ```bash
-# Requires: Visual Studio 2022+, CMake 3.20+, vcpkg
 vcpkg install libsodium:x64-windows openssl:x64-windows sqlite3:x64-windows gtest:x64-windows
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=%VCPKG_DIR%/scripts/buildsystems/vcpkg.cmake -G "Visual Studio 17 2022" -A x64
@@ -151,60 +208,22 @@ cmake --build . --config Release
 
 See [docs/BUILD.md](docs/BUILD.md) for detailed instructions.
 
-## Usage
-
-### Launch with PARANOID Mode (recommended)
-
-```bash
-# Windows: use the launcher
-run_ncp.bat
-# Then type: run
-
-# Or directly:
-ncp.exe run
-```
-
-The `run` command automatically activates:
-- Full network spoofing (IPv4/IPv6/MAC/DNS + HW identifiers)
-- DPI bypass proxy with adaptive strategy
-- Protocol Orchestrator (threat-level adaptive pipeline)
-- PARANOID mode (TINFOIL_HAT level) with all 8 protection layers
-- Cover traffic generation
-- Kill switch and leak prevention
-
-### Individual Commands
-
-```bash
-# Generate Ed25519 keypair
-ncp crypto keygen
-
-# DPI bypass with RuNet preset
-ncp dpi --mode proxy --port 8080 --target example.com --preset RuNet-Strong
-
-# Enable I2P
-ncp i2p enable
-
-# Enable TLS mimicry
-ncp mimic tls
-
-# List network interfaces
-ncp network interfaces
-```
-
 ## Project Structure
 
 ```
 Dynam/
 |-- src/
 |   |-- core/                    # Core library (libncp_core)
-|   |   |-- include/             # 21 public headers (ncp_*.hpp)
-|   |   |-- src/                 # Implementation files
+|   |   |-- include/             # 49 public headers (ncp_*.hpp)
+|   |   |-- src/                 # 46 implementation files
 |   |   |-- CMakeLists.txt
-|   |-- cli/                     # CLI tool (main.cpp)
+|   |-- cli/                     # CLI tool (main.cpp, 26KB)
 |   |-- gui/                     # Qt6 GUI (optional, ENABLE_GUI=OFF)
-|-- tests/                       # Unit tests (GoogleTest)
+|-- tests/                       # Unit tests (GoogleTest) — 22 test files
+|   |-- integration/             # Integration tests
 |   |-- fuzz/                    # Fuzzing tests (LibFuzzer)
-|-- docs/                        # Documentation
+|   |-- scripts/                 # Test helper scripts
+|-- docs/                        # Documentation (9 files)
 |   |-- ARCHITECTURE.md
 |   |-- BUILD.md
 |   |-- CLI_COMMANDS.md
@@ -213,8 +232,11 @@ Dynam/
 |   |-- SECURITY_FIXES.md
 |   |-- SECURITY_IMPLEMENTATION_GUIDE.md
 |   |-- KNOWN_ISSUES.md
+|   |-- Doxyfile.in
 |-- scripts/                     # Build helper scripts
-|-- CMakeLists.txt               # Root CMake config
+|-- AUDIT.md                     # Security audit (87 findings)
+|-- PATCHES.md                   # Applied patches
+|-- CMakeLists.txt               # Root CMake config (v1.2.0)
 |-- build.bat                    # Windows automated build
 |-- run_ncp.bat                  # Windows launcher with CLI menu
 |-- conanfile.txt                # Conan dependencies
@@ -231,36 +253,36 @@ Dynam/
 | `ENABLE_LIBOQS` | OFF | Post-quantum cryptography via liboqs |
 | `ENABLE_WEBSOCKETS` | OFF | WebSocket tunneling via libwebsockets |
 | `ENABLE_TOR_PROXY` | OFF | Tor proxy support |
+| `ENABLE_DOCS` | OFF | Generate Doxygen documentation |
 | `BUILD_SHARED_LIBS` | OFF | Build shared libraries |
 
 ## Security
 
 - **CSPRNG**: All randomness via libsodium (`randombytes_*`) — zero `std::mt19937` in codebase
-- **Cryptography**: libsodium (audited, industry-standard)
-- **AEAD**: XChaCha20-Poly1305 authenticated encryption with associated data
-- **Key Exchange**: X25519, X448, ECDH_P256
-- **TLS Fingerprinting**: Realistic browser-grade ClientHello (JA3/JA4) with per-connection rotation
-- **ECH**: Encrypted Client Hello prevents SNI leakage (HPKE: X25519+HKDF-SHA256+AES-128-GCM)
-- **Secure Memory**: Automatic zeroing via `sodium_memzero`, `mlock`/`VirtualLock` page locking, `SecureVector`/`SecureString`/`SecureBuffer` containers
-- **HW Identity Spoofing**: SMBIOS serials, disk serial numbers, DHCP client ID, TCP/IP fingerprint profiles
-- **Database**: SQLite3 + SQLCipher (encrypted at rest)
-- **Code Quality**: `constexpr`/`noexcept` throughout, typed pointers, no raw `void*`
-- **Fuzzing**: LibFuzzer-based tests for crypto, DPI config, and packet parsing
-- **Anti-Forensic**: Memory wiping on exit, secure file deletion (DOD 5220.22-M), encrypted temp files
+- **AEAD**: XChaCha20-Poly1305 authenticated encryption
+- **Key Exchange**: X25519 (working), X448/ECDH_P256 (⚠️ broken API usage), Kyber1024 (⚠️ encaps/decaps swapped)
+- **TLS Fingerprinting**: Realistic browser-grade ClientHello with per-connection rotation
+- **ECH**: HPKE implemented but ⚠️ server-side decrypt broken (info string mismatch)
+- **Secure Memory**: `sodium_memzero`, `mlock`/`VirtualLock`, `SecureVector`/`SecureString`/`SecureBuffer`
+- **Note**: `encrypt_chacha20()` is misnamed — actually calls XSalsa20-Poly1305 (`crypto_secretbox_easy`)
+- **Note**: Port knock HMAC fallback without OpenSSL uses XOR — **not a real MAC**
+- **Fuzzing**: LibFuzzer-based tests for crypto, DPI, and packet parsing
+- **Audit**: See [AUDIT.md](AUDIT.md) — 15 critical, 42 logic/race, 30 quality findings
 
 ## Dependencies
 
-| Library | Purpose | Required |
-|---------|---------|----------|
-| libsodium | Cryptography + CSPRNG (Ed25519, ChaCha20, X25519, AEAD, `randombytes`) | Yes |
-| OpenSSL | TLS operations, DoH, ECH/HPKE (3.2+ for ECH) | Yes |
-| SQLite3 | Encrypted database | Yes |
-| GoogleTest | Unit testing | For tests |
-| libpcap | Packet capture (Linux/macOS) | Optional |
-| libnetfilter_queue | DPI driver mode (Linux) | Optional |
-| Qt6 | GUI application | Optional |
-| liboqs | Post-quantum crypto | Optional |
-| libwebsockets | WebSocket tunneling | Optional |
+| Library | Purpose | Required | Notes |
+|---------|---------|----------|-------|
+| libsodium | Cryptography + CSPRNG | Yes | |
+| OpenSSL | TLS, DoH, ECH/HPKE | Yes | **3.2+ required for ECH** |
+| SQLite3 | Encrypted database | Yes | |
+| GoogleTest | Unit testing | For tests | |
+| libpcap | Packet capture (Linux/macOS) | Optional | |
+| Npcap SDK | Packet capture (Windows) | Optional | |
+| libnetfilter_queue | DPI driver mode (Linux) | Optional | |
+| Qt6 | GUI application | Optional | |
+| liboqs | Post-quantum crypto | Optional | |
+| libwebsockets | WebSocket tunneling | Optional | |
 
 See [DEPENDENCIES.md](DEPENDENCIES.md) for installation instructions.
 
@@ -272,12 +294,8 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 Internal development only. Contact the project maintainer.
 
-## Support
-
-For issues and questions, please open a [GitHub Issue](https://github.com/kirin2461/Dynam/issues).
-
 ---
 
 **Last Updated**: February 20, 2026  
-**Version**: 1.4.0  
-**Status**: Core library (21 modules), CLI, DPI bypass (15+ techniques), TLS Fingerprinting, ECH, Protocol Orchestrator, Paranoid Mode, HW spoofing, SecureBuffer, CSPRNG — implemented
+**Version**: 1.4.0-dev  
+**Status**: 42 modules, 49 headers, 46 source files, 22 test files — Active development with 87 open audit findings
