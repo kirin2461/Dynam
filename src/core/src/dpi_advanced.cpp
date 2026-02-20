@@ -785,6 +785,34 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     std::vector<std::vector<uint8_t>> result;
     std::vector<uint8_t> working_data(data, data + len);
     const auto& cfg = impl_->config;
+    
+    // Check if this is TLS ClientHello
+    bool is_client_hello = (len > 5 && data[0] == 0x16 && 
+                            data[1] == 0x03 && data[5] == 0x01);
+    
+    // ===== Issue #57: When mimicry manages TLS framing, skip TLS-level
+    // modifications that would corrupt the already-structured records.
+    // Transport-level ops (padding, obfuscation, timing) still apply. =====
+    
+    // Apply pattern obfuscation (GREASE injection)
+    // GUARD: skip when mimicry already framed the TLS record
+    if (!cfg.mimicry_managed_tls &&
+        cfg.base_config.enable_pattern_obfuscation && is_client_hello) {
+        working_data = impl_->tls_manip->inject_grease(
+            working_data.data(),
+            working_data.size()
+        );
+        
+        std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+        impl_->stats.grease_injected++;
+    }
+    
+    // Apply decoy SNI (fake ClientHello before real one)
+    // GUARD: skip when mimicry already emitted its own ClientHello
+    if (!cfg.mimicry_managed_tls &&
+        cfg.base_config.enable_decoy_sni && is_client_hello &&
+        !cfg.base_config.decoy_sni_domains.empty()) {
+        
     bool is_client_hello = (len > 5 && data[0] == 0x16 && data[1] == 0x03 && data[5] == 0x01);
 
     // === Phase 2.2: GREASE injection (before ECH, before splits) ===
@@ -814,6 +842,28 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
             impl_->stats.fake_packets_injected++;
         }
     }
+    
+    // Apply multi-layer split or SNI-based split
+    // GUARD: skip TLS-aware splitting when mimicry manages framing
+    if (!cfg.mimicry_managed_tls &&
+        cfg.base_config.enable_multi_layer_split && is_client_hello &&
+        !cfg.base_config.split_positions.empty()) {
+        
+        // Convert vector<int> to vector<size_t>
+        std::vector<size_t> split_positions_size_t;
+        split_positions_size_t.reserve(cfg.base_config.split_positions.size());
+        for (int pos : cfg.base_config.split_positions) {
+            if (pos >= 0) {
+                split_positions_size_t.push_back(static_cast<size_t>(pos));
+            }
+        }
+        
+        auto segments = impl_->tcp_manip->split_segments(
+            working_data.data(),
+            working_data.size(),
+            split_positions_size_t
+        );
+        
 
     // === Splitting logic (SNI split or multi-layer split) ===
     if (cfg.base_config.enable_multi_layer_split && is_client_hello && !cfg.base_config.split_positions.empty()) {
@@ -824,6 +874,13 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
         result.insert(result.end(), segments.begin(), segments.end());
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
         impl_->stats.tcp_segments_split += segments.size();
+    } else if (!cfg.mimicry_managed_tls && is_client_hello) {
+        // Standard SNI-based split (only when mimicry is NOT managing TLS)
+        auto split_points = impl_->tls_manip->find_sni_split_points(
+            working_data.data(),
+            working_data.size()
+        );
+        
     } else if (is_client_hello) {
         auto split_points = impl_->tls_manip->find_sni_split_points(working_data.data(), working_data.size());
         if (!split_points.empty()) {
@@ -844,6 +901,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     } else {
         result.push_back(working_data);
     }
+    
+    // Apply padding if enabled (transport-level — always safe)
 
     // === Padding ===
     if (cfg.padding.enabled && cfg.padding.max_padding > 0) {
@@ -857,6 +916,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
             impl_->stats.bytes_padding += ps;
         }
     }
+    
+    // Apply obfuscation (transport-level — always safe)
 
     // === Obfuscation ===
     if (impl_->obfuscator) {
@@ -866,6 +927,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
             impl_->stats.bytes_obfuscated += segment.size();
         }
     }
+    
+    // Apply timing jitter if enabled (transport-level — always safe)
 
     if (cfg.base_config.enable_timing_jitter && result.size() > 1) {
         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
@@ -898,6 +961,11 @@ void AdvancedDPIBypass::set_technique_enabled(EvasionTechnique technique, bool e
 
 std::vector<EvasionTechnique> AdvancedDPIBypass::get_active_techniques() const {
     return impl_->config.techniques;
+}
+
+void AdvancedDPIBypass::set_mimicry_managed_tls(bool managed) {
+    impl_->config.mimicry_managed_tls = managed;
+    impl_->log(std::string("mimicry_managed_tls set to ") + (managed ? "true" : "false"));
 }
 
 void AdvancedDPIBypass::apply_preset(BypassPreset preset) {
@@ -957,6 +1025,18 @@ std::vector<uint8_t> DPIEvasion::apply_ech(
 std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
     const std::vector<uint8_t>& data,
     const std::string& front_domain,
+    const std::string& real_domain
+) {
+    // Simple domain fronting: replace SNI with front domain
+    std::vector<uint8_t> result = data;
+    
+    // Find and replace SNI hostname
+    auto pos = std::search(
+        result.begin(), result.end(),
+        real_domain.begin(), real_domain.end()
+    );
+    
+    if (pos != result.end() && front_domain.size() == real_domain.size()) {
     const std::string& real_domain) {
     std::vector<uint8_t> result = data;
     auto pos = std::search(result.begin(), result.end(), real_domain.begin(), real_domain.end());
@@ -971,6 +1051,8 @@ namespace Presets {
 
 AdvancedDPIConfig create_tspu_preset() {
     AdvancedDPIConfig config;
+    
+    // Base config for Russian TSPU
     config.base_config.mode = DPIMode::PROXY;
     config.base_config.enable_tcp_split = true; config.base_config.split_at_sni = true;
     config.base_config.split_position = 1; config.base_config.fragment_size = 1;

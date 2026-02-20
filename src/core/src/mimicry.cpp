@@ -83,6 +83,8 @@ static unsigned int safe_hex_to_uint(const char* hex, size_t len) {
 
 // ==================== Constructors / Destructor ====================
 TrafficMimicry::TrafficMimicry()
+    : tls_sequence_number_(0), dns_transaction_id_(0), quic_packet_number_(0),
+      tls_session_phase_(TlsSessionPhase::IDLE) {
     : tls_seq_(0), skype_seq_(0), zoom_seq_(0),
       dns_transaction_id_(0), dns_last_domain_idx_(0),
       quic_packet_number_(0) {
@@ -94,6 +96,8 @@ TrafficMimicry::TrafficMimicry()
 
 TrafficMimicry::TrafficMimicry(const MimicConfig& config)
     : config_(config),
+      tls_sequence_number_(0), dns_transaction_id_(0), quic_packet_number_(0),
+      tls_session_phase_(TlsSessionPhase::IDLE) {
       tls_seq_(0), skype_seq_(0), zoom_seq_(0),
       dns_transaction_id_(0), dns_last_domain_idx_(0),
       quic_packet_number_(0) {
@@ -1534,6 +1538,146 @@ std::vector<uint8_t> TrafficMimicry::create_generic_udp_wrapper(const std::vecto
     result.push_back(len & 0xFF);
     result.insert(result.end(), payload.begin(), payload.end());
     return result;
+}
+
+// ==================== TLS Session State Machine (Issue #57) ====================
+
+TlsSessionPhase TrafficMimicry::get_tls_session_phase() const {
+    return tls_session_phase_;
+}
+
+bool TrafficMimicry::is_tls_managed() const {
+    // Mimicry manages TLS framing when using any HTTPS profile
+    return config_.profile == MimicProfile::HTTPS_APPLICATION ||
+           config_.profile == MimicProfile::HTTPS_CLIENT_HELLO;
+}
+
+void TrafficMimicry::reset_tls_session() {
+    tls_session_phase_ = TlsSessionPhase::IDLE;
+    tls_sequence_number_ = 0;
+}
+
+std::vector<uint8_t> TrafficMimicry::create_fake_server_hello() {
+    // Build a minimal but structurally valid ServerHello (TLS 1.2)
+    std::vector<uint8_t> result;
+
+    // TLS Record Header
+    result.push_back(0x16);  // Handshake
+    result.push_back(0x03);
+    result.push_back(0x03);  // TLS 1.2
+    size_t record_length_pos = result.size();
+    result.push_back(0x00); result.push_back(0x00); // placeholder
+
+    // Handshake Header: ServerHello (0x02)
+    result.push_back(0x02);
+    size_t handshake_length_pos = result.size();
+    result.push_back(0x00); result.push_back(0x00); result.push_back(0x00);
+
+    // Server Version (TLS 1.2)
+    result.push_back(0x03); result.push_back(0x03);
+
+    // Server Random (32 bytes)
+    for (int i = 0; i < 32; ++i) result.push_back(ncp::csprng_byte());
+
+    // Session ID (echo back a 32-byte random session ID)
+    result.push_back(32);
+    for (int i = 0; i < 32; ++i) result.push_back(ncp::csprng_byte());
+
+    // Selected cipher suite: TLS_AES_128_GCM_SHA256 (0x1301)
+    result.push_back(0x13); result.push_back(0x01);
+
+    // Compression method: null
+    result.push_back(0x00);
+
+    // Extensions (minimal — supported_versions for TLS 1.3)
+    std::vector<uint8_t> exts;
+    // supported_versions (type 0x002B) — selected version TLS 1.3
+    exts.push_back(0x00); exts.push_back(0x2B);
+    exts.push_back(0x00); exts.push_back(0x02);
+    exts.push_back(0x03); exts.push_back(0x04); // TLS 1.3
+
+    uint16_t exts_len = static_cast<uint16_t>(exts.size());
+    result.push_back(static_cast<uint8_t>(exts_len >> 8));
+    result.push_back(static_cast<uint8_t>(exts_len & 0xFF));
+    result.insert(result.end(), exts.begin(), exts.end());
+
+    // Fix record length
+    size_t total_len = result.size() - 5;
+    result[record_length_pos] = static_cast<uint8_t>((total_len >> 8) & 0xFF);
+    result[record_length_pos + 1] = static_cast<uint8_t>(total_len & 0xFF);
+
+    // Fix handshake length
+    size_t hs_len = result.size() - 9;
+    result[handshake_length_pos] = static_cast<uint8_t>((hs_len >> 16) & 0xFF);
+    result[handshake_length_pos + 1] = static_cast<uint8_t>((hs_len >> 8) & 0xFF);
+    result[handshake_length_pos + 2] = static_cast<uint8_t>(hs_len & 0xFF);
+
+    return result;
+}
+
+std::vector<uint8_t> TrafficMimicry::create_fake_change_cipher_spec() {
+    // ChangeCipherSpec record: exactly 1 byte payload (0x01)
+    return {
+        0x14,        // ChangeCipherSpec
+        0x03, 0x03,  // TLS 1.2
+        0x00, 0x01,  // Length = 1
+        0x01         // Payload
+    };
+}
+
+std::vector<uint8_t> TrafficMimicry::create_fake_finished() {
+    // Encrypted Handshake (Finished) — looks like a Handshake record
+    // encrypted under the handshake traffic key. We simulate it
+    // as an opaque blob of plausible size (40 bytes).
+    std::vector<uint8_t> result;
+    result.push_back(0x16);  // Handshake (in TLS 1.2 wire format)
+    result.push_back(0x03);
+    result.push_back(0x03);  // TLS 1.2
+
+    const size_t finished_payload_size = 40;
+    result.push_back(static_cast<uint8_t>((finished_payload_size >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(finished_payload_size & 0xFF));
+
+    // Opaque encrypted Finished data
+    for (size_t i = 0; i < finished_payload_size; ++i) {
+        result.push_back(ncp::csprng_byte());
+    }
+    return result;
+}
+
+std::vector<std::vector<uint8_t>> TrafficMimicry::generate_tls_handshake_sequence() {
+    std::vector<std::vector<uint8_t>> sequence;
+
+    // 1. ClientHello — use empty payload (no data to embed yet)
+    std::vector<uint8_t> empty_payload;
+    sequence.push_back(create_https_client_hello_wrapper(empty_payload));
+
+    // 2. ServerHello
+    sequence.push_back(create_fake_server_hello());
+
+    // 3. ChangeCipherSpec (client -> server direction in TLS 1.2)
+    sequence.push_back(create_fake_change_cipher_spec());
+
+    // 4. Finished
+    sequence.push_back(create_fake_finished());
+
+    return sequence;
+}
+
+std::vector<uint8_t> TrafficMimicry::wrap_tls_session_aware(
+        const std::vector<uint8_t>& payload,
+        std::vector<std::vector<uint8_t>>& handshake_preamble) {
+
+    handshake_preamble.clear();
+
+    if (tls_session_phase_ == TlsSessionPhase::IDLE) {
+        // First packet on this session — must emit handshake first
+        handshake_preamble = generate_tls_handshake_sequence();
+        tls_session_phase_ = TlsSessionPhase::APPLICATION_DATA;
+    }
+
+    // Now safe to emit Application Data (0x17)
+    return create_https_application_wrapper(payload);
 }
 
 } // namespace ncp
