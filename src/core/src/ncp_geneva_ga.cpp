@@ -16,9 +16,11 @@ uint32_t GenevaGA::csprng_uniform(uint32_t upper_bound) {
     return randombytes_uniform(upper_bound);
 }
 
+// FIX: Full 32-bit precision instead of 20-bit (randombytes_uniform(1000000))
 double GenevaGA::csprng_double() {
-    uint32_t val = randombytes_uniform(1000000);
-    return static_cast<double>(val) / 1000000.0;
+    uint32_t val;
+    randombytes_buf(&val, sizeof(val));
+    return static_cast<double>(val) / 4294967296.0;  // 2^32
 }
 
 // ======================================================================
@@ -183,6 +185,9 @@ FitnessResult GenevaGA::evaluate_individual(const Individual& ind) {
     int total_retries = 0;
 
     for (int probe = 0; probe < config_.fitness_probes; ++probe) {
+        // Early exit if GA is stopping
+        if (!running_.load(std::memory_order_relaxed)) break;
+
         FitnessResult r = fitness_evaluator_(
             ind.strategy, target_host_, target_port_,
             config_.fitness_timeout_ms);
@@ -202,11 +207,24 @@ FitnessResult GenevaGA::evaluate_individual(const Individual& ind) {
     return result;
 }
 
+// FIX: evaluate_population() no longer used by evolution_loop().
+// Kept as public API for manual single-shot evaluation if needed.
 void GenevaGA::evaluate_population() {
-    std::lock_guard<std::mutex> lock(population_mutex_);
+    // Copy population under lock, evaluate without lock, write back under lock
+    std::vector<Individual> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(population_mutex_);
+        snapshot = population_;
+    }
 
-    for (auto& ind : population_) {
+    for (auto& ind : snapshot) {
+        if (!running_.load(std::memory_order_relaxed)) break;
         ind.fitness = evaluate_individual(ind);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(population_mutex_);
+        population_ = std::move(snapshot);
     }
 
     // Update stats
@@ -382,85 +400,119 @@ void GenevaGA::sort_population() {
         });
 }
 
+// FIX: Deadlock-free evolution.
+// Phase 1 (under lock): selection + crossover + mutation  — fast, <1ms
+// Phase 2 (NO lock):    evaluate new individuals          — slow, minutes
+// Phase 3 (under lock): write back + sort + update stats  — fast
 void GenevaGA::evolve_one_generation() {
-    std::lock_guard<std::mutex> lock(population_mutex_);
-
-    if (population_.empty()) return;
-
-    sort_population();
-
-    double old_best = population_.empty() ? 0.0 : population_[0].fitness.score();
-
-    // New population starts with elites
     std::vector<Individual> new_pop;
-    new_pop.reserve(config_.population_size);
+    double old_best = 0.0;
 
-    size_t elite = std::min(config_.elite_count, population_.size());
-    for (size_t i = 0; i < elite; ++i) {
-        new_pop.push_back(population_[i]);
-    }
+    // ── Phase 1: Build new population under lock (fast) ──────────────
+    {
+        std::lock_guard<std::mutex> lock(population_mutex_);
 
-    // Fill rest via selection + crossover + mutation
-    while (new_pop.size() < config_.population_size) {
-        Individual parent_a = tournament_select();
+        if (population_.empty()) return;
 
-        if (csprng_double() < config_.crossover_rate) {
-            Individual parent_b = tournament_select();
-            Individual child = crossover(parent_a, parent_b);
-            mutate(child);
-            new_pop.push_back(std::move(child));
-        } else {
-            // Clone with mutation
-            parent_a.id = next_id();
-            parent_a.generation += 1;
-            mutate(parent_a);
-            new_pop.push_back(std::move(parent_a));
+        sort_population();
+        old_best = population_[0].fitness.score();
+
+        new_pop.reserve(config_.population_size);
+
+        // Elites carry over with their existing fitness (no re-evaluation)
+        size_t elite = std::min(config_.elite_count, population_.size());
+        for (size_t i = 0; i < elite; ++i) {
+            new_pop.push_back(population_[i]);
+        }
+
+        // Fill rest via selection + crossover + mutation
+        while (new_pop.size() < config_.population_size) {
+            Individual parent_a = tournament_select();
+
+            if (csprng_double() < config_.crossover_rate) {
+                Individual parent_b = tournament_select();
+                Individual child = crossover(parent_a, parent_b);
+                mutate(child);
+                new_pop.push_back(std::move(child));
+            } else {
+                // Clone with mutation
+                parent_a.id = next_id();
+                parent_a.generation += 1;
+                // Reset fitness so it gets re-evaluated
+                parent_a.fitness = FitnessResult{};
+                mutate(parent_a);
+                new_pop.push_back(std::move(parent_a));
+            }
         }
     }
+    // ── Lock released ─────────────────────────────────────────────────
 
-    population_ = std::move(new_pop);
+    // ── Phase 2: Evaluate WITHOUT lock (slow — real TCP connects) ────
+    size_t evaluated_count = 0;
+    for (auto& ind : new_pop) {
+        if (!running_.load(std::memory_order_relaxed)) return;  // Early exit
 
-    // Evaluate the new population (without lock — we already hold it,
-    // so we call evaluator inline)
-    for (auto& ind : population_) {
-        if (ind.fitness.score() == 0.0) {  // Only unevaluated
+        // Only evaluate individuals that don't have fitness yet
+        // (elites already have valid fitness from previous generation)
+        if (ind.fitness.score() == 0.0 && !ind.fitness.connected) {
             ind.fitness = evaluate_individual(ind);
+            ++evaluated_count;
         }
     }
 
-    sort_population();
+    // ── Phase 3: Write back under lock (fast) ────────────────────────
+    // Collect stats and callbacks data under lock, fire callbacks outside
+    uint32_t gen = 0;
+    GAStats stats_snapshot;
+    double new_best_score = 0.0;
+    Individual best_individual;
 
-    // Update stats
+    {
+        std::lock_guard<std::mutex> lock(population_mutex_);
+        population_ = std::move(new_pop);
+        sort_population();
+
+        new_best_score = population_.empty() ? 0.0 : population_[0].fitness.score();
+        if (!population_.empty()) {
+            best_individual = population_[0];
+        }
+    }
+
+    // Update stats (separate lock)
     {
         std::lock_guard<std::mutex> slock(stats_mutex_);
         stats_.current_generation++;
-        stats_.population_size = population_.size();
-        stats_.total_evaluations += population_.size();
+        gen = stats_.current_generation;
+        stats_.total_evaluations += evaluated_count;
         stats_.last_evolution = std::chrono::steady_clock::now();
 
-        if (!population_.empty()) {
-            stats_.best_fitness = population_[0].fitness.score();
-            stats_.worst_fitness = population_.back().fitness.score();
-            stats_.best_strategy_desc = population_[0].strategy.description;
+        {
+            std::lock_guard<std::mutex> plock(population_mutex_);
+            stats_.population_size = population_.size();
+            if (!population_.empty()) {
+                stats_.best_fitness = population_[0].fitness.score();
+                stats_.worst_fitness = population_.back().fitness.score();
+                stats_.best_strategy_desc = population_[0].strategy.description;
 
-            double sum = 0.0;
-            for (const auto& ind : population_) {
-                sum += ind.fitness.score();
+                double sum = 0.0;
+                for (const auto& ind : population_) {
+                    sum += ind.fitness.score();
+                }
+                stats_.avg_fitness = sum / static_cast<double>(population_.size());
             }
-            stats_.avg_fitness = sum / static_cast<double>(population_.size());
         }
+
+        stats_snapshot = stats_;  // Copy for callback
     }
 
-    // Fire callbacks
-    double new_best = population_.empty() ? 0.0 : population_[0].fitness.score();
-
+    // ── Fire callbacks WITHOUT any lock held ─────────────────────────
+    // This prevents deadlock if callbacks call get_stats() or get_best()
     if (on_generation_) {
-        std::lock_guard<std::mutex> slock(stats_mutex_);
-        on_generation_(stats_.current_generation, stats_);
+        on_generation_(gen, stats_snapshot);
     }
 
-    if (new_best > old_best && on_new_best_ && !population_.empty()) {
-        on_new_best_(population_[0]);
+    if (new_best_score > old_best && on_new_best_) {
+        on_new_best_(best_individual);
     }
 }
 
@@ -475,7 +527,7 @@ bool GenevaGA::check_best_health() {
         if (population_.empty()) return false;
         best = population_[0];
     }
-
+    // Evaluate WITHOUT lock — correct pattern
     FitnessResult result = evaluate_individual(best);
     return result.connected;
 }
@@ -517,9 +569,11 @@ bool GenevaGA::is_running() const {
     return running_.load();
 }
 
+// FIX: Removed evaluate_population() call — evolve_one_generation()
+// already evaluates unevaluated individuals. This eliminates the
+// double-evaluation bug (elites were probed twice per generation).
 void GenevaGA::evolution_loop() {
     while (running_.load()) {
-        evaluate_population();
         evolve_one_generation();
 
         // Check stop conditions
@@ -528,13 +582,10 @@ void GenevaGA::evolution_loop() {
             if (stats_.current_generation >= config_.max_generations) {
                 break;
             }
-            if (stats_.best_fitness >= config_.target_fitness) {
-                // Target reached — slow down evolution but keep running
-                // for adaptive response to DPI changes
-            }
+            // Target reached — slow down but keep running for adaptive response
         }
 
-        // Sleep between generations
+        // Interruptible sleep between generations
         for (int i = 0; i < config_.evolution_interval_sec && running_.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
@@ -543,7 +594,7 @@ void GenevaGA::evolution_loop() {
 
 void GenevaGA::health_check_loop() {
     while (running_.load()) {
-        // Sleep first
+        // Sleep first (interruptible)
         for (int i = 0; i < config_.health_check_interval_sec && running_.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
@@ -557,8 +608,7 @@ void GenevaGA::health_check_loop() {
 
             if (consecutive_health_fails_ >= config_.consecutive_failures) {
                 // TSPU/DPI updated! Current strategy is dead.
-                // Trigger re-evolution: reset population, keep elites,
-                // inject fresh random individuals
+                // Trigger re-evolution: keep elites, inject presets + fresh random
                 {
                     std::lock_guard<std::mutex> lock(population_mutex_);
 
@@ -603,14 +653,17 @@ void GenevaGA::health_check_loop() {
                     }
                 }
 
+                // FIX: Copy stats under lock, fire callback WITHOUT lock
+                // Prevents deadlock if callback calls get_stats()
+                uint32_t re_evo_count;
                 {
                     std::lock_guard<std::mutex> slock(stats_mutex_);
                     stats_.re_evolutions++;
+                    re_evo_count = stats_.re_evolutions;
                 }
 
                 if (on_re_evolution_) {
-                    std::lock_guard<std::mutex> slock(stats_mutex_);
-                    on_re_evolution_(stats_.re_evolutions);
+                    on_re_evolution_(re_evo_count);
                 }
 
                 consecutive_health_fails_ = 0;
@@ -660,6 +713,10 @@ GAStats GenevaGA::get_stats() const {
 
 // ======================================================================
 //  Callbacks
+//  NOTE: All callbacks MUST be set before calling start().
+//  Setting callbacks while evolution is running is a data race on
+//  std::function (UB). This is by design — callbacks are configuration,
+//  not runtime state.
 // ======================================================================
 
 void GenevaGA::on_generation(GenerationCallback cb) {
