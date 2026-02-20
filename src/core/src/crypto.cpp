@@ -51,60 +51,81 @@ SecureMemory Crypto::generate_random(size_t size) {
     return result;
 }
 
+// ==================== ChaCha20-Poly1305 IETF (RFC 8439) ====================
+// FIX #63: Previously used crypto_secretbox_easy() which is XSalsa20-Poly1305.
+// Now uses crypto_aead_chacha20poly1305_ietf — actual ChaCha20-Poly1305 per RFC 8439.
+// Wire format: [nonce:12 bytes][ciphertext + Poly1305 tag:N+16 bytes]
+
 SecureMemory Crypto::encrypt_chacha20(
     const SecureMemory& plaintext,
     const SecureMemory& key
 ) {
-    if (key.size() != crypto_secretbox_KEYBYTES) {
-        throw std::runtime_error("Invalid key size for ChaCha20");
+    if (key.size() != crypto_aead_chacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Invalid key size for ChaCha20-Poly1305 (expected 32 bytes)");
     }
     
-    // Generate random nonce
-    SecureMemory nonce(crypto_secretbox_NONCEBYTES);
-    randombytes_buf(nonce.data(), nonce.size());
+    // Generate random 12-byte nonce (IETF ChaCha20-Poly1305)
+    constexpr size_t NONCE_LEN = crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // 12
+    constexpr size_t TAG_LEN = crypto_aead_chacha20poly1305_ietf_ABYTES;      // 16
     
-    // Ciphertext will be: nonce + encrypted_data + auth_tag
-    SecureMemory ciphertext(crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES + plaintext.size());
+    SecureMemory nonce(NONCE_LEN);
+    randombytes_buf(nonce.data(), NONCE_LEN);
+    
+    // Ciphertext: nonce || (encrypted_data + auth_tag)
+    SecureMemory ciphertext(NONCE_LEN + plaintext.size() + TAG_LEN);
     
     // Copy nonce to beginning
-    std::memcpy(ciphertext.data(), nonce.data(), nonce.size());
+    std::memcpy(ciphertext.data(), nonce.data(), NONCE_LEN);
     
-    // Encrypt
-    if (crypto_secretbox_easy(
-            ciphertext.data() + crypto_secretbox_NONCEBYTES,
+    // Encrypt with ChaCha20-Poly1305 IETF (no additional data)
+    unsigned long long ciphertext_len = 0;
+    if (crypto_aead_chacha20poly1305_ietf_encrypt(
+            ciphertext.data() + NONCE_LEN,
+            &ciphertext_len,
             plaintext.data(), plaintext.size(),
-            nonce.data(), key.data()) != 0) {
-        throw std::runtime_error("Encryption failed");
+            nullptr, 0,   // no additional data
+            nullptr,       // nsec (unused)
+            nonce.data(),
+            key.data()) != 0) {
+        throw std::runtime_error("ChaCha20-Poly1305 encryption failed");
     }
     
     return ciphertext;
 }
 
- SecureMemory Crypto::decrypt_chacha20(
+SecureMemory Crypto::decrypt_chacha20(
     const SecureMemory& ciphertext,
     const SecureMemory& key
 ) {
-    if (key.size() != crypto_secretbox_KEYBYTES) {
-        throw std::runtime_error("Invalid key size for ChaCha20");
+    if (key.size() != crypto_aead_chacha20poly1305_ietf_KEYBYTES) {
+        throw std::runtime_error("Invalid key size for ChaCha20-Poly1305 (expected 32 bytes)");
     }
     
-    if (ciphertext.size() < crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES) {
-        throw std::runtime_error("Ciphertext too short");
+    constexpr size_t NONCE_LEN = crypto_aead_chacha20poly1305_ietf_NPUBBYTES; // 12
+    constexpr size_t TAG_LEN = crypto_aead_chacha20poly1305_ietf_ABYTES;      // 16
+    
+    if (ciphertext.size() < NONCE_LEN + TAG_LEN) {
+        throw std::runtime_error("Ciphertext too short for ChaCha20-Poly1305");
     }
     
-    // Extract nonce
+    // Extract nonce from beginning
     const uint8_t* nonce = ciphertext.data();
-    const uint8_t* encrypted_data = ciphertext.data() + crypto_secretbox_NONCEBYTES;
-    size_t encrypted_len = ciphertext.size() - crypto_secretbox_NONCEBYTES;
+    const uint8_t* encrypted_data = ciphertext.data() + NONCE_LEN;
+    size_t encrypted_len = ciphertext.size() - NONCE_LEN;
     
     // Decrypt
-     SecureMemory plaintext(encrypted_len - crypto_secretbox_MACBYTES);
+    SecureMemory plaintext(encrypted_len - TAG_LEN);
+    unsigned long long plaintext_len = 0;
     
-    if (crypto_secretbox_open_easy(
+    if (crypto_aead_chacha20poly1305_ietf_decrypt(
             plaintext.data(),
-                encrypted_data, encrypted_len,
-            nonce, key.data()) != 0) {
-        throw std::runtime_error("Decryption failed or authentication failed");
+            &plaintext_len,
+            nullptr,       // nsec (unused)
+            encrypted_data, encrypted_len,
+            nullptr, 0,    // no additional data
+            nonce,
+            key.data()) != 0) {
+        throw std::runtime_error("ChaCha20-Poly1305 decryption failed or authentication failed");
     }
     
     return plaintext;
