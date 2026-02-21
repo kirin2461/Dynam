@@ -111,6 +111,49 @@ inline std::vector<uint8_t> csprng_bytes(size_t count) {
     return result;
 }
 
+/// CSPRNG — OOP wrapper around the csprng_* free functions.
+/// Provides CSPRNG::uniform_double(), CSPRNG::shuffle(), etc.
+/// used by ncp_timing.cpp, ncp_identity.cpp and others (Phase 0.11).
+struct CSPRNG {
+    /// Uniform double in [min_val, max_val)
+    static inline double uniform_double(double min_val, double max_val) {
+        return csprng_double_range(min_val, max_val);
+    }
+    /// Uniform double in [0.0, 1.0)
+    static inline double uniform_double() {
+        return csprng_double();
+    }
+    /// Uniform uint32_t in [0, upper_bound)
+    static inline uint32_t uniform_uint32(uint32_t upper_bound) {
+        return csprng_uniform(upper_bound);
+    }
+    /// Uniform int in [min_val, max_val]
+    static inline int uniform_int(int min_val, int max_val) {
+        return csprng_range(min_val, max_val);
+    }
+    /// Random boolean with given probability of true
+    static inline bool coin(double probability = 0.5) {
+        return csprng_coin(probability);
+    }
+    /// Fisher-Yates shuffle of any random-access container
+    template<typename Container>
+    static void shuffle(Container& c) {
+        csprng_shuffle(c.begin(), c.end());
+    }
+    /// Fill buffer with random bytes
+    static inline void fill(void* buf, size_t len) {
+        csprng_fill(buf, len);
+    }
+    /// Fill vector with random bytes
+    static inline void fill(std::vector<uint8_t>& buf) {
+        csprng_fill(buf);
+    }
+    /// Random bytes as vector
+    static inline std::vector<uint8_t> bytes(size_t count) {
+        return csprng_bytes(count);
+    }
+};
+
 } // namespace ncp
 
 #endif // NCP_CSPRNG_HPP
