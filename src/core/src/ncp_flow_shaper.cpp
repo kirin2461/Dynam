@@ -81,7 +81,7 @@ BurstModel BurstModel::gaming() {
     m.burst_packets_min = 100; m.burst_packets_max = 1000;
     m.burst_inter_ms_min = 15.0; m.burst_inter_ms_max = 50.0;
     m.pause_ms_min = 0.0; m.pause_ms_max = 100.0;
-    m.timing_distribution = Distribution::UNIFORM; m.pareto_alpha = 3.0;
+    m.timing_distribution = Distribution::GAUSSIAN; m.pareto_alpha = 3.0;
     return m;
 }
 BurstModel BurstModel::file_download() {
