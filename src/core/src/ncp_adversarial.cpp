@@ -138,7 +138,7 @@ AdversarialPadding::~AdversarialPadding() {
 }
 
 AdversarialPadding::AdversarialPadding(AdversarialPadding&& o) noexcept
-    : config_(std::move(o.config_)),
+    : config_(std::move(o.config_)),       stats_(o.stats_),
       active_strategy_(o.active_strategy_),
       feedback_history_(std::move(o.feedback_history_)),
       packets_since_evaluation_(o.packets_since_evaluation_),
