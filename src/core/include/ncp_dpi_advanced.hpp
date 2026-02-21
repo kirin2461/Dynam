@@ -302,7 +302,8 @@ public:
      * handles TLS framing.
      */
     void set_mimicry_managed_tls(bool managed);
-     * @brief Set TLS fingerprint for the advanced bypass pipeline.
+    /**     
+* @brief Set TLS fingerprint for the advanced bypass pipeline.
      *        The fingerprint is forwarded to internal TLSManipulator
      *        so that fake/real ClientHello use realistic browser profiles.
      * @param fp Pointer to TLSFingerprint (not owned, caller keeps alive).
