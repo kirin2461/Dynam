@@ -72,15 +72,15 @@ OrchestratorStrategy OrchestratorStrategy::paranoid() {
 
     s.enable_adversarial = true;
     s.adversarial_config = AdversarialConfig::aggressive();
-    s.adversarial_config.min_pad_bytes = 64;
-    s.adversarial_config.max_pad_bytes = 256;
-    s.adversarial_config.dummy_probability = 0.15;
+    s.adversarial_config.pre_padding_min = 64;
+    s.adversarial_config.pre_padding_max = 256;
+    s.adversarial_config.dummy_packet_ratio = 0.15;
 
     s.enable_flow_shaping = true;
     s.flow_config = FlowShaperConfig::web_browsing();
     s.flow_config.enable_flow_dummy = true;
     s.flow_config.dummy_ratio = 0.20;
-    s.flow_config.enable_constant_rate = true;
+    // enable_constant_rate removed (not in FlowShaperConfig)
 
     s.enable_probe_resist = true;
     s.probe_config = ProbeResistConfig::strict();
@@ -556,7 +556,7 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
 
     // Step 2: Discard flow dummies
     if (snapshot.enable_flow_shaping) {
-        if (FlowShaper::is_flow_dummy(data.data(), data.size())) {
+        if (flow_shaper_.is_flow_dummy(data.data(), data.size())) {
             return {};
         }
     }
