@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#define _USE_MATH_DEFINES
 #include <cmath>
 #include <cassert>
 #include <condition_variable>
@@ -796,3 +797,10 @@ void FlowShaper::reset_stats() {
 
 } // namespace DPI
 } // namespace ncp
+
+void FlowShaper::update_config(const FlowShaperConfig& cfg) {
+    std::unique_lock<std::shared_mutex> wlock(config_mutex_);
+    config_ = cfg;
+    apply_profile_defaults();
+    precompute_weights();
+}
