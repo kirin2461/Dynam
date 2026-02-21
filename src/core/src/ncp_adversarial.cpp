@@ -137,8 +137,30 @@ AdversarialPadding::~AdversarialPadding() {
     sodium_memzero(dummy_marker_, sizeof(dummy_marker_));
 }
 
-AdversarialPadding::AdversarialPadding(AdversarialPadding&&) noexcept = default;
-AdversarialPadding& AdversarialPadding::operator=(AdversarialPadding&&) noexcept = default;
+AdversarialPadding::AdversarialPadding(AdversarialPadding&& o) noexcept
+    : config_(std::move(o.config_)),
+      active_strategy_(o.active_strategy_),
+      feedback_history_(std::move(o.feedback_history_)),
+      packets_since_evaluation_(o.packets_since_evaluation_),
+      strategy_scores_(o.strategy_scores_),
+      session_dummy_key_(std::move(o.session_dummy_key_)),
+      has_session_key_(o.has_session_key_) {
+    std::memcpy(dummy_marker_, o.dummy_marker_, sizeof(dummy_marker_));
+}
+AdversarialPadding& AdversarialPadding::operator=(AdversarialPadding&& o) noexcept {
+    if (this != &o) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        config_ = std::move(o.config_);
+        active_strategy_ = o.active_strategy_;
+        feedback_history_ = std::move(o.feedback_history_);
+        packets_since_evaluation_ = o.packets_since_evaluation_;
+        strategy_scores_ = o.strategy_scores_;
+        session_dummy_key_ = std::move(o.session_dummy_key_);
+        has_session_key_ = o.has_session_key_;
+        std::memcpy(dummy_marker_, o.dummy_marker_, sizeof(dummy_marker_));
+    }
+    return *this;
+}
 
 // ===== Dummy Marker Derivation =====
 // Caller must hold mutex_
