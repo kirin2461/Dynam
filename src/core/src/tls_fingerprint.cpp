@@ -664,21 +664,27 @@ static void minor_permute(std::vector<T>& v, uint32_t max_swaps = 2) {
 // Minor permutation for extensions: only swap within non-critical extensions.
 // server_name (0) must stay first, supported_versions (43) and key_share (51)
 // must stay near the end. We permute the middle section.
+// FIX #5: handle short lists with fallback swaps
 static void minor_permute_extensions(std::vector<uint16_t>& exts, uint32_t max_swaps = 2) {
-    if (exts.size() < 4) return;
+    if (exts.size() < 2) return;
 
     // Keep first element (server_name) and last 2 elements fixed
     size_t start = 1;
-    size_t end = exts.size() - 2;
-    size_t permutable = end - start;
-    if (permutable < 2) return;
+    size_t end = exts.size() > 2 ? exts.size() - 2 : exts.size();
+    size_t permutable = end > start ? end - start : 0;
 
-    uint32_t num_swaps = randombytes_uniform(max_swaps) + 1;
-    for (uint32_t s = 0; s < num_swaps; ++s) {
-        auto idx = start + randombytes_uniform(static_cast<uint32_t>(permutable - 1));
-        std::swap(exts[idx], exts[idx + 1]);
+    if (permutable >= 2) {
+        // Normal path: enough elements for proper permutation
+        uint32_t num_swaps = randombytes_uniform(max_swaps) + 1;
+        for (uint32_t s = 0; s < num_swaps; ++s) {
+            auto idx = start + randombytes_uniform(static_cast<uint32_t>(permutable - 1));
+            std::swap(exts[idx], exts[idx + 1]);
+        }
+    } else if (exts.size() >= 2) {
+        // Fallback: list too short for middle-section permutation,
+        // just do a single swap of the first two elements
+        std::swap(exts[0], exts[1]);
     }
-}
 
 void TLSFingerprint::randomize_all() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
