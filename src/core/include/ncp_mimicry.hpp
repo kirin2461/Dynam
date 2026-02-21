@@ -14,7 +14,7 @@
 namespace ncp {
 
 /**
- * @brief TLS session phase — tracks the state machine so that
+ * @brief TLS session phase - tracks the state machine so that
  *        Mimicry never emits Application Data (0x17) before a
  *        complete handshake sequence (0x16) has been sent.
  *
@@ -22,10 +22,10 @@ namespace ncp {
  * which is an instant DPI anomaly signal.
  */
 enum class TlsSessionPhase {
-    IDLE,                   // No TLS records sent yet
-    CLIENT_HELLO_SENT,      // ClientHello (0x16) emitted
-    HANDSHAKE_COMPLETE,     // Fake ServerHello+Finished emitted
-    APPLICATION_DATA        // Ready for Application Data (0x17)
+    IDLE,               // No TLS records sent yet
+    CLIENT_HELLO_SENT,  // ClientHello (0x16) emitted
+    HANDSHAKE_COMPLETE, // Fake ServerHello+Finished emitted
+    APPLICATION_DATA    // Ready for Application Data (0x17)
 };
 
 /**
@@ -34,60 +34,70 @@ enum class TlsSessionPhase {
  */
 class TrafficMimicry {
 public:
-    /**
-     * @brief Wire format version for mimicry protocols.
-     *
-     * Both peers MUST use the same MIMICRY_WIRE_VERSION for wrap/unwrap
-     * to succeed.  Embedded in TLS ClientHello (Random[24]),
-     * QUIC Initial (plaintext[0]), and BitTorrent (reserved[4]).
-     *
-     * Increment on ANY breaking wire-format change.
-     *
-     * History:
-     *   v1 — legacy (XOR ClientHello, no ct_len in QUIC, payload-leak BT)
-     *   v2 — AEAD-only ClientHello, QUIC ct_len field, safe BT info_hash
-     */
-    static constexpr uint8_t MIMICRY_WIRE_VERSION = 2;
-
     enum class MimicProfile {
-        HTTP_GET,            // HTTP/1.1 GET request
-        HTTP_POST,           // HTTP/1.1 POST request
-        HTTPS_CLIENT_HELLO,  // TLS ClientHello
-        HTTPS_APPLICATION,   // TLS Application Data
-        DNS_QUERY,           // DNS Query
-        DNS_RESPONSE,        // DNS Response
-        QUIC_INITIAL,        // QUIC Initial packet
-        WEBSOCKET,           // WebSocket frame
-        BITTORRENT,          // BitTorrent protocol
-        SKYPE,               // Skype-like traffic
-        ZOOM,                // Zoom-like video conference
-        GENERIC_TCP,         // Generic TCP stream
-        GENERIC_UDP          // Generic UDP datagram
+        HTTP_GET,           // HTTP/1.1 GET request
+        HTTP_POST,          // HTTP/1.1 POST request
+        HTTPS_CLIENT_HELLO, // TLS ClientHello
+        HTTPS_APPLICATION,  // TLS Application Data
+        DNS_QUERY,          // DNS Query
+        DNS_RESPONSE,       // DNS Response
+        QUIC_INITIAL,       // QUIC Initial packet
+        WEBSOCKET,          // WebSocket frame
+        BITTORRENT,         // BitTorrent protocol
+        SKYPE,              // Skype-like traffic
+        ZOOM,               // Zoom-like video conference
+        GENERIC_TCP,        // Generic TCP stream
+        GENERIC_UDP         // Generic UDP datagram
     };
-    
+
     struct MimicConfig {
         MimicProfile profile = MimicProfile::HTTPS_APPLICATION;
         bool enable_timing_mimicry = true;   // Mimic real protocol timing
-        bool enable_size_mimicry = true;     // Mimic real packet sizes
+        bool enable_size_mimicry   = true;   // Mimic real packet sizes
         bool enable_pattern_mimicry = true;  // Mimic protocol patterns
         bool randomize_fields = true;        // Randomize non-critical fields
-        
+
         // Timing parameters (milliseconds)
         int min_inter_packet_delay = 10;
         int max_inter_packet_delay = 500;
-        
+
         // Size parameters
         int min_padding = 0;
         int max_padding = 512;
-        
+
         // Protocol-specific options
-        std::string http_user_agent;         // Custom User-Agent
-        std::string http_host;               // Custom Host header
-        std::vector<std::string> http_headers;  // Additional headers
-        std::string tls_sni;                 // SNI for TLS
-        std::vector<uint16_t> tls_cipher_suites;  // TLS cipher suites
+        std::string http_user_agent;                // Custom User-Agent
+        std::string http_host;                      // Custom Host header
+        std::vector<std::string> http_headers;      // Additional headers
+        std::string tls_sni;                        // SNI for TLS
+        std::vector<uint16_t> tls_cipher_suites;    // TLS cipher suites
+
+        /**
+         * @brief Wire format version.
+         * 0 = generate random value (1-255) at object construction.
+         * Non-zero = use exactly this value.
+         * Both peers must agree on the same value.
+         * History:
+         *   v1 - legacy (XOR ClientHello, no ct_len in QUIC, payload-leak BT)
+         *   v2 - AEAD-only ClientHello, QUIC ct_len field, safe BT info_hash
+         *   v3 - XChaCha20-Poly1305 for Application Data, atomic state
+         */
+        uint8_t wire_version = 0;
+
+        /**
+         * @brief TLS session key rotation threshold (packets).
+         * 0 = disabled (key never rotated automatically).
+         * After this many wrap calls the key is regenerated.
+         */
+        uint64_t tls_key_rotation_packets = 0;
+
+        /**
+         * @brief Minimum QUIC Initial packet size in bytes.
+         * Default 1200 (RFC 9000 minimum). Can be reduced to save bandwidth.
+         */
+        uint16_t quic_min_packet_size = 1200;
     };
-    
+
     struct MimicStats {
         std::atomic<uint64_t> packets_wrapped{0};
         std::atomic<uint64_t> packets_unwrapped{0};
@@ -115,103 +125,117 @@ public:
     };
 
     static constexpr size_t MAX_DNS_PAYLOAD = 100;
-    
+
     TrafficMimicry();
     explicit TrafficMimicry(const MimicConfig& config);
     ~TrafficMimicry();
-    
+
     std::vector<uint8_t> wrap_payload(
         const std::vector<uint8_t>& payload,
         MimicProfile profile
     );
-    
     std::vector<uint8_t> wrap_payload(
         const std::vector<uint8_t>& payload
     );
-
     std::vector<uint8_t> wrap_tls_session_aware(
         const std::vector<uint8_t>& payload,
         std::vector<std::vector<uint8_t>>& handshake_preamble
     );
-
     std::vector<std::vector<uint8_t>> generate_tls_handshake_sequence();
     void reset_tls_session();
     TlsSessionPhase get_tls_session_phase() const;
     bool is_tls_managed() const;
-    
+
     std::vector<uint8_t> unwrap_payload(
         const std::vector<uint8_t>& mimicked_data,
         MimicProfile profile
     );
-    
     std::vector<uint8_t> unwrap_payload(
         const std::vector<uint8_t>& mimicked_data
     );
-    
+
     void set_config(const MimicConfig& config);
     MimicConfig get_config() const;
-    
     MimicStats get_stats() const;
     void reset_stats();
-    
     MimicProfile detect_profile(const std::vector<uint8_t>& data);
     std::chrono::milliseconds get_next_packet_delay();
 
     void set_tls_session_key(const std::vector<uint8_t>& key);
     std::vector<uint8_t> get_tls_session_key() const;
-    
+
+    /**
+     * @brief Rotate the TLS session key immediately.
+     * Generates a new random 32-byte key and securely wipes the old one.
+     * Resets the packet counter for automatic rotation.
+     */
+    void rotate_tls_session_key();
+
 private:
     std::vector<uint8_t> create_http_get_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_http_post_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_http_payload(const std::vector<uint8_t>& data);
-    
+
     std::vector<uint8_t> create_https_client_hello_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_https_application_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_tls_payload(const std::vector<uint8_t>& data);
-
     std::vector<uint8_t> create_fake_server_hello();
     std::vector<uint8_t> create_fake_change_cipher_spec();
     std::vector<uint8_t> create_fake_finished();
-    
+
     std::vector<uint8_t> create_dns_query_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_dns_response_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_dns_payload(const std::vector<uint8_t>& data);
-    
+
     std::vector<uint8_t> create_quic_initial_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_quic_payload(const std::vector<uint8_t>& data);
-    
+
     std::vector<uint8_t> create_websocket_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_websocket_payload(const std::vector<uint8_t>& data);
-    
+
     std::vector<uint8_t> create_bittorrent_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_bittorrent_payload(const std::vector<uint8_t>& data);
+
     std::vector<uint8_t> create_skype_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_zoom_wrapper(const std::vector<uint8_t>& payload);
-    
     std::vector<uint8_t> create_generic_tcp_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> create_generic_udp_wrapper(const std::vector<uint8_t>& payload);
-    
+
     std::string generate_random_http_path();
     std::string generate_random_user_agent();
     std::string generate_random_hostname();
-    uint16_t generate_random_port();
+    uint16_t    generate_random_port();
     std::vector<uint8_t> generate_random_padding(size_t min_size, size_t max_size);
     std::chrono::milliseconds calculate_realistic_delay(MimicProfile profile, size_t packet_size);
-    
+
     MimicConfig config_;
-    MimicStats stats_;
+    MimicStats  stats_;
     mutable std::mutex stats_overhead_mutex_;
     std::chrono::steady_clock::time_point last_packet_time_;
-    
-    uint32_t tls_seq_;
-    uint32_t skype_seq_;
-    uint32_t zoom_seq_;
-    uint16_t dns_transaction_id_;
-    int      dns_last_domain_idx_;
-    uint64_t quic_packet_number_;
 
-    TlsSessionPhase tls_session_phase_ = TlsSessionPhase::IDLE;
-    std::vector<uint8_t> tls_session_key_;
+    // ---- Thread-safe state counters (Task #2: atomics) ----
+    std::atomic<uint64_t> tls_seq_{0};
+    std::atomic<uint32_t> skype_seq_{0};
+    std::atomic<uint32_t> zoom_seq_{0};
+    std::atomic<uint16_t> dns_transaction_id_{0};
+    std::atomic<int>      dns_last_domain_idx_{0};
+    std::atomic<uint64_t> quic_packet_number_{0};
+    // TlsSessionPhase stored as int for std::atomic compatibility
+    std::atomic<int>      tls_session_phase_{static_cast<int>(TlsSessionPhase::IDLE)};
+
+    // ---- TLS session key (Task #1, #3) ----
+    std::vector<uint8_t>  tls_session_key_;
+    mutable std::mutex    tls_key_mutex_;
+
+    /// Counts wrap calls since last key rotation (Task #3)
+    std::atomic<uint64_t> tls_packets_since_key_rotation_{0};
+
+    // ---- Wire version (Task #4) ----
+    /// Effective wire version byte used in all protocol fields.
+    /// Derived from config_.wire_version at construction:
+    ///   0  -> random byte 1-255
+    ///   N  -> exactly N
+    uint8_t wire_version_ = 2;
 };
 
 } // namespace ncp
