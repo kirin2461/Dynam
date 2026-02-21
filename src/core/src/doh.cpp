@@ -633,7 +633,7 @@ DoHClient::DNSResult DoHClient::resolve(const std::string& hostname, RecordType 
     DNSResult result = perform_doh_query(hostname, type);
 
     if (!result.addresses.empty() || !result.cnames.empty()) {
-                        { std::lock_guard<std::mutex> lock(impl3->cache_mutex); impl3->stats.successful_queries++; }
+                                    { std::lock_guard<std::mutex> lock(pImpl->cache_mutex); pImpl->stats.successful_queries++; }
 
         if (pImpl->config.enable_cache) {
             std::lock_guard<std::mutex> lock(pImpl->cache_mutex);
@@ -646,7 +646,7 @@ DoHClient::DNSResult DoHClient::resolve(const std::string& hostname, RecordType 
             }
         }
     } else {
-                                { std::lock_guard<std::mutex> lock(impl3->cache_mutex); impl3->stats.failed_queries++; }
+                                            { std::lock_guard<std::mutex> lock(pImpl->cache_mutex); pImpl->stats.failed_queries++; }
 
         if (pImpl->config.fallback_to_system_dns && result.addresses.empty()) {
             result = fallback_to_system_dns(hostname, type);
