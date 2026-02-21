@@ -305,11 +305,12 @@ public:
     ProbeResistConfig get_config() const;
 
     ProbeResistStats get_stats() const;
-    void reset_stats();
+    void reset_stats();     
+    void cleanup_stale_data();
 
 private:
     void emit_event(const ProbeEvent& event);
-    void cleanup_stale_data();
+    
 
     // FIX #26: config_ protected by shared_mutex (readers use shared_lock,
     // set_config uses unique_lock). process_connection() snapshots config_
