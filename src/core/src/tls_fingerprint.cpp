@@ -685,7 +685,7 @@ static void minor_permute_extensions(std::vector<uint16_t>& exts, uint32_t max_s
         // just do a single swap of the first two elements
         std::swap(exts[0], exts[1]);
     }
-
+}
 void TLSFingerprint::randomize_all() {
     std::lock_guard<std::mutex> lock(pImpl->mu);
 
