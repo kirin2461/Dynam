@@ -144,7 +144,7 @@ struct AdversarialStats {
           tcp_mutations_applied(o.tcp_mutations_applied.load()),
           strategy_switches(o.strategy_switches.load()),
           size_normalizations(o.size_normalizations.load()),
-          current_strategy(o.current_strategy) {}
+          current_strategy(o.current_strategy) {}     AdversarialStats& operator=(const AdversarialStats& o) {         if (this != &o) {             packets_processed.store(o.packets_processed.load());             packets_padded.store(o.packets_padded.load());             bytes_original.store(o.bytes_original.load());             bytes_padding_added.store(o.bytes_padding_added.load());             dummy_packets_injected.store(o.dummy_packets_injected.load());             tcp_mutations_applied.store(o.tcp_mutations_applied.load());             strategy_switches.store(o.strategy_switches.load());             size_normalizations.store(o.size_normalizations.load());             current_strategy = o.current_strategy;         }         return *this;     }
 };
 
 // ===== Detection Feedback =====
