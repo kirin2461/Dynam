@@ -3,7 +3,6 @@
 
 // Only depends on secure memory types, NOT on TLS fingerprinting
 #include "ncp_secure_memory.hpp"
-
 #include <vector>
 #include <string>
 #include <memory>
@@ -15,6 +14,11 @@
 #include <array>
 
 namespace ncp {
+
+/**
+ * @brief Global library initialization (OpenSSL threading, libsodium, etc.)
+ */
+void init_library();
 
 enum class E2ESessionState {
     Uninitialized,
@@ -36,8 +40,8 @@ enum class KeyExchangeProtocol {
 };
 
 struct RatchetState {
-    SecureMemory root_key;    // 32 bytes
-    SecureMemory chain_key;   // 32 bytes (legacy — see sending_chain_key)
+    SecureMemory root_key;        // 32 bytes
+    SecureMemory chain_key;       // 32 bytes (legacy — see sending_chain_key)
     uint32_t sending_chain_length = 0;
     uint32_t receiving_chain_length = 0;
     uint32_t previous_chain_length = 0;
@@ -53,7 +57,7 @@ struct KeyPair {
 };
 
 struct MessageHeader {
-    uint8_t version = 1;
+    uint8_t version = 2; 
     uint32_t message_number = 0;
     uint32_t previous_chain_length = 0;
     std::vector<uint8_t> dh_public_key;
@@ -65,7 +69,7 @@ struct EncryptedMessage {
     MessageHeader header;
     std::vector<uint8_t> ciphertext;
     std::vector<uint8_t> auth_tag;
-    std::vector<uint8_t> nonce;           // for xchacha20 (24 bytes)
+    std::vector<uint8_t> nonce;        // for xchacha20 (24 bytes)
     std::chrono::system_clock::time_point timestamp;
 };
 
@@ -104,6 +108,13 @@ public:
         const KeyPair& local_keypair,
         const std::vector<uint8_t>& peer_public_key
     );
+
+    /**
+     * @brief Post-Quantum KEM methods
+     */
+    static SecureMemory encapsulate(const std::vector<uint8_t>& peer_public_key, std::vector<uint8_t>& out_ciphertext);
+    static SecureMemory decapsulate(const KeyPair& local_keypair, const std::vector<uint8_t>& ciphertext);
+
     SecureMemory derive_keys(
         const SecureMemory& shared_secret,
         const std::string& context,
@@ -111,9 +122,6 @@ public:
     );
 
     // FIX #61: Getter for Kyber1024 KEM ciphertext.
-    // After compute_shared_secret() in sender mode (encaps), the ciphertext
-    // must be transmitted to the receiver for decapsulation.
-    // Returns empty vector if not in Kyber mode or no encaps performed.
     std::vector<uint8_t> get_last_kem_ciphertext() const;
 
     // Low-level encrypt/decrypt with explicit key
@@ -156,7 +164,7 @@ public:
 
 private:
     void init_ratchet_keys();
-
+    
     /// Internal: decrypt a message using an already-derived message key.
     std::optional<std::vector<uint8_t>> decrypt_with_key_(
         const EncryptedMessage& msg,
@@ -182,6 +190,7 @@ public:
     std::vector<std::string> get_active_sessions() const;
     size_t get_session_count() const;
     void rotate_all_keys();
+
     void export_keys(const std::string& filepath, const SecureString& password);
     bool import_keys(const std::string& filepath, const SecureString& password);
 
@@ -197,18 +206,22 @@ namespace E2EUtils {
         const std::vector<uint8_t>& info,
         size_t output_length
     );
+
     SecureMemory hkdf_expand(
         const SecureMemory& prk,
         const std::vector<uint8_t>& info,
         size_t length
     );
+
     std::vector<uint8_t> pad_message(
         const std::vector<uint8_t>& message,
         size_t block_size = 128
     );
+
     std::optional<std::vector<uint8_t>> unpad_message(
         const std::vector<uint8_t>& padded_message
     );
+
     std::vector<uint8_t> serialize_message(const EncryptedMessage& msg);
     std::optional<EncryptedMessage> deserialize_message(
         const std::vector<uint8_t>& data
