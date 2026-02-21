@@ -225,11 +225,11 @@ std::vector<uint8_t> DoHClient::build_dns_query(const std::string& hostname, Rec
     }
     query.push_back(0);
 
-    uint16_t qtype = htons(static_cast<uint16_t>(type));
+            uint16_t qtype = static_cast<uint16_t>(type);
     query.push_back((qtype >> 8) & 0xFF);
     query.push_back(qtype & 0xFF);
 
-    uint16_t qclass = htons(1);
+            uint16_t qclass = 1;
     query.push_back((qclass >> 8) & 0xFF);
     query.push_back(qclass & 0xFF);
 
@@ -601,7 +601,7 @@ DoHClient::DNSResult DoHClient::fallback_to_system_dns(const std::string& hostna
 // ==================== DNS Resolution ====================
 
 DoHClient::DNSResult DoHClient::resolve(const std::string& hostname, RecordType type) {
-    pImpl->stats.total_queries++;
+        { std::lock_guard<std::mutex> lock(pImpl->cache_mutex); pImpl->stats.total_queries++; }
 
     // FIX: Cache key includes RecordType so A and AAAA are cached separately
     std::string cache_key = hostname + ":" + std::to_string(static_cast<int>(type));
@@ -633,7 +633,7 @@ DoHClient::DNSResult DoHClient::resolve(const std::string& hostname, RecordType 
     DNSResult result = perform_doh_query(hostname, type);
 
     if (!result.addresses.empty() || !result.cnames.empty()) {
-        pImpl->stats.successful_queries++;
+                        { std::lock_guard<std::mutex> lock(impl3->cache_mutex); impl3->stats.successful_queries++; }
 
         if (pImpl->config.enable_cache) {
             std::lock_guard<std::mutex> lock(pImpl->cache_mutex);
@@ -646,11 +646,11 @@ DoHClient::DNSResult DoHClient::resolve(const std::string& hostname, RecordType 
             }
         }
     } else {
-        pImpl->stats.failed_queries++;
+                                { std::lock_guard<std::mutex> lock(impl3->cache_mutex); impl3->stats.failed_queries++; }
 
         if (pImpl->config.fallback_to_system_dns && result.addresses.empty()) {
             result = fallback_to_system_dns(hostname, type);
-            pImpl->stats.fallback_queries++;
+                        { std::lock_guard<std::mutex> lock(pImpl->cache_mutex); pImpl->stats.fallback_queries++; }
         }
     }
 
@@ -741,15 +741,15 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
                 }
                 query.push_back(0);
 
-                uint16_t qtype = htons(static_cast<uint16_t>(type));
+                        uint16_t qtype = static_cast<uint16_t>(type);
                 query.push_back((qtype >> 8) & 0xFF);
                 query.push_back(qtype & 0xFF);
-                uint16_t qclass = htons(1);
+                        uint16_t qclass = 1;
                 query.push_back((qclass >> 8) & 0xFF);
                 query.push_back(qclass & 0xFF);
             }
 
-            impl->stats.total_queries++;
+                    { std::lock_guard<std::mutex> lock(impl->cache_mutex); impl->stats.total_queries++; }
             auto start_time = std::chrono::steady_clock::now();
 
             DNSResult result;
