@@ -140,7 +140,8 @@ public:
      * @brief Initialize with config. Must be called before process_*.
      * @return true if libsodium initialized and config valid
      */
-    bool initialize(const Config& config = Config{});
+    bool initialize(const Config& config);
+    bool initialize();  // default-config overload
 
     /**
      * @brief Update config at runtime (thread-safe)
@@ -297,6 +298,8 @@ private:
 
     void log(const std::string& msg);
 };
+
+inline bool L3Stealth::initialize() { return initialize(Config{}); }
 
 } // namespace ncp
 
