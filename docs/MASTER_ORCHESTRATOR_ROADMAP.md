@@ -146,126 +146,825 @@ VMess, VLESS, Tor bridges.
 ### SEND path (plaintext → wire)
 
 ```
-PLAINTEXT
-    │
-    ▼
-┌─ STAGE 7: SECURITY PRE-FLIGHT ──────────────────────────────┐
-│  CrossLayerCorrelator.begin_transaction()        [NEW #8]    │
-│  SecurityMonitor.check_environment()                         │
-│  ParanoidMode.verify_no_debugger()                           │
-└──────────────────────────────────┬───────────────────────────┘
-                                   │
-┌─ STAGE 2: E2E ENCRYPTION ────────┼───────────────────────────┐
-│  E2ESession.encrypt(peer_id, plaintext)                      │
-│    X25519 + Kyber1024 key exchange                           │
-│    XChaCha20-Poly1305 AEAD                                   │
-│    Double Ratchet rotation (5min)                             │
-│  Deps: ncp_e2e.hpp, ncp_crypto.hpp, ncp_csprng.hpp           │
-└──────────────────────────────────┬───────────────────────────┘
-                                   │
-┌─ STAGE 4: PROTOCOL ORCHESTRATOR ─┼── (EXISTING, DO NOT MODIFY) ─┐
-│  Step 1: AdversarialPadding.pad()                               │
-│  Step 2: TrafficMimicry.wrap_payload()                          │
-│  Step 2.5: AdvancedDPIBypass.process_outgoing()                 │
-│  Step 3: ProbeResist.generate_client_auth()                     │
-│  Step 4: TLSFingerprint.apply()                                 │
-│  Step 5: FlowShaper.enqueue()                                   │
-│  Step 6: ECH.encrypt_client_hello()                             │
-│  Output: vector<OrchestratedPacket>                             │
-└──────────────────────────────────┬──────────────────────────────┘
-                                   │
-┌─ STAGE 4+: OBFUSCATION LAYER ────┼───────────────────────────┐
-│  GenevaEngine.apply(best_strategy)               [FIX #1]    │
-│  EntropyMasking.mask()                                       │
-│  BehavioralCloak.shape_packet()                  [NEW #6]    │
-│  SessionPatternRandomizer.apply_timing()         [NEW]       │
-│  DummyInjector.inject_dummies()                              │
-│  TimingObfuscator.apply_jitter()                             │
-│  BurstMorpher.morph()                                        │
-│  ProtocolMorph.select_profile()                              │
-│  RTTEqualizer.equalize_tcp_ack()                 [NEW]       │
-│  WFDefense.defend()                              [NEW]       │
-│  VolumeNormalizer.normalize()                    [NEW]       │
-│  TimeCorrelationBreaker.break_correlation()      [NEW]       │
-└──────────────────────────────────┬───────────────────────────┘
-                                   │
-                          ┌────────▼────────┐
-                          │  threat_level   │
-                          │  >= CRITICAL?   │
-                          └───┬─────────┬───┘
-                          YES │         │ NO
-                              ▼         ▼
-┌─ COVERT CHANNEL FALLBACK ──────┐  ┌─ NORMAL PATH ─────────────────┐
-│  CovertChannelManager:  [#7]   │  │  (continue below)             │
-│  ├─ DNSCovertChannel           │  │                               │
-│  ├─ TLSRecordPadding           │  │                               │
-│  ├─ HTTPHeaderSteg             │  │                               │
-│  └─ HLSVideoSteg               │  │                               │
-└────────────┬───────────────────┘  └──────────┬────────────────────┘
-             └──────────┬──────────────────────┘
+╔══════════════════════════════════════════════════════════════════════════════════════╗
+║              DYNAM NCP v2.0.0 — ОБЪЕДИНЁННЫЙ ПОЛНЫЙ PIPELINE                       ║
+║         (pipe.docx + DYNAM_FULL_PIPELINE_DIAGRAM.md → единый поток)                ║
+╚══════════════════════════════════════════════════════════════════════════════════════╝
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФАЗА 0: ИНИЦИАЛИЗАЦИЯ (IDENTITY CLOAKING)                [ParanoidMode::start]
+═══════════════════════════════════════════════════════════════════════════════════
+
+  ┌─────────────────────┐
+  │   ncp run --iface   │  CLI → ArgumentParser → handle_run()
+  │     eth0 --preset   │
+  │      max_stealth    │
+  └─────────┬───────────┘
+            │
+            ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  0.1  DEVICE PROFILE SELECTION                              │
+  │  DeviceIdentityCloaker::select_profile()                    │
+  │                                                             │
+  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+  │  │ iPhone15 │  │SamsungS24│  │ Win11    │  │ MacBookPro│   │
+  │  │ OUI:F018 │  │ OUI:4C3C │  │ OUI:DC53 │  │ OUI:A483 │   │
+  │  │ TTL:64   │  │ TTL:64   │  │ TTL:128  │  │ TTL:64   │   │
+  │  │ Win:65535│  │ Win:65535│  │ Win:65535│  │ Win:65535│   │
+  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
+  └─────────────────────┬───────────────────────────────────────┘
                         │
-┌─ STAGE 5: TRANSPORT ──┼──────────────────────────────────────┐
-│  ProtocolRotationSchedule                        [NEW #9]    │
-│    06-12h→HTTP/2, 12-18h→WS, 18-02h→HTTPS, 02-06h→rawTLS   │
-│  ASAwareRouter.select_route()                    [NEW]       │
-│    CDN_RELAY / I2P_GARLIC / WS_TUNNEL / DIRECT               │
-│  GeoObfuscator — first hop always domestic       [NEW]       │
-│  SessionFragmenter — max 2min TCP, rotate ports  [NEW]       │
-│  DNSLeakPrevention — block plaintext/WebRTC/IPv6 [NEW]       │
-│  I2PManager (SAM v3.3, garlic routing)                       │
-│  DoHResolver (Cloudflare/Google/Quad9 + cert pin)            │
-│  WSTunnel, PortKnock                                         │
-└───────────────────────┬──────────────────────────────────────┘
+                        ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  0.2  INTERFACE DOWN → ip link set eth0 down                │
+  │       Switch CAM aging → забывает реальный MAC              │
+  └─────────────────────┬───────────────────────────────────────┘
                         │
-┌─ STAGE 3: IDENTITY ───┼──────────────────────────────────────┐
-│  MetadataSanitizer — NAT rotation, volume norm   [NEW]       │
-│  NetworkSpoofer — MAC/IP/hostname/SMBIOS         [FIX #2]    │
-│  IdentityRotation — timed (30min)                            │
-│  RotationCoordinator — sync atomically                       │
-│  L2Stealth — DHCP fingerprint, OUI randomization             │
-└───────────────────────┬──────────────────────────────────────┘
+                        ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  0.3  NETWORK IDENTITY SPOOFING                             │
+  │  NetworkSpoofer::apply()                      [FIX #2]      │
+  │                                                             │
+  │  ┌─ L2 ─────────────────────────────────────────────────┐  │
+  │  │  MAC: F0:18:98:XX:XX:XX (Apple OUI)                  │  │
+  │  │  IPv6: ОТКЛЮЧЁН (sysctl disable_ipv6=1)              │  │
+  │  │  OUI рандомизация (L2Stealth)                        │  │
+  │  └──────────────────────────────────────────────────────┘  │
+  │  ┌─ L3 ─────────────────────────────────────────────────┐  │
+  │  │  TTL: 64 (iOS)  DF bit: 1                            │  │
+  │  └──────────────────────────────────────────────────────┘  │
+  │  ┌─ L4 ─────────────────────────────────────────────────┐  │
+  │  │  TCP Window: 65535  MSS: 1460  WScale: 6  SACK: on   │  │
+  │  └──────────────────────────────────────────────────────┘  │
+  │  ┌─ OS Identity ────────────────────────────────────────┐  │
+  │  │  Hostname: "iPhone" (opt 12)                         │  │
+  │  │  DHCP FP: 1,121,3,6,15,119,252,95,44,46 (opt 55)    │  │
+  │  │  Vendor: "Apple" (opt 60)                            │  │
+  │  │  SMBIOS: spoofed                                     │  │
+  │  └──────────────────────────────────────────────────────┘  │
+  └─────────────────────┬───────────────────────────────────────┘
                         │
-┌─ STAGE 6: NETWORK ────┼──────────────────────────────────────┐
-│  L3Stealth — TTL/window/checksum manipulation                │
-│  ARPManager — ARP cache poisoning (LAN)                      │
-│  PacketInterceptor — WinDivert/WFP/raw          [FIX #3]    │
-│  NetworkBackend.send_raw()                                   │
-└───────────────────────┬──────────────────────────────────────┘
+                        ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  0.4  INTERFACE UP + DHCP                                   │
+  │  ip link set eth0 up → dhclient                             │
+  │  DHCP Discover → Offer → Request → Ack                      │
+  │  Оператор видит: "iPhone подключился"                       │
+  └─────────────────────┬───────────────────────────────────────┘
                         │
-┌─ STAGE 7: SECURITY POST-FLIGHT ──┼───────────────────────────┐
-│  CrossLayerCorrelator.end_transaction()          [NEW #8]    │
-│  ProbeHoneypot — reverse proxy to real server    [NEW]       │
-│  SecurityMonitor.log_send()                                  │
-└──────────────────────────────────┬───────────────────────────┘
-                                   │
-                                 WIRE
+                        ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  0.5  ARP ANNOUNCEMENT                                      │
+  │  ARPController::send_gratuitous_arp()                       │
+  │  → Роутер ARP-кэш: 10.0.0.7 = F0:18:98:XX (Apple)         │
+  │  → start_arp_keepalive(30s) + start_arp_watcher()           │
+  └─────────────────────┬───────────────────────────────────────┘
+                        │
+                        ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  0.6  DPI BYPASS ENGINE INIT                                │
+  │  AdvancedDPIBypass::initialize(config)                      │
+  │  AdvancedDPIBypass::apply_max_stealth_preset()              │
+  │                                                             │
+  │  ✓ EntropyController          ✓ RandomizedTLSFingerprint    │
+  │  ✓ GenevaEngine               ✓ DummyPacketInjector         │
+  │  ✓ TCPManipulator             ✓ TLSManipulator              │
+  │  ✓ TrafficObfuscator          ✓ BehavioralCloak     [#6]    │
+  │  ✓ CovertChannelManager                              [#7]   │
+  │  ✓ CrossLayerCorrelator                              [#8]   │
+  └─────────────────────┬───────────────────────────────────────┘
+                        │
+                        ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  0.7  ENCRYPTED DNS (DoH)                                   │
+  │  EncryptedDNSResolver::init("https://1.1.1.1/dns-query")   │
+  │  DoHResolver (Cloudflare/Google/Quad9 + cert pin)           │
+  │  DNSLeakPrevention — блок plaintext DNS/WebRTC/IPv6  [NEW]  │
+  │  Системный DNS → 127.0.0.1 (локальный DoH proxy)           │
+  └─────────────────────┬───────────────────────────────────────┘
+                        │
+                        ▼
+          ╔═════════════════════════════════╗
+          ║  СИСТЕМА ГОТОВА К РАБОТЕ        ║
+          ║  Оператор видит: "iPhone"       ║
+          ║  SORM видит: "Apple device"     ║
+          ╚═══════════════╤═════════════════╝
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФАЗА 1: ОБРАБОТКА ИСХОДЯЩЕГО ТРАФИКА
+═══════════════════════════════════════════════════════════════════════════════════
+
+  Приложение (браузер, мессенджер, etc.)
+            │
+            │  Данные: "GET / HTTP/1.1\r\nHost: target.com"
+            │  Размер: ~80 bytes, Энтропия: ~4.5 bits/byte
+            ▼
+
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 1: ПРЕДПОЛЁТНАЯ ПРОВЕРКА БЕЗОПАСНОСТИ         [#8]    ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  CrossLayerCorrelator.begin_transaction()                     ┃
+  ┃  SecurityMonitor.check_environment()                         ┃
+  ┃  ParanoidMode.verify_no_debugger()                           ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 2: СКВОЗНОЕ ШИФРОВАНИЕ (E2E)                          ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  E2ESession.encrypt(peer_id, plaintext)                      ┃
+  ┃    Обмен ключами: X25519 + Kyber1024 (пост-квантовый)        ┃
+  ┃    AEAD: XChaCha20-Poly1305                                  ┃
+  ┃    Double Ratchet ротация каждые 5 мин                       ┃
+  ┃  Зависимости: ncp_e2e.hpp, ncp_crypto.hpp, ncp_csprng.hpp   ┃
+  ┃                                                              ┃
+  ┃  Размер: ~88+ bytes (+nonce + auth tag)                      ┃
+  ┃  Энтропия: ~7.95 bits/byte ← ОПАСНО для DPI                 ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 3: ENTROPY MASKING (EntropyController)                ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  1. calculate_bit_density() → 0.50 (опасно для GFW)          ┃
+  ┃  2. apply_zero_padding(30%) → +26 bytes нулей                ┃
+  ┃  3. inject_ascii_bytes(40%) → printable ASCII                ┃
+  ┃  4. prepend length header (4 bytes)                          ┃
+  ┃                                                              ┃
+  ┃  ┌──────┬────────┬─────────────┬───────────┐                 ┃
+  ┃  │ORIG  │ENCRYPT │ASCII-INJECT │ZERO-PAD   │                 ┃
+  ┃  │LEN 4B│ ~88B   │  (inline)   │  ~26B     │                 ┃
+  ┃  └──────┴────────┴─────────────┴───────────┘                 ┃
+  ┃                                                              ┃
+  ┃  Размер: ~118 bytes (+34%)                                   ┃
+  ┃  Энтропия: ~4.8 bits/byte ← SAFE (выглядит как HTML)        ┃
+  ┃  Bit density: 0.38 ← SAFE (не 0.50)                         ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 4: ОРКЕСТРАТОР ПРОТОКОЛОВ (НЕ ИЗМЕНЯТЬ)               ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  Шаг 4.1: AdversarialPadding.pad()                          ┃
+  ┃  Шаг 4.2: TrafficMimicry.wrap_payload()                     ┃
+  ┃  Шаг 4.3: AdvancedDPIBypass.process_outgoing()              ┃
+  ┃  Шаг 4.4: ProbeResist.generate_client_auth()                ┃
+  ┃  Шаг 4.5: TLSFingerprint.apply()                            ┃
+  ┃           ├─ generate_client_hello("microsoft.com")          ┃
+  ┃           ├─ SNI: microsoft.com                              ┃
+  ┃           ├─ Cipher Suites: [12 + GREASE, shuffled]          ┃
+  ┃           ├─ JA4: уникальный на каждое соединение            ┃
+  ┃           └─ Padding: [50-150 bytes random]                  ┃
+  ┃  Шаг 4.6: FlowShaper.enqueue()                              ┃
+  ┃  Шаг 4.7: ECH.encrypt_client_hello()                        ┃
+  ┃  Выход: vector<OrchestratedPacket> (~450-550 bytes)          ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 5: ОБФУСКАЦИЯ + GENEVA + ПОВЕДЕНЧЕСКАЯ МАСКИРОВКА     ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃                                                              ┃
+  ┃  5.1 GenevaEngine.apply(best_strategy)          [FIX #1]     ┃
+  ┃      Strategy: UNIVERSAL                                     ┃
+  ┃      DUPLICATE(0) → 2 пакета                                ┃
+  ┃      FRAGMENT(0,64) → 8 фрагментов на пакет                 ┃
+  ┃      FRAGMENT(1,64) → ещё 8 фрагментов (копия)              ┃
+  ┃      TAMPER_TTL(0) → F01.TTL = random(1-64)                  ┃
+  ┃      DISORDER → shuffle all 16 fragments                     ┃
+  ┃      Выход: ~16 фрагментов по ~64 bytes (перемешаны)         ┃
+  ┃      DPI НЕ МОЖЕТ собрать без TCP reassembly                 ┃
+  ┃                                                              ┃
+  ┃  5.2 EntropyMasking.mask()                                   ┃
+  ┃                                                              ┃
+  ┃  5.3 BehavioralCloak.shape_packet()             [NEW #6]     ┃
+  ┃                                                              ┃
+  ┃  5.4 SessionPatternRandomizer.apply_timing()    [NEW]        ┃
+  ┃                                                              ┃
+  ┃  5.5 DummyInjector.inject_dummies()                          ┃
+  ┃      Profile: HIGH_STEALTH (ratio=1.0)                       ┃
+  ┃      [D]=dummy [R]=real                                      ┃
+  ┃      ┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐┌─┐     ┃
+  ┃      │D││R││R││D││R││D││R││R││D││R││D││D││R││R││D│      ┃
+  ┃      └─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘└─┘     ┃
+  ┃      Dummy marker: 0xDEADBEEF + random data (70% ASCII)     ┃
+  ┃      Выход: ~30 пакетов (16 real + ~14 dummy)                ┃
+  ┃                                                              ┃
+  ┃  5.6 TimingObfuscator.apply_jitter()                         ┃
+  ┃      Имитация паттерна загрузки веб-страницы:                ┃
+  ┃      Packets                                                 ┃
+  ┃       ▲                                                      ┃
+  ┃      8│ ███                                                  ┃
+  ┃      6│ ████                                                 ┃
+  ┃      4│ ████                                ███              ┃
+  ┃      2│ █████          ███                  ████             ┃
+  ┃       └──────────────────────────────────────────→ Time      ┃
+  ┃        burst 1      burst 2              burst 3             ┃
+  ┃        (page load)  (AJAX)               (navigate)          ┃
+  ┃      → ML-классификатор: "обычный web browsing"              ┃
+  ┃                                                              ┃
+  ┃  5.7 BurstMorpher.morph()                                    ┃
+  ┃  5.8 ProtocolMorph.select_profile()                          ┃
+  ┃  5.9 RTTEqualizer.equalize_tcp_ack()            [NEW]        ┃
+  ┃  5.10 WFDefense.defend()                        [NEW]        ┃
+  ┃  5.11 VolumeNormalizer.normalize()              [NEW]        ┃
+  ┃  5.12 TimeCorrelationBreaker.break_correlation() [NEW]       ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+           ┌────────────────────┐
+           │   threat_level     │
+           │   >= CRITICAL?     │
+           └───┬────────────┬───┘
+           ДА  │            │ НЕТ
+               ▼            ▼
+  ┌─ СКРЫТЫЙ КАНАЛ (ОТКАТ) ──────┐  ┌─ ОБЫЧНЫЙ ПУТЬ ──────────────┐
+  │  CovertChannelManager: [#7]  │  │  (продолжение → STAGE 6)    │
+  │  ├─ DNSCovertChannel         │  │                              │
+  │  ├─ TLSRecordPadding         │  │                              │
+  │  ├─ HTTPHeaderSteg           │  │                              │
+  │  └─ HLSVideoSteg             │  │                              │
+  └────────────┬─────────────────┘  └──────────┬───────────────────┘
+               └──────────┬────────────────────┘
+                          │
+                          ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 6: ТРАНСПОРТ                                          ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃                                                              ┃
+  ┃  6.1 ProtocolRotationSchedule                   [NEW #9]     ┃
+  ┃      06-12ч → HTTP/2                                         ┃
+  ┃      12-18ч → WebSocket                                      ┃
+  ┃      18-02ч → HTTPS                                          ┃
+  ┃      02-06ч → rawTLS                                         ┃
+  ┃                                                              ┃
+  ┃  6.2 ASAwareRouter.select_route()               [NEW]        ┃
+  ┃      CDN_RELAY / I2P_GARLIC / WS_TUNNEL / DIRECT            ┃
+  ┃                                                              ┃
+  ┃  6.3 GeoObfuscator — первый хоп всегда внутренний [NEW]      ┃
+  ┃                                                              ┃
+  ┃  6.4 SessionFragmenter — макс. 2мин TCP, ротация портов [NEW]┃
+  ┃                                                              ┃
+  ┃  6.5 I2PManager (SAM v3.3, чесночная маршрутизация)          ┃
+  ┃  6.6 DoHResolver (Cloudflare/Google/Quad9 + cert pin)        ┃
+  ┃  6.7 WSTunnel + PortKnock                                    ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 7: ИДЕНТИЧНОСТЬ (RUNTIME)                             ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  MetadataSanitizer — ротация NAT, норм. объёма   [NEW]       ┃
+  ┃  IdentityRotation — по таймеру (30 мин)                      ┃
+  ┃  RotationCoordinator — атомарная синхронизация               ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 8: СЕТЬ (NETWORK OUTPUT)                              ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃                                                              ┃
+  ┃  L3Stealth — манипуляция TTL/window/checksum                 ┃
+  ┃  ARPManager — отравление ARP-кэша (LAN)                      ┃
+  ┃  PacketInterceptor — WinDivert/WFP/raw          [FIX #3]     ┃
+  ┃                                                              ┃
+  ┃  ┌─ Ethernet Frame ────────────────────────────────────┐     ┃
+  ┃  │ Src MAC: F0:18:98:XX:XX:XX (Apple)                  │     ┃
+  ┃  │ Dst MAC: [router MAC]                               │     ┃
+  ┃  ├─ IP Header ─────────────────────────────────────────┤     ┃
+  ┃  │ Src IP: 10.0.0.7  Dst IP: 104.16.XX.XX (CDN)       │     ┃
+  ┃  │ TTL: 64 (iOS)                                       │     ┃
+  ┃  ├─ TCP Header ────────────────────────────────────────┤     ┃
+  ┃  │ Dst Port: 443  Window: 65535 (iOS)                   │     ┃
+  ┃  ├─ TLS ───────────────────────────────────────────────┤     ┃
+  ┃  │ SNI: microsoft.com   JA4: [Chrome-like]              │     ┃
+  ┃  │ Payload: [entropy-masked E2E-encrypted fragment]     │     ┃
+  ┃  └─────────────────────────────────────────────────────┘     ┃
+  ┃                                                              ┃
+  ┃  NetworkBackend.send_raw()                                   ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  STAGE 9: ПОСТПОЛЁТНАЯ ПРОВЕРКА БЕЗОПАСНОСТИ         [#8]    ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  CrossLayerCorrelator.end_transaction()                      ┃
+  ┃  ProbeHoneypot — обратный прокси к реальному серверу  [NEW]  ┃
+  ┃  SecurityMonitor.log_send()                                  ┃
+  ┗━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                  ПРОВОД
+                    │
+  → Оператор/ТСПУ видит: "iPhone → Cloudflare (HTTPS)"
+  → SORM видит: "Apple device, web browsing"
+  → ML-классификатор: "Web browsing pattern, не VPN"
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФАЗА 2: ОБРАБОТКА ВХОДЯЩЕГО ТРАФИКА                      [process_incoming]
+═══════════════════════════════════════════════════════════════════════════════════
+
+  Cloudflare CDN ──→ наш интерфейс
+            │
+            ▼
+  ┌─────────────────────────────────────────────────────────────┐
+  │  IN.1  FILTER DUMMY PACKETS                                 │
+  │        DummyPacketInjector::filter_dummy_packets()          │
+  │        packet[0:4] == 0xDEADBEEF ? → DROP                  │
+  │                                                             │
+  │  IN.2  DEOBFUSCATE                                          │
+  │        TrafficObfuscator::deobfuscate()                     │
+  │        Извлечь nonce (8 bytes) → ChaCha20 decrypt           │
+  │                                                             │
+  │  IN.3  UNMASK ENTROPY                                       │
+  │        EntropyController::unmask_entropy()                   │
+  │        Извлечь original_length (4 bytes) → trim padding     │
+  │                                                             │
+  │  IN.4  E2E DECRYPT                                          │
+  │        E2ESession.decrypt(peer_id, ciphertext)              │
+  │        XChaCha20-Poly1305 verify tag + decrypt              │
+  │        Double Ratchet advance                                │
+  │        → Оригинальные данные приложения                     │
+  └─────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФАЗА 3: ПЕРИОДИЧЕСКАЯ РОТАЦИЯ ИДЕНТИЧНОСТИ   [IdentityRotation, каждые 15-30 мин]
+═══════════════════════════════════════════════════════════════════════════════════
+
+  ┌──────────────────────────────────────────────────────────────┐
+  │  TIMER: 15-30 минут (configurable)                           │
+  │                                                              │
+  │  R.1  Сохранить состояние сессий (E2E ratchet state)         │
+  │  R.2  DHCP Release (отпустить IP)                            │
+  │  R.3  Interface DOWN                                         │
+  │  R.4  Выбрать НОВЫЙ профиль устройства (другой OUI)          │
+  │  R.5  Применить: MAC + hostname + DHCP FP + TTL + Window     │
+  │       + SMBIOS (NetworkSpoofer + L2Stealth)                  │
+  │  R.6  Пауза 60-180 секунд (anti-correlation)                │
+  │  R.7  Interface UP → DHCP Discover → новый IP                │
+  │  R.8  Gratuitous ARP → закрепить новый MAC                   │
+  │  R.9  RotationCoordinator — атомарная синхронизация           │
+  │  R.10 Восстановить сессии через новый tunnel                 │
+  │  R.11 CrossLayerCorrelator — проверка отсутствия корреляций  │
+  │                                                              │
+  │  Для оператора: "iPhone отключился, Galaxy подключился"      │
+  │  Для СОРМ: два РАЗНЫХ устройства, нет корреляции             │
+  └──────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФАЗА 4: GRACEFUL SHUTDOWN                          [handle_stop / SIGINT]
+═══════════════════════════════════════════════════════════════════════════════════
+
+  SIGINT / SIGTERM / ncp stop
+            │
+            ▼
+  ┌──────────────────────────────────────────────────────────────┐
+  │  S.1  STOP THREADS                                           │
+  │       ARP keepalive/watcher, DPI bypass, Identity rotation   │
+  │       CrossLayerCorrelator, SessionPatternRandomizer         │
+  │                                                              │
+  │  S.2  SECURE MEMORY CLEANUP                                  │
+  │       sodium_memzero() на все ключи                          │
+  │       E2E session keys + ratchet state → зануление           │
+  │       munlock() разблокировать страницы памяти               │
+  │                                                              │
+  │  S.3  NETWORK CLEANUP                                        │
+  │       DHCP Release → Interface DOWN                          │
+  │                                                              │
+  │  S.4  RESTORE ORIGINAL IDENTITY                              │
+  │       Реальный MAC, hostname, sysctl (TTL/Window/IPv6)       │
+  │       Interface UP → DHCP → IP с реальным MAC                │
+  │                                                              │
+  │  S.5  LOG CLEANUP                                            │
+  │       Удалить /tmp/ncp_dhclient.conf                         │
+  │       Очистить dmesg логи (если root)                        │
+  │       Очистить bash_history                                  │
+  └──────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФОНОВЫЕ ПРОЦЕССЫ (параллельно во время Фаз 1-3)
+═══════════════════════════════════════════════════════════════════════════════════
+
+  Thread 1: ARP Keepalive
+  ├─ Каждые 30с: Gratuitous ARP → поддерживать MAC в кэше роутера
+  └─ При проб от IDS: автоответ с поддельным MAC
+
+  Thread 2: Identity Rotation Timer
+  ├─ Каждые 15-30 мин: полная ротация MAC/hostname/DHCP/TTL/SMBIOS
+  └─ Пауза 60-180с между старой и новой идентичностью
+
+  Thread 3: Anti-Probing Defense (ProbeHoneypot)               [NEW]
+  ├─ Слушать входящие TLS подключения
+  ├─ Без PSK → проксировать на microsoft.com (fallback)
+  └─ С PSK → обрабатывать как туннель
+
+  Thread 4: Statistics Collector
+  ├─ MimicStats: overhead, packets wrapped/unwrapped
+  ├─ GenevaStats: packets duplicated/fragmented
+  ├─ DummyInjectorStats: real vs dummy packets
+  └─ EntropyController: before/after entropy values
+
+  Thread 5: CrossLayerCorrelator                               [NEW #8]
+  ├─ Мониторинг корреляций между слоями в реальном времени
+  └─ Алерт при обнаружении утечки метаданных
+
+  Thread 6: SessionPatternRandomizer                           [NEW]
+  └─ Рандомизация тайминга сессий
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ЧТО ВИДИТ ОПЕРАТОР НА КАЖДОМ УРОВНЕ
+═══════════════════════════════════════════════════════════════════════════════════
+
+  ┌─────────────────┬────────────────────────────────────────────┐
+  │ Уровень         │ Что видит оператор                         │
+  ├─────────────────┼────────────────────────────────────────────┤
+  │ L1 Физический   │ Порт коммутатора (не скрыть)               │
+  │ L2 Канальный    │ MAC: F0:18:98:XX (Apple Inc.)              │
+  │ L3 Сетевой      │ IP: 10.0.0.7 → 104.16.XX.XX (Cloudflare)  │
+  │                 │ TTL: 64 (iOS)                              │
+  │ L4 Транспортный │ TCP :443, Window 65535 (iOS)               │
+  │ L5 Сессионный   │ TLS 1.3, SNI: microsoft.com, ECH           │
+  │                 │ JA4: Chrome-like fingerprint                │
+  │ L7 Прикладной   │ ████████ (E2E + XChaCha20-Poly1305)       │
+  ├─────────────────┼────────────────────────────────────────────┤
+  │ DHCP лог        │ "iPhone" получил 10.0.0.7                  │
+  │ DNS лог         │ (пусто — DoH + leak prevention)            │
+  │ SORM-3          │ "Apple device, HTTPS browsing to CDN"      │
+  │ ТСПУ (DPI)      │ "TLS 1.3 к microsoft.com через Cloudflare" │
+  │ ML-классификатор│ "Web browsing pattern, не VPN"             │
+  │ Timing analysis │ "Нормальные burst-паттерны"        [NEW]   │
+  │ Volume analysis │ "Нормализованные объёмы"           [NEW]   │
+  │ Correlation     │ "Нет межслойных корреляций"        [NEW]   │
+  └─────────────────┴────────────────────────────────────────────┘
+
+  Вердикт оператора: ЛЕГИТИМНЫЙ ТРАФИК ✓
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФАЗА 5: ТЕСТОВЫЙ СТЕНД САМОДИАГНОСТИКИ          [SelfTestBench — ncp selftest]
+═══════════════════════════════════════════════════════════════════════════════════
+
+  Цель: атаковать СОБСТВЕННЫЙ трафик, чтобы найти дыры ДО того, как их
+  найдёт ТСПУ/РКН. Три скрипта + один thread в pipeline.
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  ЗАПУСК:  ncp selftest --iface eth0 --duration 3600        │
+  │           ncp selftest --pcap capture.pcap                 │
+  │                                                             │
+  │  Режимы:                                                    │
+  │    --live    захват с интерфейса в реальном времени          │
+  │    --pcap    анализ ранее записанного дампа                  │
+  │    --full    все 5 тестов последовательно                    │
+  │    --quick   только TEST 1 + TEST 2 (~2 мин)               │
+  └─────────────────────────────────────────────────────────────┘
+
+
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  TEST 1: dMAP / RTT FINGERPRINT                              ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  Файл: tools/selftest/test_rtt.py (~100 строк)              ┃
+  ┃                                                              ┃
+  ┃  Что делает:                                                 ┃
+  ┃    1. Из pcap извлекает TCP_RTT (SYN→SYN/ACK) для каждого   ┃
+  ┃       flow и App_RTT (TLS request→response)                  ┃
+  ┃    2. Вычисляет Δ = App_RTT − TCP_RTT                        ┃
+  ┃    3. Строит гистограмму Δ для:                              ┃
+  ┃       ├─ трафика через пайплайн (NCP)                        ┃
+  ┃       └─ прямого HTTPS (baseline)                            ┃
+  ┃    4. Считает KS-test (Kolmogorov-Smirnov) между ними       ┃
+  ┃                                                              ┃
+  ┃  Метрики:                                                    ┃
+  ┃    ┌──────────────┬────────────┬────────────┐                ┃
+  ┃    │ Метрика      │ PASS       │ FAIL       │                ┃
+  ┃    ├──────────────┼────────────┼────────────┤                ┃
+  ┃    │ KS p-value   │ > 0.05     │ ≤ 0.05     │                ┃
+  ┃    │ mean(Δ) diff │ < 10ms     │ ≥ 10ms     │                ┃
+  ┃    │ var(Δ) ratio │ 0.5 - 2.0  │ вне        │                ┃
+  ┃    └──────────────┴────────────┴────────────┘                ┃
+  ┃                                                              ┃
+  ┃  Если FAIL → RTTEqualizer не работает или не включён         ┃
+  ┃  Зависимости: scapy, scipy.stats, numpy                     ┃
+  ┃                                                              ┃
+  ┃  Пример вывода:                                              ┃
+  ┃  ┌──────────────────────────────────────────────────┐        ┃
+  ┃  │  [TEST 1] dMAP RTT Fingerprint                   │        ┃
+  ┃  │  Flows analyzed: 247                              │        ┃
+  ┃  │  mean(Δ_ncp)  = 14.3ms                            │        ┃
+  ┃  │  mean(Δ_direct)= 2.1ms                            │        ┃
+  ┃  │  KS statistic = 0.73, p-value = 0.0001            │        ┃
+  ┃  │  ❌ FAIL — proxy clearly detectable by dMAP       │        ┃
+  ┃  │  → Включить RTTEqualizer (Stage 5.9)             │        ┃
+  ┃  └──────────────────────────────────────────────────┘        ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  TEST 2: VPN-vs-WEB КЛАССИФИКАТОР (простой ML)               ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  Файл: tools/selftest/test_vpn_detect.py (~150 строк)       ┃
+  ┃                                                              ┃
+  ┃  Что делает:                                                 ┃
+  ┃    1. Из pcap извлекает для каждого flow 15 фич:             ┃
+  ┃       ├─ mean_pkt_size, std_pkt_size                         ┃
+  ┃       ├─ mean_iat, std_iat (inter-arrival time)              ┃
+  ┃       ├─ up_down_ratio (bytes up / bytes down)               ┃
+  ┃       ├─ max_burst_size, burst_count                         ┃
+  ┃       ├─ idle_gap_count, max_idle_gap                        ┃
+  ┃       ├─ session_duration                                    ┃
+  ┃       ├─ mean_entropy (payload Shannon entropy)              ┃
+  ┃       ├─ pkt_count, total_bytes                              ┃
+  ┃       └─ unique_dst_ports, unique_dst_ips                    ┃
+  ┃                                                              ┃
+  ┃    2. Метки: NCP=1, обычный_HTTPS=0                          ┃
+  ┃    3. sklearn RandomForestClassifier(n_estimators=100)       ┃
+  ┃       5-fold cross-validation                                ┃
+  ┃                                                              ┃
+  ┃  Метрики:                                                    ┃
+  ┃    ┌──────────────────┬────────────┬────────────┐            ┃
+  ┃    │ Метрика          │ PASS       │ FAIL       │            ┃
+  ┃    ├──────────────────┼────────────┼────────────┤            ┃
+  ┃    │ Accuracy         │ < 65%      │ ≥ 65%      │            ┃
+  ┃    │ ROC-AUC          │ < 0.70     │ ≥ 0.70     │            ┃
+  ┃    │ TPR @ 1% FPR     │ < 10%      │ ≥ 10%      │            ┃
+  ┃    └──────────────────┴────────────┴────────────┘            ┃
+  ┃                                                              ┃
+  ┃  Feature importance → показывает КАКОЙ фичой ты светишься:   ┃
+  ┃  ┌──────────────────────────────────────────────────┐        ┃
+  ┃  │  [TEST 2] VPN Detection Classifier               │        ┃
+  ┃  │  Flows: 500 NCP + 500 direct                      │        ┃
+  ┃  │  Accuracy: 58.2% (5-fold CV)                      │        ┃
+  ┃  │  ROC-AUC:  0.61                                   │        ┃
+  ┃  │  TPR@1%FPR: 3.2%                                  │        ┃
+  ┃  │  ✅ PASS — трафик неотличим от обычного HTTPS     │        ┃
+  ┃  │                                                    │        ┃
+  ┃  │  Top features (если бы FAIL):                      │        ┃
+  ┃  │    1. mean_iat (0.23) → TimingObfuscator           │        ┃
+  ┃  │    2. burst_count (0.18) → BurstMorpher             │        ┃
+  ┃  │    3. mean_entropy (0.15) → EntropyMasking          │        ┃
+  ┃  └──────────────────────────────────────────────────┘        ┃
+  ┃                                                              ┃
+  ┃  Зависимости: scapy, sklearn, numpy                         ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  TEST 3: WEBSITE FINGERPRINTING                              ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  Файл: tools/selftest/test_wf.py (~200 строк)              ┃
+  ┃                                                              ┃
+  ┃  Что делает:                                                 ┃
+  ┃    1. Для каждого из N сайтов (default: 20) собирает         ┃
+  ┃       трассы (50+ визитов через пайплайн)                    ┃
+  ┃    2. Извлекает sequence features:                           ┃
+  ┃       ├─ signed packet sizes (up=+, down=−)                  ┃
+  ┃       ├─ inter-packet delays                                 ┃
+  ┃       ├─ cumulative bytes curve                              ┃
+  ┃       └─ burst statistics                                    ┃
+  ┃    3. Обучает kNN (k=5) + RandomForest на site labels        ┃
+  ┃                                                              ┃
+  ┃  Метрики:                                                    ┃
+  ┃    ┌────────────────────┬──────────────┬──────────────┐      ┃
+  ┃    │ Метрика            │ PASS         │ FAIL         │      ┃
+  ┃    ├────────────────────┼──────────────┼──────────────┤      ┃
+  ┃    │ Top-1 accuracy     │ < 15%        │ ≥ 15%        │      ┃
+  ┃    │ (при 20 сайтах     │ (random=5%)  │              │      ┃
+  ┃    │  random baseline)  │              │              │      ┃
+  ┃    │ Top-5 accuracy     │ < 40%        │ ≥ 40%        │      ┃
+  ┃    └────────────────────┴──────────────┴──────────────┘      ┃
+  ┃                                                              ┃
+  ┃  Пример вывода:                                              ┃
+  ┃  ┌──────────────────────────────────────────────────┐        ┃
+  ┃  │  [TEST 3] Website Fingerprinting                  │        ┃
+  ┃  │  Sites: 20, Traces per site: 50                   │        ┃
+  ┃  │  Top-1 accuracy: 11.3%  (random: 5.0%)           │        ┃
+  ┃  │  Top-5 accuracy: 31.2%  (random: 25.0%)          │        ┃
+  ┃  │  ✅ PASS — сайты неразличимы через туннель       │        ┃
+  ┃  │                                                    │        ┃
+  ┃  │  Если FAIL, наиболее различимые сайты:            │        ┃
+  ┃  │    youtube.com  (acc=67%) → VolumeNormalizer       │        ┃
+  ┃  │    vk.com       (acc=43%) → BurstMorpher            │        ┃
+  ┃  └──────────────────────────────────────────────────┘        ┃
+  ┃                                                              ┃
+  ┃  Зависимости: scapy, sklearn, numpy                         ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  TEST 4: SORM METADATA ANOMALY                               ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  Файл: tools/selftest/test_sorm_meta.py (~120 строк)        ┃
+  ┃                                                              ┃
+  ┃  Что делает:                                                 ┃
+  ┃    Симулирует взгляд аналитика СОРМ на метаданные:           ┃
+  ┃    1. Из pcap генерирует «лог СОРМ»:                         ┃
+  ┃       ├─ sessions: src_ip, dst_ip, port, bytes, duration     ┃
+  ┃       ├─ DNS queries (если утекли)                           ┃
+  ┃       └─ connection frequency / timing                       ┃
+  ┃                                                              ┃
+  ┃    2. Проверяет эвристики:                                   ┃
+  ┃       ├─ Есть ли plaintext DNS? (→ DNSLeakPrevention)        ┃
+  ┃       ├─ Сессии > 2мин? (→ SessionFragmenter)                ┃
+  ┃       ├─ > 70% трафика к 1 IP/AS? (→ ASAwareRouter)         ┃
+  ┃       ├─ Нет idle gaps > 5мин? (→ SessionPatternRandomizer)  ┃
+  ┃       ├─ Аномальная регулярность? (→ TimeCorrelationBreaker) ┃
+  ┃       └─ Объём за час > 2σ от нормы? (→ VolumeNormalizer)   ┃
+  ┃                                                              ┃
+  ┃    3. DBSCAN кластеризация «абонентов»                       ┃
+  ┃       (NCP-абонент vs обычные)                               ┃
+  ┃                                                              ┃
+  ┃  Метрики:                                                    ┃
+  ┃    ┌──────────────────────┬────────────┬────────────┐        ┃
+  ┃    │ Проверка             │ PASS       │ FAIL       │        ┃
+  ┃    ├──────────────────────┼────────────┼────────────┤        ┃
+  ┃    │ Plaintext DNS        │ 0 запросов │ > 0        │        ┃
+  ┃    │ Max session duration │ ≤ 120s     │ > 120s     │        ┃
+  ┃    │ Single-dest ratio    │ < 70%      │ ≥ 70%      │        ┃
+  ┃    │ Min idle gap         │ ≥ 1 за час │ 0          │        ┃
+  ┃    │ Timing regularity    │ CV > 0.3   │ CV ≤ 0.3   │        ┃
+  ┃    │ DBSCAN cluster       │ mixed      │ isolated   │        ┃
+  ┃    └──────────────────────┴────────────┴────────────┘        ┃
+  ┃  (CV = coefficient of variation межсессионных интервалов)    ┃
+  ┃                                                              ┃
+  ┃  Зависимости: scapy, sklearn (DBSCAN), numpy                ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+                    │
+                    ▼
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃  TEST 5: FINGERPRINT FRESHNESS                               ┃
+  ┃  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ┃
+  ┃  Файл: tools/selftest/test_fingerprint_age.py (~80 строк)   ┃
+  ┃                                                              ┃
+  ┃  Что делает:                                                 ┃
+  ┃    Проверяет актуальность всех профилей маскировки:          ┃
+  ┃                                                              ┃
+  ┃    1. JA3/JA4 — сравнивает с актуальными базами:             ┃
+  ┃       ├─ Скачать ja3er.com top-50 fingerprints               ┃
+  ┃       ├─ Наш JA3 есть в top-50? → PASS                      ┃
+  ┃       └─ Наш JA3 в top-50 полгода назад, но не сейчас? WARN │
+  ┃                                                              ┃
+  ┃    2. DHCP fingerprint — сравнить с fingerbank.org:           ┃
+  ┃       ├─ Наш DHCP FP → определяется как "iPhone 15"? PASS   ┃
+  ┃       └─ Определяется как "Unknown"? → FAIL                  ┃
+  ┃                                                              ┃
+  ┃    3. TCP/IP stack fingerprint (p0f-style):                  ┃
+  ┃       ├─ TTL + Window + MSS + WScale + options order         ┃
+  ┃       ├─ Соответствует заявленной ОС? → PASS                 ┃
+  ┃       └─ Конфликт (TTL=64 но Window=65535+WScale=8)? → FAIL │
+  ┃                                                              ┃
+  ┃    4. Возраст профиля:                                       ┃
+  ┃       ├─ Профиль обновлён < 60 дней назад? → PASS            ┃
+  ┃       ├─ 60-120 дней? → WARN                                 ┃
+  ┃       └─ > 120 дней? → FAIL (устарел)                        ┃
+  ┃                                                              ┃
+  ┃  Метрики:                                                    ┃
+  ┃    ┌─────────────────────┬────────────┬────────────┐         ┃
+  ┃    │ Проверка            │ PASS       │ FAIL       │         ┃
+  ┃    ├─────────────────────┼────────────┼────────────┤         ┃
+  ┃    │ JA3 in top-50       │ ✓          │ ✗          │         ┃
+  ┃    │ JA4 consistency     │ match      │ mismatch   │         ┃
+  ┃    │ DHCP→device match   │ correct OS │ unknown/   │         ┃
+  ┃    │                     │            │ wrong OS   │         ┃
+  ┃    │ p0f OS match        │ correct    │ conflict   │         ┃
+  ┃    │ Profile age         │ < 60 days  │ > 120 days │         ┃
+  ┃    └─────────────────────┴────────────┴────────────┘         ┃
+  ┃                                                              ┃
+  ┃  Зависимости: requests (для ja3er.com API), json             ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+
+  ┌─────────────────────────────────────────────────────────────┐
+  │  СВОДНЫЙ ОТЧЁТ                                              │
+  │                                                              │
+  │  ncp selftest --full выводит:                                │
+  │                                                              │
+  │  ╔══════════════════════════════════════════════════════╗    │
+  │  ║  NCP SELF-TEST REPORT — 2026-02-21 10:50 MSK        ║    │
+  │  ╠══════════════════════════════════════════════════════╣    │
+  │  ║  TEST 1  dMAP RTT         ❌ FAIL  (Δ=12.1ms)       ║    │
+  │  ║  TEST 2  VPN Classifier   ✅ PASS  (acc=57%)        ║    │
+  │  ║  TEST 3  Website FP       ✅ PASS  (top1=9%)        ║    │
+  │  ║  TEST 4  SORM Metadata    ⚠️ WARN  (session>120s)   ║    │
+  │  ║  TEST 5  FP Freshness     ✅ PASS  (age=12 days)    ║    │
+  │  ╠══════════════════════════════════════════════════════╣    │
+  │  ║  OVERALL: 2/5 PASS, 1 WARN, 1 FAIL                  ║    │
+  │  ║                                                      ║    │
+  │  ║  РЕКОМЕНДАЦИИ:                                       ║    │
+  │  ║  1. Включить RTTEqualizer (Stage 5.9)                ║    │
+  │  ║  2. Уменьшить max_session в SessionFragmenter        ║    │
+  │  ╚══════════════════════════════════════════════════════╝    │
+  └─────────────────────────────────────────────────────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФОНОВЫЙ SELF-TEST (Thread 7)                       [SelfTestMonitor — continuous]
+═══════════════════════════════════════════════════════════════════════════════════
+
+  Thread 7: SelfTestMonitor (непрерывный мониторинг)            [NEW]
+  ├─ Каждые 10 мин: мини-TEST 1 (RTT check на последних 100 flows)
+  ├─ Каждые 30 мин: мини-TEST 2 (feature extraction на скользящем окне)
+  ├─ Каждые 60 мин: TEST 5 (fingerprint freshness check)
+  ├─ При обнаружении FAIL:
+  │   ├─ CrossLayerCorrelator.alert("selftest_fail", test_id)
+  │   ├─ Если TEST 1 FAIL → автоматически включить RTTEqualizer
+  │   ├─ Если TEST 2 FAIL → поднять threat_level на один уровень
+  │   ├─ Если TEST 5 FAIL → форсировать ротацию профиля
+  │   └─ Логировать в encrypted audit log
+  └─ Данные для тестов берутся из PacketInterceptor ring buffer
+     (последние 10000 пакетов, без записи на диск)
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ МАТРИЦА ДЕТЕКТИРУЕМОСТИ                          [Detection Matrix — reference]
+═══════════════════════════════════════════════════════════════════════════════════
+
+  ┌──────────────────────┬──────────┬───────────┬─────────┬───────────────────────┐
+  │ Вектор атаки         │ Без NCP  │ С NCP     │ Статус  │ Модуль защиты         │
+  │                      │          │ (полный)  │         │                       │
+  ├──────────────────────┼──────────┼───────────┼─────────┼───────────────────────┤
+  │ Сигнатура протокола  │ ❌ виден │ ✅ скрыт  │ Готов   │ TrafficMimicry        │
+  │ SNI inspection       │ ❌ виден │ ✅ скрыт  │ Готов   │ ECH                   │
+  │ JA3/JA4 fingerprint  │ ❌ виден │ ✅ скрыт  │ Готов   │ TLSFingerprint        │
+  │ Энтропия payload     │ ❌ 7.95  │ ✅ 4.8    │ Готов   │ EntropyMasking        │
+  │ Active probing       │ ❌ виден │ ✅ скрыт  │ Готов   │ ProbeResist+Honeypot  │
+  │ Burst patterns       │ ⚠️ частич│ ✅ скрыт  │ Готов   │ BurstMorpher          │
+  │ Timing patterns      │ ❌ виден │ ✅ скрыт  │ Готов   │ TimingObfuscator      │
+  │ Session duration     │ ❌ 24/7  │ ✅ 2мин   │ [NEW]   │ SessionFragmenter     │
+  │ DNS leaks            │ ❌ виден │ ✅ скрыт  │ [NEW]   │ DNSLeakPrevention     │
+  │ Volume fingerprint   │ ❌ виден │ ⚠️ частич │ [NEW]   │ VolumeNormalizer      │
+  │ Timestamp correlation│ ❌ виден │ ⚠️ частич │ [NEW]   │ TimeCorrelationBreaker│
+  │ dMAP (RTT)           │ ❌ 96%   │ ⚠️ ~70%?  │ [NEW]   │ RTTEqualizer          │
+  │ Website FP           │ ❌ 95%   │ ⚠️ ~15%?  │ [NEW]   │ WFDefense             │
+  │ ML flow classifier   │ ❌ 90%+  │ ⚠️ ~58%?  │ [NEW]   │ BehavioralCloak       │
+  │ Cross-layer корр.    │ ❌ виден │ ✅ скрыт  │ [NEW]   │ CrossLayerCorrelator  │
+  │ Dest IP (AS/geo)     │ ❌ виден │ ⚠️ частич │ [NEW]   │ GeoObfuscator+AS     │
+  │ Абонент (договор)    │ ❌ виден │ ❌ виден  │ N/A     │ (физический уровень)  │
+  └──────────────────────┴──────────┴───────────┴─────────┴───────────────────────┘
+
+  Обозначения:
+    ✅ скрыт  — модуль реализован и работает, детекция маловероятна
+    ⚠️ частич — модуль есть, но нет эмпирической проверки (нужен selftest)
+    ❌ виден  — не защищено / невозможно защитить на уровне софта
+    [NEW]     — модуль спроектирован, ещё не реализован
+    ?         — оценка предварительная, требует TEST 1-5 для подтверждения
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ ФАЙЛОВАЯ СТРУКТУРА ТЕСТОВОГО СТЕНДА
+═══════════════════════════════════════════════════════════════════════════════════
+
+  tools/selftest/
+  ├── __init__.py
+  ├── test_rtt.py                  # TEST 1: dMAP RTT fingerprint
+  ├── test_vpn_detect.py           # TEST 2: VPN-vs-Web classifier
+  ├── test_wf.py                   # TEST 3: Website fingerprinting
+  ├── test_sorm_meta.py            # TEST 4: SORM metadata anomaly
+  ├── test_fingerprint_age.py      # TEST 5: Fingerprint freshness
+  ├── feature_extractor.py         # Общий экстрактор фич из pcap
+  ├── report_generator.py          # Генерация сводного отчёта
+  ├── requirements.txt             # scapy, sklearn, scipy, numpy
+  └── README.md                    # Инструкция по запуску
+
+  src/core/include/
+  └── ncp_selftest_monitor.hpp     # Thread 7: непрерывный мониторинг
+
+  src/core/src/
+  └── ncp_selftest_monitor.cpp     # Реализация SelfTestMonitor
+
+  Общий объём: ~800 строк Python + ~300 строк C++
+
+
+═══════════════════════════════════════════════════════════════════════════════════
+ МАППИНГ ИСТОЧНИКОВ (откуда что взято)
+═══════════════════════════════════════════════════════════════════════════════════
+
+  ┌────────────────────────────────┬──────────┬──────────────────┐
+  │ Компонент                      │ pipe.docx│ DYNAM_FULL v1.1  │
+  ├────────────────────────────────┼──────────┼──────────────────┤
+  │ Фаза 0 (инициализация)        │          │        ✓         │
+  │ STAGE 1 (security pre-flight)  │    ✓     │                  │
+  │ STAGE 2 (E2E encryption)       │    ✓     │   ✓ (ChaCha20)   │
+  │ STAGE 3 (entropy masking)      │    ✓     │        ✓         │
+  │ STAGE 4 (orchestrator)         │    ✓     │   ✓ (TLS wrapper)│
+  │ STAGE 5 (obfuscation+Geneva)   │    ✓     │        ✓         │
+  │ Covert Channels                │    ✓     │                  │
+  │ STAGE 6 (transport)            │    ✓     │                  │
+  │ STAGE 7 (identity runtime)     │    ✓     │                  │
+  │ STAGE 8 (network output)       │    ✓     │        ✓         │
+  │ STAGE 9 (security post-flight) │    ✓     │                  │
+  │ Входящий трафик                │          │        ✓         │
+  │ Ротация идентичности           │    ✓     │        ✓         │
+  │ Graceful shutdown              │          │        ✓         │
+  │ Фоновые процессы               │    ✓     │        ✓         │
+  │ Таблица "что видит оператор"   │    ✓     │        ✓         │
+  └────────────────────────────────┴──────────┴──────────────────┘
 ```
 
-### RECEIVE path (wire → plaintext)
-
-```
-WIRE
-  │
-  Stage 6:  NetworkBackend.recv_raw() → L3Stealth.strip()
-  Stage 3:  (identity already applied — transparent)
-  Stage 5:  I2P.demux() / DoH.resolve() / WSTunnel.unwrap()
-  Covert:   CovertChannelManager.extract() (if stego mode)
-  Stage 4+: BurstMorpher.unmorph() → TimingObfuscator.strip()
-            DummyInjector.filter_dummies()
-            EntropyMasking.unmask()
-            GenevaEngine.reassemble()
-  Stage 4:  ProtocolOrchestrator.receive()
-            ├─ ECH unwrap
-            ├─ AdvancedDPIBypass.process_incoming()
-            ├─ ProbeResist.validate_auth()
-            ├─ TrafficMimicry.unwrap_payload()
-            └─ AdversarialPadding.unpad()
-  Stage 2:  E2ESession.decrypt() → plaintext
-  │
-  PLAINTEXT
-```
-
----
 
 ## 5. Pending Fixes
 
