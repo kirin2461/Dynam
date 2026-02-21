@@ -18,6 +18,7 @@
 #include <numeric>
 #include <vector>
 #include <sodium.h>
+#include <cmath>
 
 namespace ncp {
 namespace DPI {
