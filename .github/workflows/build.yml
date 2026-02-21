@@ -74,10 +74,7 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -C Release
 
-  # Windows build disabled — Npcap licensing prevents automated CI install.
-  # Enable when vcpkg + Npcap SDK workflow is validated locally.
-  build-windows:
-    if: false
+    build-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
