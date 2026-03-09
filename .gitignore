@@ -1,0 +1,30 @@
+# Build directories
+build/
+*/build/
+*/*/build/
+*/*/*/build/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Temporary files
+*.tmp
+*.log
+check_git.py
+git_push.py
+git_status.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+Thumbs.db
+.DS_Store

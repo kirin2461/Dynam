@@ -1,0 +1,137 @@
+#ifndef NCP_CRYPTO_HPP
+#define NCP_CRYPTO_HPP
+
+#include "ncp_secure_memory.hpp"
+#include "ncp_secure_buffer.hpp"
+#include <vector>
+#include <string>
+#include <cstdint>
+#include <sstream>
+#include <iomanip>
+
+namespace ncp {
+
+class Crypto {
+public:
+    // Key pair structure with SecureMemory and secure wiping
+    struct KeyPair {
+        SecureMemory public_key;
+        SecureMemory secret_key;
+
+        // Destructor ensures secret key material is wiped
+        ~KeyPair() noexcept { wipe_impl(); }
+
+        // Public accessor to check validity
+        bool is_valid() const noexcept {
+            return !secret_key.empty() && !public_key.empty();
+        }
+
+        // Prevent accidental copies of key material
+        KeyPair() = default;
+        KeyPair(const KeyPair&) = delete;
+        KeyPair& operator=(const KeyPair&) = delete;
+        KeyPair(KeyPair&&) noexcept = default;
+        KeyPair& operator=(KeyPair&&) noexcept = default;
+
+    private:
+        // Private wipe implementation (called only by destructor)
+        void wipe_impl() noexcept {
+            secret_key = SecureMemory{};
+            public_key = SecureMemory{};
+        }
+    };
+    
+    Crypto();
+    ~Crypto() noexcept = default;
+    
+    // Key generation
+    [[nodiscard]] KeyPair generate_keypair();
+    
+    // Random generation - returns SecureMemory
+    [[nodiscard]] SecureMemory generate_random(size_t size);
+    
+    // Digital signatures (Ed25519)
+    [[nodiscard]] SecureMemory sign_ed25519(
+        const SecureMemory& message,
+        const SecureMemory& secret_key
+    );
+    
+    [[nodiscard]] bool verify_ed25519(
+        const SecureMemory& message,
+        const SecureMemory& signature,
+        const SecureMemory& public_key
+    );
+    
+    // Symmetric encryption: ChaCha20-Poly1305 IETF (RFC 8439)
+    // Uses crypto_aead_chacha20poly1305_ietf internally.
+    // Key: 32 bytes. Nonce: 12 bytes (auto-generated, prepended).
+    // Wire format: [nonce:12][ciphertext+tag:N+16]
+    [[nodiscard]] SecureMemory encrypt_chacha20(
+        const SecureMemory& plaintext,
+        const SecureMemory& key
+    );
+    
+    [[nodiscard]] SecureMemory decrypt_chacha20(
+        const SecureMemory& ciphertext,
+        const SecureMemory& key
+    );
+    
+    // Hashing functions
+    [[nodiscard]] SecureMemory hash_sha256(const SecureMemory& data);
+    [[nodiscard]] SecureMemory hash_sha512(const SecureMemory& data);
+    [[nodiscard]] SecureMemory hash_blake2b(const SecureMemory& data, size_t output_len = 32);
+    
+    // Post-quantum signatures (Dilithium5) - requires liboqs
+    [[nodiscard]] KeyPair generate_dilithium_keypair();
+    
+    [[nodiscard]] SecureMemory sign_dilithium(
+        const SecureMemory& message,
+        const SecureMemory& secret_key
+    );
+    
+    [[nodiscard]] bool verify_dilithium(
+        const SecureMemory& message,
+        const SecureMemory& signature,
+        const SecureMemory& public_key
+    );
+
+    // AEAD encryption: XChaCha20-Poly1305 (extended nonce variant)
+    // Uses crypto_aead_xchacha20poly1305_ietf internally.
+    // Key: 32 bytes. Nonce: 24 bytes (auto-generated, prepended).
+    // Supports additional authenticated data (AAD).
+    // Wire format: [nonce:24][ciphertext+tag:N+16]
+    SecureMemory encrypt_aead(
+        const SecureMemory& plaintext,
+        const SecureMemory& key,
+        const SecureMemory& additional_data = {}
+    );
+
+    SecureMemory decrypt_aead(
+        const SecureMemory& ciphertext,
+        const SecureMemory& key,
+        const SecureMemory& additional_data = {}
+    );
+
+    // Utility: convert SecureMemory to hex string
+    // FIXED: Added null pointer and empty checks to prevent UB
+    static std::string bytes_to_hex(const SecureMemory& mem) noexcept {
+        // Validate input before accessing memory
+        if (mem.empty() || !mem.data()) {
+            return "";
+        }
+        
+        std::ostringstream oss;
+        oss << std::hex << std::setfill('0');
+        for (size_t i = 0; i < mem.size(); ++i) {
+            oss << std::setw(2) << static_cast<int>(mem.data()[i]);
+        }
+        return oss.str();
+    }
+    
+private:
+    void init_libsodium();
+};
+
+} // namespace ncp
+
+#endif // NCP_CRYPTO_HPP

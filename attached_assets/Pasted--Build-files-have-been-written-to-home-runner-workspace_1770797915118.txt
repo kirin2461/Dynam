@@ -1,0 +1,72 @@
+-- Build files have been written to: /home/runner/workspace/build
+[  6%] Building CXX object src/core/CMakeFiles/ncp_core.dir/src/spoofer.cpp.o
+[ 12%] Building CXX object src/core/CMakeFiles/ncp_core.dir/src/ncp_dpi.cpp.o
+[ 18%] Building CXX object src/core/CMakeFiles/ncp_core.dir/src/tls_fingerprint.cpp.o
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp: In member function ‘void NCP::TLSFingerprint::randomize_ciphers()’:
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:174:10: error: ‘shuffle’ is not a member of ‘std’
+  174 |     std::shuffle(all_ciphers.begin(), all_ciphers.end(), std::random_device{}());
+      |          ^~~~~~~
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:174:63: error: ‘random_device’ is not a member of ‘std’
+  174 |     std::shuffle(all_ciphers.begin(), all_ciphers.end(), std::random_device{}());
+      |                                                               ^~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp: In member function ‘void NCP::TLSFingerprint::randomize_extensions()’:
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:180:10: error: ‘shuffle’ is not a member of ‘std’
+  180 |     std::shuffle(all_exts.begin(), all_exts.end(), std::random_device{}());
+      |          ^~~~~~~
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:180:57: error: ‘random_device’ is not a member of ‘std’
+  180 |     std::shuffle(all_exts.begin(), all_exts.end(), std::random_device{}());
+      |                                                         ^~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp: In member function ‘void NCP::TLSFingerprint::randomize_curves()’:
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:186:10: error: ‘shuffle’ is not a member of ‘std’
+  186 |     std::shuffle(all_curves.begin(), all_curves.end(), std::random_device{}());
+      |          ^~~~~~~
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:186:61: error: ‘random_device’ is not a member of ‘std’
+  186 |     std::shuffle(all_curves.begin(), all_curves.end(), std::random_device{}());
+      |                                                             ^~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp: In member function ‘void NCP::TLSFingerprint::shuffle_order()’:
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:191:10: error: ‘shuffle’ is not a member of ‘std’
+  191 |     std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), std::random_device{}());
+      |          ^~~~~~~
+/home/runner/workspace/src/core/src/tls_fingerprint.cpp:191:69: error: ‘random_device’ is not a member of ‘std’
+  191 |     std::shuffle(pImpl->ciphers.begin(), pImpl->ciphers.end(), std::random_device{}());
+      |                                                                     ^~~~~~~~~~~~~
+make[2]: *** [src/core/CMakeFiles/ncp_core.dir/build.make:219: src/core/CMakeFiles/ncp_core.dir/src/tls_fingerprint.cpp.o] Error 1
+make[2]: *** Waiting for unfinished jobs....
+/home/runner/workspace/src/core/src/spoofer.cpp: In member function ‘bool NCP::NetworkSpoofer::enable(const std::string&, const SpoofConfig&)’:
+/home/runner/workspace/src/core/src/spoofer.cpp:118:35: error: ‘struct NCP::NetworkSpoofer::SpoofConfig’ has no member named ‘enable_chaffing’
+  118 |     if (needs_rotation || config_.enable_chaffing) {
+      |                                   ^~~~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/spoofer.cpp: At global scope:
+/home/runner/workspace/src/core/src/spoofer.cpp:215:6: error: no declaration matches ‘bool NCP::NetworkSpoofer::rotate_hostname()’
+  215 | bool NetworkSpoofer::rotate_hostname() {
+      |      ^~~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/spoofer.cpp:215:6: note: no functions named ‘bool NCP::NetworkSpoofer::rotate_hostname()’
+In file included from /home/runner/workspace/src/core/src/spoofer.cpp:6:
+/home/runner/workspace/src/core/include/ncp_spoofer.hpp:19:7: note: ‘class NCP::NetworkSpoofer’ defined here
+   19 | class NetworkSpoofer {
+      |       ^~~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/spoofer.cpp: In member function ‘bool NCP::NetworkSpoofer::rotate_all()’:
+/home/runner/workspace/src/core/src/spoofer.cpp:238:16: error: ‘rotate_hostname’ was not declared in this scope
+  238 |     success &= rotate_hostname();
+      |                ^~~~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/spoofer.cpp: In member function ‘void NCP::NetworkSpoofer::rotation_thread_func()’:
+/home/runner/workspace/src/core/src/spoofer.cpp:293:21: error: ‘struct NCP::NetworkSpoofer::SpoofConfig’ has no member named ‘enable_chaffing’
+  293 |         if (config_.enable_chaffing) { /* Traffic Chaffing logic */ }
+      |                     ^~~~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/spoofer.cpp:320:31: error: ‘struct NCP::NetworkSpoofer::SpoofStatus’ has no member named ‘last_hostname_rotation’; did you mean ‘last_mac_rotation’?
+  320 |                 now - status_.last_hostname_rotation).count();
+      |                               ^~~~~~~~~~~~~~~~~~~~~~
+      |                               last_mac_rotation
+/home/runner/workspace/src/core/src/spoofer.cpp:322:17: error: ‘rotate_hostname’ was not declared in this scope
+  322 |                 rotate_hostname();
+      |                 ^~~~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/spoofer.cpp: At global scope:
+/home/runner/workspace/src/core/src/spoofer.cpp:330:6: error: no declaration matches ‘bool NCP::NetworkSpoofer::apply_hostname(const std::string&)’
+  330 | bool NetworkSpoofer::apply_hostname(const std::string& hostname) {
+      |      ^~~~~~~~~~~~~~
+/home/runner/workspace/src/core/src/spoofer.cpp:330:6: note: no functions named ‘bool NCP::NetworkSpoofer::apply_hostname(const std::string&)’
+/home/runner/workspace/src/core/include/ncp_spoofer.hpp:19:7: note: ‘class NCP::NetworkSpoofer’ defined here
+   19 | class NetworkSpoofer {
+      |       ^~~~~~~~~~~~~~
+make[2]: *** [src/core/CMakeFiles/ncp_core.dir/build.make:191: src/core/CMakeFiles/ncp_core.dir/src/spoofer.cpp.o] Error 1
+make[1]: *** [CMakeFiles/Makefile2:129: src/core/CMakeFiles/ncp_core.dir/all] Error 2

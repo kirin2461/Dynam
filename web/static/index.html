@@ -1,0 +1,1704 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<!--
+   ______                            __
+  / ____/___  ____ ___  ____  __  __/ /____  _____
+ / /   / __ \/ __ `__ \/ __ \/ / / / __/ _ \/ ___/
+/ /___/ /_/ / / / / / / /_/ / /_/ / /_/  __/ /
+\____/\____/_/ /_/ /_/ .___/\__,_/\__/\___/_/
+                    /_/
+        Created with Perplexity Computer
+        https://www.perplexity.ai/computer
+-->
+
+<!-- Perplexity Computer Attribution — SEO Meta Tags -->
+<meta name="generator" content="Perplexity Computer">
+<meta name="author" content="Perplexity Computer">
+<meta property="og:see_also" content="https://www.perplexity.ai/computer">
+<link rel="author" href="https://www.perplexity.ai/computer">
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="api-base" content="">
+<title>NCP — Network Control Protocol</title>
+<meta name="description" content="NCP DPI Bypass Control Panel — Панель управления обходом DPI">
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+<!-- Socket.IO -->
+<script src="https://cdn.jsdelivr.net/npm/socket.io-client@4.7.5/dist/socket.io.min.js"></script>
+
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+<div class="dashboard">
+
+  <!-- ─── Header ──────────────────────────────────────────────────────── -->
+  <header class="header">
+    <button id="hamburger" aria-label="Меню">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+      </svg>
+    </button>
+
+    <div class="header__logo">
+      <!-- NCP Inline SVG Logo -->
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-label="NCP Logo">
+        <rect x="1" y="1" width="30" height="30" rx="6" stroke="#00d4ff" stroke-width="1.5"/>
+        <circle cx="16" cy="16" r="7" stroke="#00d4ff" stroke-width="1.5"/>
+        <circle cx="16" cy="16" r="2.5" fill="#00d4ff"/>
+        <line x1="16" y1="1" x2="16" y2="9" stroke="#00d4ff" stroke-width="1.5"/>
+        <line x1="16" y1="23" x2="16" y2="31" stroke="#00d4ff" stroke-width="1.5"/>
+        <line x1="1" y1="16" x2="9" y2="16" stroke="#00d4ff" stroke-width="1.5"/>
+        <line x1="23" y1="16" x2="31" y2="16" stroke="#00d4ff" stroke-width="1.5"/>
+        <line x1="5.6" y1="5.6" x2="11" y2="11" stroke="#00d4ff" stroke-width="1" opacity="0.5"/>
+        <line x1="21" y1="21" x2="26.4" y2="26.4" stroke="#00d4ff" stroke-width="1" opacity="0.5"/>
+        <line x1="26.4" y1="5.6" x2="21" y2="11" stroke="#00d4ff" stroke-width="1" opacity="0.5"/>
+        <line x1="11" y1="21" x2="5.6" y2="26.4" stroke="#00d4ff" stroke-width="1" opacity="0.5"/>
+      </svg>
+      <div class="header__brand">
+        <span class="header__title">NCP</span>
+        <span class="header__subtitle">Network Control Protocol</span>
+      </div>
+    </div>
+
+    <div class="header__spacer"></div>
+
+    <div class="header__connection">
+      <span class="header__version">v1.4.0-dev</span>
+      <span id="header-dot" class="status-dot"></span>
+      <button id="btn-connect" class="btn-connect">
+        <span class="status-dot"></span> Подключить
+      </button>
+    </div>
+  </header>
+
+  <!-- ─── Sidebar ─────────────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <nav>
+      <ul class="sidebar__nav">
+        <li class="sidebar__label">Главное</li>
+
+        <li class="sidebar__item active" data-nav="overview">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/>
+            <rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/>
+          </svg>
+          Обзор
+        </li>
+
+        <li class="sidebar__label">Защита</li>
+
+        <li class="sidebar__item" data-nav="dpi">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          </svg>
+          DPI Обход
+        </li>
+
+        <li class="sidebar__item" data-nav="network">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/>
+            <line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/>
+          </svg>
+          Сеть
+        </li>
+
+        <li class="sidebar__item" data-nav="e2e">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+          E2E Шифрование
+        </li>
+
+        <li class="sidebar__item" data-nav="geneva">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+          </svg>
+          Geneva GA
+        </li>
+
+        <li class="sidebar__item" data-nav="mimicry">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M8 12s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/>
+          </svg>
+          Мимикрия
+        </li>
+
+        <li class="sidebar__item" data-nav="i2p">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/>
+          </svg>
+          I2P
+        </li>
+
+        <li class="sidebar__item" data-nav="telegram">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 3L1 11l7 2 2 7 4-4 4 3z"/>
+          </svg>
+          Telegram
+        </li>
+
+        <li class="sidebar__label">Продвинутые</li>
+
+        <li class="sidebar__item" data-nav="pipeline">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="20" height="5" rx="1"/>
+          </svg>
+          Пайплайн
+        </li>
+
+        <li class="sidebar__item" data-nav="antiml">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.5 5-4 6.5V18h-6v-2.5C6.5 14 5 11.5 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="22" x2="15" y2="22"/>
+          </svg>
+          Анти-ML
+        </li>
+
+        <li class="sidebar__item" data-nav="covert">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+            <line x1="1" y1="1" x2="23" y2="23"/>
+          </svg>
+          Скрытые каналы
+        </li>
+
+        <li class="sidebar__item" data-nav="transport">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+          Транспорт
+        </li>
+
+        <li class="sidebar__sep"></li>
+        <li class="sidebar__label">Система</li>
+
+        <li class="sidebar__item" data-nav="license">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <polyline points="9 12 11 14 15 10"/>
+          </svg>
+          Лицензия
+        </li>
+
+        <li class="sidebar__item" data-nav="logs">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/>
+            <line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/>
+            <line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/>
+          </svg>
+          Логи
+        </li>
+
+        <li class="sidebar__item" data-nav="settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          Настройки
+        </li>
+      </ul>
+    </nav>
+  </aside>
+
+  <!-- ─── Main Content ─────────────────────────────────────────────────── -->
+  <main class="main">
+
+    <!-- ══ ОБЗОР ════════════════════════════════════════════════════════ -->
+    <section id="sec-overview" class="section active">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/>
+          <rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/>
+        </svg>
+        Обзор
+      </h2>
+
+      <div class="grid-4 mb-6">
+        <!-- Status Card -->
+        <div class="kpi-card col-span-2" style="background:var(--bg-surface);border-color:var(--border)">
+          <div class="status-hero">
+            <div id="status-ring" class="status-hero__ring stopped">
+              <svg class="status-hero__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              </svg>
+            </div>
+            <div id="status-label" class="status-hero__label" style="color:var(--red)">НЕ ПОДКЛЮЧЕНО</div>
+            <div id="status-sub" class="status-hero__sub">Нажмите «Подключить» для запуска</div>
+            <div style="display:flex;gap:var(--sp-3);">
+              <button class="btn btn--primary" onclick="toggleConnection()">Подключить</button>
+              <button class="btn" id="btn-rotate" onclick="rotateIdentity()">Ротировать</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Uptime -->
+        <div class="kpi-card kpi-card--accent">
+          <div class="kpi-card__label">Аптайм</div>
+          <div id="uptime-value" class="kpi-card__value">00:00:00</div>
+          <div class="kpi-card__sub">Время работы</div>
+        </div>
+
+        <!-- DPI Events -->
+        <div class="kpi-card kpi-card--yellow">
+          <div class="kpi-card__label">DPI Событий</div>
+          <div id="kpi-dpi-events" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">Всего обнаружено</div>
+        </div>
+
+        <!-- Packets -->
+        <div class="kpi-card">
+          <div class="kpi-card__label">Пакетов обработано</div>
+          <div id="kpi-packets" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">Всего</div>
+        </div>
+
+        <!-- DPI Blocks Avoided -->
+        <div class="kpi-card kpi-card--green">
+          <div class="kpi-card__label">DPI Блокировок избежано</div>
+          <div id="kpi-dpi-blocks" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">Успешно обойдено</div>
+        </div>
+
+        <!-- Data Transferred -->
+        <div class="kpi-card">
+          <div class="kpi-card__label">Передано данных</div>
+          <div id="kpi-transferred" class="kpi-card__value">0 B</div>
+          <div class="kpi-card__sub">↑↓ суммарно</div>
+        </div>
+
+        <!-- Active Connections -->
+        <div class="kpi-card">
+          <div class="kpi-card__label">Активных соединений</div>
+          <div id="kpi-connections" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">Прямо сейчас</div>
+        </div>
+      </div>
+
+      <!-- Traffic Chart -->
+      <div class="card mb-6">
+        <div class="card__title">Трафик в реальном времени</div>
+        <div class="chart-wrap" style="height:180px">
+          <canvas id="traffic-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Active Techniques -->
+      <div class="grid-2">
+        <div class="card">
+          <div class="card__title">Активные техники обхода</div>
+          <div style="display:flex;flex-wrap:wrap;gap:var(--sp-2);" id="active-techniques-display">
+            <span class="badge badge--info">TCP фрагментация</span>
+            <span class="badge badge--info">TLS splitting</span>
+            <span class="badge badge--inactive">TTL манипуляция</span>
+            <span class="badge badge--inactive">Фейковые пакеты</span>
+            <span class="badge badge--info">DoH</span>
+            <span class="badge badge--inactive">SNI спуфинг</span>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card__title">Состояние подсистем</div>
+          <div class="item-list">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">DPI Engine</span><span class="badge badge--active">Готов</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">Geneva GA</span><span class="badge badge--inactive">Выкл</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">E2E Crypto</span><span class="badge badge--active">Готов</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">I2P Bridge</span><span class="badge badge--inactive">Выкл</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">DoH Proxy</span><span class="badge badge--active">Cloudflare</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">Pipeline</span><span id="ov-badge-pipeline" class="badge badge--inactive">Выкл</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">Анти-ML</span><span id="ov-badge-antiml" class="badge badge--inactive">Выкл</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">Скрытые каналы</span><span id="ov-badge-covert" class="badge badge--inactive">Выкл</span>
+            </div>
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0">
+              <span class="text-muted">Транспорт</span><span id="ov-badge-transport" class="badge badge--inactive">Выкл</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ DPI ОБХОД ═════════════════════════════════════════════════════ -->
+    <section id="sec-dpi" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+        DPI Обход
+      </h2>
+
+      <!-- ── Operator / ISP Preset ─────────────────────────────────────── -->
+      <div class="card mb-6">
+        <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Оператор / Стратегия обхода</span>
+          <span id="dpi-operator-badge" class="badge badge--info" style="font-size:var(--text-xs)">—</span>
+        </div>
+        <p class="text-muted text-sm mb-4" style="line-height:1.5">
+          Выберите оператора для применения оптимизированной стратегии обхода DPI.
+          Каждый оператор использует разные методы блокировки — стратегия адаптирована под конкретный DPI.
+        </p>
+        <div id="dpi-operator-grid" class="preset-grid">
+          <!-- Filled dynamically by JS -->
+        </div>
+        <div id="dpi-operator-desc" class="text-sm mt-3" style="color:var(--text-secondary);min-height:1.4em;"></div>
+        <div id="dpi-operator-restart" class="mt-3 hidden" style="padding:var(--sp-3);background:var(--yellow-dim,rgba(255,200,0,.08));border:1px solid var(--yellow,#f0c000);border-radius:var(--r-md);font-size:var(--text-sm);color:var(--yellow,#f0c000);">
+          ⚠ NCP запущен — перезапустите для применения нового пресета оператора.
+          <button class="btn btn--sm btn--primary mt-2" onclick="restartWithNewPreset()">Перезапустить</button>
+        </div>
+      </div>
+
+      <!-- ── Zapret DPI Config ─────────────────────────────────────── -->
+      <div class="card mb-6">
+        <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Zapret DPI Config</span>
+          <span id="zapret-profile-badge" class="badge badge--info" style="font-size:var(--text-xs)">—</span>
+        </div>
+        <p class="text-muted text-sm mb-4" style="line-height:1.5">
+          Конфигурации на основе zapret — многоцепочечные правила обхода для разных типов трафика.
+          Каждый профиль содержит набор цепочек с оптимальными параметрами desync.
+        </p>
+        <div id="zapret-profile-grid" class="preset-grid">
+          <!-- Filled dynamically by JS -->
+        </div>
+        <div id="zapret-profile-desc" class="text-sm mt-3" style="color:var(--text-secondary);min-height:1.4em;"></div>
+
+        <!-- Chain details accordion -->
+        <div id="zapret-chains-detail" class="mt-4 hidden">
+          <div class="text-sm mb-2" style="font-weight:600;color:var(--text-primary)">Активные цепочки:</div>
+          <div id="zapret-chains-list" style="display:flex;flex-direction:column;gap:var(--sp-2)"></div>
+        </div>
+      </div>
+
+      <!-- Presets -->
+      <div class="card mb-6">
+        <div class="card__title">Пресет стратегии (UI)</div>
+        <div class="preset-grid">
+          <div class="preset-card" data-preset="stealth">
+            <div class="preset-card__icon">🥷</div>
+            <div class="preset-card__name">Скрытность</div>
+            <div class="preset-card__desc">Макс. незаметность</div>
+          </div>
+          <div class="preset-card" data-preset="paranoid">
+            <div class="preset-card__icon">🔐</div>
+            <div class="preset-card__name">Параноик</div>
+            <div class="preset-card__desc">Все техники вкл</div>
+          </div>
+          <div class="preset-card active" data-preset="balanced">
+            <div class="preset-card__icon">⚖️</div>
+            <div class="preset-card__name">Баланс</div>
+            <div class="preset-card__desc">Рекомендуемый</div>
+          </div>
+          <div class="preset-card" data-preset="performance">
+            <div class="preset-card__icon">⚡</div>
+            <div class="preset-card__name">Скорость</div>
+            <div class="preset-card__desc">Мин. задержка</div>
+          </div>
+          <div class="preset-card" data-preset="max_compat">
+            <div class="preset-card__icon">🔧</div>
+            <div class="preset-card__name">Совмест.</div>
+            <div class="preset-card__desc">Макс. совместимость</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2 mb-6">
+        <!-- Techniques -->
+        <div class="card">
+          <div class="card__title">Техники обхода</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">TCP фрагментация</div>
+              <div class="toggle-desc">Разбивка пакетов на мелкие фрагменты</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-tcp-frag"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">TLS record splitting</div>
+              <div class="toggle-desc">Разделение TLS записей</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-tls-split"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">TTL манипуляция</div>
+              <div class="toggle-desc">Изменение TTL для обхода инспекции</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-ttl-manip"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Фейковые пакеты</div>
+              <div class="toggle-desc">Отправка ложных пакетов для дезинформации</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-fake-pkt"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Разупорядочение пакетов</div>
+              <div class="toggle-desc">Намеренное нарушение порядка пакетов</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-pkt-disorder"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">SNI спуфинг</div>
+              <div class="toggle-desc">Подмена SNI поля в TLS Hello</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-sni-spoof"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+
+        <!-- Advanced Settings -->
+        <div class="card">
+          <div class="card__title">Тонкая настройка</div>
+          <div class="form-group">
+            <label class="form-label">Размер фрагмента: <span id="val-fragment">64</span> байт</label>
+            <input type="range" class="form-range" id="range-fragment" min="8" max="512" step="8" value="64">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>8</span><span>512</span></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Временной джиттер: <span id="val-jitter">20</span> мс</label>
+            <input type="range" class="form-range" id="range-jitter" min="0" max="200" step="5" value="20">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Уровень шума: <span id="val-noise">10</span>%</label>
+            <input type="range" class="form-range" id="range-noise" min="0" max="100" step="5" value="10">
+          </div>
+
+          <div class="card__title mt-4">Geneva Engine</div>
+          <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);margin-bottom:var(--sp-2)">
+            <span class="text-muted">Статус GA</span>
+            <span id="gen-status-dpi" class="badge badge--inactive">Выкл</span>
+          </div>
+          <div style="font-size:var(--text-xs);color:var(--text-muted);background:var(--bg-raised);padding:var(--sp-3);border-radius:var(--r-md);border:1px solid var(--border);font-family:var(--font)">
+            [TCP:flags:PA]-fragment{tcp:8:false}-|
+          </div>
+          <div class="mt-3">
+            <button class="btn btn--sm btn--primary" onclick="navigateTo('geneva')">Открыть Geneva GA →</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ СЕТЬ ══════════════════════════════════════════════════════════ -->
+    <section id="sec-network" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="5" r="3"/><circle cx="5" cy="19" r="3"/><circle cx="19" cy="19" r="3"/>
+          <line x1="12" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="19" y2="16"/>
+        </svg>
+        Сеть
+      </h2>
+
+      <div class="card mb-6">
+        <div class="card__title">Сетевые интерфейсы</div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Имя</th><th>IP адреса</th><th>Статус</th><th>Действие</th></tr></thead>
+            <tbody id="iface-tbody"><tr><td colspan="4" class="text-muted">Загрузка...</td></tr></tbody>
+          </table>
+        </div>
+        <div class="mt-4">
+          <div class="form-group">
+            <label class="form-label">Активный интерфейс</label>
+            <select class="form-select" id="sel-interface">
+              <option value="auto">Авто</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2 mb-6">
+        <!-- DNS -->
+        <div class="card">
+          <div class="card__title">DNS Настройки</div>
+          <div class="form-group">
+            <label class="form-label">Провайдер DoH</label>
+            <select class="form-select" id="sel-doh">
+              <option value="cloudflare">Cloudflare (1.1.1.1)</option>
+              <option value="google">Google (8.8.8.8)</option>
+              <option value="quad9">Quad9 (9.9.9.9)</option>
+              <option value="adguard">AdGuard</option>
+              <option value="custom">Пользовательский</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Пользовательский URL</label>
+            <input class="form-input" type="text" id="inp-doh-custom" placeholder="https://dns.example.com/dns-query">
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">ECH (Encrypted Client Hello)</div>
+              <div class="toggle-desc">Скрывает SNI от провайдера</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-ech"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+
+        <!-- Proxy -->
+        <div class="card">
+          <div class="card__title">Прокси</div>
+          <div class="form-group">
+            <label class="form-label">Тип прокси</label>
+            <select class="form-select" id="sel-proxy-type">
+              <option value="none">Нет</option>
+              <option value="socks5">SOCKS5</option>
+              <option value="http">HTTP</option>
+              <option value="https">HTTPS</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Хост</label>
+            <input class="form-input" type="text" id="inp-proxy-host" placeholder="127.0.0.1">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Порт</label>
+            <input class="form-input" type="number" id="inp-proxy-port" placeholder="1080">
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Port Knocking</div>
+              <div class="toggle-desc">Открытие портов через секретную последовательность</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-port-knock"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Последовательность портов</label>
+            <input class="form-input" type="text" id="inp-port-knock-seq" placeholder="7000,8000,9000">
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ E2E ШИФРОВАНИЕ ════════════════════════════════════════════════ -->
+    <section id="sec-e2e" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+        E2E Шифрование
+      </h2>
+
+      <div class="grid-2 mb-6">
+        <div class="card">
+          <div class="card__title">Параметры шифрования</div>
+          <div style="font-size:var(--text-sm);color:var(--text-secondary);margin-bottom:var(--sp-4)">
+            Схема: <strong>X25519 + AES-256-GCM + Double Ratchet</strong>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Постквантовое шифрование</div>
+              <div class="toggle-desc">Kyber1024 (CRYSTALS) — защита от квантовых атак</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-postquantum"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="mt-4">
+            <button class="btn btn--primary" onclick="createE2ESession()">+ Новая сессия</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card__title">Параметры сессии</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2);font-size:var(--text-sm)">
+            <span class="text-muted">Шифр:</span><span>AES-256-GCM</span>
+            <span class="text-muted">KDF:</span><span>HKDF-SHA256</span>
+            <span class="text-muted">Подпись:</span><span>Ed25519</span>
+            <span class="text-muted">KEM:</span><span>X25519</span>
+            <span class="text-muted">Ratchet:</span><span>Double Ratchet</span>
+            <span class="text-muted">Rekeyint:</span><span>15 мин</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+          Активные сессии
+          <button class="btn btn--sm btn--primary" onclick="loadE2ESessions()">⟳ Обновить</button>
+        </div>
+        <div id="e2e-list" class="item-list mt-4">
+          <div class="text-muted text-sm">Нет активных сессий</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ GENEVA GA ═════════════════════════════════════════════════════ -->
+    <section id="sec-geneva" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        Geneva Genetic Algorithm
+      </h2>
+
+      <div class="grid-4 mb-6">
+        <div class="kpi-card kpi-card--yellow">
+          <div class="kpi-card__label">Поколение</div>
+          <div id="gen-generation" class="kpi-card__value">0</div>
+        </div>
+        <div class="kpi-card kpi-card--green">
+          <div class="kpi-card__label">Лучший фитнес</div>
+          <div id="gen-fitness" class="kpi-card__value">0.0%</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Статус</div>
+          <div id="gen-status" class="kpi-card__value" style="font-size:var(--text-md)">Остановлена</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Популяция</div>
+          <div id="val-pop-display" class="kpi-card__value">50</div>
+        </div>
+      </div>
+
+      <div class="grid-2 mb-6">
+        <div class="card">
+          <div class="card__title">Параметры эволюции</div>
+          <div class="form-group">
+            <label class="form-label">Размер популяции: <span id="val-pop">50</span></label>
+            <input type="range" class="form-range" id="range-pop" min="10" max="200" step="10" value="50">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Скорость мутации: <span id="val-mutation">15</span>%</label>
+            <input type="range" class="form-range" id="range-mutation" min="1" max="50" step="1" value="15">
+          </div>
+          <div class="btn-group mt-4">
+            <button id="btn-gen-start" class="btn btn--success" onclick="startGeneva()">▶ Запустить</button>
+            <button id="btn-gen-stop" class="btn btn--danger hidden" onclick="stopGeneva()">■ Остановить</button>
+            <button class="btn" onclick="refreshGenevaStatus()">⟳</button>
+          </div>
+
+          <div class="card__title mt-5">Пресеты целевых систем</div>
+          <div class="btn-group mt-2">
+            <button class="btn btn--sm" data-geneva-preset="tspu">ТСПУ 2026</button>
+            <button class="btn btn--sm" data-geneva-preset="gfw">GFW 2025</button>
+            <button class="btn btn--sm" data-geneva-preset="iran">Iran DPI</button>
+            <button class="btn btn--sm" data-geneva-preset="universal">Universal</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__title">Лучшая стратегия</div>
+          <div style="background:var(--bg-base);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);font-size:var(--text-xs);color:var(--text-accent);font-family:var(--font);line-height:1.8;min-height:80px;">
+            [TCP:flags:PA]-fragment{tcp:8:false}-|<br>
+            [TCP:flags:S]-tamper{TCP:flags:replace:INVALID}-|
+          </div>
+          <div class="card__title mt-5">График фитнеса</div>
+          <div class="chart-wrap" style="height:140px;">
+            <canvas id="geneva-chart"></canvas>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ МИМИКРИЯ ══════════════════════════════════════════════════════ -->
+    <section id="sec-mimicry" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <path d="M8 12s1.5 2 4 2 4-2 4-2"/>
+        </svg>
+        Мимикрия трафика
+      </h2>
+
+      <div class="grid-2 mb-6">
+        <div class="card">
+          <div class="card__title">Протокол маскировки</div>
+          <div class="form-group">
+            <label class="form-label">Целевой протокол</label>
+            <select class="form-select" id="sel-mimic">
+              <option value="http">HTTP</option>
+              <option value="https" selected>HTTPS</option>
+              <option value="quic">QUIC / HTTP3</option>
+              <option value="websocket">WebSocket</option>
+              <option value="bittorrent">BitTorrent</option>
+              <option value="skype">Skype</option>
+              <option value="zoom">Zoom</option>
+              <option value="dns">DNS</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">TLS Fingerprint</label>
+            <select class="form-select" id="sel-tls-fp">
+              <option value="chrome">Chrome 120</option>
+              <option value="firefox">Firefox 121</option>
+              <option value="safari">Safari 17</option>
+              <option value="edge">Edge 120</option>
+            </select>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Burst Morphing</div>
+              <div class="toggle-desc">Морфинг паттернов трафика в реальном времени</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-burst-morph"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__title">Профиль потока</div>
+          <div class="form-group">
+            <label class="form-label">Эмулируемый паттерн</label>
+            <select class="form-select" id="sel-flow">
+              <option value="web_browsing">Веб-браузинг</option>
+              <option value="video_stream">Видеопоток</option>
+              <option value="messenger">Мессенджер</option>
+              <option value="gaming">Игровой трафик</option>
+              <option value="voip">VoIP</option>
+            </select>
+          </div>
+          <div style="margin-top:var(--sp-4);">
+            <div class="card__title">Активный профиль</div>
+            <div style="background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);">
+              <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);margin-bottom:var(--sp-2)">
+                <span class="text-muted">Протокол</span><span class="text-accent">HTTPS</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:var(--text-sm);margin-bottom:var(--sp-2)">
+                <span class="text-muted">Fingerprint</span><span>Chrome 120</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;font-size:var(--text-sm)">
+                <span class="text-muted">Паттерн</span><span>Веб-браузинг</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ I2P ════════════════════════════════════════════════════════════ -->
+    <section id="sec-i2p" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/>
+        </svg>
+        I2P Интеграция
+      </h2>
+
+      <div class="grid-2 mb-6">
+        <div class="card">
+          <div class="card__title">SAM Bridge</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">I2P Enabled</div>
+              <div class="toggle-desc">Включить маршрутизацию через I2P</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-i2p"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-4">
+            <label class="form-label">SAM Хост</label>
+            <input class="form-input" type="text" id="inp-i2p-host" value="127.0.0.1">
+          </div>
+          <div class="form-group">
+            <label class="form-label">SAM Порт</label>
+            <input class="form-input" type="number" id="inp-i2p-port" value="7656">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Хопов в туннеле: <span id="val-hops">3</span></label>
+            <input type="range" class="form-range" id="range-hops" min="1" max="7" step="1" value="3">
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Garlic Routing</div>
+              <div class="toggle-desc">Луковая маршрутизация I2P</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-garlic"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Туннели
+            <button class="btn btn--sm btn--primary" onclick="createI2PTunnel()">+ Создать</button>
+          </div>
+          <div id="i2p-list" class="item-list mt-4">
+            <div class="text-muted text-sm">Нет активных туннелей</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ ПАЙПЛАЙН И ЯДРО ═══════════════════════════════════════════════ -->
+        <!-- ══ TELEGRAM ═══════════════════════════════════════════════════════ -->
+    <section id="sec-telegram" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M21 3L1 11l7 2 2 7 4-4 4 3z"/>
+        </svg>
+        Telegram — Обход блокировки
+      </h2>
+
+      <!-- Explanation -->
+      <div class="card mb-4">
+        <div class="card__title">Почему звонки и медиа не работают?</div>
+        <p class="text-muted text-sm" style="line-height:1.6; margin-bottom:12px;">
+          DPI-обход (fake+disorder+multisplit) решает проблему с SNI-блокировкой сайтов (YouTube, текстовый Telegram).
+          Но звонки и отправка медиа в Telegram используют прямые IP-соединения к серверам Telegram (DC1–DC5),
+          которые <strong>блокируются по IP-адресу</strong>, а не через DPI. Фрагментация пакетов тут не поможет.
+        </p>
+        <p class="text-muted text-sm" style="line-height:1.6;">
+          <strong>Решение:</strong> MTProto-прокси — это встроенный прокси-протокол Telegram.
+          Подключите один из прокси ниже — звонки, медиа и файлы заработают.
+        </p>
+      </div>
+
+      <!-- Proxy List -->
+      <div class="card mb-4">
+        <div class="card__title">MTProto прокси серверы</div>
+        <p class="text-muted text-sm mb-3">Нажмите «Подключить» — Telegram откроется и предложит включить прокси.</p>
+        <div id="tg-proxy-list" style="display:flex; flex-direction:column; gap:8px;">
+          <div class="text-muted text-sm">Загрузка списка прокси...</div>
+        </div>
+        <button class="btn btn--primary mt-3" onclick="loadTgProxies()" style="width:auto;">Обновить список</button>
+      </div>
+
+      <!-- Manual Setup -->
+      <div class="card">
+        <div class="card__title">Ручная настройка (если встроенные не работают)</div>
+        <p class="text-muted text-sm mb-3">Telegram → Настройки → Данные и память → Прокси → Добавить прокси → MTProto</p>
+        <div style="display:grid; grid-template-columns:1fr 100px 1fr; gap:8px; align-items:end;">
+          <div class="form-group">
+            <label class="form-label">Server</label>
+            <input type="text" class="form-input" id="tg-custom-server" placeholder="91.107.172.155">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Port</label>
+            <input type="number" class="form-input" id="tg-custom-port" value="443">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Secret</label>
+            <input type="text" class="form-input" id="tg-custom-secret" placeholder="eeNEgYdJvXrFGRMCIMJdCQ">
+          </div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn btn--primary" onclick="checkCustomTgProxy()">Проверить и подключить</button>
+          <span id="tg-custom-status" class="text-sm" style="align-self:center;"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="sec-pipeline" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="2" y="3" width="20" height="5" rx="1"/><rect x="2" y="10" width="20" height="5" rx="1"/><rect x="2" y="17" width="20" height="5" rx="1"/>
+        </svg>
+        Пайплайн и Ядро
+      </h2>
+
+      <!-- KPI Cards -->
+      <div class="grid-4 mb-6">
+        <div class="kpi-card kpi-card--accent">
+          <div class="kpi-card__label">Pipeline Throughput</div>
+          <div id="kpi-mod-pipeline-throughput" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">pps</div>
+        </div>
+        <div class="kpi-card kpi-card--yellow">
+          <div class="kpi-card__label">Queue Usage</div>
+          <div id="kpi-mod-pipeline-queue-usage" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">%</div>
+        </div>
+        <div class="kpi-card kpi-card--red" style="--kpi-color:var(--red)">
+          <div class="kpi-card__label">Pipeline Drops</div>
+          <div id="kpi-mod-pipeline-drops" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">пакетов</div>
+        </div>
+        <div class="kpi-card kpi-card--green">
+          <div class="kpi-card__label">DNS Queries Intercepted</div>
+          <div id="kpi-mod-dns-queries-intercepted" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">всего</div>
+        </div>
+      </div>
+
+      <!-- Module Cards -->
+      <div class="grid-2">
+
+        <!-- PacketPipeline -->
+        <div class="card">
+          <div class="card__title">Единый пайплайн обработки</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Активировать пайплайн</div>
+              <div class="toggle-desc">Обработка всех пакетов через единый конвейер</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-pipeline-enabled"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Количество воркеров: <span id="val-pipeline-workers">4</span></label>
+            <input type="range" class="form-range" id="range-pipeline-workers" min="1" max="16" step="1" value="4"
+              oninput="document.getElementById('val-pipeline-workers').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>1</span><span>16</span></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Размер очереди: <span id="val-pipeline-queue-size">1024</span></label>
+            <input type="range" class="form-range" id="range-pipeline-queue-size" min="256" max="8192" step="256" value="1024"
+              oninput="document.getElementById('val-pipeline-queue-size').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>256</span><span>8192</span></div>
+          </div>
+        </div>
+
+        <!-- DNSLeakPrevention -->
+        <div class="card">
+          <div class="card__title">Защита от DNS утечек</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">DNS Leak Prevention</div>
+              <div class="toggle-desc">Блокировка прямых DNS-запросов в обход защиты</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-dns-leak-prevention"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Режим</label>
+            <select class="form-select" id="sel-dns-leak-mode">
+              <option value="strict">strict</option>
+              <option value="relaxed">relaxed</option>
+              <option value="monitor">monitor</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Белый список доменов</label>
+            <textarea class="form-input" id="inp-dns-leak-whitelist" rows="3" placeholder="example.com&#10;another.org" style="resize:vertical;font-family:var(--font);font-size:var(--text-xs)"></textarea>
+          </div>
+        </div>
+
+        <!-- SessionFragmenter -->
+        <div class="card">
+          <div class="card__title">Фрагментация сессий</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Session Fragmenter</div>
+              <div class="toggle-desc">Разбивка TCP сессий на несколько подсоединений</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-session-fragmenter"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Мин. сегментов: <span id="val-session-frag-min-segments">3</span></label>
+            <input type="range" class="form-range" id="range-session-frag-min-segments" min="2" max="10" step="1" value="3"
+              oninput="document.getElementById('val-session-frag-min-segments').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>2</span><span>10</span></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Макс. сегментов: <span id="val-session-frag-max-segments">8</span></label>
+            <input type="range" class="form-range" id="range-session-frag-max-segments" min="3" max="20" step="1" value="8"
+              oninput="document.getElementById('val-session-frag-max-segments').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>3</span><span>20</span></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Стратегия</label>
+            <select class="form-select" id="sel-session-frag-strategy">
+              <option value="random">random</option>
+              <option value="fixed">fixed</option>
+              <option value="adaptive">adaptive</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- CrossLayerCorrelator -->
+        <div class="card">
+          <div class="card__title">Кросс-слой когерентность</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Cross-Layer Correlator</div>
+              <div class="toggle-desc">Проверка согласованности между L3/L4/L7</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-cross-layer-enabled"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Строгость</label>
+            <select class="form-select" id="sel-cross-layer-strictness">
+              <option value="low">low</option>
+              <option value="medium" selected>medium</option>
+              <option value="high">high</option>
+            </select>
+          </div>
+          <div style="margin-top:var(--sp-4);display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-3);font-size:var(--text-sm)">
+            <div style="background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);text-align:center">
+              <div class="text-muted" style="font-size:var(--text-xs);margin-bottom:var(--sp-1)">Проверок</div>
+              <div id="mod-correlations-checked" class="text-accent" style="font-size:var(--text-lg);font-weight:600">0</div>
+            </div>
+            <div style="background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);text-align:center">
+              <div class="text-muted" style="font-size:var(--text-xs);margin-bottom:var(--sp-1)">Исправлено</div>
+              <div id="mod-anomalies-fixed" class="text-accent" style="font-size:var(--text-lg);font-weight:600">0</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ══ АНТИ-ML ЗАЩИТА ════════════════════════════════════════════════ -->
+    <section id="sec-antiml" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.5 5-4 6.5V18h-6v-2.5C6.5 14 5 11.5 5 9a7 7 0 0 1 7-7z"/><line x1="9" y1="22" x2="15" y2="22"/>
+        </svg>
+        Анти-ML Защита
+      </h2>
+
+      <!-- KPI Cards -->
+      <div class="grid-4 mb-6">
+        <div class="kpi-card kpi-card--accent">
+          <div class="kpi-card__label">Current RTT</div>
+          <div id="kpi-mod-rtt-current-ms" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">мс</div>
+        </div>
+        <div class="kpi-card kpi-card--yellow">
+          <div class="kpi-card__label">Padding Volume</div>
+          <div id="kpi-mod-volume-padding-bytes" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">байт</div>
+        </div>
+        <div class="kpi-card kpi-card--green">
+          <div class="kpi-card__label">Emulated Actions</div>
+          <div id="kpi-mod-cloak-actions-emulated" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">действий</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Correlations Broken</div>
+          <div id="kpi-mod-time-correlations-broken" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">всего</div>
+        </div>
+      </div>
+
+      <!-- Module Cards -->
+      <div class="grid-2">
+
+        <!-- RTTEqualizer -->
+        <div class="card">
+          <div class="card__title">RTT Выравниватель</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">RTT Equalizer</div>
+              <div class="toggle-desc">Выравнивание задержки для противодействия ML-анализу</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-rtt-equalizer"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Целевой RTT: <span id="val-rtt-target-ms">150</span> мс</label>
+            <input type="range" class="form-range" id="range-rtt-target-ms" min="20" max="500" step="5" value="150"
+              oninput="document.getElementById('val-rtt-target-ms').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>20</span><span>500</span></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Джиттер RTT: <span id="val-rtt-jitter-ms">10</span> мс</label>
+            <input type="range" class="form-range" id="range-rtt-jitter-ms" min="0" max="50" step="1" value="10"
+              oninput="document.getElementById('val-rtt-jitter-ms').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>0</span><span>50</span></div>
+          </div>
+        </div>
+
+        <!-- VolumeNormalizer -->
+        <div class="card">
+          <div class="card__title">Нормализатор трафика</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Volume Normalizer</div>
+              <div class="toggle-desc">Нормализация объёма трафика для скрытия паттернов</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-volume-normalizer"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Целевой объём: <span id="val-volume-target-kbps">2000</span> кбит/с</label>
+            <input type="range" class="form-range" id="range-volume-target-kbps" min="100" max="10000" step="100" value="2000"
+              oninput="document.getElementById('val-volume-target-kbps').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>100</span><span>10000</span></div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Режим паддинга</label>
+            <select class="form-select" id="sel-volume-padding-mode">
+              <option value="constant">constant</option>
+              <option value="adaptive" selected>adaptive</option>
+              <option value="burst">burst</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- BehavioralCloak -->
+        <div class="card">
+          <div class="card__title">Поведенческая маскировка</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Behavioral Cloak</div>
+              <div class="toggle-desc">Эмуляция поведения браузера для обхода ML-классификатора</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-behavioral-cloak"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Профиль браузера</label>
+            <select class="form-select" id="sel-cloak-profile">
+              <option value="chrome">chrome</option>
+              <option value="firefox">firefox</option>
+              <option value="safari">safari</option>
+              <option value="edge">edge</option>
+            </select>
+          </div>
+          <div class="toggle-wrap mt-3">
+            <div class="toggle-info">
+              <div class="toggle-name">Эмуляция человека</div>
+              <div class="toggle-desc">Имитация человеческих паттернов взаимодействия</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-cloak-human-sim"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+
+        <!-- TimeCorrelationBreaker -->
+        <div class="card">
+          <div class="card__title">Разрыв временных корреляций</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Time Correlation Breaker</div>
+              <div class="toggle-desc">Нарушение временных корреляций для противодействия анализу</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-time-correlation-breaker"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Режим</label>
+            <select class="form-select" id="sel-time-break-mode">
+              <option value="random">random</option>
+              <option value="chaff">chaff</option>
+              <option value="batch">batch</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Макс. задержка: <span id="val-time-break-max-delay-ms">200</span> мс</label>
+            <input type="range" class="form-range" id="range-time-break-max-delay-ms" min="10" max="2000" step="10" value="200"
+              oninput="document.getElementById('val-time-break-max-delay-ms').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>10</span><span>2000</span></div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ══ СКРЫТЫЕ КАНАЛЫ И МОНИТОРИНГ ══════════════════════════════════ -->
+    <section id="sec-covert" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+          <line x1="1" y1="1" x2="23" y2="23"/>
+        </svg>
+        Скрытые Каналы и Мониторинг
+      </h2>
+
+      <!-- KPI Cards -->
+      <div class="grid-4 mb-6">
+        <div class="kpi-card kpi-card--accent">
+          <div class="kpi-card__label">Covert Bytes Sent</div>
+          <div id="kpi-mod-covert-bytes-sent" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">байт</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Covert Bytes Recv</div>
+          <div id="kpi-mod-covert-bytes-recv" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">байт</div>
+        </div>
+        <div class="kpi-card kpi-card--yellow">
+          <div class="kpi-card__label">Packets Padded</div>
+          <div id="kpi-mod-wf-packets-padded" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">пакетов</div>
+        </div>
+        <div class="kpi-card kpi-card--green">
+          <div class="kpi-card__label">Self-Test Score</div>
+          <div id="kpi-mod-self-test-score" class="kpi-card__value">—</div>
+          <div class="kpi-card__sub">/ 100</div>
+        </div>
+      </div>
+
+      <!-- Module Cards -->
+      <div class="grid-2">
+
+        <!-- CovertChannelManager -->
+        <div class="card">
+          <div class="card__title">Управление скрытыми каналами</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Covert Channel Manager</div>
+              <div class="toggle-desc">DNS/HTTP стеганография для скрытой передачи данных</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-covert-channel"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Режим канала</label>
+            <select class="form-select" id="sel-covert-mode">
+              <option value="dns_txt">dns_txt</option>
+              <option value="http_header">http_header</option>
+              <option value="tcp_timestamp">tcp_timestamp</option>
+              <option value="icmp">icmp</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Лимит пропускной способности: <span id="val-covert-bandwidth-limit-bps">4096</span> бит/с</label>
+            <input type="range" class="form-range" id="range-covert-bandwidth-limit-bps" min="512" max="65536" step="512" value="4096"
+              oninput="document.getElementById('val-covert-bandwidth-limit-bps').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>512</span><span>65536</span></div>
+          </div>
+          <div style="margin-top:var(--sp-3);display:flex;align-items:center;justify-content:space-between;font-size:var(--text-sm)">
+            <span class="text-muted">Активных каналов</span>
+            <span id="mod-channels-active" class="badge badge--info">0</span>
+          </div>
+        </div>
+
+        <!-- WFDefense -->
+        <div class="card">
+          <div class="card__title">Защита от WF-атак</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">WF Defense</div>
+              <div class="toggle-desc">Защита от Website Fingerprinting атак</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-wf-defense"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Режим защиты</label>
+            <select class="form-select" id="sel-wf-defense-mode">
+              <option value="random_padding">random_padding</option>
+              <option value="constant_rate">constant_rate</option>
+              <option value="morphing">morphing</option>
+              <option value="supersequence">supersequence</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Оверхед: <span id="val-wf-defense-overhead">30</span>%</label>
+            <input type="range" class="form-range" id="range-wf-defense-overhead" min="10" max="100" step="5" value="30"
+              oninput="document.getElementById('val-wf-defense-overhead').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>10%</span><span>100%</span></div>
+          </div>
+        </div>
+
+        <!-- SelfTestMonitor — span 2 columns -->
+        <div class="card" style="grid-column: span 2">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Монитор самотестирования
+            <button class="btn btn--sm btn--primary" onclick="runSelfTest()">Запустить тест</button>
+          </div>
+          <div class="grid-2 mt-4" style="gap:var(--sp-4)">
+            <div>
+              <div class="toggle-wrap">
+                <div class="toggle-info">
+                  <div class="toggle-name">Self-Test Monitor</div>
+                  <div class="toggle-desc">Автоматическое периодическое самотестирование системы</div>
+                </div>
+                <label class="toggle"><input type="checkbox" id="toggle-self-test-enabled"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+              </div>
+              <div class="form-group mt-3">
+                <label class="form-label">Интервал: <span id="val-self-test-interval-sec">300</span> сек</label>
+                <input type="range" class="form-range" id="range-self-test-interval-sec" min="60" max="3600" step="60" value="300"
+                  oninput="document.getElementById('val-self-test-interval-sec').textContent=this.value">
+                <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>60</span><span>3600</span></div>
+              </div>
+              <div style="margin-top:var(--sp-4);background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);">
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:var(--sp-2)">
+                  <span class="text-muted" style="font-size:var(--text-sm)">Последний результат</span>
+                  <span id="mod-self-test-score-badge" class="badge badge--inactive">—</span>
+                </div>
+                <div style="display:flex;align-items:center;justify-content:space-between">
+                  <span class="text-muted" style="font-size:var(--text-sm)">Проблем обнаружено</span>
+                  <span id="mod-self-test-issues" class="text-accent" style="font-size:var(--text-sm);font-weight:600">0</span>
+                </div>
+              </div>
+            </div>
+            <div>
+              <div class="card__title" style="font-size:var(--text-sm);margin-bottom:var(--sp-3)">История тестов</div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Время</th><th>Счёт</th><th>Проблемы</th></tr></thead>
+                  <tbody id="self-test-history">
+                    <tr><td colspan="3" class="text-muted" style="text-align:center;padding:var(--sp-3)">Нет данных</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ══ УПРАВЛЕНИЕ ТРАНСПОРТОМ ════════════════════════════════════════ -->
+    <section id="sec-transport" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>
+        Управление Транспортом
+      </h2>
+
+      <!-- KPI Cards -->
+      <div class="grid-4 mb-6">
+        <div class="kpi-card kpi-card--accent">
+          <div class="kpi-card__label">Current Protocol</div>
+          <div id="kpi-mod-current-protocol" class="kpi-card__value" style="font-size:var(--text-md)">—</div>
+          <div class="kpi-card__sub">активный</div>
+        </div>
+        <div class="kpi-card kpi-card--yellow">
+          <div class="kpi-card__label">Rotations Done</div>
+          <div id="kpi-mod-rotations-completed" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">ротаций</div>
+        </div>
+        <div class="kpi-card kpi-card--green">
+          <div class="kpi-card__label">Routes Diverted</div>
+          <div id="kpi-mod-as-routes-diverted" class="kpi-card__value">0</div>
+          <div class="kpi-card__sub">маршрутов</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Apparent Location</div>
+          <div id="kpi-mod-geo-apparent-location" class="kpi-card__value" style="font-size:var(--text-md)">—</div>
+          <div class="kpi-card__sub">геолокация</div>
+        </div>
+      </div>
+
+      <!-- Module Cards -->
+      <div class="grid-2">
+
+        <!-- ProtocolRotationSchedule -->
+        <div class="card">
+          <div class="card__title">Расписание ротации протоколов</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Protocol Rotation</div>
+              <div class="toggle-desc">Автоматическая смена транспортных протоколов</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-protocol-rotation"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Протоколы ротации</label>
+            <div style="display:flex;flex-wrap:wrap;gap:var(--sp-2);margin-top:var(--sp-2)">
+              <label style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--text-xs);cursor:pointer">
+                <input type="checkbox" id="rot-proto-tls13" value="tls13" checked> tls13
+              </label>
+              <label style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--text-xs);cursor:pointer">
+                <input type="checkbox" id="rot-proto-quic" value="quic"> quic
+              </label>
+              <label style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--text-xs);cursor:pointer">
+                <input type="checkbox" id="rot-proto-websocket" value="websocket"> websocket
+              </label>
+              <label style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--text-xs);cursor:pointer">
+                <input type="checkbox" id="rot-proto-http2" value="http2"> http2
+              </label>
+              <label style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--text-xs);cursor:pointer">
+                <input type="checkbox" id="rot-proto-obfs4" value="obfs4"> obfs4
+              </label>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Интервал ротации: <span id="val-rotation-interval-min">30</span> мин</label>
+            <input type="range" class="form-range" id="range-rotation-interval-min" min="5" max="120" step="5" value="30"
+              oninput="document.getElementById('val-rotation-interval-min').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>5</span><span>120</span></div>
+          </div>
+          <div style="margin-top:var(--sp-3);display:flex;align-items:center;justify-content:space-between;font-size:var(--text-sm)">
+            <span class="text-muted">Текущий протокол</span>
+            <span id="mod-current-protocol" class="badge badge--info">—</span>
+          </div>
+        </div>
+
+        <!-- ASAwareRouter -->
+        <div class="card">
+          <div class="card__title">AS-осведомлённый роутер</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">AS-Aware Routing</div>
+              <div class="toggle-desc">Маршрутизация с учётом автономных систем</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-as-aware-routing"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Чёрный список AS</label>
+            <input class="form-input" type="text" id="inp-as-blacklist" placeholder="AS15169,AS9002">
+          </div>
+          <div class="toggle-wrap mt-2">
+            <div class="toggle-info">
+              <div class="toggle-name">Предпочитать разнообразие AS</div>
+              <div class="toggle-desc">Избегать повторного использования одних AS</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-as-prefer-diversity"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div style="margin-top:var(--sp-4);background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3)">
+            <div style="display:flex;align-items:center;justify-content:space-between;font-size:var(--text-sm)">
+              <span class="text-muted">Текущий путь</span>
+              <span id="mod-as-current-path" class="text-accent" style="font-size:var(--text-xs)">—</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- GeoObfuscator -->
+        <div class="card">
+          <div class="card__title">Гео-обфускация</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Geo Obfuscator</div>
+              <div class="toggle-desc">Маскировка географического расположения соединения</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-geo-obfuscator"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Целевая страна</label>
+            <select class="form-select" id="sel-geo-target-country">
+              <option value="auto">auto</option>
+              <option value="US">US</option>
+              <option value="DE">DE</option>
+              <option value="NL">NL</option>
+              <option value="JP">JP</option>
+              <option value="SG">SG</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Количество хопов: <span id="val-geo-relay-hops">2</span></label>
+            <input type="range" class="form-range" id="range-geo-relay-hops" min="1" max="5" step="1" value="2"
+              oninput="document.getElementById('val-geo-relay-hops').textContent=this.value">
+            <div style="display:flex;justify-content:space-between;font-size:var(--text-xs);color:var(--text-muted)"><span>1</span><span>5</span></div>
+          </div>
+          <div style="margin-top:var(--sp-3);background:var(--bg-raised);border:1px solid var(--border);border-radius:var(--r-md);padding:var(--sp-3);display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-2);font-size:var(--text-sm)">
+            <span class="text-muted">Видимое местоположение</span>
+            <span id="mod-geo-apparent-location" class="text-accent">—</span>
+            <span class="text-muted">Активных хопов</span>
+            <span id="mod-geo-hops-active" class="text-accent">0</span>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ══ ЛИЦЕНЗИЯ ══════════════════════════════════════════════════════ -->
+    <section id="sec-license" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+          <polyline points="9 12 11 14 15 10"/>
+        </svg>
+        Лицензия
+      </h2>
+
+      <div class="grid-2 mb-6">
+        <div class="card">
+          <div class="license-hero">
+            <div class="license-icon">🔑</div>
+            <div id="lic-status-text" class="license-status-text inactive">НЕ АКТИВНА</div>
+            <div id="lic-days" class="license-days">—</div>
+            <div>
+              <span class="text-muted text-xs">План: </span>
+              <span id="lic-plan" class="text-sm" style="font-weight:600;color:var(--accent)">—</span>
+            </div>
+            <div>
+              <span class="text-muted text-xs">Истекает: </span>
+              <span id="lic-expires" class="text-sm">—</span>
+            </div>
+            <div style="margin-top:var(--sp-2)">
+              <span class="text-muted text-xs">Ключ: </span>
+              <code id="lic-key-display" class="text-xs" style="color:var(--text-muted)">—</code>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div id="license-activate-form">
+            <div class="card__title">Активация</div>
+            <div class="form-group">
+              <label class="form-label">Ключ лицензии</label>
+              <input class="form-input" type="text" id="inp-license-key" placeholder="NCP-XXXXX-XXXXX-XXXXX-..." style="font-family:var(--font-mono);font-size:0.75rem">
+            </div>
+            <button class="btn btn--primary w-full" onclick="activateLicense()">Активировать ключ</button>
+            <div class="text-muted text-xs mt-3">Введите лицензионный ключ в формате NCP-XXXXX-XXXXX-...</div>
+          </div>
+          <button id="btn-deactivate-license" class="btn btn--danger w-full mt-3 hidden" onclick="deactivateLicense()">Деактивировать лицензию</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card__title">Модули и функции</div>
+        <div class="text-muted text-xs mb-3">Доступность модулей зависит от типа лицензии (Trial / Basic / Pro / Ultimate)</div>
+        <div id="lic-features" class="mt-3">
+          <div class="text-muted text-sm">Загрузка...</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ ЛОГИ ═══════════════════════════════════════════════════════════ -->
+    <section id="sec-logs" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/>
+          <line x1="8" y1="18" x2="21" y2="18"/>
+        </svg>
+        Журнал событий
+      </h2>
+
+      <!-- Toolbar -->
+      <div style="display:flex;gap:var(--sp-3);flex-wrap:wrap;margin-bottom:var(--sp-4);align-items:center;">
+        <div class="btn-group">
+          <button class="btn btn--sm btn--primary" data-log-level="ALL" onclick="setLogFilter('ALL')">Все</button>
+          <button class="btn btn--sm" data-log-level="INFO" onclick="setLogFilter('INFO')">INFO</button>
+          <button class="btn btn--sm" data-log-level="WARN" onclick="setLogFilter('WARN')">WARN</button>
+          <button class="btn btn--sm" data-log-level="ERROR" onclick="setLogFilter('ERROR')">ERROR</button>
+          <button class="btn btn--sm" data-log-level="DEBUG" onclick="setLogFilter('DEBUG')">DEBUG</button>
+        </div>
+        <input class="form-input" type="text" id="log-search" placeholder="Поиск в логах..." style="flex:1;min-width:140px;max-width:280px;">
+        <div class="btn-group">
+          <button class="btn btn--sm" onclick="copyLogs()">Копировать</button>
+          <button class="btn btn--sm btn--danger" onclick="clearLogs()">Очистить</button>
+        </div>
+        <label style="display:flex;align-items:center;gap:var(--sp-2);font-size:var(--text-xs);color:var(--text-muted)">
+          <input type="checkbox" id="log-autoscroll" checked> Авто-прокрутка
+        </label>
+      </div>
+
+      <div id="log-viewer" class="log-viewer"></div>
+    </section>
+
+    <!-- ══ НАСТРОЙКИ ═════════════════════════════════════════════════════ -->
+    <section id="sec-settings" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+        Настройки
+      </h2>
+
+      <div class="grid-2 mb-6">
+        <!-- Security -->
+        <div class="card">
+          <div class="card__title">Безопасность</div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Параноидный режим</div>
+              <div class="toggle-desc">Все 8 уровней защиты: MAX TINFOIL_HAT</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-paranoid"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Авто-ротация идентичности</div>
+              <div class="toggle-desc">Периодическая смена MAC, IP, DNS</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-auto-rotate"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="form-group mt-3">
+            <label class="form-label">Интервал ротации (сек)</label>
+            <input class="form-input" type="number" id="inp-rotate-interval" value="3600">
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Антикриминалистика</div>
+              <div class="toggle-desc">Очистка логов, кеша, RAM-only режим</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-antiforensics"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="toggle-wrap">
+            <div class="toggle-info">
+              <div class="toggle-name">Автозапуск</div>
+              <div class="toggle-desc">Запускать NCP при старте системы</div>
+            </div>
+            <label class="toggle"><input type="checkbox" id="toggle-autostart"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+
+        <!-- General -->
+        <div class="card">
+          <div class="card__title">Общие</div>
+          <div class="form-group">
+            <label class="form-label">Язык интерфейса</label>
+            <select class="form-select" id="sel-language">
+              <option value="ru">Русский</option>
+              <option value="en">English</option>
+            </select>
+          </div>
+          <div class="card__title mt-4">Конфигурация</div>
+          <div class="btn-group mt-3">
+            <button class="btn btn--sm btn--primary" onclick="exportConfig()">⬇ Экспорт</button>
+            <button class="btn btn--sm" onclick="importConfig()">⬆ Импорт</button>
+          </div>
+
+          <div class="card__title mt-5">Ротация идентичности</div>
+          <div class="btn-group mt-3">
+            <button class="btn btn--sm" id="btn-rotate" onclick="rotateIdentity()">🔄 Ротировать сейчас</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- About -->
+      <div class="card">
+        <div class="card__title">О программе</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);font-size:var(--text-sm)">
+          <div>
+            <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Версия</div>
+            <div class="text-accent">NCP v1.4.0-dev</div>
+          </div>
+          <div>
+            <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Сборка</div>
+            <div>Web UI 20260304</div>
+          </div>
+          <div>
+            <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Проект</div>
+            <div>Dynam / NCP DPI Bypass</div>
+          </div>
+          <div>
+            <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Лицензия</div>
+            <div>Proprietary</div>
+          </div>
+        </div>
+        <div style="margin-top:var(--sp-5);padding-top:var(--sp-4);border-top:1px solid var(--border);font-size:var(--text-xs);color:var(--text-muted);">
+          <a href="https://www.perplexity.ai/computer" target="_blank" rel="noopener noreferrer" style="color:var(--text-muted);text-decoration:none">
+            Created with Perplexity Computer
+          </a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ─── Status Bar ────────────────────────────────────────────────────── -->
+  <footer class="statusbar">
+    <div class="statusbar__item">
+      <span>↑</span> <strong id="sb-up">0 B/s</strong>
+    </div>
+    <div class="statusbar__sep"></div>
+    <div class="statusbar__item">
+      <span>↓</span> <strong id="sb-down">0 B/s</strong>
+    </div>
+    <div class="statusbar__sep"></div>
+    <div class="statusbar__item">
+      <span>DPI</span> <strong id="sb-dpi">0</strong>
+    </div>
+    <div class="statusbar__sep"></div>
+    <div class="statusbar__item">
+      <span>PKT</span> <strong id="sb-pkts">0</strong>
+    </div>
+    <div class="statusbar__sep"></div>
+    <div class="statusbar__item">
+      <span>Время:</span> <strong id="sb-uptime">—</strong>
+    </div>
+    <div style="flex:1"></div>
+    <div class="statusbar__item">
+      <span style="color:var(--text-muted)">NCP Web UI</span>
+    </div>
+  </footer>
+
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<!-- Scripts -->
+<script src="js/websocket.js"></script>
+<script src="js/charts.js"></script>
+<script src="js/app.js"></script>
+
+</body>
+</html>

@@ -1,0 +1,310 @@
+#include "ncp_secure_memory.hpp"
+#include <sodium.h>
+#include <cstring>
+#include <algorithm>
+#include <cerrno>
+#include <stdexcept>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
+namespace ncp {
+
+// R14-H04: Maximum secure memory allocation limit (100MB)
+// Prevents DoS via excessive memory allocation requests
+static constexpr size_t MAX_SECURE_MEMORY_SIZE = 1024 * 1024 * 100;
+
+// R9-H05: Fallback explicit_bzero for non-sodium platforms
+static void secure_erase(void* ptr, size_t size) {
+#ifdef HAVE_EXPLICIT_BZERO
+    explicit_bzero(ptr, size);
+#elif defined(_WIN32)
+    SecureZeroMemory(ptr, size);
+#elif defined(HAVE_EXPLICIT_MEMSET)
+    explicit_memset(ptr, 0, size);
+#else
+    // Fallback: volatile trick to prevent compiler optimization
+    volatile uint8_t* p = static_cast<volatile uint8_t*>(ptr);
+    while (size--) *p++ = 0;
+#endif
+}
+
+// ---- SecureMemory ------------------------------------------------------
+
+SecureMemory::SecureMemory() = default;
+
+SecureMemory::SecureMemory(size_t size)
+    : size_(size)
+{
+    // R14-H04: Validate size to prevent DoS via excessive allocation
+    if (size > MAX_SECURE_MEMORY_SIZE) {
+        throw std::runtime_error("SecureMemory size exceeds maximum (100MB)");
+    }
+    if (size > 0) {
+        data_ = new uint8_t[size];
+        std::memset(data_, 0, size_);
+    }
+}
+
+SecureMemory::SecureMemory(const uint8_t* data, size_t size)
+    : size_(size)
+{
+    // R14-H04: Validate size to prevent DoS via excessive allocation
+    if (size > MAX_SECURE_MEMORY_SIZE) {
+        throw std::runtime_error("SecureMemory size exceeds maximum (100MB)");
+    }
+    if (size > 0 && data) {
+        data_ = new uint8_t[size];
+        std::memcpy(data_, data, size);
+    }
+}
+
+SecureMemory::~SecureMemory() noexcept {
+    if (data_) {
+        zero();
+        if (locked_) {
+            unlock();
+        }
+        delete[] data_;
+        data_ = nullptr;
+    }
+}
+
+SecureMemory::SecureMemory(SecureMemory&& other) noexcept
+    : data_(other.data_), size_(other.size_), locked_(other.locked_)
+{
+    other.data_ = nullptr;
+    other.size_ = 0;
+    other.locked_ = false;
+}
+
+SecureMemory& SecureMemory::operator=(SecureMemory&& other) noexcept {
+    if (this != &other) {
+        if (data_) {
+            zero();
+            if (locked_) unlock();
+            delete[] data_;
+        }
+        data_ = other.data_;
+        size_ = other.size_;
+        locked_ = other.locked_;
+        other.data_ = nullptr;
+        other.size_ = 0;
+        other.locked_ = false;
+    }
+    return *this;
+}
+
+void SecureMemory::zero() {
+    if (data_ && size_ > 0) {
+        // R9-H05: Use libsodium if available, otherwise fallback
+#ifdef HAVE_SODIUM_MEMZERO
+        sodium_memzero(data_, size_);
+#else
+        secure_erase(data_, size_);
+#endif
+    }
+}
+
+bool SecureMemory::lock() {
+#ifdef _WIN32
+    if (data_ && size_ > 0 && !locked_) {
+        if (VirtualLock(data_, size_)) {
+            locked_ = true;
+            return true;
+        }
+        // R9-H05: Log error for debugging (ERROR_LOCK_FAILED or working set limit)
+        // DWORD err = GetLastError();
+    }
+    return false;
+#else
+    if (data_ && size_ > 0 && !locked_) {
+        if (mlock(data_, size_) == 0) {
+            locked_ = true;
+            return true;
+        }
+        // R9-H05: mlock may fail due to RLIMIT_MEMLOCK limits
+        // Common errors: EPERM (no privilege), ENOMEM (exceeds limit)
+        // int err = errno;
+    }
+    return false;
+#endif
+}
+
+bool SecureMemory::unlock() {
+#ifdef _WIN32
+    if (data_ && size_ > 0 && locked_) {
+        if (VirtualUnlock(data_, size_)) {
+            locked_ = false;
+            return true;
+        }
+    }
+    return false;
+#else
+    if (data_ && size_ > 0 && locked_) {
+        if (munlock(data_, size_) == 0) {
+            locked_ = false;
+            return true;
+        }
+    }
+    return false;
+#endif
+}
+
+void SecureMemory::secure_zero(void* ptr, size_t size) {
+    if (ptr && size > 0) {
+        sodium_memzero(ptr, size);
+    }
+}
+
+bool SecureMemory::lock_memory(void* ptr, size_t size) {
+#ifdef _WIN32
+    return VirtualLock(ptr, size) != 0;
+#else
+    return mlock(ptr, size) == 0;
+#endif
+}
+
+bool SecureMemory::unlock_memory(void* ptr, size_t size) {
+#ifdef _WIN32
+    return VirtualUnlock(ptr, size) != 0;
+#else
+    return munlock(ptr, size) == 0;
+#endif
+}
+
+// ---- SecureString ------------------------------------------------------
+
+SecureString::SecureString() = default;
+
+SecureString::SecureString(const std::string& str)
+    : size_(str.size()), capacity_(str.size() + 1)
+{
+    if (capacity_ > 0) {
+        data_ = new char[capacity_];
+        std::memcpy(data_, str.c_str(), size_);
+        data_[size_] = '\0';
+    }
+}
+
+SecureString::SecureString(const char* str, size_t len)
+    : size_(len), capacity_(len + 1)
+{
+    if (capacity_ > 0 && str) {
+        data_ = new char[capacity_];
+        std::memcpy(data_, str, size_);
+        data_[size_] = '\0';
+    }
+}
+
+SecureString::~SecureString() {
+    clear();
+}
+
+SecureString::SecureString(SecureString&& other) noexcept
+    : data_(other.data_), size_(other.size_), capacity_(other.capacity_)
+{
+    other.data_ = nullptr;
+    other.size_ = 0;
+    other.capacity_ = 0;
+}
+
+SecureString& SecureString::operator=(SecureString&& other) noexcept {
+    if (this != &other) {
+        clear();
+        data_ = other.data_;
+        size_ = other.size_;
+        capacity_ = other.capacity_;
+        other.data_ = nullptr;
+        other.size_ = 0;
+        other.capacity_ = 0;
+    }
+    return *this;
+}
+
+void SecureString::clear() {
+    if (data_) {
+        sodium_memzero(data_, capacity_);
+        delete[] data_;
+        data_ = nullptr;
+    }
+    size_ = 0;
+    capacity_ = 0;
+}
+
+// ---- SecureOps ---------------------------------------------------------
+
+namespace SecureOps {
+
+bool constant_time_compare(const void* a, const void* b, size_t len) {
+    if (!a || !b || len == 0) return false;
+    return sodium_memcmp(a, b, len) == 0;
+}
+
+std::vector<uint8_t> generate_random(size_t size) {
+    std::vector<uint8_t> result(size);
+    if (size > 0) {
+        randombytes_buf(result.data(), size);
+    }
+    return result;
+}
+
+SecureString hash_password(
+    const SecureString& password,
+    const std::vector<uint8_t>& salt)
+{
+    if (password.empty() || salt.size() < crypto_pwhash_SALTBYTES) {
+        return SecureString();
+    }
+
+    constexpr size_t hash_len = 32;
+
+    // SECURITY FIX: Use SecureMemory instead of stack buffer so the hash
+    // is automatically zeroed when hash_buf goes out of scope.
+    // Previously: char hash[hash_len] leaked secret material on the stack.
+    SecureMemory hash_buf(hash_len);
+
+    if (crypto_pwhash(
+            hash_buf.data(), hash_len,
+            password.c_str(), password.length(),
+            salt.data(),
+            crypto_pwhash_OPSLIMIT_INTERACTIVE,
+            crypto_pwhash_MEMLIMIT_INTERACTIVE,
+            crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        return SecureString();
+    }
+
+    // Copy into SecureString before hash_buf destructor zeros the memory
+    return SecureString(reinterpret_cast<const char*>(hash_buf.data()), hash_len);
+}
+
+} // namespace SecureOps
+
+// ==================== Simple getter implementations ====================
+// (Moved from header to avoid LNK4006 duplicate symbol warnings)
+
+// SecureMemory getters (now with noexcept)
+uint8_t* SecureMemory::data() noexcept { return data_; }
+const uint8_t* SecureMemory::data() const noexcept { return data_; }
+size_t SecureMemory::size() const noexcept { return size_; }
+bool SecureMemory::empty() const noexcept { return size_ == 0 || data_ == nullptr; }
+
+// SecureMemory iterators (now with noexcept)
+uint8_t* SecureMemory::begin() noexcept { return data_; }
+uint8_t* SecureMemory::end() noexcept { return data_ + size_; }
+const uint8_t* SecureMemory::begin() const noexcept { return data_; }
+const uint8_t* SecureMemory::end() const noexcept { return data_ + size_; }
+
+// SecureString getters (now with noexcept)
+const char* SecureString::c_str() const noexcept { return data_ ? data_ : ""; }
+const char* SecureString::data() const noexcept { return data_ ? data_ : ""; }
+size_t SecureString::size() const noexcept { return size_; }
+size_t SecureString::length() const noexcept { return size_; }
+bool SecureString::empty() const noexcept { return size_ == 0; }
+
+
+} // namespace ncp

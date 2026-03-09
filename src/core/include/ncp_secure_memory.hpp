@@ -1,0 +1,125 @@
+#ifndef NCP_SECURE_MEMORY_HPP
+#define NCP_SECURE_MEMORY_HPP
+
+#include <cstdint>
+#include <cstddef>
+#include <string>
+#include <vector>
+
+namespace ncp {
+
+/**
+ * @brief Secure Memory Management with auto-zeroing
+ *
+ * Uses sodium_memzero for guaranteed secure erasure.
+ * Supports mlock/munlock to prevent swapping to disk.
+ */
+class SecureMemory {
+public:
+    SecureMemory();
+    explicit SecureMemory(size_t size);
+    SecureMemory(const uint8_t* data, size_t size);
+    ~SecureMemory() noexcept;
+
+    // Disable copy - prevent accidental key duplication
+    SecureMemory(const SecureMemory&) = delete;
+    SecureMemory& operator=(const SecureMemory&) = delete;
+
+    // Allow move
+    SecureMemory(SecureMemory&& other) noexcept;
+    SecureMemory& operator=(SecureMemory&& other) noexcept;
+
+    // Getters marked noexcept for performance
+    uint8_t* data() noexcept;
+    const uint8_t* data() const noexcept;
+    size_t size() const noexcept;
+    bool empty() const noexcept;
+
+    // Iterator support for range-based for loops
+    uint8_t* begin() noexcept;
+    uint8_t* end() noexcept;
+    const uint8_t* begin() const noexcept;
+    const uint8_t* end() const noexcept;
+
+    // Securely zero the memory contents
+    // R9-H05: Uses libsodium sodium_memzero if available, otherwise
+    // platform-specific secure erase (explicit_bzero, SecureZeroMemory,
+    // or volatile memset fallback)
+    void zero();
+
+    // Lock memory to prevent swapping (best-effort)
+    // R9-H05: May fail due to system limits (RLIMIT_MEMLOCK on Linux,
+    // working set limits on Windows). Caller should check return value.
+    // Returns true if successful, false if locking failed or already locked.
+    bool lock();
+    bool unlock();
+
+    // Static utility functions
+    static void secure_zero(void* ptr, size_t size);
+    static bool lock_memory(void* ptr, size_t size);
+    static bool unlock_memory(void* ptr, size_t size);
+
+private:
+    uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+    bool locked_ = false;
+};
+
+/**
+ * @brief Secure string with auto-zeroing destructor
+ *
+ * Suitable for passwords, tokens, and other sensitive string data.
+ * Memory is zeroed on destruction and cannot be copied.
+ */
+class SecureString {
+public:
+    SecureString();
+    explicit SecureString(const std::string& str);
+    explicit SecureString(const char* str, size_t len);
+    ~SecureString();
+
+    // Disable copy
+    SecureString(const SecureString&) = delete;
+    SecureString& operator=(const SecureString&) = delete;
+
+    // Allow move
+    SecureString(SecureString&& other) noexcept;
+    SecureString& operator=(SecureString&& other) noexcept;
+
+    // Getters marked noexcept
+    const char* c_str() const noexcept;
+    const char* data() const noexcept;
+    size_t size() const noexcept;
+    size_t length() const noexcept;
+    bool empty() const noexcept;
+
+    void clear();
+
+private:
+    char* data_ = nullptr;
+    size_t size_ = 0;
+    size_t capacity_ = 0;
+};
+
+/**
+ * @brief Secure cryptographic operations
+ *
+ * Provides constant-time comparison, CSPRNG, and password hashing.
+ */
+namespace SecureOps {
+    // Constant-time comparison to prevent timing attacks
+    bool constant_time_compare(const void* a, const void* b, size_t len);
+
+    // Cryptographically secure random bytes (uses libsodium)
+    std::vector<uint8_t> generate_random(size_t size);
+
+    // Password hashing using Argon2id (via libsodium)
+    SecureString hash_password(
+        const SecureString& password,
+        const std::vector<uint8_t>& salt
+    );
+}
+
+} // namespace ncp
+
+#endif // NCP_SECURE_MEMORY_HPP

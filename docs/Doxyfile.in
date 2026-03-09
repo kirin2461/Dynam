@@ -1,0 +1,32 @@
+# Doxyfile for NCP C++ Project
+# FIXED Issue #17.11: Add documentation generation
+
+PROJECT_NAME           = "NCP C++"
+PROJECT_NUMBER         = @PROJECT_VERSION@
+PROJECT_BRIEF          = "Network Control Protocol - C++ Implementation"
+OUTPUT_DIRECTORY       = @CMAKE_BINARY_DIR@/docs
+
+INPUT                  = @CMAKE_SOURCE_DIR@/src/core/include \
+                         @CMAKE_SOURCE_DIR@/src/core/src \
+                         @CMAKE_SOURCE_DIR@/README.md
+
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.cpp *.md
+EXCLUDE_PATTERNS       = */tests/* */build/*
+
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+
+GENERATE_HTML          = YES
+HTML_OUTPUT            = html
+HTML_FILE_EXTENSION    = .html
+
+GENERATE_LATEX         = NO
+
+CLASS_DIAGRAMS         = YES
+HAVE_DOT               = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+
+USE_MDFILE_AS_MAINPAGE = @CMAKE_SOURCE_DIR@/README.md
