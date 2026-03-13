@@ -32,6 +32,24 @@
   - I2P Integration — SAM bridge API defined, implementation in progress
   - Traffic Mimicry — Full protocol emulation pending (basic structure complete)
   - Geneva GA integration — Connected to pipeline, evolution pending
+
+### CLI Tool
+- ✅ **Working Commands**: `status`, `help`, `run`, `stop`, `rotate`.
+- 🚧 **In Development**: `crypto`, `license`, `network`, `dpi`, `i2p`.
+
+## Architecture
+- Modern C++17 with `constexpr`/`noexcept` optimization.
+- Three-layer architecture: Core Library, CLI, GUI (Planned).
+- 7-stage Protocol Orchestrator pipeline.
+
+## License
+Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
+
+---
+**Last Updated**: March 13, 2026
+**Version**: 1.5.0-dev
+
+
   
 
 ## Features
