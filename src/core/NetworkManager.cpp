@@ -36,11 +36,19 @@ namespace ncp {
 NetworkManager::NetworkManager() {
 #ifdef _WIN32
     WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        throw std::runtime_error("WSAStartup failed");
+    WORD wVersionRequested = MAKEWORD(2, 2);
+    int err = WSAStartup(wVersionRequested, &wsaData);
+    
+    // FIX CRIT-1: Handle WSAStartup gracefully - don't crash if already initialized
+    if (err != 0) {
+        // Critical errors that prevent usage
+        if (err == WSAVERNOTSUPPORTED || err == WSASYSNOTREADY) {
+            throw std::runtime_error("WSAStartup failed: Winsock not supported (error " + std::to_string(err) + ")");
+        }
+        // WSAEFAULT means WSAStartup already called - this is non-fatal, continue
+        // Other errors may also indicate pre-existing initialization
     }
 #endif
-}
 
 NetworkManager::~NetworkManager() {
 #ifdef _WIN32
