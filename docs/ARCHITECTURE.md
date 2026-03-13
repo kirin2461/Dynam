@@ -24,6 +24,9 @@ NCP C++ (Dynam) is a multi-layered network anonymization platform built on a thr
 #### Stealth & Defense
 - **Paranoid Mode**: Integrated 8-layer protection.
 - **Flow Shaper**: Timing and size normalization.
+- **License**: GNU AGPLv3
+
+
 - **L2/L3 Stealth**: Low-level network stealth.
 
 ### Layer 2: CLI Tool
