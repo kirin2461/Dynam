@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <set>
 #include <cstdio>
+#include "Logger.hpp"
 
 
 #ifdef _WIN32
@@ -34,10 +35,12 @@
 namespace ncp {
 
 NetworkManager::NetworkManager() {
+        spdlog::info("NetworkManager::NetworkManager() - Constructor called");
 #ifdef _WIN32
     WSADATA wsaData;
     WORD wVersionRequested = MAKEWORD(2, 2);
     int err = WSAStartup(wVersionRequested, &wsaData);
+        spdlog::info("WSAStartup called, error code: {}", err);
     
     // FIX CRIT-1: Handle WSAStartup gracefully - don't crash if already initialized
     if (err != 0) {
@@ -51,16 +54,19 @@ NetworkManager::NetworkManager() {
 #endif
 
 NetworkManager::~NetworkManager() {
+        spdlog::info("NetworkManager::~NetworkManager() - Destructor called");
 #ifdef _WIN32
     WSACleanup();
 #endif
 }
 
 std::vector<NetworkInterface> NetworkManager::get_interfaces() const {
+        spdlog::info("NetworkManager::get_interfaces() - Called");
     return enumerate_interfaces();
 }
 
 NetworkInterface NetworkManager::get_interface(const std::string& name) const {
+        spdlog::info("NetworkManager::get_interface() - Called with name: {}", name);
     if (name.empty()) {
         return NetworkInterface{};
     }
@@ -74,6 +80,7 @@ NetworkInterface NetworkManager::get_interface(const std::string& name) const {
 }
 
 bool NetworkManager::set_active_interface(const std::string& name) {
+        spdlog::info("NetworkManager::set_active_interface() - Called with name: {}", name);
     if (name.empty()) return false;
     auto interfaces = enumerate_interfaces();
     for (const auto& iface : interfaces) {
@@ -87,16 +94,19 @@ bool NetworkManager::set_active_interface(const std::string& name) {
 }
 
 std::string NetworkManager::get_active_interface_name() const {
+        spdlog::info("NetworkManager::get_active_interface_name() - Called");
     std::lock_guard<std::mutex> lock(mutex_);
     return active_interface_;
 }
 
 NetworkStats NetworkManager::get_stats() const {
+        spdlog::info("NetworkManager::get_stats() - Called");
     std::lock_guard<std::mutex> lock(mutex_);
     return current_stats_;
 }
 
 NetworkStats NetworkManager::get_interface_stats(const std::string& name) const {
+        spdlog::info("NetworkManager::get_interface_stats() - Called with name: {}", name);
     NetworkStats stats;
     if (name.empty()) return stats;
 
@@ -170,6 +180,7 @@ bool NetworkManager::test_connection(const std::string& host, int port, int time
 
 #ifdef _WIN32
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        spdlog::info("NetworkManager::test_connection() - Called with host: {}, port: {}", host, port);
     if (sock == INVALID_SOCKET) return false;
 
     sockaddr_in addr{};
@@ -235,10 +246,12 @@ int NetworkManager::get_latency(const std::string& host) {
 }
 
 void NetworkManager::update_stats() {
+        spdlog::info("NetworkManager::update_stats() - Called");
     std::string iface_name;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         iface_name = active_interface_;
+
     }
 
     if (iface_name.empty()) return;
