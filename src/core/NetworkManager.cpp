@@ -42,14 +42,15 @@ NetworkManager::NetworkManager() {
     int err = WSAStartup(wVersionRequested, &wsaData);
         spdlog::info("WSAStartup called, error code: {}", err);
     
-    // FIX CRIT-1: Handle WSAStartup gracefully - don't crash if already initialized
-    if (err != 0) {
-        // Critical errors that prevent usage
+        if (err != 0) {
+        // If already initialized - this is not an error
         if (err == WSAVERNOTSUPPORTED || err == WSASYSNOTREADY) {
-            throw std::runtime_error("WSAStartup failed: Winsock not supported (error " + std::to_string(err) + ")");
+            spdlog::error("WSAStartup failed: {}", err);
+            throw std::runtime_error("Winsock initialization failed");
         }
-        // WSAEFAULT means WSAStartup already called - this is non-fatal, continue
-        // Other errors may also indicate pre-existing initialization
+        // WSAEFAULT - already initialized, ignore
+        spdlog::debug("WSAStartup returned {} (likely already initialized)", err);
+    }    // Other errors may also indicate pre-existing initialization
     }
 #endif
 
