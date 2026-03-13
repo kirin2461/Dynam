@@ -156,6 +156,23 @@ brew install libwebsockets
 ### 10. **Tor** - Anonymous proxy support
 
 Runtime dependency for Tor proxy integration.
+### 4. **SQLite3 / SQLCipher** - Encrypted database
+Used for secure storage of configuration and identities.
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install libsqlcipher-dev sqlite3
+```
+
+## Optional Dependencies
+
+### 5. **Qt6** - GUI Interface
+Required if `ENABLE_GUI=ON` is specified during CMake configuration.
+
+### 6. **liboqs** - Post-Quantum Cryptography
+Required for Kyber1024/X448 hybrid encryption support.
+
+
 
 ```bash
 # Ubuntu/Debian
