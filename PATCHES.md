@@ -64,6 +64,18 @@ Commit: [`a999cf1`](https://github.com/kirin2461/Dynam/commit/a999cf157f9750b34d
 | `src/core/CMakeLists.txt` | Add `ncp_csprng.hpp` and `ncp_thread_pool.hpp` to `NCP_CORE_INCLUDE_HEADERS` |
 | `tests/test_csprng.cpp` | **NEW** — 18 unit tests for `ncp::CSPRNG` |
 | `tests/CMakeLists.txt` | Register `test_csprng.cpp` |
+## Phase 5 — Core Refactoring & Security Hardening (2026-03-13)
+
+**Goal**: Fix critical findings from the security audit and transition to a unified `Application` model.
+
+**Changes**:
+- **CLI Refactoring**: Introduced `ncp::Application` to manage component lifetimes.
+- **Timing Attacks**: Implemented `sodium_memcmp` for constant-time auth verification in `ProbeResist`.
+- **HMAC Fallbacks**: Replaced XOR-based fallbacks with proper `crypto_auth` from libsodium.
+- **Memory Safety**: Fixed double-free issues in the `DoH` subsystem.
+
+
+
 | `.github/workflows/build.yml` | Fix Windows `if: false` YAML syntax; add `libssl-dev`; `ENABLE_WEBSOCKETS=OFF` |
 | `.github/workflows/ci.yml` | Remove Qt6 from non-GUI builds; remove `libwebsockets`; `ENABLE_WEBSOCKETS=OFF` |
 
