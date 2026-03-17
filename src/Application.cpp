@@ -54,11 +54,17 @@ int Application::run() {
 #endif
 
     // CLI mode - run core logic
-    NCP_LOG_INFO("NCP running in CLI mode");
-    NCP_TRACE("Application::run() returning 0 (CLI mode)");
+        NCP_LOG_INFO("Starting NCP in CLI mode");
+    NCP_LOG_WARN("CLI mode in Application::run() is a stub - use 'ncp' binary from src/cli/main.cpp for full functionality");
+    NCP_LOG_INFO("For DPI bypass, network spoofing, and privacy features, compile and run src/cli/main.cpp");
+    NCP_LOG_INFO("See issue #114 for implementation status");
+    
+    // CLI mode stub: just keep running until interrupted
+    // Full implementation should initialize:
+    // - NetworkSpoofer, DPIBypass, ParanoidMode
+    // - All protection layers from cli/main.cpp::handle_run()
+    
     return 0;
-}
-
 void Application::loadConfig(const std::string& config_path) {
     NCP_SCOPE_TRACE();
     NCP_TRACE("loadConfig() path='" + config_path + "'");
