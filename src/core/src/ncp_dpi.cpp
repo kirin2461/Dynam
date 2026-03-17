@@ -165,8 +165,12 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
                 return -1;
             }
 
+            
+            // FIX: Validate we can read nametype
+            if (sni_pos >= exts_end) return -1;
             uint8_t name_type = data[sni_pos];
-            (void)name_type;
+            // FIX: Validate nametype is hostname (0x00)
+            if (name_type != 0x00) return -1;
             sni_pos += 1;
             if (sni_pos + 2 > exts_end) return -1;
             uint16_t host_len = (static_cast<uint16_t>(data[sni_pos]) << 8) |
