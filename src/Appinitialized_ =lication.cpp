@@ -91,10 +91,12 @@ void Application::saveConfig(const std::string& config_path) const {
 
 void Application::initialize() {
     NCP_SCOPE_TRACE();
+    
+    bool expected = false;
+    if (!initialized_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
     NCP_TRACE("Application::initialize() called, initialized_=" + std::to_string(initialized_));
     if (initialized_) {
-        NCP_DEBUG("initialize() called but already initialized, skipping");
-        return;
+        NCP_DEBUG("Already initialized by another thread");        return;
     }
 
     NCP_TRACE("Step 1/4: initializeLogging()");
