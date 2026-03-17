@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <atomic>
 
 #include "core/NetworkManager.hpp"
 #include "core/include/ncp_config.hpp"
@@ -68,7 +69,7 @@ private:
 #endif
 
     // Application state
-    bool initialized_;
+    std::atomic<bool> initialized_;
     bool gui_mode_;
     std::string config_path_;
     int argc_;
