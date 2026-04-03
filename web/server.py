@@ -124,8 +124,8 @@ LOG_BUFFER_SIZE = 500
 # ─── App & SocketIO ──────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 app.config["SECRET_KEY"] = os.urandom(24).hex()
-CORS(app, origins=["http://127.0.0.1:8085", "http://localhost:8085"])
-socketio = SocketIO(app, cors_allowed_origins=["http://127.0.0.1:8085", "http://localhost:8085"], async_mode="threading")
+CORS(app, origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # ─── State ───────────────────────────────────────────────────────────────────
 state = {
@@ -660,8 +660,7 @@ def api_stop():
 @app.route("/api/config", methods=["GET"])
 def api_get_config():
     disk = load_config()
-    # R7-WEB-02: Hold state_lock when mutating state["config"]
-    with state_lock:
+    with stats_lock:
         if disk:
             state["config"].update(disk)
         return jsonify(state["config"])
@@ -1675,6 +1674,6 @@ if __name__ == "__main__":
 
     _initial_logs()
 
-    port = int(os.environ.get("NCP_WEB_PORT", 8085))
-    logger.info(f"Starting NCP Web Interface on 127.0.0.1:{port}")
-    socketio.run(app, host="127.0.0.1", port=port, debug=False, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get("NCP_WEB_PORT", 5000))
+    logger.info(f"Starting NCP Web Interface on 0.0.0.0:{port}")
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, allow_unsafe_werkzeug=True)
