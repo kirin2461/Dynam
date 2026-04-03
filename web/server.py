@@ -2,8 +2,11 @@
 """
 NCP Web Interface Backend
 Flask server providing REST API and WebSocket for NCP DPI bypass tool.
-Runs on port 8085.
+Runs on port 5000.
 """
+
+import eventlet
+eventlet.monkey_patch()
 
 import os
 import sys
@@ -59,11 +62,15 @@ def _license_has_module(module_name: str) -> bool:
 
 def _require_license(module_name: str = None):
     """Return a (json, status_code) tuple if license check fails, else None.
+    In demo/simulation mode (no C++ binary present), all modules are accessible.
     Usage in endpoints:
         err = _require_license("dpi_bypass")
         if err:
             return err
     """
+    # Demo mode: binary not found — skip license gate entirely so all features work
+    if not os.path.isfile(str(NCP_BINARY)):
+        return None
     if not _is_license_active():
         return jsonify({
             "ok": False,
@@ -116,7 +123,7 @@ NCP_BINARY = _find_ncp_binary()
 if platform.system() == "Windows":
     CONFIG_PATH = Path(os.environ.get("APPDATA", "")) / "ncp" / "config.json"
 else:
-    CONFIG_PATH = Path("/etc/ncp/config.json")
+    CONFIG_PATH = Path.home() / ".config" / "ncp" / "config.json"
 
 STATIC_DIR = BASE_DIR / "static"
 LOG_BUFFER_SIZE = 500
@@ -125,7 +132,7 @@ LOG_BUFFER_SIZE = 500
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 app.config["SECRET_KEY"] = os.urandom(24).hex()
 CORS(app, origins="*")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # ─── State ───────────────────────────────────────────────────────────────────
 state = {
@@ -454,7 +461,9 @@ def stats_update_loop():
             # Emit real stats via WebSocket
             payload = {**state["stats"], "uptime": get_uptime()}
             socketio.emit("stats", payload, namespace="/ws")
-            socketio.emit("module_stats", _flatten_modules(), namespace="/ws")
+
+        # Always emit module stats regardless of running state
+        socketio.emit("module_stats", _flatten_modules(), namespace="/ws")
 
         time.sleep(1)
 
@@ -1065,6 +1074,7 @@ def api_dpi_operator():
         "label": preset_info["label"],
         "description": preset_info["description"],
         "restarted": restarted,
+        "needs_restart": not restarted and state["running"],
     })
 
 
@@ -1324,15 +1334,24 @@ def _check_proxy_alive(server: str, port: int, timeout: float = 3.0) -> bool:
 
 @app.route("/api/telegram/proxies")
 def api_telegram_proxies():
-    """Return list of known MTProto proxies with liveness status."""
-    results = []
-    for p in TG_MTPROTO_PROXIES:
+    """Return list of known MTProto proxies with liveness status (parallel checks)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def check_one(p):
         entry = dict(p)
-        # Build tg:// deep link for one-click connect
         entry["link"] = (f"tg://proxy?server={p['server']}"
                          f"&port={p['port']}&secret={p['secret']}")
         entry["alive"] = _check_proxy_alive(p["server"], p["port"])
-        results.append(entry)
+        return entry
+
+    results = []
+    with ThreadPoolExecutor(max_workers=len(TG_MTPROTO_PROXIES)) as executor:
+        futures = {executor.submit(check_one, p): p for p in TG_MTPROTO_PROXIES}
+        # Preserve original order
+        ordered = {id(p): None for p in TG_MTPROTO_PROXIES}
+        for future in as_completed(futures):
+            ordered[id(futures[future])] = future.result()
+        results = [ordered[id(p)] for p in TG_MTPROTO_PROXIES]
     return jsonify(results)
 
 

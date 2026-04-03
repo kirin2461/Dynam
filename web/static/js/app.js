@@ -82,6 +82,7 @@ function loadSectionData(id) {
     case 'logs':      loadLogs(); break;
     case 'settings':  loadSettings(); break;
     case 'geneva':    refreshGenevaStatus(); break;
+    case 'mimicry':   loadConfig(); break;
     case 'pipeline':  loadModuleStats(); break;
     case 'antiml':    loadModuleStats(); break;
     case 'covert':    loadModuleStats(); break;
@@ -211,10 +212,10 @@ function applyModuleStats(data) {
   if (!data) return;
 
   // ── Pipeline section KPIs ──────────────────────────────────────────────
-  setEl('kpi-mod-throughput',     formatNumber(data.pipeline_throughput));
-  setEl('kpi-mod-queue-usage',    data.pipeline_queue_usage != null ? data.pipeline_queue_usage + '%' : '—');
-  setEl('kpi-mod-drops',          formatNumber(data.pipeline_drops));
-  setEl('kpi-mod-dns-intercepted', formatNumber(data.dns_queries_intercepted));
+  setEl('kpi-mod-pipeline-throughput',     formatNumber(data.pipeline_throughput));
+  setEl('kpi-mod-pipeline-queue-usage',    data.pipeline_queue_usage != null ? data.pipeline_queue_usage + '%' : '—');
+  setEl('kpi-mod-pipeline-drops',          formatNumber(data.pipeline_drops));
+  setEl('kpi-mod-dns-queries-intercepted', formatNumber(data.dns_queries_intercepted));
 
   // Pipeline inline stats
   setEl('mod-pipeline-throughput',  formatNumber(data.pipeline_throughput));
@@ -233,10 +234,10 @@ function applyModuleStats(data) {
   }
 
   // ── Anti-ML section KPIs ──────────────────────────────────────────────
-  setEl('kpi-mod-rtt-current',         data.rtt_current_ms != null ? data.rtt_current_ms + ' мс' : '—');
-  setEl('kpi-mod-padding-volume',      formatBytes(data.volume_padding_bytes));
-  setEl('kpi-mod-emulated-actions',    formatNumber(data.cloak_actions_emulated));
-  setEl('kpi-mod-correlations-broken', formatNumber(data.time_correlations_broken));
+  setEl('kpi-mod-rtt-current-ms',          data.rtt_current_ms != null ? data.rtt_current_ms + ' мс' : '—');
+  setEl('kpi-mod-volume-padding-bytes',    formatBytes(data.volume_padding_bytes));
+  setEl('kpi-mod-cloak-actions-emulated',  formatNumber(data.cloak_actions_emulated));
+  setEl('kpi-mod-time-correlations-broken', formatNumber(data.time_correlations_broken));
 
   // Anti-ML inline stats
   setEl('mod-rtt-current',          data.rtt_current_ms != null ? data.rtt_current_ms + ' мс' : '—');
@@ -249,20 +250,20 @@ function applyModuleStats(data) {
   setEl('mod-time-chaff',           formatNumber(data.time_chaff_packets));
 
   // ── Covert section KPIs ───────────────────────────────────────────────
-  setEl('kpi-mod-covert-sent',    formatBytes(data.covert_bytes_sent));
-  setEl('kpi-mod-covert-recv',    formatBytes(data.covert_bytes_recv));
-  setEl('kpi-mod-packets-padded', formatNumber(data.wf_packets_padded));
-  setEl('kpi-mod-selftest-score', data.self_test_score != null ? data.self_test_score + '/100' : '—');
+  setEl('kpi-mod-covert-bytes-sent', formatBytes(data.covert_bytes_sent));
+  setEl('kpi-mod-covert-bytes-recv', formatBytes(data.covert_bytes_recv));
+  setEl('kpi-mod-wf-packets-padded', formatNumber(data.wf_packets_padded));
+  setEl('kpi-mod-self-test-score',   data.self_test_score != null ? data.self_test_score + '/100' : '—');
 
   // Covert inline stats
-  setEl('mod-covert-sent',        formatBytes(data.covert_bytes_sent));
-  setEl('mod-covert-recv',        formatBytes(data.covert_bytes_recv));
-  setEl('mod-covert-channels',    formatNumber(data.covert_channels_active));
-  setEl('mod-wf-padded',          formatNumber(data.wf_packets_padded));
-  setEl('mod-wf-overhead',        formatBytes(data.wf_overhead_bytes));
-  setEl('mod-selftest-score',     data.self_test_score != null ? data.self_test_score + '/100' : '—');
-  setEl('mod-selftest-issues',    data.self_test_issues != null ? data.self_test_issues : '—');
-  setEl('mod-selftest-last',      data.self_test_last_run || '—');
+  setEl('mod-covert-sent',          formatBytes(data.covert_bytes_sent));
+  setEl('mod-covert-recv',          formatBytes(data.covert_bytes_recv));
+  setEl('mod-channels-active',      formatNumber(data.covert_channels_active));
+  setEl('mod-wf-padded',            formatNumber(data.wf_packets_padded));
+  setEl('mod-wf-overhead',          formatBytes(data.wf_overhead_bytes));
+  setEl('mod-self-test-score-badge', data.self_test_score != null ? data.self_test_score + '/100' : '—');
+  setEl('mod-self-test-issues',     data.self_test_issues != null ? data.self_test_issues : '—');
+  setEl('mod-selftest-last',        data.self_test_last_run || '—');
 
   // Self-test history
   if (data.self_test_history) {
@@ -270,18 +271,18 @@ function applyModuleStats(data) {
   }
 
   // ── Transport section KPIs ────────────────────────────────────────────
-  setEl('kpi-mod-current-protocol',  data.rotation_current_protocol || '—');
-  setEl('kpi-mod-rotations',         formatNumber(data.rotations_completed));
-  setEl('kpi-mod-routes-diverted',   formatNumber(data.as_routes_diverted));
-  setEl('kpi-mod-apparent-location', data.geo_apparent_location || '—');
+  setEl('kpi-mod-current-protocol',      data.rotation_current_protocol || '—');
+  setEl('kpi-mod-rotations-completed',   formatNumber(data.rotations_completed));
+  setEl('kpi-mod-as-routes-diverted',    formatNumber(data.as_routes_diverted));
+  setEl('kpi-mod-geo-apparent-location', data.geo_apparent_location || '—');
 
   // Transport inline stats
-  setEl('mod-current-protocol',  data.rotation_current_protocol || '—');
-  setEl('mod-rotations',         formatNumber(data.rotations_completed));
-  setEl('mod-as-diverted',       formatNumber(data.as_routes_diverted));
-  setEl('mod-as-path',           data.as_current_path || '—');
-  setEl('mod-geo-location',      data.geo_apparent_location || '—');
-  setEl('mod-geo-hops',          data.geo_hops_active != null ? data.geo_hops_active : '—');
+  setEl('mod-current-protocol',    data.rotation_current_protocol || '—');
+  setEl('mod-rotations',           formatNumber(data.rotations_completed));
+  setEl('mod-as-diverted',         formatNumber(data.as_routes_diverted));
+  setEl('mod-as-current-path',     data.as_current_path || '—');
+  setEl('mod-geo-apparent-location', data.geo_apparent_location || '—');
+  setEl('mod-geo-hops-active',     data.geo_hops_active != null ? data.geo_hops_active : '—');
 
   // ── Overview subsystems update ────────────────────────────────────────
   updateOverviewSubsystems(data);
@@ -440,18 +441,19 @@ function applyConfigToUI() {
   setSlider('range-hops', c.i2p_hop_count, 'val-hops');
 
   // ── New module sliders ────────────────────────────────────────────────
-  setSlider('range-pipeline-workers',  c.pipeline_workers,           'val-pipeline-workers');
-  setSlider('range-pipeline-queue',    c.pipeline_queue_size,        'val-pipeline-queue');
-  setSlider('range-session-frag-min',  c.session_frag_min_segments,  'val-session-frag-min');
-  setSlider('range-session-frag-max',  c.session_frag_max_segments,  'val-session-frag-max');
-  setSlider('range-rtt-target',        c.rtt_target_ms,              'val-rtt-target');
-  setSlider('range-rtt-jitter',        c.rtt_jitter_ms,              'val-rtt-jitter');
-  setSlider('range-volume-target',     c.volume_target_kbps,         'val-volume-target');
-  setSlider('range-time-break-delay',  c.time_break_max_delay_ms,    'val-time-break-delay');
-  setSlider('range-wf-overhead',       c.wf_defense_overhead,        'val-wf-overhead');
-  setSlider('range-selftest-interval', c.self_test_interval_sec,     'val-selftest-interval');
-  setSlider('range-rotation-interval', c.rotation_interval_min,      'val-rotation-interval');
-  setSlider('range-geo-hops',          c.geo_relay_hops,             'val-geo-hops');
+  setSlider('range-pipeline-workers',        c.pipeline_workers,           'val-pipeline-workers');
+  setSlider('range-pipeline-queue-size',     c.pipeline_queue_size,        'val-pipeline-queue-size');
+  setSlider('range-session-frag-min-segments', c.session_frag_min_segments, 'val-session-frag-min-segments');
+  setSlider('range-session-frag-max-segments', c.session_frag_max_segments, 'val-session-frag-max-segments');
+  setSlider('range-rtt-target-ms',           c.rtt_target_ms,              'val-rtt-target-ms');
+  setSlider('range-rtt-jitter-ms',           c.rtt_jitter_ms,              'val-rtt-jitter-ms');
+  setSlider('range-volume-target-kbps',      c.volume_target_kbps,         'val-volume-target-kbps');
+  setSlider('range-time-break-max-delay-ms', c.time_break_max_delay_ms,    'val-time-break-max-delay-ms');
+  setSlider('range-wf-defense-overhead',     c.wf_defense_overhead,        'val-wf-defense-overhead');
+  setSlider('range-self-test-interval-sec',  c.self_test_interval_sec,     'val-self-test-interval-sec');
+  setSlider('range-rotation-interval-min',   c.rotation_interval_min,      'val-rotation-interval-min');
+  setSlider('range-geo-relay-hops',          c.geo_relay_hops,             'val-geo-relay-hops');
+  setSlider('range-covert-bandwidth-limit-bps', c.covert_bandwidth_limit_bps, 'val-covert-bandwidth-limit-bps');
 
   // ── Preset highlight ──────────────────────────────────────────────────
   document.querySelectorAll('.preset-card[data-preset]').forEach(el => {
@@ -1279,7 +1281,6 @@ function wireUpControls() {
   // ── New module inputs ─────────────────────────────────────────────────
   bindInputSave('inp-dns-leak-whitelist', 'dns_leak_whitelist');
   bindInputSave('inp-as-blacklist',       'as_blacklist');
-  bindInputSave('inp-covert-bandwidth',   'covert_bandwidth_limit_bps', Number);
 
   // ── Existing sliders ──────────────────────────────────────────────────
   bindSlider('range-fragment', 'val-fragment');
@@ -1297,31 +1298,33 @@ function wireUpControls() {
   document.getElementById('range-hops')?.addEventListener('change', (e) => saveConfig({ i2p_hop_count: Number(e.target.value) }));
 
   // ── New module sliders ────────────────────────────────────────────────
-  bindSlider('range-pipeline-workers',  'val-pipeline-workers');
-  bindSlider('range-pipeline-queue',    'val-pipeline-queue');
-  bindSlider('range-session-frag-min',  'val-session-frag-min');
-  bindSlider('range-session-frag-max',  'val-session-frag-max');
-  bindSlider('range-rtt-target',        'val-rtt-target');
-  bindSlider('range-rtt-jitter',        'val-rtt-jitter');
-  bindSlider('range-volume-target',     'val-volume-target');
-  bindSlider('range-time-break-delay',  'val-time-break-delay');
-  bindSlider('range-wf-overhead',       'val-wf-overhead');
-  bindSlider('range-selftest-interval', 'val-selftest-interval');
-  bindSlider('range-rotation-interval', 'val-rotation-interval');
-  bindSlider('range-geo-hops',          'val-geo-hops');
+  bindSlider('range-pipeline-workers',          'val-pipeline-workers');
+  bindSlider('range-pipeline-queue-size',       'val-pipeline-queue-size');
+  bindSlider('range-session-frag-min-segments', 'val-session-frag-min-segments');
+  bindSlider('range-session-frag-max-segments', 'val-session-frag-max-segments');
+  bindSlider('range-rtt-target-ms',             'val-rtt-target-ms');
+  bindSlider('range-rtt-jitter-ms',             'val-rtt-jitter-ms');
+  bindSlider('range-volume-target-kbps',        'val-volume-target-kbps');
+  bindSlider('range-time-break-max-delay-ms',   'val-time-break-max-delay-ms');
+  bindSlider('range-wf-defense-overhead',       'val-wf-defense-overhead');
+  bindSlider('range-self-test-interval-sec',    'val-self-test-interval-sec');
+  bindSlider('range-rotation-interval-min',     'val-rotation-interval-min');
+  bindSlider('range-geo-relay-hops',            'val-geo-relay-hops');
+  bindSlider('range-covert-bandwidth-limit-bps', 'val-covert-bandwidth-limit-bps');
 
-  document.getElementById('range-pipeline-workers')?.addEventListener('change',  (e) => saveConfig({ pipeline_workers: Number(e.target.value) }));
-  document.getElementById('range-pipeline-queue')?.addEventListener('change',    (e) => saveConfig({ pipeline_queue_size: Number(e.target.value) }));
-  document.getElementById('range-session-frag-min')?.addEventListener('change',  (e) => saveConfig({ session_frag_min_segments: Number(e.target.value) }));
-  document.getElementById('range-session-frag-max')?.addEventListener('change',  (e) => saveConfig({ session_frag_max_segments: Number(e.target.value) }));
-  document.getElementById('range-rtt-target')?.addEventListener('change',        (e) => saveConfig({ rtt_target_ms: Number(e.target.value) }));
-  document.getElementById('range-rtt-jitter')?.addEventListener('change',        (e) => saveConfig({ rtt_jitter_ms: Number(e.target.value) }));
-  document.getElementById('range-volume-target')?.addEventListener('change',     (e) => saveConfig({ volume_target_kbps: Number(e.target.value) }));
-  document.getElementById('range-time-break-delay')?.addEventListener('change',  (e) => saveConfig({ time_break_max_delay_ms: Number(e.target.value) }));
-  document.getElementById('range-wf-overhead')?.addEventListener('change',       (e) => saveConfig({ wf_defense_overhead: Number(e.target.value) }));
-  document.getElementById('range-selftest-interval')?.addEventListener('change', (e) => saveConfig({ self_test_interval_sec: Number(e.target.value) }));
-  document.getElementById('range-rotation-interval')?.addEventListener('change', (e) => saveConfig({ rotation_interval_min: Number(e.target.value) }));
-  document.getElementById('range-geo-hops')?.addEventListener('change',          (e) => saveConfig({ geo_relay_hops: Number(e.target.value) }));
+  document.getElementById('range-pipeline-workers')?.addEventListener('change',          (e) => saveConfig({ pipeline_workers: Number(e.target.value) }));
+  document.getElementById('range-pipeline-queue-size')?.addEventListener('change',       (e) => saveConfig({ pipeline_queue_size: Number(e.target.value) }));
+  document.getElementById('range-session-frag-min-segments')?.addEventListener('change', (e) => saveConfig({ session_frag_min_segments: Number(e.target.value) }));
+  document.getElementById('range-session-frag-max-segments')?.addEventListener('change', (e) => saveConfig({ session_frag_max_segments: Number(e.target.value) }));
+  document.getElementById('range-rtt-target-ms')?.addEventListener('change',             (e) => saveConfig({ rtt_target_ms: Number(e.target.value) }));
+  document.getElementById('range-rtt-jitter-ms')?.addEventListener('change',             (e) => saveConfig({ rtt_jitter_ms: Number(e.target.value) }));
+  document.getElementById('range-volume-target-kbps')?.addEventListener('change',        (e) => saveConfig({ volume_target_kbps: Number(e.target.value) }));
+  document.getElementById('range-time-break-max-delay-ms')?.addEventListener('change',   (e) => saveConfig({ time_break_max_delay_ms: Number(e.target.value) }));
+  document.getElementById('range-wf-defense-overhead')?.addEventListener('change',       (e) => saveConfig({ wf_defense_overhead: Number(e.target.value) }));
+  document.getElementById('range-self-test-interval-sec')?.addEventListener('change',    (e) => saveConfig({ self_test_interval_sec: Number(e.target.value) }));
+  document.getElementById('range-rotation-interval-min')?.addEventListener('change',     (e) => saveConfig({ rotation_interval_min: Number(e.target.value) }));
+  document.getElementById('range-geo-relay-hops')?.addEventListener('change',            (e) => saveConfig({ geo_relay_hops: Number(e.target.value) }));
+  document.getElementById('range-covert-bandwidth-limit-bps')?.addEventListener('change', (e) => saveConfig({ covert_bandwidth_limit_bps: Number(e.target.value) }));
 
   // ── Protocol rotation checkboxes ──────────────────────────────────────
   bindRotationProtocols();
@@ -1351,6 +1354,12 @@ document.querySelectorAll('[data-geneva-preset]')?.forEach(el => {
   el.addEventListener('click', () => {
     const p = genevaPresets[el.dataset.genevaPreset];
     if (p) {
+      const strategyStr = p.strategy.join('\n');
+      saveConfig({ geneva_strategy: strategyStr });
+      const textarea = document.getElementById('inp-geneva-strategy');
+      if (textarea) textarea.value = strategyStr;
+      document.querySelectorAll('[data-geneva-preset]').forEach(b => b.classList.remove('active'));
+      el.classList.add('active');
       showToast(`Пресет Geneva: ${p.name}`, 'success');
     }
   });
@@ -1374,6 +1383,7 @@ async function init() {
   const ws = new NCPWebSocket({
     onLog: onLogEntry,
     onStats: applyStats,
+    onModuleStats: applyModuleStats,
     onConnect: () => { appState.wsConnected = true; },
     onDisconnect: () => { appState.wsConnected = false; },
   });

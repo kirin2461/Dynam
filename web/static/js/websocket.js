@@ -9,6 +9,7 @@ class NCPWebSocket {
     this.url = opts.url || null; // will use socket.io if null
     this.onLog = opts.onLog || null;
     this.onStats = opts.onStats || null;
+    this.onModuleStats = opts.onModuleStats || null;
     this.onConnect = opts.onConnect || null;
     this.onDisconnect = opts.onDisconnect || null;
 
@@ -62,6 +63,10 @@ class NCPWebSocket {
 
       this._socket.on('stats', (data) => {
         if (this.onStats) this.onStats(data);
+      });
+
+      this._socket.on('module_stats', (data) => {
+        if (this.onModuleStats) this.onModuleStats(data);
       });
 
     } catch (e) {

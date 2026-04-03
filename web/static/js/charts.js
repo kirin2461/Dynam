@@ -297,11 +297,6 @@ function formatBytes(bytes, decimals = 1) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
-function formatNumber(n) {
-  if (!n && n !== 0) return '—';
-  return Number(n).toLocaleString('ru-RU');
-}
-
 // Export
 window.createTrafficChart = createTrafficChart;
 window.updateTrafficChart = updateTrafficChart;
@@ -310,4 +305,3 @@ window.updateGenevaChart = updateGenevaChart;
 window.createPipelineChart = createPipelineChart;
 window.updatePipelineChart = updatePipelineChart;
 window.formatBytes = formatBytes;
-window.formatNumber = formatNumber;
