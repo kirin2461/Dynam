@@ -406,15 +406,11 @@ function applyConfigToUI() {
   setVal('sel-proxy-type', c.proxy_type);
   setVal('inp-proxy-host', c.proxy_host);
   setVal('inp-proxy-port', c.proxy_port);
-  setVal('inp-fragment-size', c.fragment_size);
-  setVal('inp-jitter', c.timing_jitter);
-  setVal('inp-noise', c.noise_level);
   setVal('sel-mimic', c.mimic_protocol);
   setVal('sel-tls-fp', c.tls_fingerprint);
   setVal('sel-flow', c.flow_profile);
   setVal('inp-i2p-host', c.i2p_sam_host);
   setVal('inp-i2p-port', c.i2p_sam_port);
-  setVal('inp-hop-count', c.i2p_hop_count);
   setVal('inp-rotate-interval', c.rotate_interval);
   setVal('sel-language', c.language);
 
@@ -427,7 +423,7 @@ function applyConfigToUI() {
   setVal('sel-cloak-profile',       c.cloak_profile);
   setVal('sel-time-break-mode',     c.time_break_mode);
   setVal('sel-covert-mode',         c.covert_mode);
-  setVal('inp-covert-bandwidth',    c.covert_bandwidth_limit_bps);
+  setSlider('range-covert-bandwidth-limit-bps', c.covert_bandwidth_limit_bps, 'val-covert-bandwidth-limit-bps');
   setVal('sel-wf-defense-mode',     c.wf_defense_mode);
   setVal('sel-geo-target-country',  c.geo_target_country);
   setVal('inp-as-blacklist',        c.as_blacklist);
@@ -1087,18 +1083,18 @@ async function runSelfTest() {
 }
 
 function renderSelfTestHistory(history) {
-  const el = document.getElementById('selftest-history');
+  const el = document.getElementById('self-test-history');
   if (!el) return;
   if (!history || !history.length) {
-    el.innerHTML = '<div class="text-muted text-sm">Нет результатов</div>';
+    el.innerHTML = '<tr><td colspan="3" class="text-muted" style="text-align:center;padding:var(--sp-3)">Нет данных</td></tr>';
     return;
   }
   el.innerHTML = history.slice(-5).reverse().map(h =>
-    `<div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0;border-bottom:1px solid var(--border)">
-      <span class="text-muted">${h.ts || h.time || '—'}</span>
-      <span class="badge badge--${h.score >= 90 ? 'active' : h.score >= 70 ? 'warn' : 'error'}">${h.score}/100</span>
-      <span class="text-muted">${h.issues} проблем</span>
-    </div>`
+    `<tr>
+      <td class="text-muted" style="font-size:var(--text-xs)">${escapeHtml(h.ts || h.time || '—')}</td>
+      <td><span class="badge badge--${h.score >= 90 ? 'active' : h.score >= 70 ? 'warn' : 'inactive'}">${h.score}/100</span></td>
+      <td class="text-muted" style="font-size:var(--text-xs)">${h.issues} проблем</td>
+    </tr>`
   ).join('');
 }
 
