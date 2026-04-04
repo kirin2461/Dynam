@@ -1340,10 +1340,34 @@ function wireUpControls() {
 // ─── Geneva presets ───────────────────────────────────────────────────────
 
 const genevaPresets = {
-  tspu: { name: 'ТСПУ 2026', strategy: ['[TCP:flags:S]-fragment{tcp:8:false}-|'] },
-  gfw: { name: 'GFW 2025', strategy: ['[TCP:flags:PA]-tamper{TCP:flags:replace:INVALID}-|'] },
-  iran: { name: 'Iran DPI', strategy: ['[TCP:flags:S]-duplicate-|'] },
-  universal: { name: 'Universal', strategy: ['[TCP:flags:PA]-fragment{tcp:4:false}-|'] },
+  tspu: {
+    name: 'ТСПУ 2026',
+    strategy: [
+      '[TCP:flags:S]-duplicate(tamper{TCP:TTL:replace:1}(send,),)-|',
+      '[TCP:flags:PA]-fragment{tcp:8:false}-tamper{TCP:flags:replace:INVALID}(send,drop)-|',
+    ]
+  },
+  gfw: {
+    name: 'GFW 2025',
+    strategy: [
+      '[TCP:flags:S]-duplicate(tamper{TCP:TTL:replace:1}(send,),send)-|',
+      '[TCP:flags:PA]-tamper{TCP:flags:replace:INVALID}(send,)-fragment{tcp:8:false}-|',
+    ]
+  },
+  iran: {
+    name: 'Iran DPI',
+    strategy: [
+      '[TCP:flags:S]-duplicate(tamper{TCP:TTL:replace:4}(send,),send)-|',
+      '[TCP:flags:PA]-fragment{tcp:4:false}(send,send)-|',
+    ]
+  },
+  universal: {
+    name: 'Universal',
+    strategy: [
+      '[TCP:flags:S]-duplicate(tamper{TCP:TTL:replace:1}(send,),send)-|',
+      '[TCP:flags:PA]-duplicate(fragment{tcp:64:false}(tamper{TCP:TTL:replace:1}(send,),send),fragment{tcp:64:false}(send,send))-|',
+    ]
+  },
 };
 
 document.querySelectorAll('[data-geneva-preset]')?.forEach(el => {

@@ -532,15 +532,22 @@ def api_status():
 
 
 def _build_ncp_args() -> list:
-    """Build NCP binary command-line arguments from current config state."""
+    """Build NCP binary command-line arguments from current config state.
+
+    Covers all tunable config keys so the binary receives every setting
+    that the web UI exposes.  Flag naming convention:
+      --no-<feature>  disables a feature that is ON by default in the binary
+      --<feature>     enables a feature that is OFF by default in the binary
+      --<key> <val>   passes a numeric or string value
+    """
     binary_path = str(NCP_BINARY)
     cfg = state["config"]
     args = [binary_path, "run", "--no-license-check",
             "--interface", cfg.get("interface", "auto"),
-            "--preset", cfg.get("dpi_preset", "tspu")]
+            "--preset",    cfg.get("dpi_preset", "tspu")]
 
-    # Module disable flags -- when config toggle is False, pass --no-* to disable
-    MODULE_FLAGS = {
+    # ── Modules ON by default — pass --no-* when user disables them ──────────
+    DISABLE_FLAGS = {
         "dns_leak_prevention":      "--no-dns-leak",
         "rtt_equalizer":            "--no-rtt-eq",
         "volume_normalizer":        "--no-volume-norm",
@@ -550,28 +557,118 @@ def _build_ncp_args() -> list:
         "self_test_enabled":        "--no-self-test",
         "session_fragmenter":       "--no-session-frag",
         "cross_layer_enabled":      "--no-cross-layer",
+        "tcp_fragment":             "--no-tcp-frag",
+        "tls_split":                "--no-tls-split",
+        "garlic_routing":           "--no-garlic",
     }
-    # geneva is enabled by default, disable if not wanted
-    # NOTE: We don't have a separate "geneva" config key; it's always on.
-    #       Could add "--no-geneva" if needed.
-
-    for config_key, flag in MODULE_FLAGS.items():
-        if not cfg.get(config_key, False):
+    for config_key, flag in DISABLE_FLAGS.items():
+        if not cfg.get(config_key, True):
             args.append(flag)
 
-    # Covert channel is opt-in (default off)
-    if cfg.get("covert_channel", False):
-        args.append("--covert")
+    # ── Modules OFF by default — pass flag when user enables them ────────────
+    ENABLE_FLAGS = {
+        "fake_packets":      "--fake-packets",
+        "pkt_disorder":      "--disorder",
+        "sni_spoof":         "--sni-spoof",
+        "auto_rotate":       "--identity-rotate",
+        "ttl_manip":         "--ttl-manip",
+        "burst_morphing":    "--burst-morph",
+        "paranoid_mode":     "--paranoid",
+        "postquantum":       "--postquantum",
+        "port_knocking":     "--port-knock",
+        "i2p_enabled":       "--i2p",
+        "covert_channel":    "--covert",
+        "full_spoof":        "--full-spoof",
+        "antiforensics":     "--antiforensics",
+        "protocol_rotation": "--proto-rotate",
+        "as_aware_routing":  "--as-route",
+        "geo_obfuscator":    "--geo-obfuscate",
+        "pipeline_enabled":  "--pipeline",
+    }
+    for config_key, flag in ENABLE_FLAGS.items():
+        if cfg.get(config_key, False):
+            args.append(flag)
 
-    # Full spoof mode for wired setups
-    if cfg.get("full_spoof", False):
-        args.append("--full-spoof")
+    # ── Numeric values ────────────────────────────────────────────────────────
+    NUMERIC_ARGS = {
+        "fragment_size":           "--fragment-size",
+        "timing_jitter":           "--jitter",
+        "noise_level":             "--noise",
+        "rotate_interval":         "--rotate-interval",
+        "rtt_target_ms":           "--rtt-target",
+        "rtt_jitter_ms":           "--rtt-jitter",
+        "volume_target_kbps":      "--volume-target",
+        "time_break_max_delay_ms": "--time-break-delay",
+        "covert_bandwidth_limit_bps": "--covert-bw",
+        "wf_defense_overhead":     "--wf-overhead",
+        "geo_relay_hops":          "--geo-hops",
+        "geneva_population":       "--geneva-pop",
+        "geneva_mutation":         "--geneva-mutation",
+        "rotation_interval_min":   "--rotate-interval-min",
+        "i2p_hop_count":           "--i2p-hops",
+        "i2p_sam_port":            "--i2p-sam-port",
+        "pipeline_workers":        "--pipeline-workers",
+        "pipeline_queue_size":     "--pipeline-queue",
+        "session_frag_min_segments": "--frag-min",
+        "session_frag_max_segments": "--frag-max",
+        "self_test_interval_sec":  "--selftest-interval",
+        "proxy_port":              "--proxy-port",
+        "cross_layer_strictness":  None,  # string, handled below
+    }
+    for config_key, flag in NUMERIC_ARGS.items():
+        if flag is None:
+            continue
+        val = cfg.get(config_key)
+        if val is not None:
+            args.extend([flag, str(val)])
 
-    # Zapret profile
+    # ── String values ─────────────────────────────────────────────────────────
+    STRING_ARGS = {
+        "mimic_protocol":       "--mimic",
+        "tls_fingerprint":      "--tls-fp",
+        "cloak_profile":        "--cloak-profile",
+        "covert_mode":          "--covert-mode",
+        "wf_defense_mode":      "--wf-mode",
+        "geo_target_country":   "--geo-country",
+        "doh_provider":         "--doh",
+        "flow_profile":         "--flow-profile",
+        "time_break_mode":      "--time-break-mode",
+        "volume_padding_mode":  "--volume-mode",
+        "dns_leak_mode":        "--dns-mode",
+        "session_frag_strategy":"--frag-strategy",
+        "cross_layer_strictness":"--cross-layer-strict",
+        "rotation_protocols":   "--rotate-protocols",
+        "i2p_sam_host":         "--i2p-sam-host",
+        "port_knock_seq":       "--knock-seq",
+        "proxy_type":           "--proxy-type",
+        "proxy_host":           "--proxy-host",
+    }
+    for config_key, flag in STRING_ARGS.items():
+        val = cfg.get(config_key, "")
+        if val and val not in ("none", "auto", ""):
+            args.extend([flag, str(val)])
+
+    # ── Optional string values (only when non-empty) ──────────────────────────
+    if cfg.get("doh_custom"):
+        args.extend(["--doh-url", cfg["doh_custom"]])
+    if cfg.get("dns_leak_whitelist"):
+        args.extend(["--dns-whitelist", cfg["dns_leak_whitelist"]])
+    if cfg.get("as_blacklist"):
+        args.extend(["--as-blacklist", cfg["as_blacklist"]])
+
+    # ── Geneva strategy (expression string) ───────────────────────────────────
+    gs = cfg.get("geneva_strategy", "")
+    if gs:
+        args.extend(["--geneva-strategy", gs])
+
+    # ── ECH ───────────────────────────────────────────────────────────────────
+    if not cfg.get("ech_enabled", True):
+        args.append("--no-ech")
+
+    # ── Zapret profile ────────────────────────────────────────────────────────
     zp = cfg.get("zapret_profile", "")
     if zp:
         args.extend(["--zapret-profile", zp])
-        # Pass custom chain selection if set
         custom = cfg.get("zapret_custom_chains")
         if custom and isinstance(custom, list):
             args.extend(["--zapret-chains", ",".join(custom)])
