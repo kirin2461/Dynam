@@ -37,6 +37,9 @@ class SettingsDialog;
 class CryptoPanel;
 class IdentityPanel;
 class DPIMetricsPanel;
+class DPIStrategyEditor;
+class DnsLookupPanel;
+class UrlProbePanel;
 
 namespace ncp::GUI {
 
@@ -137,7 +140,10 @@ private:
     SettingsDialog*  settingsDialog_;
     CryptoPanel*     cryptoPanel_      = nullptr;
     IdentityPanel*   identityPanel_    = nullptr;
-    DPIMetricsPanel* dpiMetricsPanel_  = nullptr;
+    DPIMetricsPanel*   dpiMetricsPanel_   = nullptr;
+    DPIStrategyEditor* dpiStrategyEditor_ = nullptr;
+    DnsLookupPanel*    dnsLookupPanel_    = nullptr;
+    UrlProbePanel*     urlProbePanel_     = nullptr;
 
     // Prev-sample state for the StatusPanel summary rate calculation.
     // Kept here (not in StatusPanel) so the formatter stays pure.

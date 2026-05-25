@@ -16,6 +16,10 @@
 #include "widgets/OnboardingWizard.hpp"
 #include "widgets/StatusSummary.hpp"
 #include "widgets/DiagnosticsDialog.hpp"
+#include "widgets/DnsLookupPanel.hpp"
+#include "widgets/UrlProbePanel.hpp"
+#include "widgets/DPIStrategyEditor.hpp"
+#include "widgets/Profiles.hpp"
 #include <QTabWidget>
 #include <QElapsedTimer>
 
@@ -177,15 +181,30 @@ void MainWindow::setupUI() {
     // ─── DPI ─────────────────────────────────────────────────────────────
     auto* dpiTab = new QWidget(tabs);
     auto* dpiLayout = new QVBoxLayout(dpiTab);
-    dpiControl_      = new DPIControl(this);
-    dpiMetricsPanel_ = new DPIMetricsPanel(advancedDpi_.get(), this);
+    dpiControl_       = new DPIControl(this);
+    dpiMetricsPanel_  = new DPIMetricsPanel(advancedDpi_.get(), this);
+    dpiStrategyEditor_= new DPIStrategyEditor(advancedDpi_.get(), this);
+    auto* dpiInnerTabs = new QTabWidget(dpiTab);
+    dpiInnerTabs->addTab(dpiMetricsPanel_,   tr("Metrics"));
+    dpiInnerTabs->addTab(dpiStrategyEditor_, tr("Strategy"));
     dpiLayout->addWidget(dpiControl_);
-    dpiLayout->addWidget(dpiMetricsPanel_, 1);
+    dpiLayout->addWidget(dpiInnerTabs, 1);
     tabs->addTab(dpiTab, tr("DPI"));
 
     // ─── Identity ────────────────────────────────────────────────────────
     identityPanel_ = new IdentityPanel(identityRotation_.get(), this);
     tabs->addTab(identityPanel_, tr("Identity"));
+
+    // ─── Tools (DNS + URL probe) ─────────────────────────────────────────
+    auto* toolsTab = new QWidget(tabs);
+    auto* toolsLayout = new QVBoxLayout(toolsTab);
+    auto* toolsInner = new QTabWidget(toolsTab);
+    dnsLookupPanel_ = new DnsLookupPanel(this);
+    urlProbePanel_  = new UrlProbePanel(this);
+    toolsInner->addTab(dnsLookupPanel_, tr("DNS Lookup"));
+    toolsInner->addTab(urlProbePanel_,  tr("URL Probe"));
+    toolsLayout->addWidget(toolsInner);
+    tabs->addTab(toolsTab, tr("Tools"));
 
     // ─── Crypto ──────────────────────────────────────────────────────────
     cryptoPanel_ = new CryptoPanel(crypto_.get(), this);
@@ -213,6 +232,20 @@ void MainWindow::setupMenuBar() {
     // File menu
     QMenu* fileMenu = menuBar->addMenu(tr("&File"));
     fileMenu->addAction(tr("&Settings"), this, &MainWindow::onSettingsClicked);
+    fileMenu->addSeparator();
+    fileMenu->addAction(tr("Save Profile…"), this, [this]{
+        Profiles::saveAs(this);
+        if (database_) database_->log_activity("profile", "Profile saved");
+    });
+    fileMenu->addAction(tr("Load Profile…"), this, [this]{
+        if (Profiles::load(this)) {
+            // Re-apply theme + reload any cached settings that the live
+            // UI is showing. Auto-connect / bypass technique pick up on
+            // the next Connect; no need to restart.
+            Themes::apply();
+            if (database_) database_->log_activity("profile", "Profile loaded");
+        }
+    });
     fileMenu->addSeparator();
     fileMenu->addAction(tr("E&xit"), this, &QMainWindow::close);
     

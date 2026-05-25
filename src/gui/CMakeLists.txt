@@ -24,6 +24,10 @@ set(NCP_GUI_HEADERS
     widgets/OnboardingWizard.hpp
     widgets/StatusSummary.hpp
     widgets/DiagnosticsDialog.hpp
+    widgets/DnsLookupPanel.hpp
+    widgets/UrlProbePanel.hpp
+    widgets/DPIStrategyEditor.hpp
+    widgets/Profiles.hpp
 )
 
 # Create GUI library
