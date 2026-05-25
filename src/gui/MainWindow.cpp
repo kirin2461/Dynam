@@ -20,6 +20,8 @@
 #include "widgets/UrlProbePanel.hpp"
 #include "widgets/DPIStrategyEditor.hpp"
 #include "widgets/Profiles.hpp"
+#include "widgets/PollerEngine.hpp"
+#include "widgets/PollerPanel.hpp"
 #include <QTabWidget>
 #include <QElapsedTimer>
 
@@ -79,6 +81,11 @@ MainWindow::MainWindow(QWidget* parent)
     // wiring is a follow-up; right now the panel just shows live counters
     // (all zero until something pumps packets through it).
     advancedDpi_ = std::make_unique<ncp::DPI::AdvancedDPIBypass>();
+
+    // Poller engine: independent of Connect state. It owns its own timers
+    // and runs probes whenever they're due, even when bypass is off.
+    // Persisted targets at ~/.dynam/poller.json reload here.
+    pollerEngine_ = std::make_unique<PollerEngine>();
     
     // Setup UI
     setupUI();
@@ -205,6 +212,10 @@ void MainWindow::setupUI() {
     toolsInner->addTab(urlProbePanel_,  tr("URL Probe"));
     toolsLayout->addWidget(toolsInner);
     tabs->addTab(toolsTab, tr("Tools"));
+
+    // ─── Poller ──────────────────────────────────────────────────────────
+    pollerPanel_ = new PollerPanel(pollerEngine_.get(), this);
+    tabs->addTab(pollerPanel_, tr("Poller"));
 
     // ─── Crypto ──────────────────────────────────────────────────────────
     cryptoPanel_ = new CryptoPanel(crypto_.get(), this);

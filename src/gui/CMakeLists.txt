@@ -28,6 +28,8 @@ set(NCP_GUI_HEADERS
     widgets/UrlProbePanel.hpp
     widgets/DPIStrategyEditor.hpp
     widgets/Profiles.hpp
+    widgets/PollerEngine.hpp
+    widgets/PollerPanel.hpp
 )
 
 # Create GUI library

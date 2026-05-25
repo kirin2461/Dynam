@@ -40,6 +40,8 @@ class DPIMetricsPanel;
 class DPIStrategyEditor;
 class DnsLookupPanel;
 class UrlProbePanel;
+class PollerEngine;
+class PollerPanel;
 
 namespace ncp::GUI {
 
@@ -144,6 +146,8 @@ private:
     DPIStrategyEditor* dpiStrategyEditor_ = nullptr;
     DnsLookupPanel*    dnsLookupPanel_    = nullptr;
     UrlProbePanel*     urlProbePanel_     = nullptr;
+    PollerPanel*       pollerPanel_       = nullptr;
+    std::unique_ptr<PollerEngine> pollerEngine_;
 
     // Prev-sample state for the StatusPanel summary rate calculation.
     // Kept here (not in StatusPanel) so the formatter stays pure.
