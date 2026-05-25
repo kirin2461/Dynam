@@ -82,6 +82,10 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    // Stop timers first so queued timeouts don't fire on half-destroyed widgets.
+    if (statsTimer_)   statsTimer_->stop();
+    if (networkTimer_) networkTimer_->stop();
+    if (logTimer_)     logTimer_->stop();
     saveSettings();
 }
 
@@ -435,22 +439,28 @@ void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
 }
 
+// Timer-driven slots: explicit null guards so a single torn-down or
+// uninitialised collaborator can no-op instead of segfaulting the event loop.
 void MainWindow::updateStats() {
+    if (!network_ || !systemStats_) return;
     auto stats = network_->get_stats();
     systemStats_->updateStats(stats.bytes_sent, stats.bytes_received,
                                stats.packets_sent, stats.packets_received);
 }
 
 void MainWindow::updateNetworkFlow() {
+    if (!networkMonitor_) return;
     networkMonitor_->refresh();
 }
 
 void MainWindow::updateActivityLog() {
+    if (!database_ || !activityLog_) return;
     auto logs = database_->get_recent_activity(50);
     activityLog_->setLogs(logs);
 }
 
 void MainWindow::refreshLicenseStatus() {
+    if (!license_ || !licenseInfo_) return;
     auto info = license_->get_license_info("license.dat");
     licenseInfo_->updateInfo(info);
 }
