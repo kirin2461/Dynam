@@ -44,6 +44,10 @@
 #include <dirent.h>
 #include <glob.h>
 #include <pwd.h>
+// macOS has no fdatasync — fsync gives the strongest guarantee available.
+#if defined(__APPLE__) && !defined(fdatasync)
+#  define fdatasync(fd) fsync(fd)
+#endif
 #endif
 
 // R10-FIX-01: Secure string clearing helper to avoid UB with sodium_memzero on std::string
@@ -1496,7 +1500,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         return;
     }
 
-    auto now = std::chrono::system_clock::now();
+    auto now = std::chrono::steady_clock::now();
     auto elapsed = now - impl_->kill_switch_activation_time;
 
     if (elapsed >= impl_->kill_switch_timeout_duration) {
@@ -1536,7 +1540,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         alert.type = "KILL_SWITCH_TIMEOUT";
         alert.severity = 7;
         alert.message = "Kill switch auto-disabled after timeout expired";
-        alert.timestamp = now;
+        alert.timestamp = std::chrono::system_clock::now();
         security_alerts_.push_back(alert);
     }
 }

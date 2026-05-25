@@ -7,6 +7,13 @@ set(NCP_GUI_SOURCES
 
 set(NCP_GUI_HEADERS
     MainWindow.hpp
+    widgets/StatusPanel.hpp
+    widgets/NetworkMonitor.hpp
+    widgets/DPIControl.hpp
+    widgets/TrafficAnalytics.hpp
+    widgets/SystemStats.hpp
+    widgets/ActivityLog.hpp
+    widgets/LicenseInfo.hpp
 )
 
 # Create GUI library

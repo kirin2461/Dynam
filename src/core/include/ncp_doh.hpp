@@ -88,6 +88,11 @@ public:
         // When enabled, pins SHA-256 hash of server's public key
         bool enable_certificate_pinning = false;
         std::map<std::string, std::vector<std::string>> pinned_certificates; // server_url -> list of pin SHA-256 hashes
+
+        // R13-FIX-02: Circuit breaker (used by Impl in doh.cpp)
+        bool     enable_circuit_breaker    = false;
+        uint32_t circuit_timeout_ms        = 30000;
+        uint32_t circuit_failure_threshold = 5;
     };
     /**
      * @brief Statistics for DoH operations
@@ -209,7 +214,10 @@ private:
     bool connected_ = false;
 
     // Internal helpers
-    DoHClient::DNSResult perform_query_internal(const std::string& hostname,
+    // R7-HIGH-02: Takes a config snapshot so the call is not racing
+    // with set_config(); see doh.cpp::query() for the snapshot site.
+    DoHClient::DNSResult perform_query_internal(const Config& config,
+                                                const std::string& hostname,
                                                 DoHClient::RecordType type);
     DoHClient::DNSResult try_server(const std::string& server_url,
                                     const std::string& hostname,

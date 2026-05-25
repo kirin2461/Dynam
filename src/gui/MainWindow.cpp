@@ -52,7 +52,10 @@ MainWindow::MainWindow(QWidget* parent)
     setupMenuBar();
     setupToolBar();
     setupStatusBar();
-    setupCentralWidget();  // replaces native widgets with web UI wrapper
+    // setupCentralWidget(): SKIPPED — it replaces the central widget set by
+    // setupUI() above, which Qt-reparents (and then deletes) every panel widget.
+    // The replacement was a wrapper for a localhost:8080 web UI that isn't
+    // running in this build, so we keep the native panel grid.
     setupSystemTray();
     setupConnections();
     
@@ -364,7 +367,7 @@ void MainWindow::onQuickConnectClicked() {
 void MainWindow::onBypassToggled(bool enabled) {
     bypassEnabled_ = enabled;
     if (enabled) {
-        network_->enable_bypass(ncp::Network::BypassTechnique::TCP_FRAGMENTATION);
+        network_->enable_bypass(ncp::BypassTechnique::TCP_FRAGMENTATION);
         database_->log_activity("bypass", "DPI bypass enabled");
     } else {
         network_->disable_bypass();
@@ -374,7 +377,7 @@ void MainWindow::onBypassToggled(bool enabled) {
 }
 
 void MainWindow::onBypassTechniqueChanged(int index) {
-    auto technique = static_cast<ncp::Network::BypassTechnique>(index);
+    auto technique = static_cast<ncp::BypassTechnique>(index);
     network_->enable_bypass(technique);
 }
 

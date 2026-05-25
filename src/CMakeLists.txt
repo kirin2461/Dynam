@@ -1,3 +1,5 @@
+cmake_minimum_required(VERSION 3.20)
+
 # NCP GUI Application CMakeLists.txt
 
 # Source files for main application
@@ -26,6 +28,10 @@ target_link_libraries(ncp PRIVATE
     Qt6::Charts
     ${PCAP_LIBRARIES}
 )
+
+# The #ifdef ENABLE_GUI blocks in Application.cpp gate Qt construction
+# and main window creation — without this define they all compile out.
+target_compile_definitions(ncp PRIVATE ENABLE_GUI)
 
 if(UNIX AND NOT APPLE)
     target_link_libraries(ncp PRIVATE Threads::Threads)

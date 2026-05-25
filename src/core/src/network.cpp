@@ -341,12 +341,17 @@ bool Network::setup_fragmentation_bypass() {
     bypass_config_.fragment_size   = 8;  // 8-byte TCP payload fragments
     bypass_config_.fragment_offset = 0;
 
-#ifndef _WIN32
+#if defined(__linux__)
     // On Linux, disable kernel-level Path MTU Discovery so the kernel doesn't
     // silently reassemble fragments before they reach the wire.
     if (active_socket_ >= 0) {
         int pmtu_flag = IP_PMTUDISC_DONT;
         setsockopt(active_socket_, IPPROTO_IP, IP_MTU_DISCOVER, &pmtu_flag, sizeof(pmtu_flag));
+    }
+#elif defined(__APPLE__) && defined(IP_DONTFRAG)
+    if (active_socket_ >= 0) {
+        int dontfrag = 0;
+        setsockopt(active_socket_, IPPROTO_IP, IP_DONTFRAG, &dontfrag, sizeof(dontfrag));
     }
 #endif
     return true;

@@ -1,8 +1,15 @@
 # Build directories
 build/
+build-*/
 */build/
 */*/build/
 */*/*/build/
+
+# Packaged output
+dist/
+
+# Worktree state (Claude Code)
+.claude/
 
 # IDE
 .vs/

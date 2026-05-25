@@ -10,7 +10,7 @@
 #include <stdexcept>
 #include <set>
 #include <cstdio>
-#include "Logger.hpp"
+#include <spdlog/spdlog.h>
 
 
 #ifdef _WIN32
@@ -51,8 +51,8 @@ NetworkManager::NetworkManager() {
         // WSAEFAULT - already initialized, ignore
         spdlog::debug("WSAStartup returned {} (likely already initialized)", err);
     }    // Other errors may also indicate pre-existing initialization
-    }
 #endif
+}
 
 NetworkManager::~NetworkManager() {
         spdlog::info("NetworkManager::~NetworkManager() - Destructor called");

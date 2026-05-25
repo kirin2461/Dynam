@@ -177,7 +177,11 @@ public:
      *
      * @return true if backend initialized successfully
      */
-    bool initialize(const Config& config = Config{});
+    // Two overloads instead of a default arg — clang rejects Config{} as a
+    // default value here because Config's defaults reference Backend, which
+    // is also nested in this class (chicken-and-egg).
+    bool initialize();
+    bool initialize(const Config& config);
 
     /**
      * @brief Start intercepting packets.

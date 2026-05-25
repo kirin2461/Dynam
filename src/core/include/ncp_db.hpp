@@ -59,6 +59,11 @@ public:
                 const std::string& where_column,
                 const std::string& where_value);
 
+    // Activity log — used by the GUI. Minimal in-memory ring buffer for now;
+    // a SQL-backed version can land later without touching the GUI.
+    void log_activity(const std::string& category, const std::string& message);
+    std::vector<std::string> get_recent_activity(size_t limit) const;
+
 private:
 #ifdef HAVE_SQLITE
     sqlite3* db_handle_;
@@ -66,6 +71,7 @@ private:
     std::string db_path_;
     bool is_connected_;
     std::string last_error_;
+    mutable std::vector<std::string> activity_log_;
 };
 
 } // namespace ncp

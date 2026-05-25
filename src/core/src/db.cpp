@@ -18,6 +18,7 @@
 #include <iostream>
 #include <fstream>
 #include <map>
+#include <algorithm>
 
 #ifdef HAVE_SQLITE
 #include <sqlite3.h>
@@ -426,6 +427,24 @@ bool Database::remove(const std::string& table_name,
     }
     return true;
 #endif
+}
+
+// Activity log — in-memory ring buffer. Keeps the GUI building; persists
+// nothing across runs. A SQL-backed version can replace this without
+// changing the signature.
+void Database::log_activity(const std::string& category, const std::string& message) {
+    activity_log_.push_back("[" + category + "] " + message);
+    constexpr size_t kMaxEntries = 500;
+    if (activity_log_.size() > kMaxEntries) {
+        activity_log_.erase(activity_log_.begin(),
+                            activity_log_.begin() + (activity_log_.size() - kMaxEntries));
+    }
+}
+
+std::vector<std::string> Database::get_recent_activity(size_t limit) const {
+    if (activity_log_.empty() || limit == 0) return {};
+    const size_t n = std::min(limit, activity_log_.size());
+    return std::vector<std::string>(activity_log_.end() - n, activity_log_.end());
 }
 
 } // namespace ncp

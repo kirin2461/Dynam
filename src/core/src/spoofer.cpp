@@ -658,6 +658,7 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
         original_identity_.ipv4_address = inet_ntoa(addr->sin_addr);
     }
 
+#if defined(__linux__)
     if (ioctl(fd, SIOCGIFNETMASK, &ifr) == 0) {
         struct sockaddr_in* mask = (struct sockaddr_in*)&ifr.ifr_netmask;
         original_identity_.ipv4_netmask = inet_ntoa(mask->sin_addr);
@@ -670,6 +671,14 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
         original_identity_.mac_address = mac_str;
     }
+#elif defined(__APPLE__)
+    // macOS: netmask shares ifr_addr union slot; SIOCGIFHWADDR is unavailable,
+    // so MAC address retrieval is skipped here (best-effort for portable build).
+    if (ioctl(fd, SIOCGIFNETMASK, &ifr) == 0) {
+        struct sockaddr_in* mask = (struct sockaddr_in*)&ifr.ifr_addr;
+        original_identity_.ipv4_netmask = inet_ntoa(mask->sin_addr);
+    }
+#endif
     close(fd);
 
     char hostname[256];

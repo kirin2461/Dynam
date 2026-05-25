@@ -8,7 +8,13 @@ namespace ncp {
 
 Application::Application(int& argc, char** argv)
     : initialized_(false)
+    // When ENABLE_GUI is on we *are* the GUI binary; default to GUI mode so
+    // double-click from Finder works without a --gui flag the user can't pass.
+#ifdef ENABLE_GUI
+    , gui_mode_(true)
+#else
     , gui_mode_(false)
+#endif
     , argc_(argc)
     , argv_(argv)
 {
@@ -63,8 +69,10 @@ int Application::run() {
     // Full implementation should initialize:
     // - NetworkSpoofer, DPIBypass, ParanoidMode
     // - All protection layers from cli/main.cpp::handle_run()
-    
+
     return 0;
+}
+
 void Application::loadConfig(const std::string& config_path) {
     NCP_SCOPE_TRACE();
     NCP_TRACE("loadConfig() path='" + config_path + "'");
@@ -91,12 +99,13 @@ void Application::saveConfig(const std::string& config_path) const {
 
 void Application::initialize() {
     NCP_SCOPE_TRACE();
-    
+
+    // CRIT-3: claim "initializing" atomically; another thread may have
+    // already won the race.
     bool expected = false;
     if (!initialized_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-    NCP_TRACE("Application::initialize() called, initialized_=" + std::to_string(initialized_));
-    if (initialized_) {
-        NCP_DEBUG("Already initialized by another thread");        return;
+        NCP_DEBUG("Already initialized by another thread");
+        return;
     }
 
     NCP_TRACE("Step 1/4: initializeLogging()");
@@ -117,7 +126,7 @@ void Application::initialize() {
     }
 #endif
 
-    initialized_ = true;
+    // initialized_ already set true by the compare_exchange above.
     NCP_LOG_INFO("NCP Application initialized successfully");
     NCP_TRACE("Application::initialize() complete");
 }
@@ -198,7 +207,7 @@ void Application::parseArguments() {
 void Application::initializeGui() {
     NCP_SCOPE_TRACE();
     NCP_LOG_DEBUG("Initializing GUI components");
-    main_window_ = std::make_unique<MainWindow>();
+    main_window_ = std::make_unique<GUI::MainWindow>();
     NCP_CHECK(main_window_ != nullptr, "MainWindow creation failed");
     NCP_TRACE("MainWindow created");
 }
