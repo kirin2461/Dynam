@@ -4,6 +4,7 @@
 #include <QStackedWidget>
 #include <QSystemTrayIcon>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <memory>
 
 // Optional QtWebEngine support: use QWebEngineView if available,
@@ -86,6 +87,8 @@ public slots:
     
     // License
     void onLicenseActivate();
+    void onRunDiagnostics();
+    void onExportLogs();
     void onLicenseDeactivate();
     
     // Updates
@@ -135,6 +138,12 @@ private:
     CryptoPanel*     cryptoPanel_      = nullptr;
     IdentityPanel*   identityPanel_    = nullptr;
     DPIMetricsPanel* dpiMetricsPanel_  = nullptr;
+
+    // Prev-sample state for the StatusPanel summary rate calculation.
+    // Kept here (not in StatusPanel) so the formatter stays pure.
+    QElapsedTimer summaryClock_;
+    uint64_t      lastSummaryBytesSent_ = 0;
+    uint64_t      lastSummaryBytesRecv_ = 0;
 
     // Helper to surface user-visible state changes via the tray (if available)
     // or the status bar (fallback). Implemented in MainWindow.cpp.

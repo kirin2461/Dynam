@@ -14,7 +14,10 @@
 #include "widgets/DPIMetricsPanel.hpp"
 #include "widgets/Themes.hpp"
 #include "widgets/OnboardingWizard.hpp"
+#include "widgets/StatusSummary.hpp"
+#include "widgets/DiagnosticsDialog.hpp"
 #include <QTabWidget>
+#include <QElapsedTimer>
 
 #include "../core/include/ncp_crypto.hpp"
 #include "../core/include/ncp_license.hpp"
@@ -37,6 +40,12 @@
 #include <QTextBrowser>  // always available
 #include <QUrl>
 #include <QLabel>
+#include <QDir>
+#include <QProcess>
+#include <QDesktopServices>
+#include <QFileDialog>
+#include <QTextStream>
+#include <QDateTime>
 
 #ifdef HAVE_QTWEBENGINE
 #include <QWebEngineView>  // only when Qt WebEngine module is present
@@ -219,15 +228,27 @@ void MainWindow::setupMenuBar() {
     bypassAction->setCheckable(true);
     connect(bypassAction, &QAction::toggled, this, &MainWindow::onBypassToggled);
     
-    // Help menu
+    // Help menu — rebuilt with macOS-native conveniences. Show-in-Finder
+    // uses `open -R` which highlights the file in its containing folder;
+    // open without -R would just open the parent folder, which is less
+    // useful when the user is hunting one specific file.
     QMenu* helpMenu = menuBar->addMenu(tr("&Help"));
-    helpMenu->addAction(tr("Check for &Updates"), this, &MainWindow::onCheckForUpdates);
-    helpMenu->addAction(tr("&About"), [this]() {
-        QMessageBox::about(this, tr("About NCP"),
-            tr("Network Control Protocol v2.0\n\n"
-               "High-performance network management\n"
-               "with DPI bypass capabilities."));
+    helpMenu->addAction(tr("Show Activity Log in Finder"), this, [this]{
+        const QString p = QDir::homePath() + "/.dynam/activity.log";
+        QProcess::startDetached("open", {"-R", p});
     });
+    helpMenu->addAction(tr("Open Dynam Config Folder"), this, [this]{
+        const QString p = QDir::homePath() + "/.dynam";
+        QDir().mkpath(p);
+        QProcess::startDetached("open", {p});
+    });
+    helpMenu->addAction(tr("View on GitHub"), this, [this]{
+        QDesktopServices::openUrl(QUrl("https://github.com/kirin2461/Dynam"));
+    });
+    helpMenu->addAction(tr("Run Diagnostics…"), this, &MainWindow::onRunDiagnostics);
+    helpMenu->addSeparator();
+    helpMenu->addAction(tr("Check for &Updates"), this, &MainWindow::onCheckForUpdates);
+    helpMenu->addAction(tr("&About Dynam"), this, &MainWindow::onCheckForUpdates);
 }
 
 void MainWindow::setupToolBar() {
@@ -381,6 +402,10 @@ void MainWindow::setupConnections() {
             this, &MainWindow::onBypassTechniqueChanged);
     connect(licenseInfo_, &LicenseInfo::activateClicked,
             this, &MainWindow::onLicenseActivate);
+    if (activityLog_) {
+        connect(activityLog_, &ActivityLog::exportRequested,
+                this, &MainWindow::onExportLogs);
+    }
 }
 
 void MainWindow::loadSettings() {
@@ -604,6 +629,39 @@ void MainWindow::updateStats() {
     if (identityPanel_) {
         identityPanel_->refresh();
     }
+
+    // ─── Push the plain-English status sentence to StatusPanel ──────────
+    // Compute per-second rate from a stored previous sample. summaryClock_
+    // and last*_ live on MainWindow; first call seeds them, subsequent
+    // calls produce a real delta.
+    if (statusPanel_) {
+        StatusSummaryInput in;
+        in.connected      = isConnected_;
+        in.techniqueIndex = dpiControl_ ? dpiControl_->currentTechniqueIndex()
+                                        : 0;
+        in.totalBytesSent = stats.bytes_sent;
+        in.totalBytesRecv = stats.bytes_received;
+        in.torEnabled     = QSettings().value("network/tor_enabled", false).toBool();
+        if (identityRotation_) {
+            in.rotationActive = identityRotation_->is_running();
+            in.rotationsTotal = identityRotation_->get_stats().rotations_total;
+        }
+        if (summaryClock_.isValid()) {
+            const qint64 ms = summaryClock_.restart();
+            if (ms > 0) {
+                const double s = ms / 1000.0;
+                in.bytesSentPerSec = static_cast<uint64_t>(
+                    (stats.bytes_sent     - lastSummaryBytesSent_) / s);
+                in.bytesRecvPerSec = static_cast<uint64_t>(
+                    (stats.bytes_received - lastSummaryBytesRecv_) / s);
+            }
+        } else {
+            summaryClock_.start();
+        }
+        lastSummaryBytesSent_ = stats.bytes_sent;
+        lastSummaryBytesRecv_ = stats.bytes_received;
+        statusPanel_->setSummary(formatStatusSummary(in));
+    }
 }
 
 void MainWindow::updateNetworkFlow() {
@@ -615,6 +673,43 @@ void MainWindow::updateActivityLog() {
     if (!database_ || !activityLog_) return;
     auto logs = database_->get_recent_activity(50);
     activityLog_->setLogs(logs);
+}
+
+void MainWindow::onRunDiagnostics() {
+    auto* dlg = new DiagnosticsDialog(
+        crypto_.get(), license_.get(),
+        advancedDpi_.get(), identityRotation_.get(), this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowModality(Qt::ApplicationModal);
+    dlg->show();
+}
+
+void MainWindow::onExportLogs() {
+    if (!database_) return;
+    const QString suggested = QDir::homePath()
+        + "/Desktop/dynam-activity-"
+        + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss")
+        + ".log";
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export activity log"), suggested,
+        tr("Log files (*.log);;Text files (*.txt);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        QMessageBox::warning(this, tr("Export failed"),
+            tr("Could not open %1 for writing.").arg(path));
+        return;
+    }
+    // Pull the FULL persisted log (up to kMaxEntries == 500), not just
+    // whatever the in-memory QListWidget currently shows. The Database
+    // returns them oldest-first which is the natural read order.
+    QTextStream ts(&out);
+    for (const auto& line : database_->get_recent_activity(500)) {
+        ts << QString::fromStdString(line) << '\n';
+    }
+    statusBar()->showMessage(tr("Exported activity log to %1").arg(path), 4000);
+    if (database_) database_->log_activity("export", "Activity log exported");
 }
 
 void MainWindow::refreshLicenseStatus() {

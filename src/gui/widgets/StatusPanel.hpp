@@ -25,9 +25,11 @@ class StatusPanel : public QWidget {
     Q_OBJECT
 public:
     explicit StatusPanel(QWidget* parent = nullptr) : QWidget(parent) {
-        auto* layout = new QHBoxLayout(this);
-        layout->setContentsMargins(4, 4, 4, 4);
+        auto* outer = new QVBoxLayout(this);
+        outer->setContentsMargins(4, 4, 4, 4);
+        outer->setSpacing(2);
 
+        auto* headerRow = new QHBoxLayout;
         dot_         = new StatusDot(this);
         statusLabel_ = new QLabel("Disconnected", this);
         uptimeLabel_ = new QLabel("", this);
@@ -36,10 +38,20 @@ public:
         bold.setBold(true);
         statusLabel_->setFont(bold);
 
-        layout->addWidget(dot_);
-        layout->addWidget(statusLabel_);
-        layout->addStretch(1);
-        layout->addWidget(uptimeLabel_);
+        headerRow->addWidget(dot_);
+        headerRow->addWidget(statusLabel_);
+        headerRow->addStretch(1);
+        headerRow->addWidget(uptimeLabel_);
+
+        // Plain-English summary line under the status. MainWindow pushes
+        // a sentence here each stats tick ("Bypass enabled — TLS mimicry —
+        // 1.2 MB/s ↑ / 850 KB/s ↓"). Stays empty when disconnected.
+        summaryLabel_ = new QLabel("", this);
+        summaryLabel_->setStyleSheet("color:#888;");
+        summaryLabel_->setContentsMargins(20, 0, 0, 0);
+
+        outer->addLayout(headerRow);
+        outer->addWidget(summaryLabel_);
 
         // Tick once a second to refresh the uptime string; cheap.
         uptimeTimer_ = new QTimer(this);
@@ -57,8 +69,13 @@ public:
         } else {
             connectedAt_ = QDateTime();
             uptimeLabel_->clear();
+            summaryLabel_->clear();
         }
     }
+
+    // Plain-English status sentence — MainWindow calls this each stats
+    // tick with something like "Bypass: TLS mimicry — 1.2 MB/s ↑ / 850 KB/s ↓".
+    void setSummary(const QString& text) { summaryLabel_->setText(text); }
 
 private slots:
     void tickUptime() {
@@ -77,6 +94,7 @@ private:
     StatusDot* dot_;
     QLabel*    statusLabel_;
     QLabel*    uptimeLabel_;
+    QLabel*    summaryLabel_;
     QTimer*    uptimeTimer_;
     QDateTime  connectedAt_;
     bool       connected_ = false;

@@ -3,7 +3,9 @@
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QLabel>
+#include <QPushButton>
 #include <QDateTime>
 #include <QBrush>
 #include <QColor>
@@ -17,7 +19,15 @@ public:
     explicit ActivityLog(QWidget* parent = nullptr) : QWidget(parent) {
         auto* layout = new QVBoxLayout(this);
         layout->setContentsMargins(0, 0, 0, 0);
-        layout->addWidget(new QLabel("<b>Activity</b>", this));
+
+        auto* header = new QHBoxLayout;
+        header->addWidget(new QLabel("<b>Activity</b>", this));
+        header->addStretch(1);
+        exportBtn_ = new QPushButton(tr("Export…"), this);
+        clearBtn_  = new QPushButton(tr("Clear view"), this);
+        header->addWidget(exportBtn_);
+        header->addWidget(clearBtn_);
+        layout->addLayout(header);
 
         list_ = new QListWidget(this);
         list_->setAlternatingRowColors(true);
@@ -26,8 +36,18 @@ public:
         mono.setStyleHint(QFont::Monospace);
         list_->setFont(mono);
         layout->addWidget(list_, 1);
+
+        // "Clear view" only wipes the QListWidget — the on-disk
+        // ~/.dynam/activity.log keeps every entry. This is a deliberate
+        // asymmetry: forensic-friendly persistence, low-effort UI tidy-up.
+        connect(clearBtn_,  &QPushButton::clicked, list_, &QListWidget::clear);
+        connect(exportBtn_, &QPushButton::clicked, this, &ActivityLog::exportRequested);
     }
 
+signals:
+    void exportRequested();
+
+public:
     void setLogs(const std::vector<std::string>& logs) {
         list_->clear();
         const QString ts = QDateTime::currentDateTime().toString("HH:mm:ss");
@@ -54,4 +74,6 @@ private:
     }
 
     QListWidget* list_;
+    QPushButton* exportBtn_;
+    QPushButton* clearBtn_;
 };
