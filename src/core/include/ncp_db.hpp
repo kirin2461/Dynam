@@ -59,10 +59,15 @@ public:
                 const std::string& where_column,
                 const std::string& where_value);
 
-    // Activity log — used by the GUI. Minimal in-memory ring buffer for now;
-    // a SQL-backed version can land later without touching the GUI.
+    // Activity log — used by the GUI. In-memory ring buffer backed by an
+    // append-only text file (one entry per line) so the log survives
+    // process restarts. The file path can be overridden for tests; the
+    // default lives under $HOME/.dynam/activity.log on POSIX,
+    // %APPDATA%\Dynam\activity.log on Windows. Calling
+    // set_activity_log_path("") disables file persistence (memory only).
     void log_activity(const std::string& category, const std::string& message);
     std::vector<std::string> get_recent_activity(size_t limit) const;
+    void set_activity_log_path(const std::string& path);
 
 private:
 #ifdef HAVE_SQLITE
@@ -72,6 +77,7 @@ private:
     bool is_connected_;
     std::string last_error_;
     mutable std::vector<std::string> activity_log_;
+    std::string activity_log_path_;  // empty = memory-only; non-empty = file-backed
 };
 
 } // namespace ncp

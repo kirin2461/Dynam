@@ -19,6 +19,9 @@
 #include <fstream>
 #include <map>
 #include <algorithm>
+#include <filesystem>
+#include <cstdlib>
+#include <system_error>
 
 #ifdef HAVE_SQLITE
 #include <sqlite3.h>
@@ -429,15 +432,74 @@ bool Database::remove(const std::string& table_name,
 #endif
 }
 
-// Activity log — in-memory ring buffer. Keeps the GUI building; persists
-// nothing across runs. A SQL-backed version can replace this without
-// changing the signature.
-void Database::log_activity(const std::string& category, const std::string& message) {
-    activity_log_.push_back("[" + category + "] " + message);
-    constexpr size_t kMaxEntries = 500;
+// ── Activity log ──────────────────────────────────────────────────────────
+// In-memory ring buffer backed by an append-only text file. The file is
+// rewritten in full when we trim past kMaxEntries so it stays bounded; the
+// alternative (rotating files) is overkill for an activity log that's
+// already capped at 500 lines.
+namespace {
+constexpr size_t kMaxEntries = 500;
+
+// $HOME/.dynam/activity.log on POSIX, %APPDATA%\Dynam\activity.log on Win.
+std::string default_activity_log_path() {
+#ifdef _WIN32
+    const char* base = std::getenv("APPDATA");
+    if (!base) return "";
+    std::string dir  = std::string(base) + "\\Dynam";
+    std::string path = dir + "\\activity.log";
+#else
+    const char* home = std::getenv("HOME");
+    if (!home) return "";
+    std::string dir  = std::string(home) + "/.dynam";
+    std::string path = dir + "/activity.log";
+#endif
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return path;
+}
+}  // namespace
+
+void Database::set_activity_log_path(const std::string& path) {
+    activity_log_path_ = path;
+    activity_log_.clear();
+    if (path.empty()) return;
+    // Load existing entries (last kMaxEntries lines) so the GUI shows
+    // history immediately on startup.
+    std::ifstream in(path);
+    if (!in) return;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty()) activity_log_.push_back(line);
+    }
     if (activity_log_.size() > kMaxEntries) {
         activity_log_.erase(activity_log_.begin(),
                             activity_log_.begin() + (activity_log_.size() - kMaxEntries));
+    }
+}
+
+void Database::log_activity(const std::string& category, const std::string& message) {
+    // Lazily pick the default file path the first time anyone logs, so
+    // callers that explicitly want memory-only can opt out by calling
+    // set_activity_log_path("") before the first log.
+    if (activity_log_path_.empty() && activity_log_.empty()) {
+        set_activity_log_path(default_activity_log_path());
+    }
+
+    const std::string entry = "[" + category + "] " + message;
+    activity_log_.push_back(entry);
+
+    if (activity_log_.size() > kMaxEntries) {
+        activity_log_.erase(activity_log_.begin(),
+                            activity_log_.begin() + (activity_log_.size() - kMaxEntries));
+        // Rewrite the file in full to stay bounded.
+        if (!activity_log_path_.empty()) {
+            std::ofstream out(activity_log_path_, std::ios::trunc);
+            for (const auto& line : activity_log_) out << line << '\n';
+        }
+    } else if (!activity_log_path_.empty()) {
+        // Fast path: just append.
+        std::ofstream out(activity_log_path_, std::ios::app);
+        if (out) out << entry << '\n';
     }
 }
 

@@ -21,6 +21,7 @@ set(NCP_GUI_HEADERS
     widgets/IdentityPanel.hpp
     widgets/DPIMetricsPanel.hpp
     widgets/Themes.hpp
+    widgets/OnboardingWizard.hpp
 )
 
 # Create GUI library

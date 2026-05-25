@@ -13,6 +13,7 @@
 #include "widgets/IdentityPanel.hpp"
 #include "widgets/DPIMetricsPanel.hpp"
 #include "widgets/Themes.hpp"
+#include "widgets/OnboardingWizard.hpp"
 #include <QTabWidget>
 
 #include "../core/include/ncp_crypto.hpp"
@@ -99,10 +100,24 @@ MainWindow::MainWindow(QWidget* parent)
     setMinimumSize(1200, 800);
     resize(1400, 900);
 
-    // Auto-connect if persisted in Settings. Deferred via singleShot(0) so
-    // the window has a chance to paint before any potentially-slow Connect
-    // work happens.
-    if (QSettings().value("ui/auto_connect", false).toBool()) {
+    // First-launch onboarding. Deferred via singleShot so the main window
+    // is fully visible before the modal wizard appears.
+    if (OnboardingWizard::shouldRun()) {
+        QTimer::singleShot(150, this, [this]{
+            auto* wiz = new OnboardingWizard(this);
+            wiz->setAttribute(Qt::WA_DeleteOnClose);
+            connect(wiz, &QDialog::finished, this, [this](int){
+                // Re-apply theme + maybe auto-connect now that the wizard
+                // has persisted the user's choices.
+                Themes::apply();
+                if (QSettings().value("ui/auto_connect", false).toBool()) {
+                    QTimer::singleShot(0, this, &MainWindow::onConnectClicked);
+                }
+            });
+            wiz->show();
+        });
+    } else if (QSettings().value("ui/auto_connect", false).toBool()) {
+        // No wizard, but auto-connect is set — fire after first paint.
         QTimer::singleShot(0, this, &MainWindow::onConnectClicked);
     }
 }
@@ -154,7 +169,7 @@ void MainWindow::setupUI() {
     auto* dpiTab = new QWidget(tabs);
     auto* dpiLayout = new QVBoxLayout(dpiTab);
     dpiControl_      = new DPIControl(this);
-    dpiMetricsPanel_ = new DPIMetricsPanel(this);
+    dpiMetricsPanel_ = new DPIMetricsPanel(advancedDpi_.get(), this);
     dpiLayout->addWidget(dpiControl_);
     dpiLayout->addWidget(dpiMetricsPanel_, 1);
     tabs->addTab(dpiTab, tr("DPI"));

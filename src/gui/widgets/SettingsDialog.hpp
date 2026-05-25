@@ -9,6 +9,7 @@
 #include <QSettings>
 #include <QVBoxLayout>
 #include <QLabel>
+#include <QStandardPaths>
 #include "Themes.hpp"
 
 // Persists to QSettings under the org / app key set by QApplication
@@ -56,11 +57,24 @@ public:
         themeCombo_->addItem(tr("Dark"),   "dark");
         themeCombo_->addItem(tr("Light"),  "light");
 
+        // Tor proxy toggle. Disabled if no `tor` binary is on PATH so
+        // users see why the option isn't available instead of it just
+        // not doing anything.
+        torEnabled_ = new QCheckBox(tr("Route traffic through Tor"), this);
+        const QString torPath = QStandardPaths::findExecutable("tor");
+        if (torPath.isEmpty()) {
+            torEnabled_->setEnabled(false);
+            torEnabled_->setToolTip(tr("Install Tor (e.g. `brew install tor`) to enable."));
+        } else {
+            torEnabled_->setToolTip(tr("Tor binary found at %1").arg(torPath));
+        }
+
         form->addRow(tr("Theme"),                    themeCombo_);
         form->addRow(tr("Default bypass technique"), bypassCombo_);
         form->addRow(tr("Tunnel endpoint"),          tunnelEndpoint_);
         form->addRow(tr("Activity log retention"),   logRetention_);
         form->addRow(autoConnect_);
+        form->addRow(torEnabled_);
 
         root->addLayout(form);
         root->addStretch(1);
@@ -98,6 +112,7 @@ private:
         const QString currentTheme = s.value("ui/theme", "system").toString();
         const int themeIdx = themeCombo_->findData(currentTheme);
         themeCombo_->setCurrentIndex(themeIdx >= 0 ? themeIdx : 0);
+        torEnabled_->setChecked(s.value("network/tor_enabled", false).toBool());
     }
 
     void save() {
@@ -107,6 +122,7 @@ private:
         s.setValue("ui/auto_connect",          autoConnect_->isChecked());
         s.setValue("ui/log_retention",         logRetention_->value());
         s.setValue("ui/theme",                 themeCombo_->currentData().toString());
+        s.setValue("network/tor_enabled",      torEnabled_->isChecked());
         Themes::apply();  // takes effect immediately for any open windows
     }
 
@@ -115,4 +131,5 @@ private:
     QCheckBox* autoConnect_;
     QSpinBox*  logRetention_;
     QComboBox* themeCombo_;
+    QCheckBox* torEnabled_;
 };
