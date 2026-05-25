@@ -446,6 +446,9 @@ void MainWindow::updateStats() {
     auto stats = network_->get_stats();
     systemStats_->updateStats(stats.bytes_sent, stats.bytes_received,
                                stats.packets_sent, stats.packets_received);
+    if (trafficAnalytics_) {
+        trafficAnalytics_->pushSample(stats.bytes_sent, stats.bytes_received);
+    }
 }
 
 void MainWindow::updateNetworkFlow() {
