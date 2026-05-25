@@ -9,6 +9,7 @@
 #include <QSettings>
 #include <QVBoxLayout>
 #include <QLabel>
+#include "Themes.hpp"
 
 // Persists to QSettings under the org / app key set by QApplication
 // (see Application::Application). Read-back happens in MainWindow whenever
@@ -50,6 +51,12 @@ public:
         logRetention_->setSingleStep(50);
         logRetention_->setSuffix(tr(" entries"));
 
+        themeCombo_ = new QComboBox(this);
+        themeCombo_->addItem(tr("System"), "system");
+        themeCombo_->addItem(tr("Dark"),   "dark");
+        themeCombo_->addItem(tr("Light"),  "light");
+
+        form->addRow(tr("Theme"),                    themeCombo_);
         form->addRow(tr("Default bypass technique"), bypassCombo_);
         form->addRow(tr("Tunnel endpoint"),          tunnelEndpoint_);
         form->addRow(tr("Activity log retention"),   logRetention_);
@@ -87,6 +94,10 @@ private:
         tunnelEndpoint_->setText(s.value("network/tunnel_endpoint").toString());
         autoConnect_->setChecked(s.value("ui/auto_connect", false).toBool());
         logRetention_->setValue(s.value("ui/log_retention", 500).toInt());
+
+        const QString currentTheme = s.value("ui/theme", "system").toString();
+        const int themeIdx = themeCombo_->findData(currentTheme);
+        themeCombo_->setCurrentIndex(themeIdx >= 0 ? themeIdx : 0);
     }
 
     void save() {
@@ -95,10 +106,13 @@ private:
         s.setValue("network/tunnel_endpoint",  tunnelEndpoint_->text().trimmed());
         s.setValue("ui/auto_connect",          autoConnect_->isChecked());
         s.setValue("ui/log_retention",         logRetention_->value());
+        s.setValue("ui/theme",                 themeCombo_->currentData().toString());
+        Themes::apply();  // takes effect immediately for any open windows
     }
 
     QComboBox* bypassCombo_;
     QLineEdit* tunnelEndpoint_;
     QCheckBox* autoConnect_;
     QSpinBox*  logRetention_;
+    QComboBox* themeCombo_;
 };

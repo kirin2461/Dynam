@@ -10,6 +10,9 @@
 #include "widgets/CryptoPanel.hpp"
 #include "widgets/LicenseActivationDialog.hpp"
 #include "widgets/AboutDialog.hpp"
+#include "widgets/IdentityPanel.hpp"
+#include "widgets/DPIMetricsPanel.hpp"
+#include "widgets/Themes.hpp"
 #include <QTabWidget>
 
 #include "../core/include/ncp_crypto.hpp"
@@ -47,10 +50,21 @@ MainWindow::MainWindow(QWidget* parent)
     , currentTheme_("dark_pro") {
     
     // Initialize core modules
-    crypto_ = std::make_unique<ncp::Crypto>();
-    license_ = std::make_unique<ncp::License>();
+    crypto_   = std::make_unique<ncp::Crypto>();
+    license_  = std::make_unique<ncp::License>();
     database_ = std::make_unique<ncp::Database>();
-    network_ = std::make_unique<ncp::Network>();
+    network_  = std::make_unique<ncp::Network>();
+
+    // Identity rotation: seed an 8-identity pool so rotate-now has options.
+    // generate_pool fills with random_device() entries; user can hit
+    // Regenerate to refresh, Rotate now to step.
+    identityRotation_ = std::make_unique<ncp::DPI::IdentityRotation>();
+    identityRotation_->generate_pool(8);
+
+    // Advanced DPI: instantiated but not started here. process_outgoing
+    // wiring is a follow-up; right now the panel just shows live counters
+    // (all zero until something pumps packets through it).
+    advancedDpi_ = std::make_unique<ncp::DPI::AdvancedDPIBypass>();
     
     // Setup UI
     setupUI();
@@ -132,10 +146,15 @@ void MainWindow::setupUI() {
     // ─── DPI ─────────────────────────────────────────────────────────────
     auto* dpiTab = new QWidget(tabs);
     auto* dpiLayout = new QVBoxLayout(dpiTab);
-    dpiControl_ = new DPIControl(this);
+    dpiControl_      = new DPIControl(this);
+    dpiMetricsPanel_ = new DPIMetricsPanel(this);
     dpiLayout->addWidget(dpiControl_);
-    dpiLayout->addStretch(1);
+    dpiLayout->addWidget(dpiMetricsPanel_, 1);
     tabs->addTab(dpiTab, tr("DPI"));
+
+    // ─── Identity ────────────────────────────────────────────────────────
+    identityPanel_ = new IdentityPanel(identityRotation_.get(), this);
+    tabs->addTab(identityPanel_, tr("Identity"));
 
     // ─── Crypto ──────────────────────────────────────────────────────────
     cryptoPanel_ = new CryptoPanel(crypto_.get(), this);
@@ -357,8 +376,13 @@ void MainWindow::saveSettings() {
 }
 
 void MainWindow::applyTheme(const QString& themeName) {
-    QString stylesheet = loadStyleSheet(themeName);
-    qApp->setStyleSheet(stylesheet);
+    // Persist the requested theme so Themes::apply() picks it up consistently
+    // (apply() is also called from SettingsDialog when the user changes it
+    // live, and from startup before MainWindow exists).
+    if (!themeName.isEmpty()) {
+        QSettings().setValue("ui/theme", themeName);
+    }
+    Themes::apply();
     currentTheme_ = themeName;
 }
 
@@ -519,6 +543,12 @@ void MainWindow::updateStats() {
                                stats.packets_sent, stats.packets_received);
     if (trafficAnalytics_) {
         trafficAnalytics_->pushSample(stats.bytes_sent, stats.bytes_received);
+    }
+    if (dpiMetricsPanel_ && advancedDpi_) {
+        dpiMetricsPanel_->update(advancedDpi_->get_stats());
+    }
+    if (identityPanel_) {
+        identityPanel_->refresh();
     }
 }
 

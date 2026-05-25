@@ -19,6 +19,10 @@ namespace ncp {
     class License;
     class Database;
     class Network;
+    namespace DPI {
+        class IdentityRotation;
+        class AdvancedDPIBypass;
+    }
 }
 
 class StatusPanel;
@@ -30,6 +34,8 @@ class ActivityLog;
 class LicenseInfo;
 class SettingsDialog;
 class CryptoPanel;
+class IdentityPanel;
+class DPIMetricsPanel;
 
 namespace ncp::GUI {
 
@@ -113,6 +119,8 @@ private:
     std::unique_ptr<ncp::License> license_;
     std::unique_ptr<ncp::Database> database_;
     std::unique_ptr<ncp::Network> network_;
+    std::unique_ptr<ncp::DPI::IdentityRotation>   identityRotation_;
+    std::unique_ptr<ncp::DPI::AdvancedDPIBypass>  advancedDpi_;
 
     // UI Components
     QStackedWidget* stackedWidget_;
@@ -123,8 +131,10 @@ private:
     SystemStats* systemStats_;
     ActivityLog* activityLog_;
     LicenseInfo* licenseInfo_;
-    SettingsDialog* settingsDialog_;
-    CryptoPanel*    cryptoPanel_ = nullptr;
+    SettingsDialog*  settingsDialog_;
+    CryptoPanel*     cryptoPanel_      = nullptr;
+    IdentityPanel*   identityPanel_    = nullptr;
+    DPIMetricsPanel* dpiMetricsPanel_  = nullptr;
 
     // Helper to surface user-visible state changes via the tray (if available)
     // or the status bar (fallback). Implemented in MainWindow.cpp.

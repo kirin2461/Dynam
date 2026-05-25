@@ -18,6 +18,9 @@ set(NCP_GUI_HEADERS
     widgets/CryptoPanel.hpp
     widgets/LicenseActivationDialog.hpp
     widgets/AboutDialog.hpp
+    widgets/IdentityPanel.hpp
+    widgets/DPIMetricsPanel.hpp
+    widgets/Themes.hpp
 )
 
 # Create GUI library

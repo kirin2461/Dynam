@@ -123,8 +123,25 @@ codesign --verify "${DIST_ROOT}/Dynam.app" && echo "✅ ${DIST_ROOT}/Dynam.app i
 ZIP="${DIST_ROOT}/Dynam-${VERSION}-macos-${ARCH}.zip"
 rm -f "${ZIP}"
 ( cd "${DIST_ROOT}" && zip -qry "$(basename "${ZIP}")" "Dynam.app" )
+
+# DMG: a small staging directory with the .app and an "Applications" symlink,
+# converted to a compressed disk image. hdiutil create -srcfolder is the
+# Apple-standard pattern; no extra deps needed.
+DMG="${DIST_ROOT}/Dynam-${VERSION}-macos-${ARCH}.dmg"
+DMG_STAGE="$(mktemp -d -t dynam-dmg.XXXXXX)"
+trap 'rm -rf "${DMG_STAGE}"' EXIT
+ditto --noextattr --norsrc "${DIST_ROOT}/Dynam.app" "${DMG_STAGE}/Dynam.app"
+ln -s /Applications "${DMG_STAGE}/Applications"
+rm -f "${DMG}"
+hdiutil create \
+    -volname "Dynam ${VERSION}" \
+    -srcfolder "${DMG_STAGE}" \
+    -ov -format UDZO \
+    "${DMG}" > /dev/null
+
 echo
 echo "Done."
 echo "  Bundle: ${DIST_ROOT}/Dynam.app"
 echo "  CLI:    ${DIST_ROOT}/Dynam.app/Contents/Resources/bin/ncp"
 echo "  Zip:    ${ZIP}"
+echo "  DMG:    ${DMG}"

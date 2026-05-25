@@ -32,33 +32,6 @@ jobs:
           brew install cmake libsodium libwebsockets spdlog qt@6 fmt
           echo "QT_PREFIX=$(brew --prefix qt@6)" >> "$GITHUB_ENV"
 
-      - name: Configure CMake (CLI)
-        run: |
-          cmake -S . -B build-portable \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_PORTABLE_MACOS=ON \
-            -DENABLE_GUI=OFF \
-            -DENABLE_CLI=ON \
-            -DENABLE_TESTS=OFF \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-
-      - name: Build CLI
-        run: cmake --build build-portable --config Release --parallel
-
-      - name: Configure CMake (GUI)
-        run: |
-          cmake -S . -B build-gui \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_PORTABLE_MACOS=ON \
-            -DENABLE_GUI=ON \
-            -DENABLE_CLI=OFF \
-            -DENABLE_TESTS=OFF \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
-            -DCMAKE_PREFIX_PATH="$QT_PREFIX"
-
-      - name: Build GUI
-        run: cmake --build build-gui --config Release --parallel
-
       - name: Generate app icon
         run: |
           swiftc scripts/make_icon.swift -o /tmp/make_icon
@@ -66,7 +39,7 @@ jobs:
           mkdir -p resources
           cp scripts/out/Dynam.icns resources/Dynam.icns
 
-      - name: Build Dynam.app bundle
+      - name: Build everything (CLI + GUI + bundle + DMG)
         run: ./scripts/build_macos_gui_app.sh
 
       - name: Smoke test (GUI launches and survives 15s)
@@ -87,11 +60,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Dynam-${{ matrix.arch }}
-          path: dist/Dynam-*-macos-*.zip
+          path: |
+            dist/Dynam-*-macos-*.zip
+            dist/Dynam-*-macos-*.dmg
           if-no-files-found: error
 
       - name: Attach to release (on tag)
         if: github.event_name == 'release'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/Dynam-*-macos-*.zip
+          files: |
+            dist/Dynam-*-macos-*.zip
+            dist/Dynam-*-macos-*.dmg
