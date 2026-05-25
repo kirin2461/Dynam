@@ -41,8 +41,15 @@ public:
                              static_cast<int>(PollerKind::DnsLookup));
         kindCombo_->addItem(tr("TCP connect - host:port reachable = ok"),
                              static_cast<int>(PollerKind::TcpConnect));
+        kindCombo_->addItem(tr("API (JSON) - GET, parse JSON, check key==value"),
+                             static_cast<int>(PollerKind::ApiJson));
+        kindCombo_->addItem(tr("TLS cert expiry - days remaining vs minimum"),
+                             static_cast<int>(PollerKind::TlsCertExpiry));
+        kindCombo_->addItem(tr("HTTP body match - GET, substring or /regex/"),
+                             static_cast<int>(PollerKind::HttpBodyMatch));
         kindCombo_->setCurrentIndex(static_cast<int>(seed.kind));
-        targetEdit_ = new QLineEdit(seed.target, this);
+        targetEdit_   = new QLineEdit(seed.target, this);
+        criteriaEdit_ = new QLineEdit(seed.criteria, this);
         intervalSpin_ = new QSpinBox(this);
         intervalSpin_->setRange(5, 86400);
         intervalSpin_->setValue(seed.intervalSec == 0 ? 60 : seed.intervalSec);
@@ -53,6 +60,7 @@ public:
         form->addRow(tr("Name:"),     nameEdit_);
         form->addRow(tr("Kind:"),     kindCombo_);
         form->addRow(tr("Target:"),   targetEdit_);
+        form->addRow(tr("Criteria:"), criteriaEdit_);
         form->addRow(tr("Interval:"), intervalSpin_);
         form->addRow("",              pausedCheck_);
         root->addLayout(form);
@@ -87,6 +95,7 @@ public:
         t.name        = nameEdit_->text().trimmed();
         t.kind        = static_cast<PollerKind>(kindCombo_->currentData().toInt());
         t.target      = targetEdit_->text().trimmed();
+        t.criteria    = criteriaEdit_->text().trimmed();
         t.intervalSec = intervalSpin_->value();
         t.paused      = pausedCheck_->isChecked();
         return t;
@@ -94,7 +103,8 @@ public:
 
 private slots:
     void updatePlaceholder(int idx) {
-        switch (static_cast<PollerKind>(kindCombo_->itemData(idx).toInt())) {
+        const auto k = static_cast<PollerKind>(kindCombo_->itemData(idx).toInt());
+        switch (k) {
             case PollerKind::HttpsUrl:
                 targetEdit_->setPlaceholderText("https://api.example.com/health");
                 break;
@@ -104,7 +114,23 @@ private slots:
             case PollerKind::TcpConnect:
                 targetEdit_->setPlaceholderText("example.com:443");
                 break;
+            case PollerKind::ApiJson:
+                targetEdit_->setPlaceholderText("https://api.example.com/v1/status");
+                break;
+            case PollerKind::TlsCertExpiry:
+                targetEdit_->setPlaceholderText("example.com[:443]");
+                break;
+            case PollerKind::HttpBodyMatch:
+                targetEdit_->setPlaceholderText("https://example.com");
+                break;
         }
+        // Criteria field gets a kind-specific hint via the engine helper.
+        criteriaEdit_->setPlaceholderText(criteriaHint(k));
+        // Disable the criteria field for kinds that don't use it.
+        const bool usesCriteria = (k == PollerKind::ApiJson
+                                || k == PollerKind::TlsCertExpiry
+                                || k == PollerKind::HttpBodyMatch);
+        criteriaEdit_->setEnabled(usesCriteria);
     }
 
 private:
@@ -112,6 +138,7 @@ private:
     QLineEdit*   nameEdit_;
     QComboBox*   kindCombo_;
     QLineEdit*   targetEdit_;
+    QLineEdit*   criteriaEdit_;
     QSpinBox*    intervalSpin_;
     QCheckBox*   pausedCheck_;
 };
@@ -138,10 +165,11 @@ public:
         root->addLayout(btnRow);
 
         table_ = new QTableWidget(this);
-        table_->setColumnCount(8);
+        table_->setColumnCount(9);
         table_->setHorizontalHeaderLabels({
-            tr("Name"), tr("Kind"), tr("Target"), tr("Every"),
-            tr("Last status"), tr("Latency"), tr("Success"), tr("Last run"),
+            tr("Name"), tr("Kind"), tr("Target"), tr("Criteria"),
+            tr("Every"), tr("Last status"), tr("Latency"),
+            tr("Success"), tr("Last run"),
         });
         table_->setSelectionBehavior(QAbstractItemView::SelectRows);
         table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -225,7 +253,8 @@ private slots:
             setCell(r, 0, t.name.isEmpty() ? t.target : t.name);
             setCell(r, 1, pollerKindName(t.kind));
             setCell(r, 2, t.target, true);
-            setCell(r, 3, QString("%1 s%2").arg(t.intervalSec)
+            setCell(r, 3, t.criteria.isEmpty() ? "-" : t.criteria, true);
+            setCell(r, 4, QString("%1 s%2").arg(t.intervalSec)
                               .arg(t.paused ? "  (paused)" : ""));
 
             QString status = t.lastStatus.isEmpty() ? "-" : t.lastStatus;
@@ -234,22 +263,22 @@ private slots:
                 statusItem->setForeground(QBrush(t.lastOk
                     ? QColor("#2ecc71") : QColor("#e74c3c")));
             }
-            table_->setItem(r, 4, statusItem);
+            table_->setItem(r, 5, statusItem);
 
-            setCell(r, 5, t.lastLatencyMs < 0
+            setCell(r, 6, t.lastLatencyMs < 0
                             ? "-"
                             : QString("%1 ms").arg(t.lastLatencyMs));
             const double sr = t.successRate();
-            setCell(r, 6, sr < 0 ? "-" : QString::asprintf("%.1f%% (%llu/%llu)",
+            setCell(r, 7, sr < 0 ? "-" : QString::asprintf("%.1f%% (%llu/%llu)",
                                                             sr,
                                                             (unsigned long long)t.successfulRuns,
                                                             (unsigned long long)t.totalRuns));
-            setCell(r, 7, t.lastRunAt.isValid()
+            setCell(r, 8, t.lastRunAt.isValid()
                             ? t.lastRunAt.toString("HH:mm:ss")
                             : "-");
             table_->item(r, 0)->setData(Qt::UserRole, t.id);
         }
-        for (int c = 0; c < 7; ++c) table_->resizeColumnToContents(c);
+        for (int c = 0; c < 8; ++c) table_->resizeColumnToContents(c);
         if (!sel.isEmpty()) {
             for (int r = 0; r < table_->rowCount(); ++r) {
                 if (table_->item(r, 0)->data(Qt::UserRole).toString() == sel) {

@@ -8,6 +8,8 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonParseError>
+#include <QJsonValue>
 #include <QFile>
 #include <QDir>
 #include <QHostInfo>
@@ -15,8 +17,11 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QTcpSocket>
+#include <QSslSocket>
+#include <QSslCertificate>
 #include <QElapsedTimer>
 #include <QHostAddress>
+#include <QRegularExpression>
 #include <memory>
 
 // ─── Data types ─────────────────────────────────────────────────────────────
@@ -27,18 +32,37 @@
 // lookup; for our purposes one value type per row reads better.
 
 enum class PollerKind {
-    HttpsUrl,
-    DnsLookup,
-    TcpConnect,
+    HttpsUrl,        // HEAD; 2xx/3xx = ok
+    DnsLookup,       // resolve; any record = ok
+    TcpConnect,      // connect host:port; reachable = ok
+    ApiJson,         // GET; parse JSON; criteria like "data.status==ok"
+    TlsCertExpiry,   // open TLS to host:port; criteria = minimum days remaining
+    HttpBodyMatch,   // GET; criteria = substring (or /regex/) the body must contain
 };
 
 inline QString pollerKindName(PollerKind k) {
     switch (k) {
-        case PollerKind::HttpsUrl:    return "HTTPS";
-        case PollerKind::DnsLookup:   return "DNS";
-        case PollerKind::TcpConnect:  return "TCP";
+        case PollerKind::HttpsUrl:       return "HTTPS";
+        case PollerKind::DnsLookup:      return "DNS";
+        case PollerKind::TcpConnect:     return "TCP";
+        case PollerKind::ApiJson:        return "API";
+        case PollerKind::TlsCertExpiry:  return "TLS-Cert";
+        case PollerKind::HttpBodyMatch:  return "Body";
     }
     return "?";
+}
+
+// Hint string shown next to the Criteria field for each kind.
+inline QString criteriaHint(PollerKind k) {
+    switch (k) {
+        case PollerKind::HttpsUrl:       return "(none — HTTP status is the criterion)";
+        case PollerKind::DnsLookup:      return "(none — any record = ok)";
+        case PollerKind::TcpConnect:     return "(none — connect = ok)";
+        case PollerKind::ApiJson:        return "JSON key == value, e.g. data.status==ok";
+        case PollerKind::TlsCertExpiry:  return "minimum days remaining, e.g. 30";
+        case PollerKind::HttpBodyMatch:  return "substring, or /regex/ to use a regex";
+    }
+    return "";
 }
 
 struct PollerTarget {
@@ -48,6 +72,7 @@ struct PollerTarget {
     QString    target;              // URL / hostname / host:port
     int        intervalSec = 60;
     bool       paused = false;
+    QString    criteria;            // kind-specific validation string; see criteriaHint()
 
     // Stats (mutated by the engine)
     quint64    totalRuns      = 0;
@@ -65,6 +90,7 @@ struct PollerTarget {
             {"target",      target},
             {"intervalSec", intervalSec},
             {"paused",      paused},
+            {"criteria",    criteria},
         };
     }
     static PollerTarget fromJson(const QJsonObject& o) {
@@ -75,6 +101,7 @@ struct PollerTarget {
         t.target      = o.value("target").toString();
         t.intervalSec = o.value("intervalSec").toInt(60);
         t.paused      = o.value("paused").toBool(false);
+        t.criteria    = o.value("criteria").toString();
         return t;
     }
 
@@ -130,6 +157,7 @@ public:
         merged.target      = t.target;
         merged.intervalSec = t.intervalSec;
         merged.paused      = t.paused;
+        merged.criteria    = t.criteria;
         targets_[id]       = merged;
         if (intervalChanged || pausedChanged) {
             stopTimerFor(id);
@@ -180,9 +208,12 @@ private:
         PollerTarget t = targets_[id];
         if (t.paused) return;
         switch (t.kind) {
-            case PollerKind::HttpsUrl:   probeHttps(id);  break;
-            case PollerKind::DnsLookup:  probeDns(id);    break;
-            case PollerKind::TcpConnect: probeTcp(id);    break;
+            case PollerKind::HttpsUrl:       probeHttps(id);    break;
+            case PollerKind::DnsLookup:      probeDns(id);      break;
+            case PollerKind::TcpConnect:     probeTcp(id);      break;
+            case PollerKind::ApiJson:        probeApiJson(id);  break;
+            case PollerKind::TlsCertExpiry:  probeTlsCert(id);  break;
+            case PollerKind::HttpBodyMatch:  probeHttpBody(id); break;
         }
     }
 
@@ -258,6 +289,177 @@ private:
             sock->deleteLater();
         });
         sock->connectToHost(host, port);
+    }
+
+    // GET URL, parse JSON, evaluate criteria like "data.status==ok".
+    // Empty criteria → only HTTP status matters. Dotted path → walk nested
+    // QJsonObject; bare key → top-level field.
+    void probeApiJson(const QString& id) {
+        const PollerTarget t = targets_[id];
+        QUrl url(t.target);
+        if (url.scheme().isEmpty()) url.setScheme("https");
+        QNetworkRequest req(url);
+        req.setHeader(QNetworkRequest::UserAgentHeader, "Dynam-Poller/1.2");
+        req.setRawHeader("accept", "application/json");
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+        auto* timer = new QElapsedTimer; timer->start();
+        auto* reply = net_->get(req);
+        const QString criteria = t.criteria;
+        connect(reply, &QNetworkReply::finished, this,
+                [this, id, reply, timer, criteria]{
+            const qint64 ms = timer->elapsed();
+            delete timer;
+            const int status = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (reply->error() != QNetworkReply::NoError) {
+                recordResult(id, false, ms,
+                             QString("error: %1").arg(reply->errorString()));
+                reply->deleteLater();
+                return;
+            }
+            if (status < 200 || status >= 400) {
+                recordResult(id, false, ms,
+                             QString("HTTP %1 (not 2xx/3xx)").arg(status));
+                reply->deleteLater();
+                return;
+            }
+            const QByteArray body = reply->readAll();
+            QJsonParseError perr;
+            const auto doc = QJsonDocument::fromJson(body, &perr);
+            if (perr.error != QJsonParseError::NoError) {
+                recordResult(id, false, ms,
+                             QString("invalid JSON: %1").arg(perr.errorString()));
+                reply->deleteLater();
+                return;
+            }
+            QString detail = QString("HTTP %1 · JSON ok").arg(status);
+            bool ok = true;
+            if (!criteria.isEmpty()) {
+                ok = evaluateJsonCriterion(doc, criteria, detail);
+            }
+            recordResult(id, ok, ms, detail);
+            reply->deleteLater();
+        });
+    }
+
+    // Open a TLS connection, grab the peer cert, check days remaining.
+    // criteria = minimum required days (default 30). No HTTP request is sent.
+    void probeTlsCert(const QString& id) {
+        const PollerTarget t = targets_[id];
+        QString host = t.target;
+        quint16 port = 443;
+        if (t.target.contains(':')) {
+            const auto parts = t.target.split(':');
+            host = parts[0];
+            port = parts[1].toUShort();
+        }
+        const int minDays = t.criteria.isEmpty() ? 30 : t.criteria.toInt();
+        auto* sock = new QSslSocket(this);
+        auto* timer = new QElapsedTimer; timer->start();
+        QTimer::singleShot(10000, sock, [sock]{ if (sock) sock->abort(); });
+
+        connect(sock, &QSslSocket::encrypted, this,
+                [this, id, sock, timer, minDays]{
+            const qint64 ms = timer->elapsed();
+            delete timer;
+            const auto chain = sock->peerCertificateChain();
+            if (chain.isEmpty()) {
+                recordResult(id, false, ms, "no peer certificate");
+            } else {
+                const QSslCertificate cert = chain.first();
+                const QDateTime expiry = cert.expiryDate();
+                const qint64 days =
+                    QDateTime::currentDateTime().secsTo(expiry) / 86400;
+                const bool ok = days >= minDays;
+                recordResult(id, ok, ms,
+                             QString("%1 days remaining (min %2) · CN=%3")
+                                 .arg(days).arg(minDays)
+                                 .arg(cert.subjectInfo(QSslCertificate::CommonName).join(',')));
+            }
+            sock->disconnectFromHost();
+            sock->deleteLater();
+        });
+        connect(sock, &QSslSocket::errorOccurred, this,
+                [this, id, sock, timer](QAbstractSocket::SocketError) {
+            const qint64 ms = timer->elapsed();
+            delete timer;
+            recordResult(id, false, ms,
+                         QString("error: %1").arg(sock->errorString()));
+            sock->deleteLater();
+        });
+        sock->connectToHostEncrypted(host, port);
+    }
+
+    // GET URL, check that response body contains criteria. Criteria wrapped
+    // in /…/ is treated as a regex; otherwise plain substring.
+    void probeHttpBody(const QString& id) {
+        const PollerTarget t = targets_[id];
+        QUrl url(t.target);
+        if (url.scheme().isEmpty()) url.setScheme("https");
+        QNetworkRequest req(url);
+        req.setHeader(QNetworkRequest::UserAgentHeader, "Dynam-Poller/1.2");
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+        auto* timer = new QElapsedTimer; timer->start();
+        auto* reply = net_->get(req);
+        const QString criteria = t.criteria;
+        connect(reply, &QNetworkReply::finished, this,
+                [this, id, reply, timer, criteria]{
+            const qint64 ms = timer->elapsed();
+            delete timer;
+            if (reply->error() != QNetworkReply::NoError) {
+                recordResult(id, false, ms,
+                             QString("error: %1").arg(reply->errorString()));
+                reply->deleteLater();
+                return;
+            }
+            const QString body = QString::fromUtf8(reply->readAll());
+            if (criteria.isEmpty()) {
+                recordResult(id, true, ms,
+                             QString("body OK (%1 bytes, no criterion)").arg(body.size()));
+            } else if (criteria.size() >= 2 && criteria.startsWith('/') && criteria.endsWith('/')) {
+                QRegularExpression re(criteria.mid(1, criteria.size() - 2));
+                const bool ok = re.match(body).hasMatch();
+                recordResult(id, ok, ms,
+                             ok ? QString("regex matched") : QString("regex did not match"));
+            } else {
+                const bool ok = body.contains(criteria);
+                recordResult(id, ok, ms,
+                             ok ? QString("substring matched") : QString("substring not found"));
+            }
+            reply->deleteLater();
+        });
+    }
+
+    // Walk a dotted JSON path against the parsed document, then compare to
+    // the right-hand value. Comparison is string-equality after JSON value
+    // serialization — good enough for "status==ok" / "healthy==true" / "errors==0".
+    static bool evaluateJsonCriterion(const QJsonDocument& doc,
+                                       const QString& criterion,
+                                       QString& detailOut) {
+        const int eq = criterion.indexOf("==");
+        if (eq < 0) {
+            detailOut = QString("invalid criterion (need key==value): %1").arg(criterion);
+            return false;
+        }
+        const QString key   = criterion.left(eq).trimmed();
+        const QString want  = criterion.mid(eq + 2).trimmed();
+        QJsonValue cur = doc.isObject() ? QJsonValue(doc.object())
+                                         : QJsonValue(doc.array());
+        for (const QString& part : key.split('.')) {
+            if (cur.isObject()) cur = cur.toObject().value(part);
+            else { detailOut = QString("path '%1' not navigable").arg(key); return false; }
+        }
+        QString actual;
+        if      (cur.isString()) actual = cur.toString();
+        else if (cur.isBool())   actual = cur.toBool() ? "true" : "false";
+        else if (cur.isDouble()) actual = QString::number(cur.toDouble(), 'g', 15);
+        else if (cur.isNull())   actual = "null";
+        else                      actual = QJsonDocument(cur.toObject()).toJson(QJsonDocument::Compact);
+        const bool ok = (actual == want);
+        detailOut = QString("%1 = '%2' (want '%3')").arg(key, actual, want);
+        return ok;
     }
 
     void recordResult(const QString& id, bool ok, qint64 ms, const QString& detail) {
