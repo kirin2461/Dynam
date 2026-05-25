@@ -98,6 +98,13 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowTitle("NCP - Network Control Protocol v2.0");
     setMinimumSize(1200, 800);
     resize(1400, 900);
+
+    // Auto-connect if persisted in Settings. Deferred via singleShot(0) so
+    // the window has a chance to paint before any potentially-slow Connect
+    // work happens.
+    if (QSettings().value("ui/auto_connect", false).toBool()) {
+        QTimer::singleShot(0, this, &MainWindow::onConnectClicked);
+    }
 }
 
 MainWindow::~MainWindow() {
@@ -409,8 +416,29 @@ void MainWindow::onConnectClicked() {
         const int idx = QSettings().value("network/bypass_technique", 2).toInt();
         network_->enable_bypass(static_cast<ncp::BypassTechnique>(idx));
         bypassEnabled_ = true;
-        if (dpiControl_) dpiControl_->setBypassEnabled(true);
+        if (dpiControl_) {
+            const QSignalBlocker block(dpiControl_);
+            dpiControl_->setBypassEnabled(true);
+            dpiControl_->setTechniqueIndex(idx);
+        }
     }
+
+    // Start the AdvancedDPIBypass pipeline so its counters update during
+    // the session. MODERATE preset is a safe default; users can revisit
+    // via the DPI tab once we expose a preset selector.
+    if (advancedDpi_) {
+        ncp::DPI::AdvancedDPIConfig cfg;
+        cfg.enable_tcp_keepalive_tricks = true;
+        cfg.randomize_tcp_options       = true;
+        cfg.randomize_ip_id             = true;
+        cfg.tspu_bypass                 = true;
+        if (advancedDpi_->initialize(cfg)) {
+            advancedDpi_->apply_preset(
+                ncp::DPI::AdvancedDPIBypass::BypassPreset::MODERATE);
+            advancedDpi_->start();
+        }
+    }
+
     notify(tr("Connected"), tr("Dynam is protecting your traffic."));
 }
 
@@ -421,6 +449,7 @@ void MainWindow::onDisconnectClicked() {
     statusBar()->showMessage(tr("Disconnected"));
     if (database_) database_->log_activity("connection", "Disconnected from network");
     if (network_) network_->disable_bypass();
+    if (advancedDpi_ && advancedDpi_->is_running()) advancedDpi_->stop();
     bypassEnabled_ = false;
     if (dpiControl_) dpiControl_->setBypassEnabled(false);
     notify(tr("Disconnected"), tr("Network protection is off."));
@@ -432,14 +461,24 @@ void MainWindow::onQuickConnectClicked() {
 
 void MainWindow::onBypassToggled(bool enabled) {
     bypassEnabled_ = enabled;
-    if (enabled) {
-        network_->enable_bypass(ncp::BypassTechnique::TCP_FRAGMENTATION);
-        database_->log_activity("bypass", "DPI bypass enabled");
-    } else {
+    if (enabled && network_) {
+        // Read the user's currently-selected technique from the combo
+        // rather than hard-coding TCP_FRAGMENTATION. Falls back to the
+        // persisted Settings value if dpiControl_ isn't around yet.
+        int idx = dpiControl_ ? dpiControl_->currentTechniqueIndex()
+                              : QSettings().value("network/bypass_technique", 2).toInt();
+        network_->enable_bypass(static_cast<ncp::BypassTechnique>(idx));
+        if (database_) database_->log_activity("bypass", "DPI bypass enabled");
+    } else if (network_) {
         network_->disable_bypass();
-        database_->log_activity("bypass", "DPI bypass disabled");
+        if (database_) database_->log_activity("bypass", "DPI bypass disabled");
     }
-    dpiControl_->setBypassEnabled(enabled);
+    // setBypassEnabled would re-emit bypassToggled → infinite loop. Block
+    // signals while we mirror the checkbox state.
+    if (dpiControl_) {
+        const QSignalBlocker block(dpiControl_);
+        dpiControl_->setBypassEnabled(enabled);
+    }
 }
 
 void MainWindow::onBypassTechniqueChanged(int index) {

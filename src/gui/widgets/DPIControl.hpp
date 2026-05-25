@@ -11,7 +11,19 @@ public:
         auto* layout = new QVBoxLayout(this);
         toggle_ = new QCheckBox("Enable DPI bypass", this);
         technique_ = new QComboBox(this);
-        technique_->addItems({"TCP fragmentation", "TLS SNI split", "Header reorder"});
+        // Order MUST match ncp::BypassTechnique in ncp_network.hpp so the
+        // combo's currentIndex() can be cast straight to the enum.
+        technique_->addItems({
+            "None",
+            "TTL modification",
+            "TCP fragmentation",
+            "SNI spoofing",
+            "Fake packet",
+            "Disorder",
+            "Obfuscation",
+            "HTTP mimicry",
+            "TLS mimicry",
+        });
         layout->addWidget(toggle_);
         layout->addWidget(technique_);
         connect(toggle_, &QCheckBox::toggled, this, &DPIControl::bypassToggled);
@@ -19,6 +31,10 @@ public:
                 this, &DPIControl::techniqueChanged);
     }
     void setBypassEnabled(bool enabled) { toggle_->setChecked(enabled); }
+    int currentTechniqueIndex() const   { return technique_->currentIndex(); }
+    void setTechniqueIndex(int idx) {
+        if (idx >= 0 && idx < technique_->count()) technique_->setCurrentIndex(idx);
+    }
 
 signals:
     void bypassToggled(bool enabled);
