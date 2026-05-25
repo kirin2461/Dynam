@@ -29,6 +29,7 @@ class SystemStats;
 class ActivityLog;
 class LicenseInfo;
 class SettingsDialog;
+class CryptoPanel;
 
 namespace ncp::GUI {
 
@@ -123,6 +124,11 @@ private:
     ActivityLog* activityLog_;
     LicenseInfo* licenseInfo_;
     SettingsDialog* settingsDialog_;
+    CryptoPanel*    cryptoPanel_ = nullptr;
+
+    // Helper to surface user-visible state changes via the tray (if available)
+    // or the status bar (fallback). Implemented in MainWindow.cpp.
+    void notify(const QString& title, const QString& body);
 
     // Web UI central widget (thin wrapper around localhost:8080)
     // Exactly one of these is non-null, depending on compile-time availability.

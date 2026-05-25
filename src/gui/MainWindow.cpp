@@ -7,6 +7,10 @@
 #include "widgets/ActivityLog.hpp"
 #include "widgets/LicenseInfo.hpp"
 #include "widgets/SettingsDialog.hpp"
+#include "widgets/CryptoPanel.hpp"
+#include "widgets/LicenseActivationDialog.hpp"
+#include "widgets/AboutDialog.hpp"
+#include <QTabWidget>
 
 #include "../core/include/ncp_crypto.hpp"
 #include "../core/include/ncp_license.hpp"
@@ -91,45 +95,66 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::setupUI() {
-    // Central widget with grid layout
-    QWidget* central = new QWidget(this);
+    // Five-tab layout. StatusPanel sits at the top as a always-visible
+    // header; the QTabWidget lives below it. Widget creation order is
+    // independent of the layout — every widget has `this` as parent so
+    // it's owned by MainWindow, not by whichever tab page it ends up in.
+    auto* central = new QWidget(this);
     setCentralWidget(central);
-    
-    QGridLayout* mainLayout = new QGridLayout(central);
-    mainLayout->setSpacing(10);
-    mainLayout->setContentsMargins(10, 10, 10, 10);
-    
-    // Row 0: Status Panel (full width)
+    auto* root = new QVBoxLayout(central);
+    root->setSpacing(6);
+    root->setContentsMargins(8, 8, 8, 8);
+
     statusPanel_ = new StatusPanel(this);
-    mainLayout->addWidget(statusPanel_, 0, 0, 1, 3);
-    
-    // Row 1: Network Monitor | DPI Control | Traffic Analytics
-    networkMonitor_ = new NetworkMonitor(this);
-    mainLayout->addWidget(networkMonitor_, 1, 0);
-    
-    dpiControl_ = new DPIControl(this);
-    mainLayout->addWidget(dpiControl_, 1, 1);
-    
+    root->addWidget(statusPanel_);
+
+    auto* tabs = new QTabWidget(this);
+    root->addWidget(tabs, 1);
+
+    // ─── Overview ────────────────────────────────────────────────────────
+    auto* overview = new QWidget(tabs);
+    auto* overviewLayout = new QGridLayout(overview);
+    systemStats_      = new SystemStats(this);
     trafficAnalytics_ = new TrafficAnalytics(this);
-    mainLayout->addWidget(trafficAnalytics_, 1, 2);
-    
-    // Row 2: System Stats | Activity Log | License Info
-    systemStats_ = new SystemStats(this);
-    mainLayout->addWidget(systemStats_, 2, 0);
-    
-    activityLog_ = new ActivityLog(this);
-    mainLayout->addWidget(activityLog_, 2, 1);
-    
+    overviewLayout->addWidget(systemStats_,      0, 0);
+    overviewLayout->addWidget(trafficAnalytics_, 0, 1, 1, 2);
+    overviewLayout->setColumnStretch(1, 1);
+    overviewLayout->setColumnStretch(2, 1);
+    tabs->addTab(overview, tr("Overview"));
+
+    // ─── Network ─────────────────────────────────────────────────────────
+    auto* networkTab = new QWidget(tabs);
+    auto* networkLayout = new QVBoxLayout(networkTab);
+    networkMonitor_ = new NetworkMonitor(this);
+    networkLayout->addWidget(networkMonitor_);
+    tabs->addTab(networkTab, tr("Network"));
+
+    // ─── DPI ─────────────────────────────────────────────────────────────
+    auto* dpiTab = new QWidget(tabs);
+    auto* dpiLayout = new QVBoxLayout(dpiTab);
+    dpiControl_ = new DPIControl(this);
+    dpiLayout->addWidget(dpiControl_);
+    dpiLayout->addStretch(1);
+    tabs->addTab(dpiTab, tr("DPI"));
+
+    // ─── Crypto ──────────────────────────────────────────────────────────
+    cryptoPanel_ = new CryptoPanel(crypto_.get(), this);
+    tabs->addTab(cryptoPanel_, tr("Crypto"));
+
+    // ─── License ─────────────────────────────────────────────────────────
+    auto* licenseTab = new QWidget(tabs);
+    auto* licenseLayout = new QVBoxLayout(licenseTab);
     licenseInfo_ = new LicenseInfo(this);
-    mainLayout->addWidget(licenseInfo_, 2, 2);
-    
-    // Set row/column stretch
-    mainLayout->setRowStretch(0, 1);
-    mainLayout->setRowStretch(1, 2);
-    mainLayout->setRowStretch(2, 2);
-    mainLayout->setColumnStretch(0, 1);
-    mainLayout->setColumnStretch(1, 1);
-    mainLayout->setColumnStretch(2, 1);
+    licenseLayout->addWidget(licenseInfo_);
+    licenseLayout->addStretch(1);
+    tabs->addTab(licenseTab, tr("License"));
+
+    // ─── Logs ────────────────────────────────────────────────────────────
+    auto* logsTab = new QWidget(tabs);
+    auto* logsLayout = new QVBoxLayout(logsTab);
+    activityLog_ = new ActivityLog(this);
+    logsLayout->addWidget(activityLog_);
+    tabs->addTab(logsTab, tr("Logs"));
 }
 
 void MainWindow::setupMenuBar() {
@@ -348,21 +373,33 @@ QString MainWindow::loadStyleSheet(const QString& themeName) {
 
 // Slots implementation
 void MainWindow::onConnectClicked() {
-    if (!isConnected_) {
-        isConnected_ = true;
-        statusPanel_->setConnected(true);
-        statusBar()->showMessage(tr("Connected"));
-        database_->log_activity("connection", "Connected to network");
+    if (isConnected_) return;
+    isConnected_ = true;
+    statusPanel_->setConnected(true);
+    statusBar()->showMessage(tr("Connected"));
+    if (database_) database_->log_activity("connection", "Connected to network");
+
+    // Apply the persisted bypass technique on connect (Settings dialog
+    // writes to network/bypass_technique; default is TCP_FRAGMENTATION).
+    if (network_) {
+        const int idx = QSettings().value("network/bypass_technique", 2).toInt();
+        network_->enable_bypass(static_cast<ncp::BypassTechnique>(idx));
+        bypassEnabled_ = true;
+        if (dpiControl_) dpiControl_->setBypassEnabled(true);
     }
+    notify(tr("Connected"), tr("Dynam is protecting your traffic."));
 }
 
 void MainWindow::onDisconnectClicked() {
-    if (isConnected_) {
-        isConnected_ = false;
-        statusPanel_->setConnected(false);
-        statusBar()->showMessage(tr("Disconnected"));
-        database_->log_activity("connection", "Disconnected from network");
-    }
+    if (!isConnected_) return;
+    isConnected_ = false;
+    statusPanel_->setConnected(false);
+    statusBar()->showMessage(tr("Disconnected"));
+    if (database_) database_->log_activity("connection", "Disconnected from network");
+    if (network_) network_->disable_bypass();
+    bypassEnabled_ = false;
+    if (dpiControl_) dpiControl_->setBypassEnabled(false);
+    notify(tr("Disconnected"), tr("Network protection is off."));
 }
 
 void MainWindow::onQuickConnectClicked() {
@@ -414,9 +451,21 @@ void MainWindow::onMinimizeToTray() {
 }
 
 void MainWindow::onLicenseActivate() {
-    // Activate license
-    QString hwid = QString::fromStdString(license_->get_hwid());
-    licenseInfo_->setHWID(hwid);
+    if (!license_) return;
+    auto* dlg = new LicenseActivationDialog(license_.get(), this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dlg, &LicenseActivationDialog::activated, this, [this]{
+        if (database_) database_->log_activity("license", "License activated");
+        refreshLicenseStatus();
+        notify(tr("License activated"), tr("Your license has been registered."));
+    });
+    // Refresh HWID into the panel either way — the dialog reads it but we
+    // mirror it into LicenseInfo so the user sees what's bound on the device.
+    if (licenseInfo_) {
+        licenseInfo_->setHWID(QString::fromStdString(license_->get_hwid()));
+    }
+    dlg->setWindowModality(Qt::ApplicationModal);
+    dlg->show();
 }
 
 void MainWindow::onLicenseDeactivate() {
@@ -424,8 +473,23 @@ void MainWindow::onLicenseDeactivate() {
 }
 
 void MainWindow::onCheckForUpdates() {
-    QMessageBox::information(this, tr("Updates"),
-        tr("You are running the latest version."));
+    // Repurpose this slot as the "About" entry — the menubar action that
+    // used to call it is now wired to a more useful About panel.
+    auto* dlg = new AboutDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowModality(Qt::ApplicationModal);
+    dlg->show();
+}
+
+// Helper: show a tray notification if the tray icon is visible; otherwise
+// fall back to a status-bar message. Centralises the "did something visible
+// happen?" logic so each slot doesn't need to know about platform niceties.
+void MainWindow::notify(const QString& title, const QString& body) {
+    if (trayIcon_ && trayIcon_->isVisible()) {
+        trayIcon_->showMessage(title, body, QSystemTrayIcon::Information, 3000);
+    } else {
+        statusBar()->showMessage(title + " — " + body, 4000);
+    }
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
