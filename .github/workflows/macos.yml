@@ -1,0 +1,97 @@
+name: macOS build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & bundle Dynam.app (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64, runner: macos-15 }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew update
+          brew install cmake libsodium libwebsockets spdlog qt@6 fmt
+          echo "QT_PREFIX=$(brew --prefix qt@6)" >> "$GITHUB_ENV"
+
+      - name: Configure CMake (CLI)
+        run: |
+          cmake -S . -B build-portable \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_PORTABLE_MACOS=ON \
+            -DENABLE_GUI=OFF \
+            -DENABLE_CLI=ON \
+            -DENABLE_TESTS=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build CLI
+        run: cmake --build build-portable --config Release --parallel
+
+      - name: Configure CMake (GUI)
+        run: |
+          cmake -S . -B build-gui \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_PORTABLE_MACOS=ON \
+            -DENABLE_GUI=ON \
+            -DENABLE_CLI=OFF \
+            -DENABLE_TESTS=OFF \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+            -DCMAKE_PREFIX_PATH="$QT_PREFIX"
+
+      - name: Build GUI
+        run: cmake --build build-gui --config Release --parallel
+
+      - name: Generate app icon
+        run: |
+          swiftc scripts/make_icon.swift -o /tmp/make_icon
+          /tmp/make_icon
+          mkdir -p resources
+          cp scripts/out/Dynam.icns resources/Dynam.icns
+
+      - name: Build Dynam.app bundle
+        run: ./scripts/build_macos_gui_app.sh
+
+      - name: Smoke test (GUI launches and survives 15s)
+        run: |
+          open dist/Dynam.app
+          sleep 15
+          if pgrep -f "dist/Dynam.app/Contents/MacOS/ncp" > /dev/null; then
+            echo "GUI alive after 15s"
+            pkill -f "dist/Dynam.app/Contents/MacOS/ncp" || true
+          else
+            echo "GUI crashed during smoke test"
+            LATEST=$(ls -t "$HOME/Library/Logs/DiagnosticReports/"ncp*.ips 2>/dev/null | head -1)
+            [ -n "$LATEST" ] && head -120 "$LATEST"
+            exit 1
+          fi
+
+      - name: Upload Dynam.app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Dynam-${{ matrix.arch }}
+          path: dist/Dynam-*-macos-*.zip
+          if-no-files-found: error
+
+      - name: Attach to release (on tag)
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/Dynam-*-macos-*.zip

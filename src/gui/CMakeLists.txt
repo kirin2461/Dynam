@@ -14,6 +14,7 @@ set(NCP_GUI_HEADERS
     widgets/SystemStats.hpp
     widgets/ActivityLog.hpp
     widgets/LicenseInfo.hpp
+    widgets/SettingsDialog.hpp
 )
 
 # Create GUI library

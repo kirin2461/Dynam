@@ -6,6 +6,7 @@
 #include "widgets/SystemStats.hpp"
 #include "widgets/ActivityLog.hpp"
 #include "widgets/LicenseInfo.hpp"
+#include "widgets/SettingsDialog.hpp"
 
 #include "../core/include/ncp_crypto.hpp"
 #include "../core/include/ncp_license.hpp"
@@ -386,7 +387,13 @@ void MainWindow::onBypassTechniqueChanged(int index) {
 }
 
 void MainWindow::onSettingsClicked() {
-    // Open settings dialog
+    // SettingsDialog persists changes to QSettings on Accept, so we don't
+    // need to block here — heap-allocate with WA_DeleteOnClose so it cleans
+    // itself up when dismissed.
+    auto* dlg = new SettingsDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowModality(Qt::ApplicationModal);
+    dlg->show();
 }
 
 void MainWindow::onThemeChanged(const QString& theme) {
