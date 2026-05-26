@@ -28,6 +28,12 @@
 #include <QClipboard>
 #include <QFont>
 #include <QSet>
+#include <QFileDialog>
+#include <QJsonDocument>
+#include <QMessageBox>
+#include "ScanCommon.hpp"
+#include "BulkScanDialog.hpp"
+#include "CrawlerDialog.hpp"
 
 // SiteScraperPanel — one-click reconnaissance of a URL. Fires off ~7
 // independent probes in parallel and renders results as they arrive:
@@ -66,10 +72,25 @@ public:
         scanBtn_ = new QPushButton(tr("Scan"), inputBox);
         scanBtn_->setDefault(true);
         scanBtn_->setMinimumWidth(80);
+        exportMdBtn_ = new QPushButton(tr("Export MD"), inputBox);
+        exportJsonBtn_ = new QPushButton(tr("Export JSON"), inputBox);
+        exportMdBtn_->setEnabled(false);
+        exportJsonBtn_->setEnabled(false);
+        bulkBtn_  = new QPushButton(tr("Bulk…"), inputBox);
+        crawlBtn_ = new QPushButton(tr("Crawl…"), inputBox);
         inputLayout->addWidget(urlEdit_, 1);
         inputLayout->addWidget(scanBtn_);
-        connect(scanBtn_,  &QPushButton::clicked,     this, &SiteScraperPanel::startScan);
-        connect(urlEdit_,  &QLineEdit::returnPressed, this, &SiteScraperPanel::startScan);
+        inputLayout->addWidget(exportMdBtn_);
+        inputLayout->addWidget(exportJsonBtn_);
+        inputLayout->addSpacing(8);
+        inputLayout->addWidget(bulkBtn_);
+        inputLayout->addWidget(crawlBtn_);
+        connect(scanBtn_,       &QPushButton::clicked,     this, &SiteScraperPanel::startScan);
+        connect(urlEdit_,       &QLineEdit::returnPressed, this, &SiteScraperPanel::startScan);
+        connect(exportMdBtn_,   &QPushButton::clicked,     this, &SiteScraperPanel::exportMd);
+        connect(exportJsonBtn_, &QPushButton::clicked,     this, &SiteScraperPanel::exportJson);
+        connect(bulkBtn_,       &QPushButton::clicked,     this, &SiteScraperPanel::openBulkDialog);
+        connect(crawlBtn_,      &QPushButton::clicked,     this, &SiteScraperPanel::openCrawlerDialog);
 
         root->addWidget(inputBox);
 
@@ -103,6 +124,10 @@ private slots:
         currentHost_ = url.host();
         pendingProbes_ = 0;
         scanBtn_->setEnabled(false);
+        exportMdBtn_->setEnabled(false);
+        exportJsonBtn_->setEnabled(false);
+        report_ = {};                       // fresh report for this run
+        report_.requestUrl = url;
         statusBar_->setText(tr("Scanning %1 …").arg(currentHost_));
 
         fetchMain(url);
@@ -147,10 +172,74 @@ private:
     void probeDone() {
         if (--pendingProbes_ <= 0) {
             scanBtn_->setEnabled(true);
-            statusBar_->setText(tr("Scan complete for %1").arg(currentHost_));
+            exportMdBtn_->setEnabled(true);
+            exportJsonBtn_->setEnabled(true);
+            // Tech detection runs once all probes are in so it has access
+            // to both the main body and the full header set.
+            if (!report_.responseHeaders.isEmpty() && !rawBody_.isEmpty()) {
+                detectTech(report_.responseHeaders, rawBody_, report_);
+                if (!report_.techDetected.isEmpty()) {
+                    auto* box = addSection(tr("🧰 Technology — %1 detected")
+                                              .arg(report_.techDetected.size()));
+                    auto* out = monoTextIn(box);
+                    out->setPlainText(report_.techDetected.join('\n'));
+                }
+            }
+            statusBar_->setText(tr("Scan complete for %1 · grade %2 · %3 tech")
+                                  .arg(currentHost_)
+                                  .arg(report_.secGrade.isEmpty() ? "—" : report_.secGrade)
+                                  .arg(report_.techDetected.size()));
         }
     }
     void probeStart() { ++pendingProbes_; }
+
+    // ─── Export ─────────────────────────────────────────────────────
+    void exportMd() {
+        const QString path = QFileDialog::getSaveFileName(this,
+            tr("Export scan as Markdown"),
+            QDir::homePath() + "/Desktop/dynam-scan-"
+                + currentHost_ + "-"
+                + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") + ".md",
+            tr("Markdown (*.md);;All files (*)"));
+        if (path.isEmpty()) return;
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QMessageBox::warning(this, tr("Export failed"), f.errorString());
+            return;
+        }
+        f.write(report_.toMarkdown().toUtf8());
+        statusBar_->setText(tr("Exported %1").arg(path));
+    }
+
+    void exportJson() {
+        const QString path = QFileDialog::getSaveFileName(this,
+            tr("Export scan as JSON"),
+            QDir::homePath() + "/Desktop/dynam-scan-"
+                + currentHost_ + "-"
+                + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") + ".json",
+            tr("JSON (*.json);;All files (*)"));
+        if (path.isEmpty()) return;
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QMessageBox::warning(this, tr("Export failed"), f.errorString());
+            return;
+        }
+        QJsonDocument doc(report_.toJson());
+        f.write(doc.toJson(QJsonDocument::Indented));
+        statusBar_->setText(tr("Exported %1").arg(path));
+    }
+
+    void openBulkDialog() {
+        auto* dlg = new BulkScanDialog(this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->show();
+    }
+
+    void openCrawlerDialog() {
+        auto* dlg = new CrawlerDialog(this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->show();
+    }
 
     // ─── Probe 1: main GET ──────────────────────────────────────────
     void fetchMain(const QUrl& url) {
@@ -165,11 +254,29 @@ private:
         connect(reply, &QNetworkReply::finished, this, [this, reply, timer, url]{
             const qint64 ms = timer->elapsed();
             delete timer;
+            // Capture into ScanReport for export + tech-detection.
+            report_.finalUrl    = reply->url();
+            report_.httpStatus  = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            report_.timingMs    = ms;
+            report_.server      = reply->header(QNetworkRequest::ServerHeader).toString();
+            report_.contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
+            for (const auto& p : reply->rawHeaderPairs()) {
+                report_.responseHeaders.insert(
+                    QString::fromUtf8(p.first).toLower(),
+                    QString::fromUtf8(p.second));
+            }
+            scoreSecurity(reply, report_);
+            report_.cookies = reply->header(QNetworkRequest::SetCookieHeader)
+                                .value<QList<QNetworkCookie>>();
+
             renderSummary(url, reply, ms);
             renderHeaders(reply);
             renderSecurityHeaders(reply);
             renderCookies(reply);
             const QByteArray body = reply->readAll();
+            report_.bodyBytes = body.size();
+            rawBody_ = body;          // saved so tech-detect can run in probeDone()
             renderMeta(body);
             renderResources(body, url);
             renderLinks(body, url);
@@ -192,10 +299,12 @@ private:
             } else {
                 QStringList lines;
                 for (const QHostAddress& a : info.addresses()) {
-                    lines << QString("%1   %2")
-                                 .arg(a.protocol() == QAbstractSocket::IPv6Protocol ? "AAAA" : "A",
-                                      -5)
-                                 .arg(a.toString());
+                    const QString rec = QString("%1   %2")
+                                            .arg(a.protocol() == QAbstractSocket::IPv6Protocol ? "AAAA" : "A",
+                                                 -5)
+                                            .arg(a.toString());
+                    lines << rec;
+                    report_.dnsRecords.append(rec.simplified());
                 }
                 out->setPlainText(lines.join('\n'));
             }
@@ -214,6 +323,18 @@ private:
             const auto cfg = sock->sslConfiguration();
             const auto cipher = cfg.sessionCipher();
             const auto chain = sock->peerCertificateChain();
+            // Capture into report
+            report_.tlsProtocol = cipher.protocolString();
+            report_.tlsCipher   = cipher.name();
+            report_.tlsBits     = cipher.usedBits();
+            if (!chain.isEmpty()) {
+                const auto& leaf = chain.first();
+                report_.certSubject   = leaf.subjectInfo(QSslCertificate::CommonName).join(',');
+                report_.certIssuer    = leaf.issuerInfo(QSslCertificate::CommonName).join(',');
+                report_.certValidFrom = leaf.effectiveDate();
+                report_.certValidTo   = leaf.expiryDate();
+                report_.certSans      = leaf.subjectAlternativeNames().values();
+            }
             QString text;
             text += QString("Protocol:    %1\n").arg(cipher.protocolString());
             text += QString("Cipher:      %1 (%2-bit)\n")
@@ -278,7 +399,9 @@ private:
         const int status = reply->attribute(
             QNetworkRequest::HttpStatusCodeAttribute).toInt();
         if (status == 200) {
-            out->setPlainText(QString::fromUtf8(reply->readAll()));
+            const QString body = QString::fromUtf8(reply->readAll());
+            out->setPlainText(body);
+            report_.robotsTxt = body;
         } else if (status == 0) {
             out->setPlainText(tr("error: %1").arg(reply->errorString()));
         } else {
@@ -299,6 +422,8 @@ private:
             QRegularExpression re("<loc>");
             auto it = re.globalMatch(QString::fromUtf8(body));
             while (it.hasNext()) { it.next(); ++locs; }
+            report_.sitemapXml      = QString::fromUtf8(body.left(2048));
+            report_.sitemapLocCount = locs;
             out->setPlainText(tr("(%1 <loc> entries, %2 bytes)\n\n").arg(locs).arg(body.size())
                               + QString::fromUtf8(body.left(2048)));
         } else {
@@ -320,6 +445,8 @@ private:
                 QNetworkRequest::HttpStatusCodeAttribute).toInt();
             const auto sizeHdr = reply->header(QNetworkRequest::ContentLengthHeader);
             if (status == 200) {
+                report_.faviconFound = true;
+                report_.faviconBytes = sizeHdr.toLongLong();
                 out->setPlainText(tr("found · %1 bytes · %2")
                                       .arg(sizeHdr.toLongLong())
                                       .arg(reply->header(QNetworkRequest::ContentTypeHeader).toString()));
@@ -438,7 +565,9 @@ private:
                                     QRegularExpression::CaseInsensitiveOption);
         const auto titleMatch = titleRe.match(head);
         if (titleMatch.hasMatch()) {
-            text += "<title>: " + titleMatch.captured(1).trimmed() + "\n\n";
+            const QString t = titleMatch.captured(1).trimmed();
+            text += "<title>: " + t + "\n\n";
+            report_.title = t;
         }
 
         // <meta name="…" content="…">  and  <meta property="og:…">
@@ -451,6 +580,7 @@ private:
             text += QString("  %1 = %2\n")
                         .arg(m.captured(1).leftJustified(28))
                         .arg(m.captured(2).left(120));
+            report_.meta.insert(m.captured(1), m.captured(2));
         }
 
         if (!text.isEmpty()) {
@@ -481,6 +611,10 @@ private:
         const auto styles  = pull("link",   "<link[^>]*rel=[\"']stylesheet[\"'][^>]*href=[\"']([^\"']+)[\"']");
         const auto images  = pull("img",    "<img[^>]*src=[\"']([^\"']+)[\"']");
 
+        report_.scripts = scripts;
+        report_.styles  = styles;
+        report_.images  = images;
+
         if (scripts.isEmpty() && styles.isEmpty() && images.isEmpty()) return;
 
         auto* box = addSection(tr("📦 Resources — %1 scripts · %2 stylesheets · %3 images")
@@ -510,6 +644,11 @@ private:
             if (QUrl(abs).host() == base.host()) internal << abs;
             else                                   external << abs;
         }
+        report_.linksInternal = internal;
+        report_.linksExternal = external;
+        report_.linksMailto   = mailto;
+        report_.linksTel      = tel;
+
         if (internal.isEmpty() && external.isEmpty()
             && mailto.isEmpty() && tel.isEmpty()) return;
 
@@ -547,6 +686,7 @@ private:
                                        : base.resolved(QUrl(m.captured(1))).toString();
             const QString method = m.captured(2).isEmpty() ? "GET" : m.captured(2).toUpper();
             text += QString("%1   %2\n").arg(method, -6).arg(action);
+            report_.forms.append({method, action});
         }
         if (count == 0) return;
         auto* box = addSection(tr("📝 Forms (%1)").arg(count));
@@ -555,9 +695,15 @@ private:
 
     QLineEdit*             urlEdit_;
     QPushButton*           scanBtn_;
+    QPushButton*           exportMdBtn_;
+    QPushButton*           exportJsonBtn_;
+    QPushButton*           bulkBtn_;
+    QPushButton*           crawlBtn_;
     QVBoxLayout*           sectionsLayout_;
     QLabel*                statusBar_;
     QNetworkAccessManager* net_;
     QString                currentHost_;
     int                    pendingProbes_ = 0;
+    ScanReport             report_;        // accumulated during scan
+    QByteArray             rawBody_;       // kept for tech detection in probeDone()
 };

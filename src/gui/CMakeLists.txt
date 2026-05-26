@@ -32,6 +32,9 @@ set(NCP_GUI_HEADERS
     widgets/PollerPanel.hpp
     widgets/AdvancedSettingsPanel.hpp
     widgets/SiteScraperPanel.hpp
+    widgets/ScanCommon.hpp
+    widgets/BulkScanDialog.hpp
+    widgets/CrawlerDialog.hpp
 )
 
 # Create GUI library
