@@ -8,7 +8,10 @@
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QHeaderView>
+#include <QHash>
 #include <QSettings>
 #include <QLineEdit>
 #include <QComboBox>
@@ -179,23 +182,24 @@ public:
         row->addWidget(resetBtn_);
         root->addLayout(row);
 
-        table_ = new QTableWidget(this);
-        table_->setColumnCount(3);
-        table_->setHorizontalHeaderLabels({tr("Key"), tr("Type"), tr("Value")});
-        table_->setSelectionBehavior(QAbstractItemView::SelectRows);
-        table_->setSelectionMode(QAbstractItemView::SingleSelection);
-        table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-        table_->setAlternatingRowColors(true);
-        table_->verticalHeader()->setVisible(false);
-        table_->horizontalHeader()->setStretchLastSection(true);
-        root->addWidget(table_, 1);
+        tree_ = new QTreeWidget(this);
+        tree_->setColumnCount(3);
+        tree_->setHeaderLabels({tr("Key"), tr("Type"), tr("Value")});
+        tree_->setSelectionBehavior(QAbstractItemView::SelectRows);
+        tree_->setSelectionMode(QAbstractItemView::SingleSelection);
+        tree_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+        tree_->setAlternatingRowColors(true);
+        tree_->header()->setStretchLastSection(true);
+        tree_->setIndentation(16);
+        root->addWidget(tree_, 1);
 
         connect(addBtn_,     &QPushButton::clicked, this, &AdvancedSettingsPanel::onAdd);
         connect(editBtn_,    &QPushButton::clicked, this, &AdvancedSettingsPanel::onEdit);
         connect(deleteBtn_,  &QPushButton::clicked, this, &AdvancedSettingsPanel::onDelete);
         connect(refreshBtn_, &QPushButton::clicked, this, &AdvancedSettingsPanel::refresh);
         connect(resetBtn_,   &QPushButton::clicked, this, &AdvancedSettingsPanel::onResetAll);
-        connect(table_,      &QTableWidget::doubleClicked, this, &AdvancedSettingsPanel::onEdit);
+        connect(tree_,       &QTreeWidget::itemDoubleClicked,
+                this, [this](QTreeWidgetItem*, int){ onEdit(); });
 
         auto* warn = new QLabel(tr(
             "<b>Warning</b> — this is the raw QSettings store. Type the wrong "
@@ -210,25 +214,70 @@ public:
     }
 
 private slots:
+    // Rebuild the tree from QSettings::allKeys(). Keys are slash-paths;
+    // we build a nested QTreeWidgetItem hierarchy where each ancestor
+    // is created lazily on first use. The full key is stashed in
+    // Qt::UserRole on leaves so the toolbar actions can recover it
+    // from a selection without re-walking.
     void refresh() {
+        const QString prevSelected = selectedKey();
+        const QStringList prevExpanded = expandedPaths();
+        tree_->clear();
+
         QSettings s;
         const QStringList keys = s.allKeys();
-        const QString selected = selectedKey();
-        table_->setRowCount(keys.size());
-        for (int r = 0; r < keys.size(); ++r) {
-            const QString& k = keys[r];
-            const QVariant v = s.value(k);
-            setCell(r, 0, k, /*mono=*/true);
-            setCell(r, 1, typeName(v));
-            setCell(r, 2, displayValue(v), /*mono=*/true);
-        }
-        for (int c = 0; c < 2; ++c) table_->resizeColumnToContents(c);
-        if (!selected.isEmpty()) {
-            for (int r = 0; r < table_->rowCount(); ++r) {
-                if (table_->item(r, 0)->text() == selected) {
-                    table_->selectRow(r);
-                    break;
+
+        // prefix-path → branch item, so each ancestor is created once.
+        QHash<QString, QTreeWidgetItem*> nodes;
+        for (const QString& fullKey : keys) {
+            const QStringList parts = fullKey.split('/');
+            QTreeWidgetItem* parent = tree_->invisibleRootItem();
+            QString accum;
+            // Walk every part except the last — those are branches
+            for (int i = 0; i < parts.size() - 1; ++i) {
+                accum = accum.isEmpty() ? parts[i]
+                                         : (accum + "/" + parts[i]);
+                auto it = nodes.constFind(accum);
+                if (it == nodes.constEnd()) {
+                    auto* branch = new QTreeWidgetItem(parent, {parts[i]});
+                    branch->setFirstColumnSpanned(false);
+                    QFont bold = branch->font(0);
+                    bold.setBold(true);
+                    branch->setFont(0, bold);
+                    nodes.insert(accum, branch);
+                    parent = branch;
+                } else {
+                    parent = it.value();
                 }
+            }
+            // Last part is the leaf (the actual setting)
+            const QString leafName = parts.last();
+            const QVariant v = s.value(fullKey);
+            auto* leaf = new QTreeWidgetItem(parent,
+                {leafName, typeName(v), displayValue(v)});
+            QFont mono;
+            mono.setStyleHint(QFont::Monospace);
+            mono.setFamily("Menlo");
+            leaf->setFont(0, mono);
+            leaf->setFont(2, mono);
+            // Stash the full path on the leaf for selection mapping.
+            leaf->setData(0, Qt::UserRole, fullKey);
+        }
+        tree_->expandAll();
+        for (int c = 0; c < 2; ++c) tree_->resizeColumnToContents(c);
+
+        // Best-effort restore: collapse any branches that the user
+        // had collapsed, and reselect the previously-selected leaf.
+        if (!prevExpanded.isEmpty()) {
+            // We already expanded everything; collapse the ones missing
+            // from prevExpanded if there was a previous state captured.
+            for (auto it = nodes.constBegin(); it != nodes.constEnd(); ++it) {
+                if (!prevExpanded.contains(it.key())) it.value()->setExpanded(false);
+            }
+        }
+        if (!prevSelected.isEmpty()) {
+            if (auto* item = findLeaf(prevSelected)) {
+                tree_->setCurrentItem(item);
             }
         }
     }
@@ -284,20 +333,58 @@ private slots:
     }
 
 private:
+    // Returns the full slash-path of the currently selected *leaf*, or an
+    // empty string if no item is selected or the selection is a branch.
     QString selectedKey() const {
-        const auto items = table_->selectedItems();
-        if (items.isEmpty()) return {};
-        return table_->item(items.first()->row(), 0)->text();
+        auto* item = tree_->currentItem();
+        if (!item) return {};
+        const QVariant tag = item->data(0, Qt::UserRole);
+        return tag.isValid() ? tag.toString() : QString{};
     }
 
-    void setCell(int row, int col, const QString& text, bool mono = false) {
-        auto* it = new QTableWidgetItem(text);
-        it->setFlags(it->flags() & ~Qt::ItemIsEditable);
-        if (mono) {
-            QFont f; f.setStyleHint(QFont::Monospace); f.setFamily("Menlo");
-            it->setFont(f);
+    // Snapshot of currently-expanded branch paths so refresh() can
+    // preserve the user's view across an add/edit/delete cycle.
+    QStringList expandedPaths() const {
+        QStringList out;
+        walkBranches(tree_->invisibleRootItem(), QString{},
+                     [&out](const QString& path, QTreeWidgetItem* it){
+            if (it->isExpanded()) out.append(path);
+        });
+        return out;
+    }
+
+    // Find the leaf item whose UserRole == fullKey. Used to restore
+    // selection across refresh(). Returns nullptr if not found.
+    QTreeWidgetItem* findLeaf(const QString& fullKey) {
+        QTreeWidgetItem* found = nullptr;
+        walkBranches(tree_->invisibleRootItem(), QString{},
+                     [&found, &fullKey](const QString&, QTreeWidgetItem* it){
+            for (int i = 0; i < it->childCount(); ++i) {
+                auto* child = it->child(i);
+                if (child->childCount() == 0 &&
+                    child->data(0, Qt::UserRole).toString() == fullKey) {
+                    found = child;
+                }
+            }
+        });
+        return found;
+    }
+
+    // Depth-first walk of all branch (non-leaf) items, invoking fn with
+    // the accumulated slash-path. Leaf items are visited indirectly via
+    // their parent branch.
+    template <typename Fn>
+    static void walkBranches(QTreeWidgetItem* node, const QString& path, Fn fn) {
+        for (int i = 0; i < node->childCount(); ++i) {
+            auto* child = node->child(i);
+            const QString childPath = path.isEmpty()
+                ? child->text(0)
+                : (path + "/" + child->text(0));
+            if (child->childCount() > 0) {
+                fn(childPath, child);
+                walkBranches(child, childPath, fn);
+            }
         }
-        table_->setItem(row, col, it);
     }
 
     static QString typeName(const QVariant& v) {
@@ -323,7 +410,7 @@ private:
         return s;
     }
 
-    QTableWidget* table_;
+    QTreeWidget*  tree_;
     QPushButton*  addBtn_;
     QPushButton*  editBtn_;
     QPushButton*  deleteBtn_;
