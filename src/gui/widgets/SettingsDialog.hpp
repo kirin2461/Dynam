@@ -10,7 +10,9 @@
 #include <QVBoxLayout>
 #include <QLabel>
 #include <QStandardPaths>
+#include <QTabWidget>
 #include "Themes.hpp"
+#include "AdvancedSettingsPanel.hpp"
 
 // Persists to QSettings under the org / app key set by QApplication
 // (see Application::Application). Read-back happens in MainWindow whenever
@@ -22,9 +24,15 @@ public:
     explicit SettingsDialog(QWidget* parent = nullptr) : QDialog(parent) {
         setWindowTitle(tr("Dynam — Settings"));
         setModal(true);
-        resize(420, 240);
+        resize(640, 480);
 
         auto* root = new QVBoxLayout(this);
+        auto* tabs = new QTabWidget(this);
+        root->addWidget(tabs, 1);
+
+        // ─── Basic tab: the existing form ───────────────────────────
+        auto* basicTab = new QWidget(tabs);
+        auto* basicLayout = new QVBoxLayout(basicTab);
         auto* form = new QFormLayout;
 
         // The order here mirrors ncp::BypassTechnique in
@@ -75,15 +83,21 @@ public:
         form->addRow(autoConnect_);
         form->addRow(torEnabled_);
 
-        root->addLayout(form);
-        root->addStretch(1);
+        basicLayout->addLayout(form);
+        basicLayout->addStretch(1);
 
         auto* note = new QLabel(
             tr("Settings persist via QSettings; bypass technique and tunnel "
-               "endpoint take effect on the next Connect."), this);
+               "endpoint take effect on the next Connect."), basicTab);
         note->setWordWrap(true);
         note->setStyleSheet("color:#888; font-size:11px;");
-        root->addWidget(note);
+        basicLayout->addWidget(note);
+
+        tabs->addTab(basicTab, tr("Basic"));
+
+        // ─── Advanced tab: raw QSettings editor ─────────────────────
+        advancedPanel_ = new AdvancedSettingsPanel(tabs);
+        tabs->addTab(advancedPanel_, tr("Advanced"));
 
         auto* buttons = new QDialogButtonBox(
             QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
@@ -131,4 +145,5 @@ private:
     QSpinBox*  logRetention_;
     QComboBox* themeCombo_;
     QCheckBox* torEnabled_;
+    AdvancedSettingsPanel* advancedPanel_ = nullptr;
 };

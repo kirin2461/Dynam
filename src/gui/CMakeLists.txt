@@ -30,6 +30,7 @@ set(NCP_GUI_HEADERS
     widgets/Profiles.hpp
     widgets/PollerEngine.hpp
     widgets/PollerPanel.hpp
+    widgets/AdvancedSettingsPanel.hpp
 )
 
 # Create GUI library
