@@ -24,6 +24,7 @@
 #include <QMenu>
 #include "ScanCommon.hpp"
 #include "PollerEngine.hpp"
+#include "BulkDiffDialog.hpp"
 
 // Bulk scanner — paste URLs (one per line), Run, watch the leaderboard
 // fill in real time as ScanProbe instances finish. Concurrency capped at
@@ -64,6 +65,8 @@ public:
         btnRow->addWidget(cancelBtn_);
         btnRow->addStretch(1);
         btnRow->addWidget(historyBtn_);
+        diffBtn_ = new QPushButton(tr("Diff…"), leftWidget);
+        btnRow->addWidget(diffBtn_);
         leftLayout->addLayout(btnRow);
 
         auto* btnRow2 = new QHBoxLayout;
@@ -118,6 +121,7 @@ public:
         connect(exportHtmlBtn_, &QPushButton::clicked, this, &BulkScanDialog::exportHtml);
         connect(scheduleBtn_,   &QPushButton::clicked, this, &BulkScanDialog::scheduleRescans);
         connect(historyBtn_,    &QPushButton::clicked, this, &BulkScanDialog::openHistory);
+        connect(diffBtn_,       &QPushButton::clicked, this, &BulkScanDialog::openDiff);
     }
 
 private slots:
@@ -233,6 +237,12 @@ private slots:
         const int idx = labels.indexOf(choice);
         if (idx < 0) return;
         loadFromFile(entries[idx].first);
+    }
+
+    void openDiff() {
+        auto* dlg = new BulkDiffDialog(this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        dlg->show();
     }
 
     void loadFromFile(const QString& path) {
@@ -463,6 +473,7 @@ private:
     QPushButton*     runBtn_;
     QPushButton*     cancelBtn_;
     QPushButton*     historyBtn_;
+    QPushButton*     diffBtn_;
     QPushButton*     exportJsonBtn_;
     QPushButton*     exportHtmlBtn_;
     QPushButton*     scheduleBtn_;

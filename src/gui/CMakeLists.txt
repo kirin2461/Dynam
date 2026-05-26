@@ -35,6 +35,8 @@ set(NCP_GUI_HEADERS
     widgets/ScanCommon.hpp
     widgets/BulkScanDialog.hpp
     widgets/CrawlerDialog.hpp
+    widgets/SparklineWidget.hpp
+    widgets/BulkDiffDialog.hpp
 )
 
 # Create GUI library

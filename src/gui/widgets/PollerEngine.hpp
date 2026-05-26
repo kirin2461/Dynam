@@ -82,7 +82,19 @@ struct PollerTarget {
     qint64     lastLatencyMs  = -1;
     QDateTime  lastRunAt;
 
+    // Rolling history — capped to kHistoryDepth most recent results so the
+    // poller table can render a sparkline. Stored as QVector<bool> for
+    // compactness; persisted as a 0/1 string for human-readable JSON.
+    static constexpr int kHistoryDepth = 60;
+    QVector<bool> history;
+
     QJsonObject toJson() const {
+        // history serialised as a compact 0/1 string ("011101…") so it's
+        // human-readable and ~10× smaller than a JSON bool array.
+        QString hist;
+        hist.reserve(history.size());
+        for (bool b : history) hist += (b ? '1' : '0');
+
         return QJsonObject{
             {"id",          id},
             {"name",        name},
@@ -91,6 +103,7 @@ struct PollerTarget {
             {"intervalSec", intervalSec},
             {"paused",      paused},
             {"criteria",    criteria},
+            {"history",     hist},
         };
     }
     static PollerTarget fromJson(const QJsonObject& o) {
@@ -102,6 +115,9 @@ struct PollerTarget {
         t.intervalSec = o.value("intervalSec").toInt(60);
         t.paused      = o.value("paused").toBool(false);
         t.criteria    = o.value("criteria").toString();
+        const QString hist = o.value("history").toString();
+        t.history.reserve(hist.size());
+        for (QChar c : hist) t.history.append(c == '1');
         return t;
     }
 
@@ -506,6 +522,12 @@ private:
         t.lastLatencyMs = ms;
         t.lastStatus    = detail;
         t.lastRunAt     = QDateTime::currentDateTime();
+        // Rolling history capped at kHistoryDepth.
+        t.history.append(ok);
+        if (t.history.size() > PollerTarget::kHistoryDepth) {
+            t.history.remove(0, t.history.size() - PollerTarget::kHistoryDepth);
+        }
+        save();   // persist after every result so a restart doesn't lose the streak
         emit targetUpdated(id);
     }
 

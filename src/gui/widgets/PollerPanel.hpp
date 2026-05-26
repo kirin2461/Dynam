@@ -19,6 +19,7 @@
 #include <QMessageBox>
 #include <QEventLoop>
 #include "PollerEngine.hpp"
+#include "SparklineWidget.hpp"
 
 class PollerTargetDialog : public QDialog {
     Q_OBJECT
@@ -165,11 +166,11 @@ public:
         root->addLayout(btnRow);
 
         table_ = new QTableWidget(this);
-        table_->setColumnCount(9);
+        table_->setColumnCount(10);
         table_->setHorizontalHeaderLabels({
             tr("Name"), tr("Kind"), tr("Target"), tr("Criteria"),
             tr("Every"), tr("Last status"), tr("Latency"),
-            tr("Success"), tr("Last run"),
+            tr("Success"), tr("Trend"), tr("Last run"),
         });
         table_->setSelectionBehavior(QAbstractItemView::SelectRows);
         table_->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -273,12 +274,24 @@ private slots:
                                                             sr,
                                                             (unsigned long long)t.successfulRuns,
                                                             (unsigned long long)t.totalRuns));
-            setCell(r, 8, t.lastRunAt.isValid()
+
+            // Sparkline: re-use the existing widget if already there
+            // (cheaper than recreating each refresh), otherwise spawn one.
+            auto* spark = qobject_cast<SparklineWidget*>(table_->cellWidget(r, 8));
+            if (!spark) {
+                spark = new SparklineWidget;
+                table_->setCellWidget(r, 8, spark);
+            }
+            spark->setHistory(t.history);
+            spark->setToolTip(tr("Last %1 results · newest on the right")
+                                .arg(t.history.size()));
+
+            setCell(r, 9, t.lastRunAt.isValid()
                             ? t.lastRunAt.toString("HH:mm:ss")
                             : "-");
             table_->item(r, 0)->setData(Qt::UserRole, t.id);
         }
-        for (int c = 0; c < 8; ++c) table_->resizeColumnToContents(c);
+        for (int c = 0; c < 9; ++c) table_->resizeColumnToContents(c);
         if (!sel.isEmpty()) {
             for (int r = 0; r < table_->rowCount(); ++r) {
                 if (table_->item(r, 0)->data(Qt::UserRole).toString() == sel) {
