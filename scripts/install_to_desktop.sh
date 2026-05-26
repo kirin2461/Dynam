@@ -35,6 +35,20 @@ echo "==> Stripping Gatekeeper / quarantine flags"
 xattr -dr com.apple.quarantine "${DEST}" 2>/dev/null || true
 xattr -dr com.apple.provenance  "${DEST}" 2>/dev/null || true
 
+# Remove the bundle-level resource sealing (Contents/_CodeSignature/) so
+# the user can edit Info.plist / Resources / PlugIns without invalidating
+# anything. The Mach-O binary's *own* signature stays — required for the
+# Apple Silicon kernel to load its code pages — but the bundle is
+# otherwise unprotected and freely editable.
+echo "==> Removing bundle resource sealing (keeping binary signature)"
+rm -rf "${DEST}/Contents/_CodeSignature"
+
+# Make every file under the bundle writable. ditto can preserve read-only
+# bits from the source tree; chmod -R u+w lifts them so any modification
+# (Info.plist, Resources/Dynam.icns, anything in Resources/bin/) Just Works.
+echo "==> Making every file writable"
+chmod -R u+w "${DEST}"
+
 echo "==> Launching via LaunchServices (same path Finder double-click uses)"
 open "${DEST}"
 sleep 3

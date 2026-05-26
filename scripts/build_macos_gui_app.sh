@@ -114,7 +114,7 @@ echo "==> Ad-hoc codesign"
 codesign --force --deep --sign - --timestamp=none "${FINAL}" 2>&1 | tail -2
 codesign --verify --verbose "${FINAL}" 2>&1
 
-# Move to dist/, re-verify, zip
+# Move to dist/, re-verify, then unseal so the user can edit freely.
 mkdir -p "${DIST_ROOT}"
 rm -rf "${DIST_ROOT}/Dynam.app"
 ditto --noextattr --norsrc "${FINAL}" "${DIST_ROOT}/Dynam.app"
@@ -123,7 +123,17 @@ ditto --noextattr --norsrc "${FINAL}" "${DIST_ROOT}/Dynam.app"
 # move so the bundle is ready to double-click without Gatekeeper warnings.
 xattr -dr com.apple.quarantine "${DIST_ROOT}/Dynam.app" 2>/dev/null || true
 
+# One last signature verification before we unseal — confirms the binary
+# inside is good (the kernel will reject otherwise).
 codesign --verify "${DIST_ROOT}/Dynam.app" && echo "✅ ${DIST_ROOT}/Dynam.app is signed and valid"
+
+# Now drop the bundle-level seal so Info.plist / Resources / PlugIns are
+# editable. The Mach-O binary keeps its own embedded signature; we're only
+# removing the file-hash manifest that detects bundle tampering. Result:
+# user can hot-edit anything in the .app without the next launch breaking.
+rm -rf "${DIST_ROOT}/Dynam.app/Contents/_CodeSignature"
+chmod -R u+w "${DIST_ROOT}/Dynam.app"
+echo "==> Bundle unsealed (binary signature kept for kernel; resource seal removed)"
 
 ZIP="${DIST_ROOT}/Dynam-${VERSION}-macos-${ARCH}.zip"
 rm -f "${ZIP}"
