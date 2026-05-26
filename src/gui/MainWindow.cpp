@@ -130,13 +130,13 @@ MainWindow::MainWindow(QWidget* parent)
                 // Re-apply theme + maybe auto-connect now that the wizard
                 // has persisted the user's choices.
                 Themes::apply();
-                if (QSettings().value("ui/auto_connect", false).toBool()) {
+                if (QSettings().value("ui/auto_connect", true).toBool()) {
                     QTimer::singleShot(0, this, &MainWindow::onConnectClicked);
                 }
             });
             wiz->show();
         });
-    } else if (QSettings().value("ui/auto_connect", false).toBool()) {
+    } else if (QSettings().value("ui/auto_connect", true).toBool()) {
         // No wizard, but auto-connect is set — fire after first paint.
         QTimer::singleShot(0, this, &MainWindow::onConnectClicked);
     }
@@ -290,6 +290,13 @@ void MainWindow::setupMenuBar() {
         QDesktopServices::openUrl(QUrl("https://github.com/kirin2461/Dynam"));
     });
     helpMenu->addAction(tr("Run Diagnostics…"), this, &MainWindow::onRunDiagnostics);
+    helpMenu->addAction(tr("Re-run Onboarding"),  this, [this]{
+        // No first-launch gate when invoked explicitly — user can revisit anytime.
+        auto* wiz = new OnboardingWizard(this);
+        wiz->setAttribute(Qt::WA_DeleteOnClose);
+        connect(wiz, &QDialog::finished, this, [](int){ Themes::apply(); });
+        wiz->show();
+    });
     helpMenu->addSeparator();
     helpMenu->addAction(tr("Check for &Updates"), this, &MainWindow::onCheckForUpdates);
     helpMenu->addAction(tr("&About Dynam"), this, &MainWindow::onCheckForUpdates);

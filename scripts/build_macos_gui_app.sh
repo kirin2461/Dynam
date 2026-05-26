@@ -118,6 +118,11 @@ codesign --verify --verbose "${FINAL}" 2>&1
 mkdir -p "${DIST_ROOT}"
 rm -rf "${DIST_ROOT}/Dynam.app"
 ditto --noextattr --norsrc "${FINAL}" "${DIST_ROOT}/Dynam.app"
+
+# Strip any quarantine flags that macOS might have re-added during the
+# move so the bundle is ready to double-click without Gatekeeper warnings.
+xattr -dr com.apple.quarantine "${DIST_ROOT}/Dynam.app" 2>/dev/null || true
+
 codesign --verify "${DIST_ROOT}/Dynam.app" && echo "✅ ${DIST_ROOT}/Dynam.app is signed and valid"
 
 ZIP="${DIST_ROOT}/Dynam-${VERSION}-macos-${ARCH}.zip"

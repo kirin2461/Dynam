@@ -57,17 +57,16 @@ public:
         themeCombo_->addItem(tr("Dark"),   "dark");
         themeCombo_->addItem(tr("Light"),  "light");
 
-        // Tor proxy toggle. Disabled if no `tor` binary is on PATH so
-        // users see why the option isn't available instead of it just
-        // not doing anything.
+        // Tor proxy toggle — always toggleable. If no `tor` binary is on
+        // PATH the tooltip says so but the user can still set the
+        // preference; useful for "I'm installing Tor in another terminal"
+        // or "I'll set this and grab the binary later".
         torEnabled_ = new QCheckBox(tr("Route traffic through Tor"), this);
         const QString torPath = QStandardPaths::findExecutable("tor");
-        if (torPath.isEmpty()) {
-            torEnabled_->setEnabled(false);
-            torEnabled_->setToolTip(tr("Install Tor (e.g. `brew install tor`) to enable."));
-        } else {
-            torEnabled_->setToolTip(tr("Tor binary found at %1").arg(torPath));
-        }
+        torEnabled_->setToolTip(torPath.isEmpty()
+            ? tr("No `tor` binary detected on PATH yet — your preference "
+                  "is still saved; install Tor with `brew install tor` when ready.")
+            : tr("Tor binary found at %1").arg(torPath));
 
         form->addRow(tr("Theme"),                    themeCombo_);
         form->addRow(tr("Default bypass technique"), bypassCombo_);
@@ -106,7 +105,7 @@ private:
         QSettings s;
         bypassCombo_->setCurrentIndex(s.value("network/bypass_technique", 2).toInt()); // TCP_FRAG
         tunnelEndpoint_->setText(s.value("network/tunnel_endpoint").toString());
-        autoConnect_->setChecked(s.value("ui/auto_connect", false).toBool());
+        autoConnect_->setChecked(s.value("ui/auto_connect", true).toBool());
         logRetention_->setValue(s.value("ui/log_retention", 500).toInt());
 
         const QString currentTheme = s.value("ui/theme", "system").toString();

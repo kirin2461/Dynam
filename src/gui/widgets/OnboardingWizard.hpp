@@ -97,7 +97,7 @@ private:
         themeCombo_->setCurrentIndex(themeCombo_->findData(current));
 
         autoConnect_ = new QCheckBox(tr("Connect automatically on launch"), page);
-        autoConnect_->setChecked(QSettings().value("ui/auto_connect", false).toBool());
+        autoConnect_->setChecked(QSettings().value("ui/auto_connect", true).toBool());
 
         auto* themeRow = new QHBoxLayout;
         themeRow->addWidget(new QLabel(tr("Theme:"), page));
