@@ -40,6 +40,7 @@ class DPIMetricsPanel;
 class DPIStrategyEditor;
 class DnsLookupPanel;
 class UrlProbePanel;
+class SiteScraperPanel;
 class PollerEngine;
 class PollerPanel;
 
@@ -146,6 +147,7 @@ private:
     DPIStrategyEditor* dpiStrategyEditor_ = nullptr;
     DnsLookupPanel*    dnsLookupPanel_    = nullptr;
     UrlProbePanel*     urlProbePanel_     = nullptr;
+    SiteScraperPanel*  siteScraperPanel_  = nullptr;
     PollerPanel*       pollerPanel_       = nullptr;
     std::unique_ptr<PollerEngine> pollerEngine_;
 

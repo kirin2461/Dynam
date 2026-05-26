@@ -18,6 +18,7 @@
 #include "widgets/DiagnosticsDialog.hpp"
 #include "widgets/DnsLookupPanel.hpp"
 #include "widgets/UrlProbePanel.hpp"
+#include "widgets/SiteScraperPanel.hpp"
 #include "widgets/DPIStrategyEditor.hpp"
 #include "widgets/Profiles.hpp"
 #include "widgets/PollerEngine.hpp"
@@ -206,10 +207,12 @@ void MainWindow::setupUI() {
     auto* toolsTab = new QWidget(tabs);
     auto* toolsLayout = new QVBoxLayout(toolsTab);
     auto* toolsInner = new QTabWidget(toolsTab);
-    dnsLookupPanel_ = new DnsLookupPanel(this);
-    urlProbePanel_  = new UrlProbePanel(this);
-    toolsInner->addTab(dnsLookupPanel_, tr("DNS Lookup"));
-    toolsInner->addTab(urlProbePanel_,  tr("URL Probe"));
+    dnsLookupPanel_   = new DnsLookupPanel(this);
+    urlProbePanel_    = new UrlProbePanel(this);
+    siteScraperPanel_ = new SiteScraperPanel(this);
+    toolsInner->addTab(dnsLookupPanel_,   tr("DNS Lookup"));
+    toolsInner->addTab(urlProbePanel_,    tr("URL Probe"));
+    toolsInner->addTab(siteScraperPanel_, tr("Site Scraper"));
     toolsLayout->addWidget(toolsInner);
     tabs->addTab(toolsTab, tr("Tools"));
 

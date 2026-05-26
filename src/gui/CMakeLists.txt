@@ -31,6 +31,7 @@ set(NCP_GUI_HEADERS
     widgets/PollerEngine.hpp
     widgets/PollerPanel.hpp
     widgets/AdvancedSettingsPanel.hpp
+    widgets/SiteScraperPanel.hpp
 )
 
 # Create GUI library
