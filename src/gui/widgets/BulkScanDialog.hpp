@@ -20,7 +20,10 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QFile>
+#include <QInputDialog>
+#include <QMenu>
 #include "ScanCommon.hpp"
+#include "PollerEngine.hpp"
 
 // Bulk scanner — paste URLs (one per line), Run, watch the leaderboard
 // fill in real time as ScanProbe instances finish. Concurrency capped at
@@ -29,10 +32,12 @@
 class BulkScanDialog : public QDialog {
     Q_OBJECT
 public:
-    explicit BulkScanDialog(QWidget* parent = nullptr) : QDialog(parent) {
+    explicit BulkScanDialog(PollerEngine* poller = nullptr,
+                              QWidget* parent = nullptr)
+        : QDialog(parent), poller_(poller) {
         setWindowTitle(tr("Dynam — Bulk Site Scan"));
         setModal(false);
-        resize(960, 640);
+        resize(1000, 660);
         net_ = new QNetworkAccessManager(this);
 
         auto* root = new QVBoxLayout(this);
@@ -51,16 +56,32 @@ public:
         leftLayout->addWidget(urlInput_, 1);
 
         auto* btnRow = new QHBoxLayout;
-        runBtn_    = new QPushButton(tr("Run scan"), leftWidget);
-        cancelBtn_ = new QPushButton(tr("Cancel"), leftWidget);
+        runBtn_      = new QPushButton(tr("Run scan"), leftWidget);
+        cancelBtn_   = new QPushButton(tr("Cancel"), leftWidget);
         cancelBtn_->setEnabled(false);
-        exportBtn_ = new QPushButton(tr("Export JSON…"), leftWidget);
-        exportBtn_->setEnabled(false);
+        historyBtn_  = new QPushButton(tr("History…"), leftWidget);
         btnRow->addWidget(runBtn_);
         btnRow->addWidget(cancelBtn_);
         btnRow->addStretch(1);
-        btnRow->addWidget(exportBtn_);
+        btnRow->addWidget(historyBtn_);
         leftLayout->addLayout(btnRow);
+
+        auto* btnRow2 = new QHBoxLayout;
+        exportJsonBtn_ = new QPushButton(tr("Export JSON…"), leftWidget);
+        exportHtmlBtn_ = new QPushButton(tr("Export HTML…"), leftWidget);
+        scheduleBtn_   = new QPushButton(tr("Schedule re-scans…"), leftWidget);
+        exportJsonBtn_->setEnabled(false);
+        exportHtmlBtn_->setEnabled(false);
+        scheduleBtn_->setEnabled(false);
+        scheduleBtn_->setToolTip(poller_
+            ? tr("Create a Poller target for every URL so they're checked on a schedule")
+            : tr("Poller engine not available; schedule disabled"));
+        scheduleBtn_->setVisible(poller_ != nullptr);
+        btnRow2->addWidget(exportJsonBtn_);
+        btnRow2->addWidget(exportHtmlBtn_);
+        btnRow2->addStretch(1);
+        btnRow2->addWidget(scheduleBtn_);
+        leftLayout->addLayout(btnRow2);
 
         progress_ = new QProgressBar(leftWidget);
         progress_->setVisible(false);
@@ -91,9 +112,12 @@ public:
         split->setStretchFactor(1, 3);
         root->addWidget(split, 1);
 
-        connect(runBtn_,    &QPushButton::clicked, this, &BulkScanDialog::startRun);
-        connect(cancelBtn_, &QPushButton::clicked, this, &BulkScanDialog::cancelRun);
-        connect(exportBtn_, &QPushButton::clicked, this, &BulkScanDialog::exportJson);
+        connect(runBtn_,        &QPushButton::clicked, this, &BulkScanDialog::startRun);
+        connect(cancelBtn_,     &QPushButton::clicked, this, &BulkScanDialog::cancelRun);
+        connect(exportJsonBtn_, &QPushButton::clicked, this, &BulkScanDialog::exportJson);
+        connect(exportHtmlBtn_, &QPushButton::clicked, this, &BulkScanDialog::exportHtml);
+        connect(scheduleBtn_,   &QPushButton::clicked, this, &BulkScanDialog::scheduleRescans);
+        connect(historyBtn_,    &QPushButton::clicked, this, &BulkScanDialog::openHistory);
     }
 
 private slots:
@@ -121,7 +145,9 @@ private slots:
         progress_->setValue(0);
         runBtn_->setEnabled(false);
         cancelBtn_->setEnabled(true);
-        exportBtn_->setEnabled(false);
+        exportJsonBtn_->setEnabled(false);
+        exportHtmlBtn_->setEnabled(false);
+        scheduleBtn_->setEnabled(false);
         cancelled_ = false;
         pumpQueue();
     }
@@ -148,6 +174,100 @@ private slots:
             return;
         }
         f.write(doc.toJson(QJsonDocument::Indented));
+    }
+
+    void exportHtml() {
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("Export HTML report"),
+            QDir::homePath() + "/Desktop/dynam-bulk-"
+                + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss") + ".html",
+            tr("HTML (*.html);;All files (*)"));
+        if (path.isEmpty()) return;
+        QFile f(path);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            QMessageBox::warning(this, tr("Export failed"), f.errorString());
+            return;
+        }
+        f.write(renderHtmlReport().toUtf8());
+    }
+
+    void scheduleRescans() {
+        if (!poller_ || results_.isEmpty()) return;
+        bool ok = false;
+        const int interval = QInputDialog::getInt(this,
+            tr("Schedule re-scans"),
+            tr("Re-check every N seconds:"),
+            300 /*default*/, 30, 86400, 30, &ok);
+        if (!ok) return;
+        int created = 0;
+        for (const auto& r : results_) {
+            PollerTarget t;
+            t.name        = r.title.isEmpty() ? r.requestUrl.host() : r.title;
+            t.kind        = PollerKind::HttpsUrl;
+            t.target      = r.requestUrl.toString();
+            t.intervalSec = interval;
+            poller_->addTarget(t);
+            ++created;
+        }
+        QMessageBox::information(this, tr("Scheduled"),
+            tr("Created %1 Poller target%2 with a %3-second interval. "
+               "Open the Poller tab in the main window to see them live.")
+                .arg(created).arg(created == 1 ? "" : "s").arg(interval));
+    }
+
+    void openHistory() {
+        const auto entries = ScanHistory::list("bulk");
+        if (entries.isEmpty()) {
+            QMessageBox::information(this, tr("History"),
+                tr("No previous bulk runs found in ~/.dynam/scans/."));
+            return;
+        }
+        QStringList labels;
+        for (const auto& e : entries) labels << e.second;
+        bool ok = false;
+        const QString choice = QInputDialog::getItem(this,
+            tr("Load bulk history"),
+            tr("Pick a previous run to display:"),
+            labels, 0, false, &ok);
+        if (!ok) return;
+        const int idx = labels.indexOf(choice);
+        if (idx < 0) return;
+        loadFromFile(entries[idx].first);
+    }
+
+    void loadFromFile(const QString& path) {
+        const auto doc = ScanHistory::load(path);
+        if (!doc.isArray()) return;
+        results_.clear();
+        table_->setSortingEnabled(false);
+        table_->setRowCount(0);
+        for (const QJsonValue& v : doc.array()) {
+            // Minimal round-trip: only fill the fields the table renders.
+            // Full ScanReport::fromJson would be richer but isn't worth
+            // implementing for the leaderboard view.
+            ScanReport r;
+            const auto o = v.toObject();
+            r.requestUrl    = QUrl(o.value("request_url").toString());
+            r.finalUrl      = QUrl(o.value("final_url").toString());
+            r.httpStatus    = o.value("http_status").toInt();
+            r.title         = o.value("title").toString();
+            r.server        = o.value("server").toString();
+            const auto sec  = o.value("security").toObject();
+            r.secScore      = sec.value("score").toInt();
+            r.secMax        = sec.value("max").toInt();
+            r.secGrade      = sec.value("grade").toString();
+            const auto tls  = o.value("tls").toObject();
+            r.tlsProtocol   = tls.value("protocol").toString();
+            r.tlsBits       = tls.value("bits").toInt();
+            for (const QJsonValue& t : o.value("tech").toArray())
+                r.techDetected.append(t.toString());
+            addResultRow(r);
+            results_.append(r);
+        }
+        table_->setSortingEnabled(true);
+        exportJsonBtn_->setEnabled(true);
+        exportHtmlBtn_->setEnabled(true);
+        scheduleBtn_->setEnabled(poller_ != nullptr);
     }
 
 private:
@@ -222,17 +342,130 @@ private:
         progress_->setVisible(false);
         runBtn_->setEnabled(true);
         cancelBtn_->setEnabled(false);
-        exportBtn_->setEnabled(!results_.isEmpty());
+        const bool any = !results_.isEmpty();
+        exportJsonBtn_->setEnabled(any);
+        exportHtmlBtn_->setEnabled(any);
+        scheduleBtn_->setEnabled(any && poller_ != nullptr);
         // Re-enable sorting; sort by grade descending (A first) by default
         table_->setSortingEnabled(true);
         for (int c = 0; c < 6; ++c) table_->resizeColumnToContents(c);
+
+        // Persist a snapshot so the user can revisit via History…
+        // (kept under ~/.dynam/scans/, auto-pruned to kMaxHistory).
+        if (any && !cancelled_) {
+            QJsonArray arr;
+            for (const auto& r : results_) arr.append(r.toJson());
+            ScanHistory::save("bulk", arr);
+        }
+    }
+
+    // Standalone HTML report — inline CSS, no JS, works offline. Uses
+    // simple coloured bars for the grade-distribution chart instead of
+    // dragging in a chart library.
+    QString renderHtmlReport() const {
+        QHash<QString, int> gradeCount;
+        for (const auto& r : results_) gradeCount[r.secGrade.isEmpty() ? "?" : r.secGrade]++;
+        const QStringList gradeOrder = {"A", "B", "C", "D", "F", "?"};
+        const QHash<QString, QString> gradeColor = {
+            {"A", "#2ecc71"}, {"B", "#3498db"}, {"C", "#f39c12"},
+            {"D", "#e67e22"}, {"F", "#e74c3c"}, {"?", "#7f8c8d"},
+        };
+        const int total = results_.size();
+
+        QString html;
+        html += "<!doctype html>\n<html><head><meta charset=\"utf-8\">\n";
+        html += "<title>Dynam bulk scan — " + QDateTime::currentDateTime().toString(Qt::ISODate) + "</title>\n";
+        html += "<style>\n"
+                "  body { font-family: -apple-system, sans-serif; max-width: 1100px; "
+                "         margin: 32px auto; padding: 0 24px; color: #222; }\n"
+                "  h1   { border-bottom: 2px solid #eee; padding-bottom: 8px; }\n"
+                "  .meta { color: #888; font-size: 13px; }\n"
+                "  .chart { display: flex; gap: 4px; height: 36px; margin: 16px 0; }\n"
+                "  .chart .bar { color: white; padding: 8px; font-weight: bold; min-width: 24px; "
+                "                text-align: center; border-radius: 3px; }\n"
+                "  .card { border: 1px solid #ddd; border-radius: 6px; padding: 16px; "
+                "          margin: 12px 0; background: #fafafa; }\n"
+                "  .grade { display: inline-block; padding: 2px 10px; border-radius: 4px; "
+                "           color: white; font-weight: bold; }\n"
+                "  .url   { font-family: Menlo, monospace; color: #555; word-break: break-all; }\n"
+                "  table { border-collapse: collapse; width: 100%; font-size: 13px; }\n"
+                "  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eee; }\n"
+                "  th { background: #f5f5f5; }\n"
+                "  .tech { color: #555; font-size: 12px; }\n"
+                "</style>\n</head>\n<body>\n";
+
+        html += QString("<h1>Bulk site scan</h1>\n"
+                        "<p class=\"meta\">Generated %1 · %2 target%3</p>\n")
+                    .arg(QDateTime::currentDateTime().toString(Qt::ISODate))
+                    .arg(total).arg(total == 1 ? "" : "s");
+
+        // Chart bar
+        html += "<h2>Grade distribution</h2>\n<div class=\"chart\">\n";
+        for (const QString& g : gradeOrder) {
+            const int n = gradeCount.value(g);
+            if (n == 0) continue;
+            const int pct = total ? (100 * n / total) : 0;
+            html += QString("  <div class=\"bar\" style=\"background:%1; flex:%2;\">%3 · %4</div>\n")
+                        .arg(gradeColor.value(g)).arg(n).arg(g).arg(n);
+        }
+        html += "</div>\n";
+
+        // Summary table
+        html += "<h2>Leaderboard</h2>\n<table>\n";
+        html += "<tr><th>URL</th><th>Status</th><th>Grade</th><th>Score</th>"
+                "<th>TLS</th><th>Server</th><th>Tech</th></tr>\n";
+        for (const auto& r : results_) {
+            const QString g = r.secGrade.isEmpty() ? "?" : r.secGrade;
+            html += "<tr>"
+                    "<td class=\"url\">" + r.requestUrl.toString().toHtmlEscaped() + "</td>"
+                    "<td>" + QString::number(r.httpStatus) + "</td>"
+                    "<td><span class=\"grade\" style=\"background:" + gradeColor.value(g) + "\">"
+                          + g + "</span></td>"
+                    "<td>" + QString("%1/%2").arg(r.secScore).arg(r.secMax) + "</td>"
+                    "<td>" + (r.tlsProtocol.isEmpty() ? "—" : r.tlsProtocol) + "</td>"
+                    "<td>" + r.server.toHtmlEscaped() + "</td>"
+                    "<td class=\"tech\">" + r.techDetected.join(", ").toHtmlEscaped() + "</td>"
+                    "</tr>\n";
+        }
+        html += "</table>\n";
+
+        // Per-target detail cards
+        html += "<h2>Per-target detail</h2>\n";
+        for (const auto& r : results_) {
+            const QString g = r.secGrade.isEmpty() ? "?" : r.secGrade;
+            html += "<div class=\"card\">\n";
+            html += "<h3>" + r.requestUrl.toString().toHtmlEscaped() + " · "
+                    "<span class=\"grade\" style=\"background:" + gradeColor.value(g) + "\">"
+                    + g + " · " + QString::number(r.secScore) + "/" + QString::number(r.secMax)
+                    + "</span></h3>\n";
+            html += "<p class=\"url\">→ " + r.finalUrl.toString().toHtmlEscaped() + "</p>\n";
+            if (!r.title.isEmpty())
+                html += "<p><b>" + r.title.toHtmlEscaped() + "</b></p>\n";
+            html += "<p>HTTP " + QString::number(r.httpStatus)
+                    + " · " + QString::number(r.timingMs) + " ms"
+                    + (r.server.isEmpty() ? "" : " · " + r.server.toHtmlEscaped()) + "</p>\n";
+            if (!r.tlsProtocol.isEmpty())
+                html += "<p>TLS: " + r.tlsProtocol + " · " + r.tlsCipher
+                        + " (" + QString::number(r.tlsBits) + "-bit)</p>\n";
+            if (!r.techDetected.isEmpty())
+                html += "<p class=\"tech\">Tech: " + r.techDetected.join(", ").toHtmlEscaped() + "</p>\n";
+            html += "</div>\n";
+        }
+
+        html += "<p class=\"meta\">Report generated by Dynam Site Scraper</p>\n";
+        html += "</body></html>\n";
+        return html;
     }
 
     QNetworkAccessManager* net_;
+    PollerEngine*    poller_;
     QPlainTextEdit*  urlInput_;
     QPushButton*     runBtn_;
     QPushButton*     cancelBtn_;
-    QPushButton*     exportBtn_;
+    QPushButton*     historyBtn_;
+    QPushButton*     exportJsonBtn_;
+    QPushButton*     exportHtmlBtn_;
+    QPushButton*     scheduleBtn_;
     QProgressBar*    progress_;
     QTableWidget*    table_;
 

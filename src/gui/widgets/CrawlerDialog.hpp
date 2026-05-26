@@ -19,6 +19,11 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QElapsedTimer>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QInputDialog>
+#include <QMessageBox>
+#include "ScanCommon.hpp"
 
 // Depth-limited BFS crawler. Starts from the input URL, fetches each
 // page, extracts internal links from <a href>, queues new ones up to
@@ -59,9 +64,11 @@ public:
         auto* btnRow = new QHBoxLayout;
         startBtn_  = new QPushButton(tr("Start crawl"), this);
         stopBtn_   = new QPushButton(tr("Stop"), this);
+        historyBtn_ = new QPushButton(tr("History…"), this);
         stopBtn_->setEnabled(false);
         btnRow->addWidget(startBtn_);
         btnRow->addWidget(stopBtn_);
+        btnRow->addWidget(historyBtn_);
         btnRow->addStretch(1);
         statusLabel_ = new QLabel(tr("idle"), this);
         statusLabel_->setStyleSheet("color:#888;");
@@ -86,9 +93,10 @@ public:
         table_->verticalHeader()->setVisible(false);
         root->addWidget(table_, 1);
 
-        connect(startBtn_,  &QPushButton::clicked,     this, &CrawlerDialog::start);
-        connect(stopBtn_,   &QPushButton::clicked,     this, &CrawlerDialog::stop);
-        connect(urlEdit_,   &QLineEdit::returnPressed, this, &CrawlerDialog::start);
+        connect(startBtn_,   &QPushButton::clicked,     this, &CrawlerDialog::start);
+        connect(stopBtn_,    &QPushButton::clicked,     this, &CrawlerDialog::stop);
+        connect(urlEdit_,    &QLineEdit::returnPressed, this, &CrawlerDialog::start);
+        connect(historyBtn_, &QPushButton::clicked,     this, &CrawlerDialog::openHistory);
     }
 
 private slots:
@@ -108,6 +116,7 @@ private slots:
         cancelled_  = false;
         visited_.clear();
         queue_.clear();
+        capturedRows_.clear();
         table_->setRowCount(0);
         table_->setSortingEnabled(false);
 
@@ -201,8 +210,21 @@ private:
         });
     }
 
+    // In-memory record of every row, used for save-on-finalize + history reload.
+    struct Row {
+        int depth = 0; int status = 0; QString url, type, title; qint64 bytes = 0;
+        QJsonObject toJson() const {
+            QJsonObject o;
+            o["depth"]=depth; o["status"]=status; o["url"]=url;
+            o["type"]=type; o["bytes"]=static_cast<qint64>(bytes); o["title"]=title;
+            return o;
+        }
+    };
+    QList<Row> capturedRows_;
+
     void addRow(int depth, int status, const QString& url,
                   const QString& type, qint64 bytes, const QString& title) {
+        capturedRows_.append({depth, status, url, type, title, bytes});
         const int row = table_->rowCount();
         table_->insertRow(row);
 
@@ -241,8 +263,62 @@ private:
             ? tr("cancelled — %1 pages fetched").arg(fetched_)
             : tr("done — %1 pages, %2 queued unvisited")
                 .arg(fetched_).arg(queue_.size() + visited_.size() - fetched_));
+
+        // Persist a snapshot so the user can revisit via History….
+        if (!capturedRows_.isEmpty() && !cancelled_) {
+            QJsonObject doc;
+            doc["seed"]      = seedHost_;
+            doc["max_depth"] = maxDepth_;
+            doc["page_cap"]  = pageCap_;
+            doc["timestamp"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+            QJsonArray rows;
+            for (const auto& r : capturedRows_) rows.append(r.toJson());
+            doc["rows"] = rows;
+            ScanHistory::save("crawl", doc);
+        }
         fetched_   = 0;
         inFlight_  = 0;
+    }
+
+    void openHistory() {
+        const auto entries = ScanHistory::list("crawl");
+        if (entries.isEmpty()) {
+            QMessageBox::information(this, tr("History"),
+                tr("No previous crawl runs found in ~/.dynam/scans/."));
+            return;
+        }
+        QStringList labels;
+        for (const auto& e : entries) labels << e.second;
+        bool ok = false;
+        const QString choice = QInputDialog::getItem(this,
+            tr("Load crawl history"),
+            tr("Pick a previous crawl to display:"),
+            labels, 0, false, &ok);
+        if (!ok) return;
+        const int idx = labels.indexOf(choice);
+        if (idx < 0) return;
+        const auto doc = ScanHistory::load(entries[idx].first);
+        if (!doc.isObject()) return;
+        const auto obj = doc.object();
+        seedHost_ = obj.value("seed").toString();
+        urlEdit_->setText("https://" + seedHost_);
+        depthSpin_->setValue(obj.value("max_depth").toInt(2));
+        capSpin_->setValue(obj.value("page_cap").toInt(30));
+        table_->setSortingEnabled(false);
+        table_->setRowCount(0);
+        capturedRows_.clear();
+        for (const QJsonValue& v : obj.value("rows").toArray()) {
+            const auto r = v.toObject();
+            addRow(r.value("depth").toInt(),
+                   r.value("status").toInt(),
+                   r.value("url").toString(),
+                   r.value("type").toString(),
+                   r.value("bytes").toVariant().toLongLong(),
+                   r.value("title").toString());
+        }
+        table_->setSortingEnabled(true);
+        statusLabel_->setText(tr("loaded %1 rows from %2")
+                                .arg(capturedRows_.size()).arg(entries[idx].second));
     }
 
     QNetworkAccessManager* net_;
@@ -251,6 +327,7 @@ private:
     QSpinBox*     capSpin_;
     QPushButton*  startBtn_;
     QPushButton*  stopBtn_;
+    QPushButton*  historyBtn_;
     QProgressBar* progress_;
     QLabel*       statusLabel_;
     QTableWidget* table_;

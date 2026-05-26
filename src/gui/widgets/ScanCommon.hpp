@@ -29,6 +29,10 @@
 #include <QSet>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QDir>
+#include <QFile>
+#include <QDateTime>
 
 // ─── ScanReport: everything we learned about one URL ────────────────────────
 struct ScanReport {
@@ -499,3 +503,71 @@ private:
     ScanReport             report_;
     QElapsedTimer          timer_;
 };
+
+// ─── ScanHistory: persistence under ~/.dynam/scans/ ────────────────────────
+// Two file kinds:
+//   ~/.dynam/scans/bulk-YYYYMMDD-HHMMSS.json   ← array of ScanReport
+//   ~/.dynam/scans/crawl-YYYYMMDD-HHMMSS.json  ← {seed, depth, cap, rows:[…]}
+// Auto-prune to last kMaxHistory of each kind so the directory doesn't grow
+// unbounded.
+namespace ScanHistory {
+
+inline QString dirPath() {
+    const QString dir = QDir::homePath() + "/.dynam/scans";
+    QDir().mkpath(dir);
+    return dir;
+}
+
+inline QString stamp() {
+    return QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss");
+}
+
+constexpr int kMaxHistory = 50;
+
+inline void pruneOld(const QString& kind);  // fwd-decl for save() below
+
+// Generic kind-keyed save / list / load. `kind` is "bulk" or "crawl".
+inline QString save(const QString& kind, const QJsonValue& payload) {
+    const QString path = QString("%1/%2-%3.json")
+                            .arg(dirPath(), kind, stamp());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return {};
+    QJsonDocument doc(payload.isObject() ? QJsonDocument(payload.toObject())
+                                          : QJsonDocument(payload.toArray()));
+    f.write(doc.toJson(QJsonDocument::Indented));
+    pruneOld(kind);
+    return path;
+}
+
+// Return list of (path, ISO timestamp) tuples, newest first.
+inline QList<QPair<QString, QString>> list(const QString& kind) {
+    QList<QPair<QString, QString>> out;
+    QDir d(dirPath());
+    const auto files = d.entryList({kind + "-*.json"}, QDir::Files,
+                                    QDir::Name | QDir::Reversed);
+    for (const QString& name : files) {
+        const QString stem = name.section('.', 0, 0);          // bulk-20260525-153012
+        const QString ts   = stem.section('-', 1);             // 20260525-153012
+        QDateTime when = QDateTime::fromString(ts, "yyyyMMdd-HHmmss");
+        out.append({d.absoluteFilePath(name),
+                    when.isValid() ? when.toString("yyyy-MM-dd HH:mm:ss") : ts});
+    }
+    return out;
+}
+
+inline QJsonDocument load(const QString& path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    return QJsonDocument::fromJson(f.readAll());
+}
+
+inline void pruneOld(const QString& kind) {
+    QDir d(dirPath());
+    const auto files = d.entryList({kind + "-*.json"}, QDir::Files,
+                                    QDir::Name | QDir::Reversed);
+    for (int i = kMaxHistory; i < files.size(); ++i) {
+        d.remove(files[i]);
+    }
+}
+
+}  // namespace ScanHistory

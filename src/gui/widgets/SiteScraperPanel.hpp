@@ -54,10 +54,16 @@
 //
 // Each section is its own QGroupBox in a scroll area; a section renders
 // the moment its probe finishes.
+class PollerEngine;  // fwd-decl (full include is in BulkScanDialog.hpp)
 class SiteScraperPanel : public QWidget {
     Q_OBJECT
 public:
-    explicit SiteScraperPanel(QWidget* parent = nullptr) : QWidget(parent) {
+    // PollerEngine* is optional — when present, the Bulk dialog can
+    // schedule re-scans by adding HttpsUrl Poller targets. When null,
+    // the Schedule button stays hidden.
+    explicit SiteScraperPanel(PollerEngine* poller = nullptr,
+                                QWidget* parent = nullptr)
+        : QWidget(parent), poller_(poller) {
         net_ = new QNetworkAccessManager(this);
 
         auto* root = new QVBoxLayout(this);
@@ -230,7 +236,7 @@ private:
     }
 
     void openBulkDialog() {
-        auto* dlg = new BulkScanDialog(this);
+        auto* dlg = new BulkScanDialog(poller_, this);
         dlg->setAttribute(Qt::WA_DeleteOnClose);
         dlg->show();
     }
@@ -706,4 +712,5 @@ private:
     int                    pendingProbes_ = 0;
     ScanReport             report_;        // accumulated during scan
     QByteArray             rawBody_;       // kept for tech detection in probeDone()
+    PollerEngine*          poller_;        // borrowed; for "Schedule re-scans"
 };

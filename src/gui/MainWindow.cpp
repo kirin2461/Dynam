@@ -209,7 +209,7 @@ void MainWindow::setupUI() {
     auto* toolsInner = new QTabWidget(toolsTab);
     dnsLookupPanel_   = new DnsLookupPanel(this);
     urlProbePanel_    = new UrlProbePanel(this);
-    siteScraperPanel_ = new SiteScraperPanel(this);
+    siteScraperPanel_ = new SiteScraperPanel(pollerEngine_.get(), this);
     toolsInner->addTab(dnsLookupPanel_,   tr("DNS Lookup"));
     toolsInner->addTab(urlProbePanel_,    tr("URL Probe"));
     toolsInner->addTab(siteScraperPanel_, tr("Site Scraper"));
