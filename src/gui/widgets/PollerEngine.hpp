@@ -325,22 +325,57 @@ private:
                 return;
             }
             const QByteArray body = reply->readAll();
+
+            // If the user didn't supply a criterion, they're just using the
+            // API kind for labelling — don't force the body to be JSON. The
+            // HTTP status above already passed, so we're done.
+            if (criteria.isEmpty()) {
+                recordResult(id, true, ms,
+                             QString("HTTP %1 · %2 B body (no criterion)")
+                                 .arg(status).arg(body.size()));
+                reply->deleteLater();
+                return;
+            }
+
             QJsonParseError perr;
             const auto doc = QJsonDocument::fromJson(body, &perr);
             if (perr.error != QJsonParseError::NoError) {
                 recordResult(id, false, ms,
-                             QString("invalid JSON: %1").arg(perr.errorString()));
+                             formatJsonParseError(body, perr));
                 reply->deleteLater();
                 return;
             }
             QString detail = QString("HTTP %1 · JSON ok").arg(status);
-            bool ok = true;
-            if (!criteria.isEmpty()) {
-                ok = evaluateJsonCriterion(doc, criteria, detail);
-            }
+            bool ok = evaluateJsonCriterion(doc, criteria, detail);
             recordResult(id, ok, ms, detail);
             reply->deleteLater();
         });
+    }
+
+    // Build a diagnostic like "invalid JSON @ byte 142: illegal number
+    // near `…99.5, "size":0123, "up…`". The window shrinks at start/end
+    // of body so we never read out of bounds.
+    static QString formatJsonParseError(const QByteArray& body,
+                                          const QJsonParseError& perr) {
+        const int n      = body.size();
+        const int center = std::clamp(perr.offset, 0, n);
+        const int from   = std::max(0, center - 20);
+        const int to     = std::min(n, center + 20);
+        const QByteArray snippet = body.mid(from, to - from);
+        // Make the snippet single-line and safely printable.
+        QString clean = QString::fromUtf8(snippet)
+                            .replace('\n', QChar(0x21B5))   // ↵
+                            .replace('\r', "")
+                            .replace('\t', " ");
+        // Insert a marker at the error position within the snippet.
+        const int markerAt = center - from;
+        if (markerAt >= 0 && markerAt <= clean.size()) {
+            clean.insert(markerAt, "›");  // hint at the bad byte
+        }
+        return QString("invalid JSON @ byte %1: %2 near `%3`")
+                   .arg(perr.offset)
+                   .arg(perr.errorString())
+                   .arg(clean);
     }
 
     // Open a TLS connection, grab the peer cert, check days remaining.
