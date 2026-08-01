@@ -392,7 +392,7 @@ int main(int argc, char* argv[]) {
 
     ArgumentParser parser("ncp", "v1.2.0");
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers)", handle_run, {"[<interface>]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch)", handle_run, {"[<interface>]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
     parser.add_command("rotate", "Rotate all identities", handle_rotate);
@@ -613,6 +613,18 @@ void handle_run(const std::vector<std::string>& args) {
         
         // 3. Activate ParanoidMode with TINFOIL_HAT threat level
         g_app.paranoid->set_threat_level(ParanoidMode::ThreatLevel::TINFOIL_HAT);
+
+        // Kill switch is strictly opt-in: it installs a firewall rule dropping ALL
+        // non-loopback traffic. If this process dies unexpectedly (SIGKILL, crash,
+        // reboot), the rule persists and locks the machine off the network entirely
+        // (including SSH). Arm it only when explicitly requested via --kill-switch.
+        {
+            ParanoidMode::NetworkIsolation ni{};
+            ni.enable_kill_switch = has_flag(args, "--kill-switch")
+                                    && !has_flag(args, "--no-kill-switch");
+            g_app.paranoid->set_network_isolation(ni);
+        }
+
         if (!g_app.paranoid->activate()) {
             std::cerr << "[!] Warning: ParanoidMode failed to activate (continuing without it)\n";
             g_app.paranoid.reset();
