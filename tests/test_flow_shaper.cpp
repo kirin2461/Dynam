@@ -140,16 +140,23 @@ TEST_F(FlowShaperTest, ShapeSync_PacketDataPreserved) {
     auto pkt = make_packet(64);
     auto result = fs.shape_sync(pkt, true);
 
-    // At least one packet should contain the original data (possibly with headers)
-    EXPECT_FALSE(result.empty());
-    bool found = false;
+    ASSERT_FALSE(result.empty());
+
+    // The shaper may legitimately fragment the packet into smaller chunks and
+    // insert dummy/padding packets (RNG-dependent), so no single output packet
+    // is guaranteed to be >= 64 bytes. What MUST hold: the original payload
+    // bytes appear, in order, across the concatenated non-dummy output.
+    std::vector<uint8_t> payload;
     for (auto& sp : result) {
-        if (sp.data.size() >= pkt.size()) {
-            found = true;
-            break;
-        }
+        if (!sp.is_dummy) payload.insert(payload.end(), sp.data.begin(), sp.data.end());
     }
-    EXPECT_TRUE(found);
+    ASSERT_GE(payload.size(), pkt.size());
+
+    size_t pi = 0;
+    for (uint8_t b : payload) {
+        if (pi < pkt.size() && b == pkt[pi]) ++pi;
+    }
+    EXPECT_EQ(pi, pkt.size()) << "original packet bytes not found in shaped output";
 }
 
 TEST_F(FlowShaperTest, ShapeSync_LargePacket_MayBeSplit) {
