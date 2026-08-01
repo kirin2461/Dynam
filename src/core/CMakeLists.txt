@@ -310,7 +310,8 @@ elseif(WIN32)
     endif()
 
     # Windows networking libraries for hybrid backend (always needed)
-    target_link_libraries(ncp_core PUBLIC ws2_32 iphlpapi)
+    # winhttp: WinHttp* API used by network.cpp
+    target_link_libraries(ncp_core PUBLIC ws2_32 iphlpapi winhttp)
 
     # bcrypt.lib for CSPRNG in anti-TSPU modules
     target_link_libraries(ncp_core PUBLIC bcrypt)
@@ -347,8 +348,23 @@ if(WIN32)
         endif()
     endif()
 
-    # WFP library for legacy WFP backend
-    target_link_libraries(ncp_core PUBLIC fwpuclnt)
+    # WFP (Windows Filtering Platform) SDK detection.
+    # mingw-w64 (at least < v10) ships an incomplete fwpmu.h (no FWPM_*
+    # constants) and no fwpuclnt import library. Disable WFP code there;
+    # WinDivert is the real interception backend on Windows anyway.
+    include(CheckCXXSourceCompiles)
+    check_cxx_source_compiles("
+#include <winsock2.h>
+#include <windows.h>
+#include <fwpmu.h>
+int main() { return (int)FWPM_SESSION_FLAG_DYNAMIC; }
+" HAVE_WFP_SDK)
+    if(HAVE_WFP_SDK)
+        target_link_libraries(ncp_core PUBLIC fwpuclnt)
+    else()
+        target_compile_definitions(ncp_core PRIVATE NCP_NO_WFP)
+        message(STATUS "WFP SDK unavailable - WFP code disabled (WinDivert backend only)")
+    endif()
 endif()
 
 # ==================== Optional: libnetfilter_queue ====================

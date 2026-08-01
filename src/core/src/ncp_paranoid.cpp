@@ -332,7 +332,7 @@ bool ParanoidMode::deactivate() {
     }
 
     // Teardown kill switch before clearing flag
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
     if (impl_->wfp_engine_handle) {
         // Remove all WFP filters
         for (UINT64 filter_id : impl_->wfp_filter_ids) {
@@ -342,6 +342,8 @@ bool ParanoidMode::deactivate() {
         FwpmEngineClose0(impl_->wfp_engine_handle);
         impl_->wfp_engine_handle = nullptr;
     }
+#elif defined(_WIN32)
+    // WFP SDK unavailable in this build - no firewall rules were installed
 #else
     if (impl_->kill_switch_active) {
         // Remove iptables rules via fork+exec
@@ -1353,7 +1355,7 @@ void ParanoidMode::setup_kill_switch() {
         impl_->kill_switch_timeout_enabled = true;
     }
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
     // Windows: Use Windows Filtering Platform (WFP)
     FWPM_SESSION0 session = {};
     session.flags = FWPM_SESSION_FLAG_DYNAMIC;  // Filters removed on process exit
@@ -1424,6 +1426,10 @@ void ParanoidMode::setup_kill_switch() {
         }
     }
 
+    impl_->kill_switch_active = true;
+
+#elif defined(_WIN32)
+    // WFP SDK unavailable (e.g. mingw-w64): flag-only mode, no firewall rules
     impl_->kill_switch_active = true;
 
 #else
@@ -1519,7 +1525,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         std::cerr << "[!] Auto-disabling kill switch to restore network connectivity...\n";
 
         // Teardown kill switch
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
         if (impl_->wfp_engine_handle) {
             for (UINT64 filter_id : impl_->wfp_filter_ids) {
                 FwpmFilterDeleteById0(impl_->wfp_engine_handle, filter_id);
@@ -1528,6 +1534,8 @@ void ParanoidMode::check_kill_switch_timeout() {
             FwpmEngineClose0(impl_->wfp_engine_handle);
             impl_->wfp_engine_handle = nullptr;
         }
+#elif defined(_WIN32)
+        // WFP SDK unavailable in this build - no firewall rules were installed
 #else
         // Remove iptables DROP rule
         pid_t pid = fork();

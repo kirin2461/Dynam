@@ -184,7 +184,7 @@ private:
 
 #ifdef _WIN32
 // Standalone DNS setter — works even when the full spoofer fails.
-:// R10-FIX-06: Command injection prevention - validate inputs and use safe parameter passing
+// R10-FIX-06: Command injection prevention - validate inputs and use safe parameter passing
 // Validates that string contains only allowed characters for DNS/interface names
 static bool is_valid_netsh_identifier(const std::string& s) {
     if (s.empty() || s.length() > 256) return false;
@@ -457,11 +457,13 @@ void handle_run(const std::vector<std::string>& args) {
         std::cout << "[*] Starting NCP protection...\n";
         
         // Interface: prefer --interface option, fallback to positional arg
-        std::string interface = get_option(args, "--interface");
-        if (interface.empty()) {
+        // NOTE: `interface` is a COM macro (#define interface struct) in
+        // Windows headers — use iface_opt for the variable name.
+        std::string iface_opt = get_option(args, "--interface");
+        if (iface_opt.empty()) {
             // Positional: first arg that doesn't start with --
             for (const auto& a : args) {
-                if (a.substr(0, 2) != "--") { interface = a; break; }
+                if (a.substr(0, 2) != "--") { iface_opt = a; break; }
             }
         }
         
@@ -499,7 +501,7 @@ void handle_run(const std::vector<std::string>& args) {
             std::cout << "[*] Full spoof mode (IP+MAC+DNS) - use only on wired/static setups\n";
         }
         
-        std::string iface = (interface.empty() || interface == "auto") ? detect_default_interface() : interface;
+        std::string iface = (iface_opt.empty() || iface_opt == "auto") ? detect_default_interface() : iface_opt;
         std::cout << "[*] Interface: " << iface << "\n";
         
         bool dns_set = false;

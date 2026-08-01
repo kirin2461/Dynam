@@ -391,7 +391,7 @@ void DNSLeakPrevention::reset_stats()
 // WINDOWS — WFP
 // ============================================================
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
 
 // We use a fixed GUID for our sublayer so we can find and remove it later.
 // {A1B2C3D4-E5F6-7890-ABCD-EF0123456789}
@@ -752,6 +752,31 @@ uint64_t DNSLeakPrevention::add_wfp_filter_(
 // ============================================================
 // LINUX — iptables
 // ============================================================
+
+#elif defined(_WIN32)
+// WFP SDK headers unavailable in this toolchain (e.g. mingw-w64).
+// DNS leak prevention is disabled; activate() fails gracefully.
+bool DNSLeakPrevention::install_wfp_filters_()
+{
+    NCP_LOG_ERROR("[DNSLeakPrevention] WFP unavailable in this build - DNS leak protection disabled");
+    return false;
+}
+
+bool DNSLeakPrevention::remove_wfp_filters_()
+{
+    return true;
+}
+
+uint64_t DNSLeakPrevention::add_wfp_filter_(
+    HANDLE     /*engine*/,
+    const GUID& /*layer_key*/,
+    const char* /*filter_name*/,
+    uint16_t    /*port*/,
+    bool        /*is_udp*/,
+    const std::string& /*except_ip*/)
+{
+    return 0;
+}
 
 #else // !_WIN32
 

@@ -536,7 +536,7 @@ private:
 };
 #endif // _WIN32 && HAVE_WINDIVERT
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
 // ==================== WFP Backend (Windows) ====================
 // Uses Windows Filtering Platform for network-layer filter management.
 //
@@ -895,7 +895,7 @@ bool PacketInterceptor::initialize(const Config& config) {
     }
 #endif
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
     if (backend == Backend::WFP) {
         impl_ = std::make_unique<WFPBackend>();
         impl_->parent = this;
