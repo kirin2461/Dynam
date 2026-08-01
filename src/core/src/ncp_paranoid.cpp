@@ -1496,7 +1496,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         return;
     }
 
-    auto now = std::chrono::system_clock::now();
+    auto now = std::chrono::steady_clock::now();
     auto elapsed = now - impl_->kill_switch_activation_time;
 
     if (elapsed >= impl_->kill_switch_timeout_duration) {
@@ -1536,7 +1536,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         alert.type = "KILL_SWITCH_TIMEOUT";
         alert.severity = 7;
         alert.message = "Kill switch auto-disabled after timeout expired";
-        alert.timestamp = now;
+        alert.timestamp = std::chrono::system_clock::now();
         security_alerts_.push_back(alert);
     }
 }

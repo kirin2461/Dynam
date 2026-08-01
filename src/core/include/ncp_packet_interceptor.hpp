@@ -177,7 +177,8 @@ public:
      *
      * @return true if backend initialized successfully
      */
-    bool initialize(const Config& config = Config{});
+    bool initialize(const Config& config);
+    bool initialize() { return initialize(Config{}); }
 
     /**
      * @brief Start intercepting packets.

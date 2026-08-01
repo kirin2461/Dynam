@@ -131,7 +131,4 @@ TEST_F(R13FixesTest, CASBackoff_LimitedRetries) {
 }
 
 // Main entry point
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// main() provided by gtest_main (duplicate definition removed)

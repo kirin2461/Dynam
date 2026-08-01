@@ -46,6 +46,7 @@
 #  include <sys/ioctl.h>
 #  include <ifaddrs.h>
 #  include <sys/types.h>
+#  include <sys/stat.h>
 #  include <sys/socket.h>
 #  include <netdb.h>
 #  include <netinet/in.h>
@@ -133,14 +134,6 @@ static std::string json_escape_string_constant_time(const std::string& input, si
         }
         output += buf;
         ++processed;
-    }
-    return output;
-                    snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                    output += buf;
-                } else {
-                    output += c;
-                }
-        }
     }
     return output;
 }

@@ -1,3 +1,4 @@
+#include "../include/ncp_logger.hpp"
 #include "../include/ncp_mimicry.hpp"
 #include <sstream>
 #include <algorithm>
@@ -369,7 +370,7 @@ TrafficMimicry::MimicProfile TrafficMimicry::detect_profile(const std::vector<ui
 // ==================== Timing ====================
 std::chrono::milliseconds TrafficMimicry::get_next_packet_delay() {
     // R6-11: Snapshot config under lock
-    MimicryConfig cfg_snap;
+    MimicConfig cfg_snap;
     {
         std::lock_guard<std::mutex> lock(config_mutex_);
         cfg_snap = config_;
@@ -378,7 +379,7 @@ std::chrono::milliseconds TrafficMimicry::get_next_packet_delay() {
 }
 
 std::chrono::milliseconds TrafficMimicry::calculate_realistic_delay(
-    const MimicryConfig& cfg, TrafficMimicry::MimicProfile profile, size_t packet_size) {
+    const MimicConfig& cfg, TrafficMimicry::MimicProfile profile, size_t packet_size) {
 
     if (!cfg.enable_timing_mimicry) {
         return std::chrono::milliseconds(0);
@@ -611,7 +612,6 @@ std::vector<uint8_t> TrafficMimicry::extract_http_payload(const std::vector<uint
 // ==================== TLS ClientHello wrapper (AEAD encryption) ====================
 
 // FIX: Maximum TLS record size per RFC 8446
-static constexpr size_t MAX_TLS_RECORD_SIZE = 16384;
 
 std::vector<uint8_t> TrafficMimicry::create_https_client_hello_wrapper(const std::vector<uint8_t>& payload) {
     std::string sni = config_.tls_sni;

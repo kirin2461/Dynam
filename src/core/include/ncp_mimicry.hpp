@@ -212,9 +212,10 @@ private:
     std::string generate_random_hostname();
     uint16_t    generate_random_port();
     std::vector<uint8_t> generate_random_padding(size_t min_size, size_t max_size);
-    std::chrono::milliseconds calculate_realistic_delay(const MimicryConfig& cfg, TrafficMimicry::MimicProfile profile, size_t packet_size);
+    std::chrono::milliseconds calculate_realistic_delay(const MimicConfig& cfg, TrafficMimicry::MimicProfile profile, size_t packet_size);
 
     MimicConfig config_;
+    mutable std::mutex config_mutex_;  // guards config_ (R6-11/R6-07 snapshots)
     MimicStats  stats_;
     mutable std::mutex stats_overhead_mutex_;
     // R6-13: Use atomic for thread-safe last_packet_time access

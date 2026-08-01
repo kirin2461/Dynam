@@ -3,6 +3,7 @@
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <cstring>
 #include <sodium.h>
 
 #ifdef _WIN32

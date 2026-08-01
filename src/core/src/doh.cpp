@@ -1992,17 +1992,17 @@ DoHClient::DNSResult AntiCensorshipDNS::parallel_query(const std::string& hostna
     return resolve(hostname);  // stub
 }
 
-// ==================== CertificatePinner Implementation (R9-H03) ====================
+// ==================== DoHCertificatePinner Implementation (R9-H03) ====================
 
-void CertificatePinner::add_pin(const std::string& server_url, const std::string& sha256_hash) {
+void DoHCertificatePinner::add_pin(const std::string& server_url, const std::string& sha256_hash) {
     pins_[server_url].push_back(sha256_hash);
 }
 
-void CertificatePinner::remove_pins(const std::string& server_url) {
+void DoHCertificatePinner::remove_pins(const std::string& server_url) {
     pins_.erase(server_url);
 }
 
-std::string CertificatePinner::extract_spki_hash(const std::vector<uint8_t>& cert_der) {
+std::string DoHCertificatePinner::extract_spki_hash(const std::vector<uint8_t>& cert_der) {
     if (cert_der.empty()) return "";
     
 #ifdef HAVE_OPENSSL
@@ -2043,7 +2043,7 @@ std::string CertificatePinner::extract_spki_hash(const std::vector<uint8_t>& cer
 #endif
 }
 
-bool CertificatePinner::verify(const std::string& server_url, const std::vector<uint8_t>& cert_der) {
+bool DoHCertificatePinner::verify(const std::string& server_url, const std::vector<uint8_t>& cert_der) {
     auto it = pins_.find(server_url);
     if (it == pins_.end() || it->second.empty()) {
         // No pins configured for this server - allow by default
@@ -2067,7 +2067,7 @@ bool CertificatePinner::verify(const std::string& server_url, const std::vector<
     return false;
 }
 
-void CertificatePinner::load_default_pins() {
+void DoHCertificatePinner::load_default_pins() {
     // R9-H03: Default certificate pins for major DoH providers
     // These are SHA-256 hashes of the SPKI (Subject Public Key Info)
     // Note: Pins should be updated periodically as certificates rotate

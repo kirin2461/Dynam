@@ -401,7 +401,7 @@ set_target_properties(ncp_core PROPERTIES
 # ==================== Required: OpenSSL ====================
 find_package(OpenSSL REQUIRED)
 if(OpenSSL_FOUND)
-    target_link_libraries(ncp_core PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+    target_link_libraries(ncp_core PUBLIC OpenSSL::SSL OpenSSL::Crypto ${CMAKE_DL_LIBS})
     target_compile_definitions(ncp_core PRIVATE HAVE_OPENSSL)
     message(STATUS "Found OpenSSL: ${OPENSSL_VERSION}")
     

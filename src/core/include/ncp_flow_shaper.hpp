@@ -16,6 +16,7 @@
  */
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <vector>
 #include <array>
 #include <atomic>

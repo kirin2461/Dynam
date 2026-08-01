@@ -6,10 +6,6 @@
 #include <sodium.h>
 
 #ifdef __linux__
-#ifdef HAVE_NFQUEUE
-#include <libnetfilter_queue/libnetfilter_queue.h>
-#include <linux/netfilter.h>
-#endif
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -18,6 +14,12 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <fcntl.h>
+// NFQUEUE/kernel headers AFTER glibc netinet/*: libc-compat.h then
+// suppresses duplicate in_addr/IPPROTO_* definitions (order conflict fix).
+#ifdef HAVE_NFQUEUE
+#include <libnetfilter_queue/libnetfilter_queue.h>
+#include <linux/netfilter.h>
+#endif
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <sys/ioctl.h>
@@ -204,6 +206,7 @@ public:
 // ==================== NFQUEUE Backend (Linux) ====================
 
 class NFQUEUEBackend : public PacketInterceptor::Impl {
+    using Config = PacketInterceptor::Config;
 public:
     NFQUEUEBackend() = default;
     ~NFQUEUEBackend() override { stop(); }

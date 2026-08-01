@@ -250,7 +250,4 @@ TEST_F(ThreadSafetyTest, ConcurrentCounter_RaiiGuards) {
     EXPECT_LE(peak_count.load(), 50);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// main() provided by gtest_main (duplicate definition removed)

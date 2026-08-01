@@ -28,6 +28,14 @@
 #include <cstdlib>
 #include <sodium.h>
 
+#ifdef __linux__
+#include <sys/stat.h>
+#include <sys/sysmacros.h>  // major()/minor()
+#include <netinet/in.h>     // in_addr, INET6_ADDRSTRLEN
+#include <arpa/inet.h>        // inet_ntop
+#include <unistd.h>
+#endif
+
 #ifdef _WIN32
 #  ifndef NOMINMAX
 #    define NOMINMAX

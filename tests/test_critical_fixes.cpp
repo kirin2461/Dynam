@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <chrono>
 #include <thread>
+#include <cstring>
 
 using namespace ncp;
 
