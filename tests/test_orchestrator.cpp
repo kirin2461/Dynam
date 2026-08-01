@@ -21,6 +21,7 @@ protected:
         auto cfg = OrchestratorConfig::client_default();
         // Use a lightweight strategy for tests
         cfg.strategy = OrchestratorStrategy::balanced();
+        cfg.strategy.enable_advanced_dpi = false; // never start real NFQUEUE/WinDivert in tests
         cfg.health_check_interval_sec = 9999; // disable background health checks
         return cfg;
     }

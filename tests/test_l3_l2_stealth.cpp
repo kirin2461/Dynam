@@ -61,6 +61,7 @@ TEST(L3StealthTest, MSSClamping) {
     std::vector<uint8_t> packet(60);
     packet[0] = 0x45; // IPv4
     packet[9] = 6;    // TCP
+    packet[20 + 12] = 0x60; // TCP data offset = 6 (24 bytes -> options present)
     packet[20 + 13] = 0x02; // SYN flag
 
     // Add MSS option (kind=2, len=4, mss=1460)
@@ -114,6 +115,8 @@ TEST(L2StealthTest, ARPRateLimiting) {
     L2Stealth::Config cfg;
     cfg.enable_arp_rate_shaping = true;
     cfg.arp_max_rate_per_sec = 5;
+    cfg.use_arptables = false; // Don't actually run arptables in test
+    cfg.use_ebtables = false;  // Don't actually run ebtables in test
     cfg.enable_logging = false;
     ASSERT_TRUE(stealth.initialize(cfg));
     ASSERT_TRUE(stealth.start());
@@ -189,7 +192,7 @@ TEST(CombinedStealthTest, L3AndL2Pipeline) {
 
 // ==================== Packet Interceptor Tests ====================
 
-TEST(PacketInterceptorTest, Initialization) {
+TEST(PacketInterceptorBasicTest, Initialization) {
     PacketInterceptor interceptor;
     PacketInterceptor::Config cfg;
     cfg.backend = PacketInterceptor::Backend::NONE; // No backend for test
@@ -197,7 +200,7 @@ TEST(PacketInterceptorTest, Initialization) {
     ASSERT_TRUE(interceptor.initialize(cfg));
 }
 
-TEST(PacketInterceptorTest, BackendDetection) {
+TEST(PacketInterceptorBasicTest, BackendDetection) {
     auto backend = PacketInterceptor::detect_backend();
     // Should return NFQUEUE on Linux with HAVE_NFQUEUE, NONE otherwise
 #if defined(__linux__) && defined(HAVE_NFQUEUE)

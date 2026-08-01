@@ -845,9 +845,11 @@ PacketInterceptor::~PacketInterceptor() { stop(); }
 bool PacketInterceptor::initialize(const Config& config) {
     if (initialized_.load()) return false;
 
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    config_ = config;
-    config_version_++;  // FIX #30: bump version on init
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        config_ = config;
+        config_version_++;  // FIX #30: bump version on init
+    } // lock released: log() and backend->initialize() take config_mutex_ internally
 
     Backend backend = config.backend;
     if (backend == Backend::AUTO) {

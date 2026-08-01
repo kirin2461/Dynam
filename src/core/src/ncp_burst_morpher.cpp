@@ -212,9 +212,7 @@ TargetProfile TargetProfile::quic_web() {
 
 // ===== TargetProfileDB =====
 
-TargetProfileDB::TargetProfileDB() {
-    load_defaults();
-}
+TargetProfileDB::TargetProfileDB() = default;
 
 void TargetProfileDB::load_defaults() {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -583,6 +581,9 @@ BurstMorpher::BurstMorpher(const BurstMorpherConfig& config)
     : config_(config),
       cache_(config.cache_max_entries),
       burst_tracker_(config.burst_gap_threshold_us) {
+
+    // Built-in target profiles (YouTube/Netflix/Zoom/...) for find_nearest()
+    target_db_.load_defaults();
 
     // Load persisted cache if path is set
     if (!config_.cache_file_path.empty()) {

@@ -497,8 +497,10 @@ L2Stealth::~L2Stealth() {
 bool L2Stealth::initialize(const Config& config) {
     if (initialized_.load(std::memory_order_acquire)) return false;
 
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    config_ = config;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        config_ = config;
+    } // lock released: impl_->initialize() and log() must not run under config_mutex_
 
     if (!impl_->initialize(config)) {
         return false;

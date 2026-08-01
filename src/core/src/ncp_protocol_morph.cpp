@@ -354,8 +354,6 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
     std::lock_guard<std::mutex> lock(impl_->mutex_);
 
     ConnectionProfile cp;
-    cp.connection_id = impl_->connection_count_;
-    cp.mutation_epoch = impl_->mutation_epoch_;
 
     // 1. Build effective weights (base + schedule boosts)
     auto weights = impl_->build_effective_weights();
@@ -363,8 +361,16 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
     // 2. Weighted random selection (unbiased)
     cp.mimic_profile = impl_->select_weighted(weights);
 
+    // Auto-increment FIRST: connection ids start at 1 and the mutation
+    // threshold below is evaluated against the new connection number.
+    impl_->connection_count_++;
+    impl_->stats_.connections_total++;
+    cp.connection_id = impl_->connection_count_;
+    cp.mutation_epoch = impl_->mutation_epoch_;
+
     // 3. Apply wire mutation if threshold reached
-    bool should_mutate = (impl_->connection_count_ > 0) &&
+    bool should_mutate =
+        (impl_->config_.mutation.connections_per_mutation > 0) &&
         (impl_->connection_count_ % impl_->config_.mutation.connections_per_mutation == 0);
 
     if (should_mutate) {
@@ -390,12 +396,6 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
         cp.mimic_config.tls_cipher_suites = cp.tls_cipher_suites;
     }
 
-    // FIX: Auto-increment connection counter so caller doesn't need
-    // separate on_connection_opened() call. on_connection_opened() is
-    // kept for backward compatibility but is now optional.
-    impl_->connection_count_++;
-    impl_->stats_.connections_total++;
-
     // Track usage
     impl_->stats_.profile_usage[cp.mimic_profile]++;
 
@@ -407,10 +407,10 @@ ProtocolMorph::ConnectionProfile ProtocolMorph::select_profile_for_connection() 
 }
 
 void ProtocolMorph::on_connection_opened() {
-    // NOTE: Now a no-op — select_profile_for_connection() auto-increments.
-    // Kept for API compatibility. Callers may safely remove this call.
-    // If called, it harmlessly acquires and releases the lock.
+    // Explicit counter for callers that manage connections themselves.
     std::lock_guard<std::mutex> lock(impl_->mutex_);
+    impl_->connection_count_++;
+    impl_->stats_.connections_total++;
 }
 
 TrafficMimicry::MimicProfile ProtocolMorph::get_scheduled_profile() const {

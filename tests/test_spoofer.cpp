@@ -95,7 +95,7 @@ TEST_F(SpooferTest, GenerateRandomDiskSerial_NotEmpty) {
 
 TEST_F(SpooferTest, TcpFingerprint_Windows10) {
     auto p = NetworkSpoofer::TcpFingerprintProfile::Windows10();
-    EXPECT_EQ(p.name, "Windows10");
+    EXPECT_EQ(p.name, "Windows 10");
     EXPECT_GT(p.ttl, 0u);
     EXPECT_GT(p.window_size, 0u);
     EXPECT_GT(p.mss, 0u);
@@ -103,13 +103,13 @@ TEST_F(SpooferTest, TcpFingerprint_Windows10) {
 
 TEST_F(SpooferTest, TcpFingerprint_Linux5x) {
     auto p = NetworkSpoofer::TcpFingerprintProfile::Linux5x();
-    EXPECT_EQ(p.name, "Linux5x");
+    EXPECT_EQ(p.name, "Linux 5.x");
     EXPECT_GT(p.ttl, 0u);
 }
 
 TEST_F(SpooferTest, TcpFingerprint_MacOS12) {
     auto p = NetworkSpoofer::TcpFingerprintProfile::MacOS12();
-    EXPECT_EQ(p.name, "MacOS12");
+    EXPECT_EQ(p.name, "macOS 12");
     EXPECT_GT(p.ttl, 0u);
 }
 

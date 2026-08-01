@@ -664,7 +664,7 @@ void TrafficPadder::set_padding_range(uint32_t min_size, uint32_t max_size) {
 
 // ==================== ForensicLogger ====================
 
-ForensicLogger::ForensicLogger() : enabled_(false) {}
+ForensicLogger::ForensicLogger() : enabled_(true) {}
 
 ForensicLogger::ForensicLogger(const std::string& log_path)
     : log_path_(log_path), enabled_(true)

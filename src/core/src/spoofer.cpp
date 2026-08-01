@@ -396,7 +396,9 @@ bool NetworkSpoofer::rotate_all() {
 // ==================== Generators ====================
 std::string NetworkSpoofer::generate_random_ipv4() {
     std::ostringstream oss;
-    oss << "10." << csprng_byte() << "." << csprng_byte() << "." << (1 + csprng_byte() % 254);
+    oss << "10." << static_cast<unsigned>(csprng_byte()) << "."
+        << static_cast<unsigned>(csprng_byte()) << "."
+        << (1 + static_cast<unsigned>(csprng_byte()) % 254);
     return oss.str();
 }
 
@@ -420,7 +422,7 @@ std::string NetworkSpoofer::generate_random_mac() {
     oss << std::hex << std::setfill('0');
     oss << std::setw(2) << ((csprng_byte() & 0xFC) | 0x02);
     for (int i = 0; i < 5; ++i)
-        oss << ":" << std::setw(2) << csprng_byte();
+        oss << ":" << std::setw(2) << static_cast<unsigned>(csprng_byte());
     return oss.str();
 }
 

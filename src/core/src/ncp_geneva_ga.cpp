@@ -190,8 +190,6 @@ FitnessResult GenevaGA::evaluate_individual(const Individual& ind) {
     int total_retries = 0;
 
     for (int probe = 0; probe < config_.fitness_probes; ++probe) {
-        // Early exit if GA is stopping
-        if (!running_.load(std::memory_order_relaxed)) break;
 
         FitnessResult r = fitness_evaluator_(
             ind.strategy, target_host_, target_port_,
@@ -222,8 +220,10 @@ void GenevaGA::evaluate_population() {
         snapshot = population_;
     }
 
+    // Synchronous entry point: evaluate unconditionally. The async run loop
+    // checks running_ between generations, so callers (and tests) can invoke
+    // evaluate_population() directly without start().
     for (auto& ind : snapshot) {
-        if (!running_.load(std::memory_order_relaxed)) break;
         ind.fitness = evaluate_individual(ind);
     }
 

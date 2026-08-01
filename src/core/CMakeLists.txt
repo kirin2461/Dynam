@@ -239,6 +239,13 @@ endif()
 
 # ==================== Required: libsodium ====================
 # Try vcpkg first (unofficial-sodium)
+# SQLite3 (optional) — enables the real Database backend in db.cpp
+find_package(SQLite3 QUIET)
+if(SQLite3_FOUND)
+    target_link_libraries(ncp_core PUBLIC SQLite::SQLite3)
+    target_compile_definitions(ncp_core PRIVATE HAVE_SQLITE)
+endif()
+
 find_package(unofficial-sodium CONFIG QUIET)
 if(unofficial-sodium_FOUND)
     message(STATUS "Found libsodium via vcpkg")

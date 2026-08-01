@@ -1216,10 +1216,24 @@ bool DoHClient::is_valid_hostname(const std::string& hostname) const {
         return false;
     }
 
-    for (char c : hostname) {
-        if (!std::isalnum(c) && c != '.' && c != '-' && c != '_') {
-            return false;
+    // Per-label DNS validation: labels separated by '.', each 1-63 chars,
+    // starting and ending with an alphanumeric character.
+    size_t start = 0;
+    while (start <= hostname.size()) {
+        size_t dot = hostname.find('.', start);
+        size_t end = (dot == std::string::npos) ? hostname.size() : dot;
+        size_t len = end - start;
+        if (len == 0 || len > 63) return false;
+        if (!std::isalnum(static_cast<unsigned char>(hostname[start]))) return false;
+        if (!std::isalnum(static_cast<unsigned char>(hostname[end - 1]))) return false;
+        for (size_t i = start; i < end; ++i) {
+            char c = hostname[i];
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != '-' && c != '_') {
+                return false;
+            }
         }
+        if (dot == std::string::npos) break;
+        start = dot + 1;
     }
 
     return true;

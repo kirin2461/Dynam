@@ -350,11 +350,25 @@ bool ParanoidMode::deactivate() {
             close(STDIN_FILENO);
             close(STDOUT_FILENO);
             close(STDERR_FILENO);
-            execlp("iptables", "iptables", "-D", "OUTPUT", "-j", "DROP", nullptr);
+            execlp("iptables", "iptables", "-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP", nullptr);
             _exit(127);
         } else if (pid > 0) {
             int status;
             waitpid(pid, &status, 0);
+        }
+        // Remove whitelist ACCEPT rules added by setup_kill_switch()
+        for (const auto& ip : network_isolation_.whitelist_ips) {
+            pid_t wl_pid = fork();
+            if (wl_pid == 0) {
+                close(STDIN_FILENO);
+                close(STDOUT_FILENO);
+                close(STDERR_FILENO);
+                execlp("iptables", "iptables", "-D", "OUTPUT", "-d", ip.c_str(), "-j", "ACCEPT", nullptr);
+                _exit(127);
+            } else if (wl_pid > 0) {
+                int wl_status;
+                waitpid(wl_pid, &wl_status, 0);
+            }
         }
     }
 #endif
@@ -1521,7 +1535,7 @@ void ParanoidMode::check_kill_switch_timeout() {
             close(STDIN_FILENO);
             close(STDOUT_FILENO);
             close(STDERR_FILENO);
-            execlp("iptables", "iptables", "-D", "OUTPUT", "-j", "DROP", nullptr);
+            execlp("iptables", "iptables", "-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP", nullptr);
             _exit(127);
         } else if (pid > 0) {
             int status;

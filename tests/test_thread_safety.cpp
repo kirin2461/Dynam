@@ -202,7 +202,7 @@ TEST_F(ThreadSafetyTest, FragmentSize_Bounded) {
     };
     
     for (const auto& tc : cases) {
-        size_t base_frag_size = (tc.requested > 0) ? tc.requested : 2;
+        size_t base_frag_size = (tc.requested > 0) ? tc.requested : 1;
         base_frag_size = std::min(base_frag_size, MAX_FRAG_SIZE);
         base_frag_size = std::max(base_frag_size, size_t{1});
         

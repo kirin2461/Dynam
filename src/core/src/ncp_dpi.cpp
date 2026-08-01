@@ -2334,6 +2334,13 @@ public:
     void nfqueue_loop() {
         char buf[65536];
         while (running) {
+            // Poll with timeout so stop() can terminate this thread even when
+            // no packets arrive (plain blocking recv() hangs join() forever).
+            struct pollfd pfd{};
+            pfd.fd = m_nfq_fd;
+            pfd.events = POLLIN;
+            int pr = poll(&pfd, 1, 200);
+            if (pr <= 0) continue;  // timeout or interrupted — re-check running
             int rv = recv(m_nfq_fd, buf, sizeof(buf), 0);
             if (rv >= 0) nfq_handle_packet(nfq_h, buf, rv);
         }

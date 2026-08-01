@@ -65,6 +65,8 @@ bool Database::open(const std::string& db_path, const std::string& password) {
     }
 
     if (!password.empty()) {
+#ifdef SQLITE_HAS_CODEC
+        // SQLCipher build — database encryption available
         rc = sqlite3_key_v2(db_handle_, "main", password.c_str(), password.length());
         if (rc != SQLITE_OK) {
             last_error_ = "Failed to set encryption key";
@@ -72,6 +74,13 @@ bool Database::open(const std::string& db_path, const std::string& password) {
             db_handle_ = nullptr;
             return false;
         }
+#else
+        // Stock SQLite has no codec — cannot honor the password
+        last_error_ = "Database encryption unavailable (SQLite built without codec)";
+        sqlite3_close(db_handle_);
+        db_handle_ = nullptr;
+        return false;
+#endif
     }
 
     is_connected_ = true;
