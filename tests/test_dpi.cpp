@@ -16,7 +16,7 @@ TEST(DPIConfigTest, DefaultsAreReasonable) {
     EXPECT_TRUE(cfg.enable_tcp_split);
     EXPECT_TRUE(cfg.enable_fake_packet);
     EXPECT_TRUE(cfg.enable_disorder);
-    EXPECT_EQ(cfg.listen_port, 8080);
+    EXPECT_EQ(cfg.listen_port, 8881);  // default proxy port (docs examples set 8080 explicitly)
 }
 
 TEST(DPIPresetTest, RunetSoftPresetAppliesExpectedFlags) {

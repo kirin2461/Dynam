@@ -6,10 +6,6 @@
 #include <sodium.h>
 
 #ifdef __linux__
-#ifdef HAVE_NFQUEUE
-#include <libnetfilter_queue/libnetfilter_queue.h>
-#include <linux/netfilter.h>
-#endif
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -18,6 +14,12 @@
 #include <netinet/ip.h>
 #include <netinet/udp.h>
 #include <fcntl.h>
+// NFQUEUE/kernel headers AFTER glibc netinet/*: libc-compat.h then
+// suppresses duplicate in_addr/IPPROTO_* definitions (order conflict fix).
+#ifdef HAVE_NFQUEUE
+#include <libnetfilter_queue/libnetfilter_queue.h>
+#include <linux/netfilter.h>
+#endif
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <sys/ioctl.h>
@@ -204,6 +206,7 @@ public:
 // ==================== NFQUEUE Backend (Linux) ====================
 
 class NFQUEUEBackend : public PacketInterceptor::Impl {
+    using Config = PacketInterceptor::Config;
 public:
     NFQUEUEBackend() = default;
     ~NFQUEUEBackend() override { stop(); }
@@ -533,7 +536,7 @@ private:
 };
 #endif // _WIN32 && HAVE_WINDIVERT
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
 // ==================== WFP Backend (Windows) ====================
 // Uses Windows Filtering Platform for network-layer filter management.
 //
@@ -842,9 +845,11 @@ PacketInterceptor::~PacketInterceptor() { stop(); }
 bool PacketInterceptor::initialize(const Config& config) {
     if (initialized_.load()) return false;
 
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    config_ = config;
-    config_version_++;  // FIX #30: bump version on init
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        config_ = config;
+        config_version_++;  // FIX #30: bump version on init
+    } // lock released: log() and backend->initialize() take config_mutex_ internally
 
     Backend backend = config.backend;
     if (backend == Backend::AUTO) {
@@ -890,7 +895,7 @@ bool PacketInterceptor::initialize(const Config& config) {
     }
 #endif
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
     if (backend == Backend::WFP) {
         impl_ = std::make_unique<WFPBackend>();
         impl_->parent = this;

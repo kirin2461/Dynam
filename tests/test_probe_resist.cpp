@@ -243,8 +243,12 @@ TEST_F(ProbeResistTest, JA3Allowlist_AddRemove) {
     std::string ja3 = "abc123def456";
     pr.add_ja3_allowlist(ja3);
     EXPECT_TRUE(pr.is_ja3_allowed(ja3));
+    // Note: an EMPTY allowlist means "filter off, allow everything" by design,
+    // so keep another entry in the list to test removal semantics.
+    pr.add_ja3_allowlist("keepme");
     pr.remove_ja3_allowlist(ja3);
     EXPECT_FALSE(pr.is_ja3_allowed(ja3));
+    EXPECT_TRUE(pr.is_ja3_allowed("keepme"));
 }
 
 // ── Statistics ────────────────────────────────────────────────────────────────

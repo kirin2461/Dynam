@@ -718,12 +718,10 @@ void ProtocolOrchestrator::escalate(const std::string& reason) {
 
     mimicry_.reset_tls_session();
 
-    // R6-ORCH-01: Snapshot callback under lock
-    OrchestratorConfig::StrategyChangeCallback cb;
-    {
-        std::lock_guard<std::mutex> lock(strategy_mutex_);
-        cb = config_.on_strategy_change;
-    }
+    // R6-ORCH-01: Snapshot callback — caller already holds strategy_mutex_;
+    // locking it again here would self-deadlock (escalate/deescalate are private
+    // and only called from report_detection/report_success_locked under the lock).
+    OrchestratorConfig::StrategyChangeCallback cb = config_.on_strategy_change;
     if (cb) {
         cb(old_level, threat_level_, reason);
     }
@@ -744,12 +742,10 @@ void ProtocolOrchestrator::deescalate(const std::string& reason) {
 
     mimicry_.reset_tls_session();
 
-    // R6-ORCH-01: Snapshot callback under lock
-    OrchestratorConfig::StrategyChangeCallback cb;
-    {
-        std::lock_guard<std::mutex> lock(strategy_mutex_);
-        cb = config_.on_strategy_change;
-    }
+    // R6-ORCH-01: Snapshot callback — caller already holds strategy_mutex_;
+    // locking it again here would self-deadlock (escalate/deescalate are private
+    // and only called from report_detection/report_success_locked under the lock).
+    OrchestratorConfig::StrategyChangeCallback cb = config_.on_strategy_change;
     if (cb) {
         cb(old_level, threat_level_, reason);
     }
@@ -997,8 +993,16 @@ void ProtocolOrchestrator::update_overhead_stats() {
 
 void ProtocolOrchestrator::health_monitor_func() {
     while (running_.load()) {
-        std::this_thread::sleep_for(
-            std::chrono::seconds(config_.health_check_interval_sec));
+        // Sleep in short slices so stop() can join this thread promptly even
+        // when health_check_interval_sec is large.
+        auto remaining = std::chrono::milliseconds(
+            1000LL * config_.health_check_interval_sec);
+        const auto slice = std::chrono::milliseconds(100);
+        while (running_.load() && remaining > std::chrono::milliseconds(0)) {
+            const auto step = (remaining < slice) ? remaining : slice;
+            std::this_thread::sleep_for(step);
+            remaining -= step;
+        }
 
         if (!running_.load()) break;
 

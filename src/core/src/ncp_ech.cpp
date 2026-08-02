@@ -9,7 +9,7 @@
 #include <cstring>
 #include <sodium.h>
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_ECH_HPKE
 #include <openssl/evp.h>
 #include <openssl/hpke.h>
 #include <openssl/rand.h>
@@ -20,7 +20,7 @@ namespace ncp {
 namespace DPI {
 namespace ECH {
 
-#ifdef HAVE_OPENSSL
+#ifdef HAVE_ECH_HPKE
 
 // ==================== Helper Functions ====================
 
@@ -1078,6 +1078,50 @@ bool parse_ech_config(const std::vector<uint8_t>& data, ECHConfig& config) {
     config.raw_config = data;
 
     return true; // success
+}
+
+// ==================== create_test_ech_config (no-HPKE) ====================
+
+ECHConfig create_test_ech_config(
+    const std::string& public_name,
+    const HPKECipherSuite& cipher_suite,
+    std::vector<uint8_t>& private_key
+) {
+    ECHConfig config;
+    config.public_name = public_name;
+    config.config_id = 1;
+    config.cipher_suites.push_back(cipher_suite);
+
+    // Without HPKE we always fall back to X25519 via libsodium
+    private_key.resize(32);
+    config.public_key.resize(32);
+    crypto_box_keypair(config.public_key.data(), private_key.data());
+
+    // Build canonical raw_config for wire format
+    config.raw_config.clear();
+    config.raw_config.reserve(9 + config.public_key.size());
+
+    // Version
+    config.raw_config.push_back(static_cast<uint8_t>(config.version >> 8));
+    config.raw_config.push_back(static_cast<uint8_t>(config.version & 0xFF));
+
+    // Config ID
+    config.raw_config.push_back(config.config_id);
+
+    // KEM ID
+    config.raw_config.push_back(static_cast<uint8_t>(static_cast<uint16_t>(cipher_suite.kem_id) >> 8));
+    config.raw_config.push_back(static_cast<uint8_t>(static_cast<uint16_t>(cipher_suite.kem_id) & 0xFF));
+
+    // Public key length
+    config.raw_config.push_back(static_cast<uint8_t>(config.public_key.size() >> 8));
+    config.raw_config.push_back(static_cast<uint8_t>(config.public_key.size() & 0xFF));
+
+    // Public key
+    config.raw_config.insert(config.raw_config.end(),
+                             config.public_key.begin(),
+                             config.public_key.end());
+
+    return config;
 }
 
 // ==================== apply_ech (no-OpenSSL) ====================

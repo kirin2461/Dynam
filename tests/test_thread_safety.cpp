@@ -202,7 +202,7 @@ TEST_F(ThreadSafetyTest, FragmentSize_Bounded) {
     };
     
     for (const auto& tc : cases) {
-        size_t base_frag_size = (tc.requested > 0) ? tc.requested : 2;
+        size_t base_frag_size = (tc.requested > 0) ? tc.requested : 1;
         base_frag_size = std::min(base_frag_size, MAX_FRAG_SIZE);
         base_frag_size = std::max(base_frag_size, size_t{1});
         
@@ -250,7 +250,4 @@ TEST_F(ThreadSafetyTest, ConcurrentCounter_RaiiGuards) {
     EXPECT_LE(peak_count.load(), 50);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// main() provided by gtest_main (duplicate definition removed)

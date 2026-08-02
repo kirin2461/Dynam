@@ -151,6 +151,26 @@ struct AdvancedDPIStats {
     std::atomic<uint64_t> dpi_signatures_evaded{0};
     std::atomic<uint64_t> ech_applied{0};
 
+    AdvancedDPIStats() = default;
+    AdvancedDPIStats(const AdvancedDPIStats& o) { *this = o; }
+    AdvancedDPIStats& operator=(const AdvancedDPIStats& o) {
+        base_stats = o.base_stats;
+        tcp_segments_split.store(o.tcp_segments_split.load(std::memory_order_relaxed));
+        tcp_overlaps_sent.store(o.tcp_overlaps_sent.load(std::memory_order_relaxed));
+        tcp_oob_sent.store(o.tcp_oob_sent.load(std::memory_order_relaxed));
+        tls_records_split.store(o.tls_records_split.load(std::memory_order_relaxed));
+        grease_injected.store(o.grease_injected.load(std::memory_order_relaxed));
+        packets_padded.store(o.packets_padded.load(std::memory_order_relaxed));
+        bytes_padding.store(o.bytes_padding.load(std::memory_order_relaxed));
+        timing_delays_applied.store(o.timing_delays_applied.load(std::memory_order_relaxed));
+        fake_packets_injected.store(o.fake_packets_injected.load(std::memory_order_relaxed));
+        bytes_obfuscated.store(o.bytes_obfuscated.load(std::memory_order_relaxed));
+        bytes_deobfuscated.store(o.bytes_deobfuscated.load(std::memory_order_relaxed));
+        dpi_signatures_evaded.store(o.dpi_signatures_evaded.load(std::memory_order_relaxed));
+        ech_applied.store(o.ech_applied.load(std::memory_order_relaxed));
+        return *this;
+    }
+
     void reset() {
         tcp_segments_split.store(0);
         tcp_overlaps_sent.store(0);

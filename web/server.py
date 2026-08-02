@@ -35,7 +35,9 @@ except ImportError:
 
 # Публичный ключ Ed25519 для верификации лицензий (Base64, 32 байта)
 # Этот ключ безопасно распространять — подделать подпись без приватного ключа невозможно
-NCP_LICENSE_PUBLIC_KEY_B64 = "0J6Gb+VIXPUPl9zAWF+DpHWZhPrLvGYl7g82lJAfrlE="
+# Ключевая пара перегенерирована 2026-08-01 (старый приватный ключ утерян).
+# Верификация ключей — web/ncp_license.py, выпуск ключей — web/ncp_keygen.py.
+NCP_LICENSE_PUBLIC_KEY_B64 = "FT2FWdlm6rGldWix5fDJBuZmrHIR+73CuRpWszs/Hog="
 
 # Файл для сохранения активированной лицензии
 LICENSE_FILE = Path(os.environ.get("APPDATA", str(Path.home()))) / "ncp" / "license.json"
@@ -526,7 +528,7 @@ def _build_ncp_args() -> list:
     """Build NCP binary command-line arguments from current config state."""
     binary_path = str(NCP_BINARY)
     cfg = state["config"]
-    args = [binary_path, "run", "--no-license-check",
+    args = [binary_path, "run", "--no-license-check", "--no-kill-switch",
             "--interface", cfg.get("interface", "auto"),
             "--preset", cfg.get("dpi_preset", "tspu")]
 

@@ -15,6 +15,15 @@ class ParanoidModeTest : public ::testing::Test {
 protected:
     void SetUp() override {
         paranoid = std::make_unique<ParanoidMode>();
+        // SAFETY: tests run on real hosts as root — never touch the firewall,
+        // system logs, or DNS state. Kill switch is tested for logic only.
+        ParanoidMode::NetworkIsolation ni{};
+        ni.enable_kill_switch = false;
+        paranoid->set_network_isolation(ni);
+        ParanoidMode::ForensicResistance fr{};
+        fr.clear_memory_on_exit = false;
+        fr.secure_delete_on_exit = false;
+        paranoid->set_forensic_resistance(fr);
     }
     
     void TearDown() override {

@@ -37,14 +37,22 @@ const char* cover_mode_to_string(CoverMode m) noexcept {
 }
 
 CoverMode cover_mode_from_string(const std::string& name) noexcept {
-    if (name == "REDIRECT")    return CoverMode::REDIRECT;
-    if (name == "MIRROR")      return CoverMode::MIRROR;
-    if (name == "RESET")       return CoverMode::RESET;
-    if (name == "DROP")        return CoverMode::DROP;
-    if (name == "TARPIT")      return CoverMode::TARPIT;
-    if (name == "ECHO_NGINX")  return CoverMode::ECHO_NGINX;
-    if (name == "ECHO_IIS")    return CoverMode::ECHO_IIS;
-    if (name == "ECHO_APACHE") return CoverMode::ECHO_APACHE;
+    // Accept any case plus short aliases: "nginx", "apache", "iis", ...
+    std::string n = name;
+    for (auto& ch : n) {
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+    }
+    if (n == "NGINX")  return CoverMode::ECHO_NGINX;
+    if (n == "APACHE") return CoverMode::ECHO_APACHE;
+    if (n == "IIS")    return CoverMode::ECHO_IIS;
+    if (n == "REDIRECT")    return CoverMode::REDIRECT;
+    if (n == "MIRROR")      return CoverMode::MIRROR;
+    if (n == "RESET")       return CoverMode::RESET;
+    if (n == "DROP")        return CoverMode::DROP;
+    if (n == "TARPIT")      return CoverMode::TARPIT;
+    if (n == "ECHO_NGINX")  return CoverMode::ECHO_NGINX;
+    if (n == "ECHO_IIS")    return CoverMode::ECHO_IIS;
+    if (n == "ECHO_APACHE") return CoverMode::ECHO_APACHE;
     return CoverMode::ECHO_NGINX;
 }
 
@@ -354,15 +362,18 @@ std::vector<uint8_t> ProbeResist::generate_client_auth() {
     // This prevents nonce reuse after NTP clock rollback
     csprng_fill(token.data(), cfg.nonce_length);
 
-    // FIX #6: Use monotonic counter instead of wall clock time
-    // Counter increments atomically and never rolls back
-    uint64_t counter_val = g_nonce_counter.fetch_add(1, std::memory_order_relaxed);
+    // FIX #6: timestamp verified by process_connection(); nonce uniqueness via CSPRNG
+    // Wall-clock timestamp, big-endian — process_connection() verifies it
+    // against timestamp_tolerance_sec. Uniqueness (even across clock
+    // rollback) is guaranteed by the CSPRNG nonce above, so a monotonic
+    // counter here is unnecessary and would fail timestamp validation.
+    uint32_t now_ts = static_cast<uint32_t>(std::time(nullptr));
     
-    // Store counter as big-endian 4-byte value (truncated from 8 bytes)
-    token[cfg.nonce_length + 0] = (counter_val >> 24) & 0xFF;
-    token[cfg.nonce_length + 1] = (counter_val >> 16) & 0xFF;
-    token[cfg.nonce_length + 2] = (counter_val >> 8) & 0xFF;
-    token[cfg.nonce_length + 3] = counter_val & 0xFF;
+    // Store timestamp as big-endian 4-byte value
+    token[cfg.nonce_length + 0] = (now_ts >> 24) & 0xFF;
+    token[cfg.nonce_length + 1] = (now_ts >> 16) & 0xFF;
+    token[cfg.nonce_length + 2] = (now_ts >> 8) & 0xFF;
+    token[cfg.nonce_length + 3] = now_ts & 0xFF;
 
     auto hmac = compute_hmac(
         token.data(), token.size(),

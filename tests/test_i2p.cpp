@@ -66,7 +66,12 @@ static bool is_sam_reachable(const char* host = "127.0.0.1", uint16_t port = 765
     connect(sock, (struct sockaddr*)&addr, sizeof(addr));
     struct pollfd pfd = {sock, POLLOUT, 0};
     int ret = poll(&pfd, 1, 500); // 500ms
-    bool reachable = (ret > 0 && (pfd.revents & POLLOUT));
+    // POLLOUT alone is not enough: a refused connection also signals
+    // POLLOUT|POLLERR. Check the actual connect result via SO_ERROR.
+    int so_err = 0;
+    socklen_t so_len = sizeof(so_err);
+    getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_err, &so_len);
+    bool reachable = (ret > 0 && so_err == 0);
     close(sock);
     return reachable;
 #endif
@@ -87,15 +92,18 @@ protected:
     I2PManager manager_;
     I2PManager::Config config_;
 
-    // Helper: skip test if SAM is not reachable
-    void RequireSAM() {
+    // Helper: skip test if SAM is not reachable.
+    // NOTE: GTEST_SKIP() inside a helper only returns from the helper, so
+    // callers must do `if (!RequireSAM()) return;` to actually stop the test.
+    bool RequireSAM() {
         static int sam_status = -1; // -1 = unknown, 0 = no, 1 = yes
         if (sam_status < 0) {
             sam_status = is_sam_reachable() ? 1 : 0;
         }
         if (sam_status == 0) {
-            GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)";
+            return false;
         }
+        return true;
     }
 };
 
@@ -188,21 +196,21 @@ TEST_F(I2PManagerTest, EnableTrafficMixingNoCrash) {
 // ==================== Tests that REQUIRE SAM bridge ====================
 
 TEST_F(I2PManagerTest, InitializeWithSAM) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     bool result = manager_.initialize(config_);
     EXPECT_TRUE(result);
 }
 
 TEST_F(I2PManagerTest, IsActiveAfterInit) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     manager_.initialize(config_);
     EXPECT_TRUE(manager_.is_active());
 }
 
 TEST_F(I2PManagerTest, GetDestinationAfterInit) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     manager_.initialize(config_);
     std::string dest = manager_.get_destination();
@@ -210,7 +218,7 @@ TEST_F(I2PManagerTest, GetDestinationAfterInit) {
 }
 
 TEST_F(I2PManagerTest, CreateTunnelWhenActive) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     manager_.initialize(config_);
     [[maybe_unused]] bool result = manager_.create_tunnel(
@@ -220,7 +228,7 @@ TEST_F(I2PManagerTest, CreateTunnelWhenActive) {
 }
 
 TEST_F(I2PManagerTest, DestroyNonExistentTunnel) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     manager_.initialize(config_);
     bool result = manager_.destroy_tunnel("non_existent_tunnel_id");
@@ -228,7 +236,7 @@ TEST_F(I2PManagerTest, DestroyNonExistentTunnel) {
 }
 
 TEST_F(I2PManagerTest, SetEnabledToggle) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     manager_.initialize(config_);
     manager_.set_enabled(false);
@@ -237,14 +245,14 @@ TEST_F(I2PManagerTest, SetEnabledToggle) {
 }
 
 TEST_F(I2PManagerTest, RotateTunnelsNoCrash) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     manager_.initialize(config_);
     EXPECT_NO_THROW(manager_.rotate_tunnels());
 }
 
 TEST_F(I2PManagerTest, CreateServerTunnelBasic) {
-    RequireSAM();
+    if (!RequireSAM()) { GTEST_SKIP() << "SAM bridge not reachable at 127.0.0.1:7656 (expected in CI)"; }
     config_.enabled = true;
     manager_.initialize(config_);
     [[maybe_unused]] bool result = manager_.create_server_tunnel("test_server", 8080);

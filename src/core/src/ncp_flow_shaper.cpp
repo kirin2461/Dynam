@@ -25,12 +25,17 @@ const char* flow_profile_to_string(FlowProfile p) noexcept {
 }
 
 FlowProfile flow_profile_from_string(const std::string& name) noexcept {
-    if (name == "WEB_BROWSING")   return FlowProfile::WEB_BROWSING;
-    if (name == "VIDEO_STREAM")  return FlowProfile::VIDEO_STREAM;
-    if (name == "MESSENGER")     return FlowProfile::MESSENGER;
-    if (name == "GAMING")        return FlowProfile::GAMING;
-    if (name == "FILE_DOWNLOAD") return FlowProfile::FILE_DOWNLOAD;
-    if (name == "CUSTOM")        return FlowProfile::CUSTOM;
+    // Accept any case: "HTTP_MIMIC", "http_mimic", "Http_Mimic", ...
+    std::string n = name;
+    for (auto& ch : n) {
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+    }
+    if (n == "WEB_BROWSING")   return FlowProfile::WEB_BROWSING;
+    if (n == "VIDEO_STREAM")  return FlowProfile::VIDEO_STREAM;
+    if (n == "MESSENGER")     return FlowProfile::MESSENGER;
+    if (n == "GAMING")        return FlowProfile::GAMING;
+    if (n == "FILE_DOWNLOAD") return FlowProfile::FILE_DOWNLOAD;
+    if (n == "CUSTOM")        return FlowProfile::CUSTOM;
     return FlowProfile::WEB_BROWSING;
 }
 

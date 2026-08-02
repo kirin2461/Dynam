@@ -100,16 +100,20 @@ bool L3Stealth::initialize(const Config& config) {
         return false;
     }
 
-    std::lock_guard<std::mutex> lock(config_mutex_);
-    config_ = config;
+    OSProfile resolved_profile;
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        config_ = config;
 
-    // Apply OS profile defaults if AUTO
-    if (config_.os_profile == OSProfile::AUTO) {
-        config_.os_profile = detect_os_profile();
-    }
-    if (config_.ttl_profile == OSProfile::AUTO) {
-        config_.ttl_profile = config_.os_profile;
-    }
+        // Apply OS profile defaults if AUTO
+        if (config_.os_profile == OSProfile::AUTO) {
+            config_.os_profile = detect_os_profile();
+        }
+        if (config_.ttl_profile == OSProfile::AUTO) {
+            config_.ttl_profile = config_.os_profile;
+        }
+        resolved_profile = config_.os_profile;
+    } // lock released BEFORE log() -- log() itself takes config_mutex_
 
     // FIX #26: Use atomic store for thread-safe initialization of IPID counter
     global_ipid_counter_.store(
@@ -117,14 +121,17 @@ bool L3Stealth::initialize(const Config& config) {
         std::memory_order_relaxed);
 
     // Initialize timestamp offset
-    if (config_.randomize_timestamp_offset) {
-        timestamp_offset_ = randombytes_random();
+    {
+        std::lock_guard<std::mutex> lock(config_mutex_);
+        if (config_.randomize_timestamp_offset) {
+            timestamp_offset_ = randombytes_random();
+        }
     }
     timestamp_epoch_ = std::chrono::steady_clock::now();
 
     stats_.reset();
     initialized_ = true;
-    log("L3Stealth initialized, profile=" + std::to_string(static_cast<int>(config_.os_profile)));
+    log("L3Stealth initialized, profile=" + std::to_string(static_cast<int>(resolved_profile)));
     return true;
 }
 

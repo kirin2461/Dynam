@@ -25,13 +25,18 @@ const char* strategy_to_string(AdversarialStrategy s) noexcept {
 }
 
 AdversarialStrategy strategy_from_string(const std::string& name) noexcept {
-    if (name == "RANDOM")     return AdversarialStrategy::RANDOM;
-    if (name == "HTTP_MIMIC") return AdversarialStrategy::HTTP_MIMIC;
-    if (name == "TLS_MIMIC")  return AdversarialStrategy::TLS_MIMIC;
-    if (name == "QUIC_MIMIC") return AdversarialStrategy::QUIC_MIMIC;
-    if (name == "DNS_MIMIC")  return AdversarialStrategy::DNS_MIMIC;
-    if (name == "ADAPTIVE")   return AdversarialStrategy::ADAPTIVE;
-    if (name == "CUSTOM")     return AdversarialStrategy::CUSTOM;
+    // Accept any case: "HTTP_MIMIC", "http_mimic", "Http_Mimic", ...
+    std::string n = name;
+    for (auto& ch : n) {
+        if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
+    }
+    if (n == "RANDOM")     return AdversarialStrategy::RANDOM;
+    if (n == "HTTP_MIMIC") return AdversarialStrategy::HTTP_MIMIC;
+    if (n == "TLS_MIMIC")  return AdversarialStrategy::TLS_MIMIC;
+    if (n == "QUIC_MIMIC") return AdversarialStrategy::QUIC_MIMIC;
+    if (n == "DNS_MIMIC")  return AdversarialStrategy::DNS_MIMIC;
+    if (n == "ADAPTIVE")   return AdversarialStrategy::ADAPTIVE;
+    if (n == "CUSTOM")     return AdversarialStrategy::CUSTOM;
     return AdversarialStrategy::RANDOM;
 }
 

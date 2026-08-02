@@ -13,8 +13,10 @@
 #include <openssl/ec.h>
 #include <openssl/obj_mac.h>
 #include <openssl/err.h>
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 #include <openssl/param_build.h>
 #include <openssl/core_names.h>
+#endif
 #include <openssl/crypto.h>
 
 #ifdef HAVE_LIBOQS
@@ -52,12 +54,14 @@ struct EC_POINT_Deleter {
 struct BN_CTX_Deleter {
     void operator()(BN_CTX* p) const { if (p) BN_CTX_free(p); }
 };
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 struct OSSL_PARAM_BLD_Deleter {
     void operator()(OSSL_PARAM_BLD* p) const { if (p) OSSL_PARAM_BLD_free(p); }
 };
 struct OSSL_PARAM_Deleter {
     void operator()(OSSL_PARAM* p) const { if (p) OSSL_PARAM_free(p); }
 };
+#endif
 
 using UniqueEVP_PKEY     = std::unique_ptr<EVP_PKEY, EVP_PKEY_Deleter>;
 using UniqueEVP_PKEY_CTX = std::unique_ptr<EVP_PKEY_CTX, EVP_PKEY_CTX_Deleter>;
@@ -65,8 +69,10 @@ using UniqueBN           = std::unique_ptr<BIGNUM, BN_Deleter>;
 using UniqueEC_KEY       = std::unique_ptr<EC_KEY, EC_KEY_Deleter>;
 using UniqueEC_POINT     = std::unique_ptr<EC_POINT, EC_POINT_Deleter>;
 using UniqueBN_CTX       = std::unique_ptr<BN_CTX, BN_CTX_Deleter>;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 using UniqueOSSL_PARAM_BLD = std::unique_ptr<OSSL_PARAM_BLD, OSSL_PARAM_BLD_Deleter>;
 using UniqueOSSL_PARAM     = std::unique_ptr<OSSL_PARAM, OSSL_PARAM_Deleter>;
+#endif
 
 // Fallback for OpenSSL 1.1.1 (EVP_PKEY_fromdata not available)
 // R15-H02: Full RAII — no manual cleanup needed
@@ -230,7 +236,8 @@ KeyPair generate_ratchet_keypair(KeyExchangeProtocol protocol) {
                 throw std::runtime_error("P256 ratchet keygen failed");
             UniqueEVP_PKEY upkey(pkey);
 
-            size_t pub_len = 0;
+            #if OPENSSL_VERSION_NUMBER >= 0x30000000L
+size_t pub_len = 0;
             EVP_PKEY_get_octet_string_param(upkey.get(), OSSL_PKEY_PARAM_PUB_KEY, nullptr, 0, &pub_len);
             kp.public_key = SecureMemory(pub_len);
             EVP_PKEY_get_octet_string_param(upkey.get(), OSSL_PKEY_PARAM_PUB_KEY, kp.public_key.data(), pub_len, &pub_len);
@@ -243,6 +250,22 @@ KeyPair generate_ratchet_keypair(KeyExchangeProtocol protocol) {
             size_t priv_len = static_cast<size_t>(BN_num_bytes(priv_bn.get()));
             kp.private_key = SecureMemory(priv_len);
             BN_bn2bin(priv_bn.get(), kp.private_key.data());
+#else
+            // OpenSSL 1.1.x: extract via legacy EC_KEY API
+            UniqueEC_KEY ec(EVP_PKEY_get1_EC_KEY(upkey.get()));
+            if (!ec) throw std::runtime_error("P256 ratchet: get1_EC_KEY failed");
+            const EC_GROUP* grp = EC_KEY_get0_group(ec.get());
+            const EC_POINT* pub = EC_KEY_get0_public_key(ec.get());
+            UniqueBN_CTX bnctx(BN_CTX_new());
+            size_t pub_len = EC_POINT_point2oct(grp, pub, POINT_CONVERSION_UNCOMPRESSED, nullptr, 0, bnctx.get());
+            if (pub_len == 0) throw std::runtime_error("P256 ratchet: point2oct failed");
+            kp.public_key = SecureMemory(pub_len);
+            EC_POINT_point2oct(grp, pub, POINT_CONVERSION_UNCOMPRESSED, kp.public_key.data(), pub_len, bnctx.get());
+            const BIGNUM* priv = EC_KEY_get0_private_key(ec.get());
+            size_t priv_len = static_cast<size_t>(BN_num_bytes(priv));
+            kp.private_key = SecureMemory(priv_len);
+            BN_bn2bin(priv, kp.private_key.data());
+#endif
             break;
         }
         case KeyExchangeProtocol::X25519:

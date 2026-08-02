@@ -10,7 +10,18 @@
 #include <stdexcept>
 #include <set>
 #include <cstdio>
-#include "Logger.hpp"
+#include "include/ncp_logger.hpp"
+
+// NetworkManager.cpp historically used spdlog, which is not a project
+// dependency. Shim routes messages to the project logger; {} format args
+// are dropped (log line text is kept for diagnostics).
+namespace spdlog {
+template<typename... A> inline void info(const std::string& m, A&&...)  { NCP_LOG_INFO(m); }
+template<typename... A> inline void debug(const std::string& m, A&&...) { NCP_LOG_DEBUG(m); }
+template<typename... A> inline void warn(const std::string& m, A&&...)  { NCP_LOG_WARN(m); }
+template<typename... A> inline void error(const std::string& m, A&&...) { NCP_LOG_ERROR(m); }
+} // namespace spdlog
+
 
 
 #ifdef _WIN32
@@ -50,9 +61,9 @@ NetworkManager::NetworkManager() {
         }
         // WSAEFAULT - already initialized, ignore
         spdlog::debug("WSAStartup returned {} (likely already initialized)", err);
-    }    // Other errors may also indicate pre-existing initialization
     }
 #endif
+}
 
 NetworkManager::~NetworkManager() {
         spdlog::info("NetworkManager::~NetworkManager() - Destructor called");

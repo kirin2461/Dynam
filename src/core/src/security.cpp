@@ -28,6 +28,14 @@
 #include <cstdlib>
 #include <sodium.h>
 
+#ifdef __linux__
+#include <sys/stat.h>
+#include <sys/sysmacros.h>  // major()/minor()
+#include <netinet/in.h>     // in_addr, INET6_ADDRSTRLEN
+#include <arpa/inet.h>        // inet_ntop
+#include <unistd.h>
+#endif
+
 #ifdef _WIN32
 #  ifndef NOMINMAX
 #    define NOMINMAX
@@ -656,7 +664,7 @@ void TrafficPadder::set_padding_range(uint32_t min_size, uint32_t max_size) {
 
 // ==================== ForensicLogger ====================
 
-ForensicLogger::ForensicLogger() : enabled_(false) {}
+ForensicLogger::ForensicLogger() : enabled_(true) {}
 
 ForensicLogger::ForensicLogger(const std::string& log_path)
     : log_path_(log_path), enabled_(true)

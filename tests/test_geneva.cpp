@@ -20,6 +20,9 @@ static std::vector<uint8_t> make_ip_packet(size_t size = 60) {
     std::vector<uint8_t> pkt(size, 0);
     // Minimal IPv4 header stub (version/IHL)
     pkt[0] = 0x45; // IPv4, IHL=5 (20 bytes)
+    // tot_len must be plausible, otherwise validators rightly reject the stub
+    pkt[2] = static_cast<uint8_t>((size >> 8) & 0xFF);
+    pkt[3] = static_cast<uint8_t>(size & 0xFF);
     pkt[8] = 64;   // TTL
     pkt[9] = 0x06; // TCP
     return pkt;

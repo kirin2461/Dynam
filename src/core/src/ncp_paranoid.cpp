@@ -332,7 +332,7 @@ bool ParanoidMode::deactivate() {
     }
 
     // Teardown kill switch before clearing flag
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
     if (impl_->wfp_engine_handle) {
         // Remove all WFP filters
         for (UINT64 filter_id : impl_->wfp_filter_ids) {
@@ -342,6 +342,8 @@ bool ParanoidMode::deactivate() {
         FwpmEngineClose0(impl_->wfp_engine_handle);
         impl_->wfp_engine_handle = nullptr;
     }
+#elif defined(_WIN32)
+    // WFP SDK unavailable in this build - no firewall rules were installed
 #else
     if (impl_->kill_switch_active) {
         // Remove iptables rules via fork+exec
@@ -350,11 +352,25 @@ bool ParanoidMode::deactivate() {
             close(STDIN_FILENO);
             close(STDOUT_FILENO);
             close(STDERR_FILENO);
-            execlp("iptables", "iptables", "-D", "OUTPUT", "-j", "DROP", nullptr);
+            execlp("iptables", "iptables", "-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP", nullptr);
             _exit(127);
         } else if (pid > 0) {
             int status;
             waitpid(pid, &status, 0);
+        }
+        // Remove whitelist ACCEPT rules added by setup_kill_switch()
+        for (const auto& ip : network_isolation_.whitelist_ips) {
+            pid_t wl_pid = fork();
+            if (wl_pid == 0) {
+                close(STDIN_FILENO);
+                close(STDOUT_FILENO);
+                close(STDERR_FILENO);
+                execlp("iptables", "iptables", "-D", "OUTPUT", "-d", ip.c_str(), "-j", "ACCEPT", nullptr);
+                _exit(127);
+            } else if (wl_pid > 0) {
+                int wl_status;
+                waitpid(wl_pid, &wl_status, 0);
+            }
         }
     }
 #endif
@@ -1339,7 +1355,7 @@ void ParanoidMode::setup_kill_switch() {
         impl_->kill_switch_timeout_enabled = true;
     }
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
     // Windows: Use Windows Filtering Platform (WFP)
     FWPM_SESSION0 session = {};
     session.flags = FWPM_SESSION_FLAG_DYNAMIC;  // Filters removed on process exit
@@ -1410,6 +1426,10 @@ void ParanoidMode::setup_kill_switch() {
         }
     }
 
+    impl_->kill_switch_active = true;
+
+#elif defined(_WIN32)
+    // WFP SDK unavailable (e.g. mingw-w64): flag-only mode, no firewall rules
     impl_->kill_switch_active = true;
 
 #else
@@ -1496,7 +1516,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         return;
     }
 
-    auto now = std::chrono::system_clock::now();
+    auto now = std::chrono::steady_clock::now();
     auto elapsed = now - impl_->kill_switch_activation_time;
 
     if (elapsed >= impl_->kill_switch_timeout_duration) {
@@ -1505,7 +1525,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         std::cerr << "[!] Auto-disabling kill switch to restore network connectivity...\n";
 
         // Teardown kill switch
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(NCP_NO_WFP)
         if (impl_->wfp_engine_handle) {
             for (UINT64 filter_id : impl_->wfp_filter_ids) {
                 FwpmFilterDeleteById0(impl_->wfp_engine_handle, filter_id);
@@ -1514,6 +1534,8 @@ void ParanoidMode::check_kill_switch_timeout() {
             FwpmEngineClose0(impl_->wfp_engine_handle);
             impl_->wfp_engine_handle = nullptr;
         }
+#elif defined(_WIN32)
+        // WFP SDK unavailable in this build - no firewall rules were installed
 #else
         // Remove iptables DROP rule
         pid_t pid = fork();
@@ -1521,7 +1543,7 @@ void ParanoidMode::check_kill_switch_timeout() {
             close(STDIN_FILENO);
             close(STDOUT_FILENO);
             close(STDERR_FILENO);
-            execlp("iptables", "iptables", "-D", "OUTPUT", "-j", "DROP", nullptr);
+            execlp("iptables", "iptables", "-D", "OUTPUT", "!", "-o", "lo", "-j", "DROP", nullptr);
             _exit(127);
         } else if (pid > 0) {
             int status;
@@ -1536,7 +1558,7 @@ void ParanoidMode::check_kill_switch_timeout() {
         alert.type = "KILL_SWITCH_TIMEOUT";
         alert.severity = 7;
         alert.message = "Kill switch auto-disabled after timeout expired";
-        alert.timestamp = now;
+        alert.timestamp = std::chrono::system_clock::now();
         security_alerts_.push_back(alert);
     }
 }

@@ -46,6 +46,7 @@
 #  include <sys/ioctl.h>
 #  include <ifaddrs.h>
 #  include <sys/types.h>
+#  include <sys/stat.h>
 #  include <sys/socket.h>
 #  include <netdb.h>
 #  include <netinet/in.h>
@@ -133,14 +134,6 @@ static std::string json_escape_string_constant_time(const std::string& input, si
         }
         output += buf;
         ++processed;
-    }
-    return output;
-                    snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
-                    output += buf;
-                } else {
-                    output += c;
-                }
-        }
     }
     return output;
 }
@@ -1603,9 +1596,11 @@ void License::obfuscate_license_data() {
     std::string hwid = get_hwid();
     SecureMemory inp(hwid.size());
     std::memcpy(inp.data(), hwid.data(), hwid.size());
-    SecureMemory hashed = crypto_->hash_blake2b(inp, 8);
+    // BLAKE2b minimum output is crypto_generichash_BYTES_MIN (16) —
+    // derive 16 bytes and fold to the 8-byte obfuscation key.
+    SecureMemory hashed = crypto_->hash_blake2b(inp, 16);
     for (size_t i = 0; i < 8; ++i)
-        impl_->obf_key[i] = hashed.data()[i];
+        impl_->obf_key[i] = hashed.data()[i] ^ hashed.data()[i + 8];
 
     // XOR obfuscate the cached license blob
     std::lock_guard<std::mutex> lk(impl_->cache_mutex);

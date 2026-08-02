@@ -184,7 +184,7 @@ private:
 
 #ifdef _WIN32
 // Standalone DNS setter — works even when the full spoofer fails.
-:// R10-FIX-06: Command injection prevention - validate inputs and use safe parameter passing
+// R10-FIX-06: Command injection prevention - validate inputs and use safe parameter passing
 // Validates that string contains only allowed characters for DNS/interface names
 static bool is_valid_netsh_identifier(const std::string& s) {
     if (s.empty() || s.length() > 256) return false;
@@ -392,7 +392,7 @@ int main(int argc, char* argv[]) {
 
     ArgumentParser parser("ncp", "v1.2.0");
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers)", handle_run, {"[<interface>]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch)", handle_run, {"[<interface>]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
     parser.add_command("rotate", "Rotate all identities", handle_rotate);
@@ -457,11 +457,13 @@ void handle_run(const std::vector<std::string>& args) {
         std::cout << "[*] Starting NCP protection...\n";
         
         // Interface: prefer --interface option, fallback to positional arg
-        std::string interface = get_option(args, "--interface");
-        if (interface.empty()) {
+        // NOTE: `interface` is a COM macro (#define interface struct) in
+        // Windows headers — use iface_opt for the variable name.
+        std::string iface_opt = get_option(args, "--interface");
+        if (iface_opt.empty()) {
             // Positional: first arg that doesn't start with --
             for (const auto& a : args) {
-                if (a.substr(0, 2) != "--") { interface = a; break; }
+                if (a.substr(0, 2) != "--") { iface_opt = a; break; }
             }
         }
         
@@ -499,7 +501,7 @@ void handle_run(const std::vector<std::string>& args) {
             std::cout << "[*] Full spoof mode (IP+MAC+DNS) - use only on wired/static setups\n";
         }
         
-        std::string iface = (interface.empty() || interface == "auto") ? detect_default_interface() : interface;
+        std::string iface = (iface_opt.empty() || iface_opt == "auto") ? detect_default_interface() : iface_opt;
         std::cout << "[*] Interface: " << iface << "\n";
         
         bool dns_set = false;
@@ -613,6 +615,18 @@ void handle_run(const std::vector<std::string>& args) {
         
         // 3. Activate ParanoidMode with TINFOIL_HAT threat level
         g_app.paranoid->set_threat_level(ParanoidMode::ThreatLevel::TINFOIL_HAT);
+
+        // Kill switch is strictly opt-in: it installs a firewall rule dropping ALL
+        // non-loopback traffic. If this process dies unexpectedly (SIGKILL, crash,
+        // reboot), the rule persists and locks the machine off the network entirely
+        // (including SSH). Arm it only when explicitly requested via --kill-switch.
+        {
+            ParanoidMode::NetworkIsolation ni{};
+            ni.enable_kill_switch = has_flag(args, "--kill-switch")
+                                    && !has_flag(args, "--no-kill-switch");
+            g_app.paranoid->set_network_isolation(ni);
+        }
+
         if (!g_app.paranoid->activate()) {
             std::cerr << "[!] Warning: ParanoidMode failed to activate (continuing without it)\n";
             g_app.paranoid.reset();

@@ -257,7 +257,7 @@ KnockResult PortKnock::process_knock(
 
     std::lock_guard lock(progress_mutex_);
     // R12-FIX-07: Atomic insert with try_emplace (C++17) to prevent TOCTOU
-    auto [it, inserted] = progress_.try_emplace(source_ip, KnockState{});
+    auto [it, inserted] = progress_.try_emplace(source_ip, KnockProgress{});
     auto& prog = it->second;
     if (inserted) {
         prog.ip = source_ip;
