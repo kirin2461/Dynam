@@ -293,7 +293,8 @@ function formatBytes(bytes, decimals = 1) {
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-  const i = Math.floor(Math.log(Math.abs(bytes)) / Math.log(k));
+  // clamp: sub-byte values (< 1 B) would give i = -1 -> sizes[-1] = undefined
+  const i = Math.max(0, Math.min(sizes.length - 1, Math.floor(Math.log(Math.abs(bytes)) / Math.log(k))));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
 }
 
