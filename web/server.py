@@ -129,6 +129,12 @@ if platform.system() == "Windows":
 else:
     CONFIG_PATH = Path("/etc/ncp/config.json")
 
+# Ensure the config directory exists from the start (health check reads it)
+try:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+
 STATIC_DIR = (RESOURCE_DIR / "static") if FROZEN else (BASE_DIR / "static")
 LOG_BUFFER_SIZE = 500
 
