@@ -87,6 +87,13 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("ncp-web")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
+# PyInstaller frozen support: bundled data (static/, ncp.exe) is extracted to
+# sys._MEIPASS at runtime; the launcher exe dir is where the user keeps
+# WinDivert.dll / WinDivert64.sys.
+FROZEN = getattr(sys, "frozen", False)
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+EXE_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
+
 BASE_DIR = Path(__file__).parent
 PROJECT_DIR = BASE_DIR.parent
 BUILD_DIR = PROJECT_DIR / "build"
@@ -95,6 +102,8 @@ def _find_ncp_binary() -> Path:
     """Search for ncp binary in common build output locations."""
     if platform.system() == "Windows":
         candidates = [
+            RESOURCE_DIR / "ncp.exe",   # bundled inside frozen app
+            EXE_DIR / "ncp.exe",        # next to the launcher
             BUILD_DIR / "ncp.exe",
             BUILD_DIR / "bin" / "Release" / "ncp.exe",
             BUILD_DIR / "bin" / "Debug" / "ncp.exe",
@@ -120,7 +129,7 @@ if platform.system() == "Windows":
 else:
     CONFIG_PATH = Path("/etc/ncp/config.json")
 
-STATIC_DIR = BASE_DIR / "static"
+STATIC_DIR = (RESOURCE_DIR / "static") if FROZEN else (BASE_DIR / "static")
 LOG_BUFFER_SIZE = 500
 
 # ─── App & SocketIO ──────────────────────────────────────────────────────────
@@ -1638,6 +1647,7 @@ def _initial_logs():
         # Check for required DLLs next to binary, auto-copy from SDK if missing
         bin_dir = NCP_BINARY.parent
         _windivert_sdk_dirs = [
+            EXE_DIR,  # user drops WinDivert.dll/.sys next to the launcher
             Path(r"C:\WinDivert-2.2.2-A\x64"),
             Path(r"C:\WinDivert-2.2.2-A"),
             Path(r"C:\WinDivert\x64"),
@@ -1679,4 +1689,17 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("NCP_WEB_PORT", 8085))
     logger.info(f"Starting NCP Web Interface on 127.0.0.1:{port}")
+
+    # Frozen app: open the control panel in the default browser automatically
+    if (FROZEN or os.environ.get("NCP_OPEN_BROWSER") == "1") \
+            and os.environ.get("NCP_NO_BROWSER") != "1":
+        def _open_browser():
+            time.sleep(1.5)
+            try:
+                import webbrowser
+                webbrowser.open(f"http://127.0.0.1:{port}")
+            except Exception:
+                pass
+        threading.Thread(target=_open_browser, daemon=True).start()
+
     socketio.run(app, host="127.0.0.1", port=port, debug=False, allow_unsafe_werkzeug=True)
