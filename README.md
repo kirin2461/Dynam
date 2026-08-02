@@ -7,7 +7,7 @@
 **Version**: 1.5.0-dev (Active Development)
 **CMake Version**: 1.5.0 (synced)
 
-- ✅ **Build**: Linux (GCC 9+) and Windows (MSVC, WinDivert) via CMake + Ninja.
+- ✅ **Build**: Linux (GCC 9+) and Windows (mingw-w64 cross-build verified — statically linked `ncp.exe`; MSVC also supported) via CMake + Ninja.
 - ✅ **Tests**: 604 tests — 596 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
 - ✅ **MASTER_ORCHESTRATOR 100% COMPLETE**: Full 7-stage pipeline with anti-ML, steganography, and behavioral cloaking implemented.
 - ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop).
@@ -40,21 +40,72 @@
 ### Linux
 
 ```bash
-sudo apt install build-essential cmake ninja-build libssl-dev libsodium-dev libsqlite3-dev
+sudo apt install build-essential cmake ninja-build \
+    libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev \
+    libpcap-dev libnetfilter-queue-dev
 cmake -B build -G Ninja -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
 cmake --build build
 ```
+
+> `libwebsockets-dev` is **required** (secure tunneling). `libpcap-dev` and
+> `libnetfilter-queue-dev` are optional but enable L2 features and the NFQUEUE
+> DPI-bypass backend respectively.
 
 Binaries: `build/bin/ncp` (CLI), `build/bin/ncp_tests` (test suite).
 
 ### Windows
 
-Requirements: MSVC (Visual Studio 2019+), CMake, [WinDivert](https://reqrypt.org/windivert.html) 2.x (`WinDivert.dll` next to `ncp.exe` for DPI bypass / packet interception), vcpkg or manual installs of OpenSSL and libsodium.
+#### Option A — cross-compile from Linux (verified)
+
+Tested on Ubuntu 20.04 with mingw-w64 (produces a statically linked `ncp.exe`
+with ECH/HPKE support):
+
+```bash
+sudo apt install mingw-w64
+# Use the POSIX-threaded variant (std::thread/std::mutex support):
+sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+```
+
+Build the dependencies for mingw (versions verified to work):
+
+- **libsodium 1.0.20** — `./configure --host=x86_64-w64-mingw32 --prefix=/opt/win-deps`
+- **OpenSSL 3.5.1** — `./Configure mingw64 --prefix=/opt/win-deps --cross-compile-prefix=x86_64-w64-mingw32- no-shared no-tests no-apps`
+- **libwebsockets 4.3.3** — CMake with the toolchain file below, `-DLWS_WITH_SHARED=OFF -DLWS_WITH_ZLIB=OFF`
+
+Then configure and build:
+
+```bash
+cmake -B build-win -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+    -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=OFF -DENABLE_CLI=ON
+cmake --build build-win     # -> build-win/bin/ncp.exe
+```
+
+#### Option B — MSVC (native)
+
+Requirements: Visual Studio 2019+, CMake, and vcpkg:
 
 ```powershell
-cmake -B build -DENABLE_TESTS=ON -DENABLE_CLI=ON
+vcpkg install libsodium:x64-windows openssl:x64-windows libwebsockets:x64-windows
+cmake -B build -DENABLE_CLI=ON -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 ```
+
+#### Runtime requirement (both options)
+
+Packet interception on Windows uses **WinDivert**: download
+[WinDivert 2.x](https://reqrypt.org/windivert.html) and place `WinDivert.dll`
+and `WinDivert64.sys` next to `ncp.exe`, then run as Administrator:
+
+```powershell
+ncp.exe run --preset tspu
+```
+
+> The legacy WFP (Windows Filtering Platform) backend is compiled only when a
+> full WFP SDK is available (`HAVE_WFP_SDK` CMake check). mingw-w64 < v10 ships
+> an incomplete `fwpmu.h`, so WFP code is disabled there automatically
+> (`NCP_NO_WFP`) — WinDivert is the real interception backend regardless.
 
 ## Testing
 
@@ -108,5 +159,5 @@ python3 web/ncp_keygen.py issue --key private_key.b64 --plan ultimate --days 0 -
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: August 1, 2026
+**Last Updated**: August 2, 2026
 **Version**: 1.5.0-dev
