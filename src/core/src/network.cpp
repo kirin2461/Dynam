@@ -1,3 +1,5 @@
+#include <fstream>
+#include <sstream>
 #include "../include/ncp_network.hpp"
 #include "../include/ncp_mimicry.hpp"
 #include <stdexcept>
@@ -121,6 +123,7 @@ std::vector<Network::InterfaceInfo> Network::get_interfaces() {
 
 Network::InterfaceInfo Network::get_interface_info([[maybe_unused]] const std::string& interface_name) {
     InterfaceInfo info;
+    info.name = interface_name;
     info.is_up = false;
     info.is_loopback = false;
 
@@ -1017,6 +1020,34 @@ std::string Network::get_network_stats() {
 }
 
 NetworkStats Network::get_stats() const {
+#ifndef _WIN32
+    // When no capture session populated stats_, report system-wide counters
+    // from /proc/net/dev (aggregate of non-loopback interfaces).
+    if (stats_.packets_sent == 0 && stats_.packets_received == 0 &&
+        stats_.bytes_sent == 0 && stats_.bytes_received == 0) {
+        NetworkStats sys;
+        std::ifstream f("/proc/net/dev");
+        std::string line;
+        while (std::getline(f, line)) {
+            auto colon = line.find(':');
+            if (colon == std::string::npos) continue;
+            std::string name = line.substr(0, colon);
+            name.erase(0, name.find_first_not_of(" \t"));
+            if (name == "lo") continue;
+            std::istringstream ss(line.substr(colon + 1));
+            uint64_t rbytes, rpackets, dummy;
+            if (!(ss >> rbytes >> rpackets)) continue;
+            for (int i = 0; i < 6; ++i) ss >> dummy;   // errs drop fifo frame compressed multicast
+            uint64_t sbytes, spackets;
+            if (!(ss >> sbytes >> spackets)) continue;
+            sys.bytes_received += rbytes;
+            sys.packets_received += rpackets;
+            sys.bytes_sent += sbytes;
+            sys.packets_sent += spackets;
+        }
+        return sys;
+    }
+#endif
     return stats_;
 }
 

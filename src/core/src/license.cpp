@@ -872,6 +872,15 @@ License::ValidationResult License::validate_offline(
                          std::istreambuf_iterator<char>());
     file.close();
 
+    // Trim trailing whitespace/newlines — std::regex_match requires a full
+    // match and '.' does not match '\n', so a trailing newline in the file
+    // would otherwise silently invalidate every license.
+    while (!content.empty() &&
+           (content.back() == '\n' || content.back() == '\r' ||
+            content.back() == ' ' || content.back() == '\t')) {
+        content.pop_back();
+    }
+
     std::regex pattern(R"(([^|]+)\|([^|]+)\|(.+))");
     std::smatch matches;
     if (!std::regex_match(content, matches, pattern)) return ValidationResult::INVALID_FORMAT;
@@ -1090,6 +1099,14 @@ License::LicenseInfo License::get_license_info(const std::string& license_file) 
     std::string content((std::istreambuf_iterator<char>(file)),
                          std::istreambuf_iterator<char>());
     file.close();
+
+    // Trim trailing whitespace/newlines (see validate_offline): regex_match
+    // requires a full match and '.' does not match '\n'.
+    while (!content.empty() &&
+           (content.back() == '\n' || content.back() == '\r' ||
+            content.back() == ' ' || content.back() == '\t')) {
+        content.pop_back();
+    }
 
     std::regex pattern(R"(([^|]+)\|([^|]+)\|(.+))");
     std::smatch matches;

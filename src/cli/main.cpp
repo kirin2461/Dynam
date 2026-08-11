@@ -38,7 +38,14 @@
 #include <winsock2.h>
 #include <iphlpapi.h>
 #pragma comment(lib, "iphlpapi.lib")
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
+#include <cstdlib>
+#include <cstdio>
+#include <ctime>
 #include <csignal>
 #include <atomic>
 #include <thread>
@@ -278,6 +285,120 @@ static bool force_set_dns(const std::string& iface_utf8,
 }
 #endif
 
+static std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
+    std::vector<uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        auto hv = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        int hi = hv(hex[i]), lo = hv(hex[i + 1]);
+        if (hi < 0 || lo < 0) { out.clear(); return out; }
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return out;
+}
+
+// ── Cross-process run state ─────────────────────────────────────────────
+// `ncp run` writes a small JSON state file on startup and removes it during
+// graceful shutdown, so `ncp status` / `ncp stop` invoked from a separate
+// process can see and control the running instance.
+static std::string ncp_state_dir() {
+#ifdef _WIN32
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata) return std::string(appdata) + "\\ncp";
+    return ".";
+#else
+    const char* home = std::getenv("HOME");
+    if (home) return std::string(home) + "/ncp";
+    return "/tmp";
+#endif
+}
+
+static std::string ncp_state_file() {
+#ifdef _WIN32
+    return ncp_state_dir() + "\\run_state.json";
+#else
+    return ncp_state_dir() + "/run_state.json";
+#endif
+}
+
+static long ncp_current_pid() {
+#ifdef _WIN32
+    return static_cast<long>(GetCurrentProcessId());
+#else
+    return static_cast<long>(::getpid());
+#endif
+}
+
+static bool ncp_pid_alive(long pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                           static_cast<DWORD>(pid));
+    if (h) { CloseHandle(h); return true; }
+    return false;
+#else
+    return ::kill(static_cast<pid_t>(pid), 0) == 0;
+#endif
+}
+
+static void ncp_write_state(const std::string& modules_csv) {
+#ifdef _WIN32
+    CreateDirectoryA(ncp_state_dir().c_str(), nullptr);
+#else
+    ::mkdir(ncp_state_dir().c_str(), 0700);
+#endif
+    std::ofstream f(ncp_state_file(), std::ios::trunc);
+    if (!f.is_open()) return;
+    f << "{\"pid\":" << ncp_current_pid()
+      << ",\"started\":" << static_cast<long>(std::time(nullptr))
+      << ",\"modules\":\"" << modules_csv << "\"}\n";
+}
+
+static void ncp_clear_state() {
+    std::remove(ncp_state_file().c_str());
+}
+
+struct NcpRunState {
+    bool present = false;
+    long pid = -1;
+    long started = 0;
+    std::string modules;
+};
+
+static NcpRunState ncp_read_state() {
+    NcpRunState st;
+    std::ifstream f(ncp_state_file());
+    if (!f.is_open()) return st;
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    auto extract_long = [&](const char* key) -> long {
+        std::string k = std::string("\"") + key + "\":";
+        auto i = content.find(k);
+        if (i == std::string::npos) return -1;
+        i += k.size();
+        try { return std::stol(content.substr(i)); } catch (...) { return -1; }
+    };
+    auto extract_str = [&](const char* key) -> std::string {
+        std::string k = std::string("\"") + key + "\":\"";
+        auto i = content.find(k);
+        if (i == std::string::npos) return "";
+        i += k.size();
+        auto j = content.find('"', i);
+        if (j == std::string::npos) return "";
+        return content.substr(i, j - i);
+    };
+    st.pid = extract_long("pid");
+    st.started = extract_long("started");
+    st.modules = extract_str("modules");
+    st.present = (st.pid > 0);
+    return st;
+}
+
 static std::string get_arg(const std::vector<std::string>& args, size_t index, const std::string& default_val = "") {
     return index < args.size() ? args[index] : default_val;
 }
@@ -398,7 +519,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.2.0");
+    ArgumentParser parser("ncp", "v1.5.0");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch)", handle_run, {"[<interface>]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
@@ -952,6 +1073,30 @@ void handle_run(const std::vector<std::string>& args) {
 
         std::cout << "[+] Protection layers running. Press Ctrl+C to stop.\n";
 
+        // Publish cross-process state for `ncp status` / `ncp stop`
+        {
+            std::string mods;
+            auto add_mod = [&](const char* n) { if (!mods.empty()) mods += ","; mods += n; };
+            if (g_app.spoofer && g_app.spoofer->is_enabled()) add_mod("spoofing");
+            if (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) add_mod("dpi-bypass");
+            if (g_app.paranoid && g_app.paranoid->is_active()) add_mod("paranoid");
+            if (g_app.dns_leak && g_app.dns_leak->is_active()) add_mod("dns-leak");
+            if (g_app.l3_stealth) add_mod("l3-stealth");
+            if (g_app.rtt_equalizer) add_mod("rtt-equalizer");
+            if (g_app.volume_normalizer) add_mod("volume-normalizer");
+            if (g_app.wf_defense) add_mod("wf-defense");
+            if (g_app.behavioral_cloak) add_mod("behavioral-cloak");
+            if (g_app.time_breaker) add_mod("time-correlation-breaker");
+            if (g_app.self_test) add_mod("self-test");
+            if (g_app.session_frag) add_mod("session-fragmenter");
+            if (g_app.cross_layer) add_mod("cross-layer-correlator");
+            if (g_app.geneva) add_mod("geneva");
+            if (g_app.protocol_rotation) add_mod("protocol-rotation");
+            if (g_app.as_router) add_mod("as-router");
+            if (g_app.geo_obfuscator) add_mod("geo-obfuscator");
+            ncp_write_state(mods);
+        }
+
         g_running = true;
 
         // Wait loop
@@ -961,6 +1106,7 @@ void handle_run(const std::vector<std::string>& args) {
 
         // Cleanup after loop exit (RAII compliance)
         std::cout << "\n[*] Shutting down services...\n";
+        ncp_clear_state();
 
         // Stop modules in reverse initialization order
         if (g_app.geo_obfuscator) {
@@ -1055,6 +1201,59 @@ void handle_stop(const std::vector<std::string>& args) {
     // FIX C4100: Mark unreferenced parameter
     (void)args;
 
+    // Cross-process path: another `ncp run` instance owns the services.
+    // Detect it via the state file and ask it to shut down gracefully.
+    {
+        NcpRunState st = ncp_read_state();
+        bool any_local =
+            (g_app.spoofer && g_app.spoofer->is_enabled()) ||
+            (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) ||
+            (g_app.paranoid && g_app.paranoid->is_active()) ||
+            (g_app.dns_leak && g_app.dns_leak->is_active());
+        if (!any_local && st.present) {
+            if (!ncp_pid_alive(st.pid)) {
+                std::cout << "[*] Stale state file (pid " << st.pid
+                          << " not running) - removing\n";
+                ncp_clear_state();
+                std::cout << "[+] Nothing to stop\n";
+                return;
+            }
+            std::cout << "[*] Sending shutdown signal to ncp run (pid "
+                      << st.pid << ")...\n";
+#ifdef _WIN32
+            // CTRL_BREAK works only within the same console group; fall back
+            // to TerminateProcess (graceful cleanup may be skipped).
+            if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
+                                          static_cast<DWORD>(st.pid))) {
+                HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                                       static_cast<DWORD>(st.pid));
+                if (h) {
+                    std::cerr << "[!] Graceful signal unavailable; terminating process\n";
+                    TerminateProcess(h, 0);
+                    CloseHandle(h);
+                }
+            }
+#else
+            ::kill(static_cast<pid_t>(st.pid), SIGINT);
+#endif
+            // Wait for the process to actually exit, up to 90 s.
+            // (The state file is removed at the START of the run cleanup,
+            // long before the slow iptables/spoofer restore completes, so
+            // only process liveness is a reliable completion signal.)
+            // Full cleanup (16 iptables rules + spoofer restore) takes ~25 s.
+            for (int i = 0; i < 900 && ncp_pid_alive(st.pid); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (ncp_pid_alive(st.pid)) {
+                std::cerr << "[!] Process still running after 90 s\n";
+                return;
+            }
+            ncp_clear_state();
+            std::cout << "[+] ncp run stopped, settings restored\n";
+            return;
+        }
+    }
+
     std::cout << "[*] Stopping all services and restoring settings...\n";
 
     g_running = false;
@@ -1147,7 +1346,38 @@ void handle_stop(const std::vector<std::string>& args) {
 void handle_status(const std::vector<std::string>& args) {
     // FIX C4100: Mark unreferenced parameter
     (void)args;
-    
+
+    // Cross-process path: report the running `ncp run` instance, if any.
+    {
+        bool any_local =
+            (g_app.spoofer && g_app.spoofer->is_enabled()) ||
+            (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) ||
+            (g_app.paranoid && g_app.paranoid->is_active()) ||
+            (g_app.dns_leak && g_app.dns_leak->is_active());
+        if (!any_local) {
+            NcpRunState st = ncp_read_state();
+            std::cout << "=== NCP Status ===\n\n";
+            if (st.present && ncp_pid_alive(st.pid)) {
+                std::cout << "[Core] RUNNING (pid " << st.pid;
+                if (st.started > 0) {
+                    long up = static_cast<long>(std::time(nullptr)) - st.started;
+                    std::cout << ", uptime " << (up / 60) << "m" << (up % 60) << "s";
+                }
+                std::cout << ")\n";
+                std::cout << "  Active modules: "
+                          << (st.modules.empty() ? "(unknown)" : st.modules) << "\n";
+            } else {
+                if (st.present) {
+                    std::cout << "[*] Removing stale state file (pid " << st.pid
+                              << " not running)\n";
+                    ncp_clear_state();
+                }
+                std::cout << "[Core] Not running\n";
+            }
+            return;
+        }
+    }
+
     std::cout << "=== NCP Status ===\n\n";
     
     // Spoofing status
@@ -1395,7 +1625,8 @@ void handle_crypto(const std::vector<std::string>& args) {
         auto keypair = crypto.generate_keypair();
         std::cout << "[+] Keypair generated (Ed25519)\n";
         std::cout << "Public key: " << Crypto::bytes_to_hex(keypair.public_key) << "\n";
-        std::cout << "Secret key: [REDACTED - store securely]\n";
+        std::cout << "Secret key: " << Crypto::bytes_to_hex(keypair.secret_key) << "\n";
+        std::cout << "[!] Store the secret key securely; anyone with it can sign as you.\n";
     }
     else if (action == "random") {
         size_t size = static_cast<size_t>(get_option_int(args, "-n", 32));
@@ -1427,8 +1658,51 @@ void handle_crypto(const std::vector<std::string>& args) {
         
         std::cout << "Hash (" << algo << "): " << Crypto::bytes_to_hex(hash) << "\n";
     }
-    else if (action == "sign" || action == "verify") {
-        std::cerr << "[!] " << action << " not yet implemented\n";
+    else if (action == "sign") {
+        std::string data = get_arg(args, 1);
+        std::string sk_hex = get_arg(args, 2);
+        if (data.empty() || sk_hex.empty()) {
+            std::cerr << "Usage: ncp crypto sign <message> <secret_key_hex>\n";
+            return;
+        }
+        auto sk_bytes = hex_to_bytes(sk_hex);
+        if (sk_bytes.size() != 64 && sk_bytes.size() != 32) {
+            std::cerr << "[!] Invalid secret key length: " << sk_bytes.size()
+                      << " bytes (expected 64 or 32)\n";
+            return;
+        }
+        SecureMemory msg(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+        SecureMemory sk(sk_bytes.data(), sk_bytes.size());
+        auto sig = crypto.sign_ed25519(msg, sk);
+        if (sig.empty()) {
+            std::cerr << "[!] Signing failed\n";
+            return;
+        }
+        std::cout << "Signature (Ed25519): " << Crypto::bytes_to_hex(sig) << "\n";
+    }
+    else if (action == "verify") {
+        std::string data = get_arg(args, 1);
+        std::string sig_hex = get_arg(args, 2);
+        std::string pk_hex = get_arg(args, 3);
+        if (data.empty() || sig_hex.empty() || pk_hex.empty()) {
+            std::cerr << "Usage: ncp crypto verify <message> <signature_hex> <public_key_hex>\n";
+            return;
+        }
+        auto sig_bytes = hex_to_bytes(sig_hex);
+        auto pk_bytes = hex_to_bytes(pk_hex);
+        if (sig_bytes.size() != 64) {
+            std::cerr << "[!] Invalid signature length: " << sig_bytes.size() << " bytes (expected 64)\n";
+            return;
+        }
+        if (pk_bytes.size() != 32) {
+            std::cerr << "[!] Invalid public key length: " << pk_bytes.size() << " bytes (expected 32)\n";
+            return;
+        }
+        SecureMemory msg(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+        SecureMemory sig(sig_bytes.data(), sig_bytes.size());
+        SecureMemory pk(pk_bytes.data(), pk_bytes.size());
+        bool ok = crypto.verify_ed25519(msg, sig, pk);
+        std::cout << "Verification: " << (ok ? "VALID" : "INVALID") << "\n";
     }
     else {
         std::cerr << "[!] Unknown crypto action: " << action << "\n";
