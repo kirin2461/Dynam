@@ -25,6 +25,14 @@ set(NCP_CORE_SRC_SOURCES
     src/spoofer.cpp
     src/ncp_dpi.cpp
     src/ncp_dpi_zapret.cpp
+    # Bypass feature set (hostlists, proxy mode, blockcheck, detectors)
+    src/ncp_hostlist.cpp
+    src/ncp_zapret_import.cpp
+    src/ncp_proxy.cpp
+    src/ncp_blockcheck.cpp
+    src/ncp_dpi_detector.cpp
+    src/ncp_quic.cpp
+    src/ncp_ipfrag.cpp
     src/tls_fingerprint.cpp
     src/dpi_advanced.cpp
     src/secure_buffer.cpp

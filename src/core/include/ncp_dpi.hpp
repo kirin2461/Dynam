@@ -132,6 +132,10 @@ struct DPIConfig {
     int autottl_min = 3;         // minimum auto-detected TTL
     int autottl_max = 20;        // maximum auto-detected TTL
 
+    // QUIC/HTTP3 handling (UDP 443) — packet-level backends (WinDivert).
+    bool quic_force_tcp = false;   // drop outbound QUIC → clients fall back to TCP/TLS
+    int quic_ipfrag_offset = 0;    // >0: IP-fragment QUIC Initial at this payload offset
+
     // Auto-probe: sequentially try preset strategies until one works
     bool enable_autoprobe = false;
     int autoprobe_timeout_sec = 8;     // seconds to test each strategy
@@ -469,6 +473,8 @@ struct DPIStats {
     std::atomic<uint64_t> connections_handled{0};
     // CRIT-1: count WinDivertSend failures
     std::atomic<uint64_t> send_errors{0};
+    // QUIC force-TCP: outbound QUIC datagrams intentionally dropped
+    std::atomic<uint64_t> packets_dropped{0};
 
         DPIStats() = default;
     DPIStats(const DPIStats& other)
@@ -479,7 +485,8 @@ struct DPIStats {
           bytes_sent(other.bytes_sent.load()),
           bytes_received(other.bytes_received.load()),
           connections_handled(other.connections_handled.load()),
-          send_errors(other.send_errors.load()) {}
+          send_errors(other.send_errors.load()),
+          packets_dropped(other.packets_dropped.load()) {}
     DPIStats& operator=(const DPIStats& other) {
         if (this != &other) {
             packets_total.store(other.packets_total.load());
@@ -490,6 +497,7 @@ struct DPIStats {
             bytes_received.store(other.bytes_received.load());
             connections_handled.store(other.connections_handled.load());
             send_errors.store(other.send_errors.load());
+            packets_dropped.store(other.packets_dropped.load());
         }
         return *this;
     }
@@ -503,6 +511,7 @@ struct DPIStats {
         bytes_received.store(0);
         connections_handled.store(0);
         send_errors.store(0);
+        packets_dropped.store(0);
     }
 
     DPIStats snapshot() const noexcept {
@@ -515,6 +524,7 @@ struct DPIStats {
         s.bytes_received.store(bytes_received.load());
         s.connections_handled.store(connections_handled.load());
         s.send_errors.store(send_errors.load());
+        s.packets_dropped.store(packets_dropped.load());
         return s;
     }
 };

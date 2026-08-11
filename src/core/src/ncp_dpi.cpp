@@ -1,4 +1,6 @@
 #include "ncp_dpi.hpp"
+#include "ncp_ipfrag.hpp"
+#include "ncp_quic.hpp"
 #include "ncp_dpi_advanced.hpp"
 #include "ncp_dpi_zapret.hpp"
 #include "ncp_tls_fingerprint.hpp"
@@ -1624,6 +1626,46 @@ public:
 
                 uint16_t udp_dst = ntohs(udp_header->DstPort);
 
+                // === QUIC force-TCP: drop outbound QUIC (UDP/443) so clients
+                // fall back to TCP/TLS where TCP desync strategies apply ===
+                if (udp_dst == 443 && cfg.quic_force_tcp) {
+                    {
+                        std::lock_guard<std::mutex> lock(stats_mutex);
+                        stats.packets_dropped++;
+                    }
+                    continue;
+                }
+
+                // === QUIC Initial IP fragmentation (config-level) ===
+                if (udp_dst == 443 && cfg.quic_ipfrag_offset > 0 &&
+                    tcp_payload && payload_len > 20 &&
+                    is_quic_initial(tcp_payload, payload_len)) {
+                    std::vector<uint8_t> f1, f2;
+                    if (build_ip_fragments(packet, packet_len,
+                            static_cast<size_t>(cfg.quic_ipfrag_offset), f1, f2)) {
+                        // Mark fragments as self-injected to skip reprocessing
+                        if (f1.size() >= 6) {
+                            f1[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                            f1[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                        }
+                        if (f2.size() >= 6) {
+                            f2[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                            f2[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                        }
+                        if (!WinDivertSend(wd_handle_, f1.data(),
+                                static_cast<UINT>(f1.size()), nullptr, &addr) ||
+                            !WinDivertSend(wd_handle_, f2.data(),
+                                static_cast<UINT>(f2.size()), nullptr, &addr)) {
+                            log("WinDivertSend (QUIC ipfrag) failed");
+                            stats.send_errors++;
+                        } else {
+                            std::lock_guard<std::mutex> lock(stats_mutex);
+                            stats.packets_modified++;
+                        }
+                        continue;  // original datagram replaced by fragments
+                    }
+                }
+
                 // === QUIC DPI bypass (UDP 443) ===
                 // When zapret chains are active and match QUIC traffic,
                 // send fake QUIC packets before the real one to confuse DPI.
@@ -1632,6 +1674,33 @@ public:
                     const ZapretChain* match = find_matching_chain(ZProto::UDP, udp_dst, "");
                     if (match) {
                         auto ov = chain_to_overrides(*match);
+
+                        // Chain-level IP fragmentation (ipfrag2 for QUIC)
+                        if (match->ipfrag_offset > 0 && tcp_payload && payload_len > 20 &&
+                            is_quic_initial(tcp_payload, payload_len)) {
+                            std::vector<uint8_t> f1, f2;
+                            if (build_ip_fragments(packet, packet_len,
+                                    static_cast<size_t>(match->ipfrag_offset), f1, f2)) {
+                                if (f1.size() >= 6) {
+                                    f1[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                                    f1[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                                }
+                                if (f2.size() >= 6) {
+                                    f2[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                                    f2[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                                }
+                                WinDivertSend(wd_handle_, f1.data(),
+                                    static_cast<UINT>(f1.size()), nullptr, &addr);
+                                WinDivertSend(wd_handle_, f2.data(),
+                                    static_cast<UINT>(f2.size()), nullptr, &addr);
+                                {
+                                    std::lock_guard<std::mutex> lock(stats_mutex);
+                                    stats.packets_modified++;
+                                }
+                                continue;
+                            }
+                        }
+
                         int repeats = std::max(ov.fake_repeats, 1);
                         UINT ip_hdr_len = ip_header->HdrLength * 4;
 

@@ -20,6 +20,11 @@
 #include "ncp_geneva_engine.hpp"
 #include "ncp_covert_channel.hpp"
 #include "ncp_transport_manager.hpp"
+#include "ncp_proxy.hpp"
+#include "ncp_blockcheck.hpp"
+#include "ncp_zapret_import.hpp"
+#include "ncp_hostlist.hpp"
+#include "ncp_dpi_detector.hpp"
 
 #include <iostream>
 #include <string>
@@ -381,6 +386,9 @@ void handle_license(const std::vector<std::string>& args);
 void handle_dpi(const std::vector<std::string>& args);
 void handle_i2p(const std::vector<std::string>& args);
 void handle_mimic(const std::vector<std::string>& args);
+void handle_proxy(const std::vector<std::string>& args);
+void handle_blockcheck(const std::vector<std::string>& args);
+void handle_import_zapret(const std::vector<std::string>& args);
 
 // ============================================================================
 // main()
@@ -402,6 +410,9 @@ int main(int argc, char* argv[]) {
     parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
+    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]"});
+    parser.add_command("blockcheck", "Auto-select best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--json]", "[--out file]", "[--apply profile.json]"});
+    parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
 
     parser.parse_and_execute(argc, argv);
 
@@ -559,6 +570,17 @@ void handle_run(const std::vector<std::string>& args) {
 
         DPI::DPIConfig dpi_cfg;
         DPI::apply_preset(chosen_preset, dpi_cfg);
+        if (has_flag(args, "--quic-block")) {
+            dpi_cfg.quic_force_tcp = true;
+            std::cout << "[*] QUIC blocked — clients will fall back to TCP/TLS\n";
+        }
+        {
+            int qf = get_option_int(args, "--quic-frag", 0);
+            if (qf > 0) {
+                dpi_cfg.quic_ipfrag_offset = qf;
+                std::cout << "[*] QUIC Initial IP fragmentation at offset " << qf << "\n";
+            }
+        }
         std::cout << "[*] DPI preset: " << DPI::preset_to_string(chosen_preset) << "\n";
         
         if (!g_app.dpi_bypass->initialize(dpi_cfg) || !g_app.dpi_bypass->start()) {
@@ -1680,4 +1702,274 @@ void handle_mimic(const std::vector<std::string>& args) {
     std::cout << "[+] Size mimicry: enabled\n";
     std::cout << "[+] Pattern mimicry: enabled\n";
     std::cout << "\nTraffic will be disguised as " << type << " protocol\n";
+}
+// ============================================================================
+// ncp proxy — local SOCKS5/HTTP desync proxy (no admin required)
+// ============================================================================
+void handle_proxy(const std::vector<std::string>& args) {
+    if (has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp proxy [options]\n"
+                  << "  --port N              Listen port (default 1080, 0 = ephemeral)\n"
+                  << "  --bind ADDR           Listen address (default 127.0.0.1)\n"
+                  << "  --preset NAME         Base DPI preset for desync strategy\n"
+                  << "  --split-pos N         TCP split at byte N\n"
+                  << "  --split-sni           Split at SNI/Host position\n"
+                  << "  --multisplit a,b,c    Multi-layer split positions\n"
+                  << "  --chain \"<zapret args>\"  Attach zapret chain (import syntax)\n"
+                  << "  --block-quic          Drop UDP/443 (force TCP fallback)\n"
+                  << "  --fake-quic N         Send N fake QUIC Initials per target\n"
+                  << "  --doh                 Resolve targets via DNS-over-HTTPS\n"
+                  << "  --autohostlist FILE   Auto-record blocked hosts to FILE\n"
+                  << "  --detector-log FILE   Append DPI detector events (JSONL)\n";
+        return;
+    }
+    ncp::DesyncProxy::Config cfg;
+    cfg.port = static_cast<uint16_t>(get_option_int(args, "--port", 1080));
+    cfg.listen_host = get_option(args, "--bind", "127.0.0.1");
+
+    // Base strategy: preset or safe default (split-2 + split-at-SNI)
+    std::string preset_name = get_option(args, "--preset", "");
+    if (!preset_name.empty()) {
+        DPI::DPIPreset preset = DPI::preset_from_string(preset_name);
+        if (preset == DPI::DPIPreset::NONE) {
+            std::cerr << "[!] Unknown preset: " << preset_name << "\n";
+            return;
+        }
+        DPI::apply_preset(preset, cfg.base);
+    } else {
+        cfg.base.enable_tcp_split = true;
+        cfg.base.split_position = 2;
+        cfg.base.split_at_sni = true;
+        cfg.base.enable_noise = false;
+        cfg.base.enable_fake_packet = false;
+        cfg.base.enable_disorder = false;
+    }
+
+    // Explicit strategy flags override preset/default
+    if (has_flag(args, "--split-sni")) {
+        cfg.base.enable_tcp_split = false;
+        cfg.base.enable_multi_layer_split = false;
+        cfg.base.split_positions.clear();
+        cfg.base.split_at_sni = true;
+    }
+    {
+        int sp = get_option_int(args, "--split-pos", -1);
+        if (sp > 0) {
+            cfg.base.enable_tcp_split = true;
+            cfg.base.split_position = sp;
+            cfg.base.enable_multi_layer_split = false;
+            cfg.base.split_positions.clear();
+        }
+    }
+    {
+        std::string ms = get_option(args, "--multisplit", "");
+        if (!ms.empty()) {
+            cfg.base.enable_tcp_split = false;
+            cfg.base.enable_multi_layer_split = true;
+            cfg.base.split_positions.clear();
+            std::istringstream ss(ms);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+                try { cfg.base.split_positions.push_back(std::stoi(tok)); }
+                catch (...) {}
+            }
+        }
+    }
+
+    // Optional zapret chains (per-host strategies with hostlists)
+    std::string zprof = get_option(args, "--zapret-profile", "");
+    if (!zprof.empty()) {
+        auto p = DPI::get_zapret_profile_by_name(zprof);
+        if (p.chains.empty()) {
+            std::cerr << "[!] Unknown zapret profile: " << zprof << "\n";
+            return;
+        }
+        cfg.chains = p.chains;
+    }
+    cfg.hostlist_dir = get_option(args, "--hostlist-dir", "");
+    cfg.block_quic = has_flag(args, "--block-quic");
+    cfg.use_doh = has_flag(args, "--doh");
+
+    // Inline zapret chain spec: --chain "--filter-tcp=443 --dpi-desync=multisplit
+    // --dpi-desync-split-pos=1,midsld" (same syntax as import-zapret)
+    {
+        std::string chain_spec = get_option(args, "--chain", "");
+        if (!chain_spec.empty()) {
+            auto imported = DPI::parse_zapret_cmdline(chain_spec);
+            if (imported.ok()) {
+                cfg.chains = imported.profile.chains;
+                std::cout << "[+] Strategy chain: "
+                          << DPI::chain_to_cmdline(cfg.chains[0]) << "\n";
+            } else {
+                std::cerr << "[!] Bad --chain spec: "
+                          << (imported.errors.empty() ? "?" : imported.errors[0]) << "\n";
+                return;
+            }
+        }
+    }
+    cfg.fake_quic_repeats = get_option_int(args, "--fake-quic", 0);
+
+    ncp::DpiDetector detector(512, 2);
+    ncp::AutoHostlist autohl;
+    std::string ahl_path = get_option(args, "--autohostlist", "");
+    if (!ahl_path.empty()) {
+        autohl.set_path(ahl_path);
+        autohl.load();
+        cfg.auto_hostlist = &autohl;
+        std::cout << "[+] Auto-hostlist: " << ahl_path
+                  << " (" << autohl.size() << " entries)\n";
+    }
+    std::string detlog = get_option(args, "--detector-log", "");
+    if (!detlog.empty()) detector.set_log_file(detlog);
+    cfg.detector = &detector;
+    cfg.log_cb = [](const std::string& m) { std::cout << "[proxy] " << m << "\n"; };
+
+    ncp::DesyncProxy proxy;
+    if (!proxy.start(cfg)) {
+        std::cerr << "[!] Failed to start proxy on " << cfg.listen_host << ":"
+                  << cfg.port << "\n";
+        return;
+    }
+
+    std::cout << "[+] NCP desync proxy active\n"
+              << "    SOCKS5:        " << cfg.listen_host << ":" << proxy.bound_port() << "\n"
+              << "    HTTP CONNECT:  " << cfg.listen_host << ":" << proxy.bound_port() << "\n"
+              << "    QUIC block:    " << (cfg.block_quic ? "on (forces TCP fallback)" : "off") << "\n"
+              << "    Fake QUIC:     " << cfg.fake_quic_repeats << " per target\n"
+              << "    DoH upstream:  " << (cfg.use_doh ? "on (1.1.1.1)" : "off") << "\n"
+              << "    Chains:        " << cfg.chains.size() << "\n"
+              << "Point your browser/system proxy at this address. Ctrl+C to stop.\n";
+
+    g_running = 1;
+    while (g_running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    proxy.stop();
+    auto st = proxy.stats();
+    std::cout << "[+] Proxy stopped. Connections: " << st.connections_total
+              << ", splits applied: " << st.desync_splits_applied
+              << ", fake QUIC sent: " << st.fake_quic_sent
+              << ", QUIC blocked: " << st.quic_datagrams_blocked
+              << ", RST blocks: " << st.rst_blocks_detected
+              << ", timeout blocks: " << st.timeout_blocks_detected << "\n";
+}
+
+// ============================================================================
+// ncp blockcheck — automatic strategy selection
+// ============================================================================
+void handle_blockcheck(const std::vector<std::string>& args) {
+    if (has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp blockcheck [options]\n"
+                  << "  --domains a,b,c       Domains to probe (default: built-in list)\n"
+                  << "  --timeout MS          Per-probe timeout (default 5000)\n"
+                  << "  --json                Print report as JSON\n"
+                  << "  --out FILE            Save report JSON to FILE\n"
+                  << "  --apply               Print best strategy as DPIConfig/profile JSON\n";
+        return;
+    }
+    ncp::BlockChecker::Config cfg;
+    cfg.timeout_ms = get_option_int(args, "--timeout", 5000);
+
+    std::string domains_opt = get_option(args, "--domains", "");
+    if (!domains_opt.empty()) {
+        std::istringstream ss(domains_opt);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            size_t b = tok.find_first_not_of(" \t");
+            size_t e = tok.find_last_not_of(" \t");
+            if (b != std::string::npos) cfg.domains.push_back(tok.substr(b, e - b + 1));
+        }
+    }
+
+    const bool quiet = has_flag(args, "--json") || !get_option(args, "--out", "").empty();
+    if (!quiet) {
+        cfg.progress_cb = [](const std::string& strat, const std::string& domain, bool ok) {
+            std::cout << "  [" << (ok ? "OK" : "FAIL") << "] " << strat
+                      << " -> " << domain << "\n";
+        };
+    }
+
+    std::cout << "[*] Running blockcheck (" 
+              << (cfg.domains.empty() ? 6 : cfg.domains.size()) << " domains, "
+              << "timeout " << cfg.timeout_ms << "ms)...\n";
+
+    ncp::BlockChecker checker;
+    auto report = checker.run(cfg);
+
+    std::string out_path = get_option(args, "--out", "");
+    if (!out_path.empty()) {
+        std::ofstream f(out_path, std::ios::trunc);
+        f << ncp::BlockChecker::report_to_json(report);
+        std::cout << "[+] Report written to " << out_path << "\n";
+    }
+    if (has_flag(args, "--json")) {
+        std::cout << ncp::BlockChecker::report_to_json(report);
+    } else {
+        std::cout << "\n═══ Blockcheck results ═══\n";
+        for (const auto& r : report.results) {
+            std::cout << "  " << r.strategy << ": " << r.success_count << "/" << r.total
+                      << " ok";
+            if (r.success_count > 0)
+                std::cout << ", avg " << r.avg_latency_ms << " ms";
+            if (r.strategy == report.best_strategy) std::cout << "   <-- BEST";
+            std::cout << "\n";
+        }
+        std::cout << "\n[+] Best strategy: " << report.best_strategy
+                  << " (" << report.best_description << ")\n";
+    }
+
+    std::string apply_path = get_option(args, "--apply", "");
+    if (!apply_path.empty()) {
+        std::ofstream f(apply_path, std::ios::trunc);
+        f << ncp::BlockChecker::best_strategy_to_profile_json(report);
+        std::cout << "[+] Best strategy profile written to " << apply_path << "\n";
+    }
+}
+
+// ============================================================================
+// ncp import-zapret — import zapret CLI strategy
+// ============================================================================
+void handle_import_zapret(const std::vector<std::string>& args) {
+    if (has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp import-zapret (--args \"<zapret flags>\" | --file LIST.TXT)\n"
+                  << "  Parses zapret CLI flags and prints the resulting strategy profile as JSON.\n";
+        return;
+    }
+    std::string cmdline = get_option(args, "--args", "");
+    std::string file = get_option(args, "--file", "");
+    if (cmdline.empty() && file.empty()) {
+        std::cerr << "[!] Usage: ncp import-zapret --args \"<zapret args>\" | --file <args.txt> [--out profile.json]\n";
+        return;
+    }
+    if (!file.empty()) {
+        std::ifstream f(file);
+        if (!f.is_open()) {
+            std::cerr << "[!] Cannot read " << file << "\n";
+            return;
+        }
+        std::stringstream buf;
+        buf << f.rdbuf();
+        cmdline = buf.str();
+    }
+
+    auto result = DPI::parse_zapret_cmdline(cmdline);
+    std::string json = DPI::zapret_profile_to_json(result);
+
+    std::string out_path = get_option(args, "--out", "");
+    if (!out_path.empty()) {
+        std::ofstream f(out_path, std::ios::trunc);
+        f << json;
+        std::cout << "[+] Profile written to " << out_path << "\n";
+    } else {
+        std::cout << json;
+    }
+
+    if (!result.errors.empty()) {
+        std::cerr << "[!] " << result.errors.size() << " parse error(s)\n";
+        return;
+    }
+    std::cout << "[+] Imported " << result.profile.chains.size() << " chain(s)";
+    if (!result.warnings.empty())
+        std::cout << ", " << result.warnings.size() << " warning(s)";
+    std::cout << "\n";
 }

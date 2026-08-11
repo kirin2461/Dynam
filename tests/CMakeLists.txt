@@ -44,6 +44,7 @@ add_executable(ncp_tests
     # --- R11-R13 fixes test suite ---
     test_r13_fixes.cpp       # Tests for R11-R13 critical fixes
     test_thread_safety.cpp   # Thread safety verification tests
+    test_bypass_features.cpp # Hostlist/proxy/blockcheck/zapret-import/detector
 )
 
 target_link_libraries(ncp_tests

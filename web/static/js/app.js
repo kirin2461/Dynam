@@ -1465,3 +1465,327 @@ async function checkCustomTgProxy() {
     if (status) { status.textContent = 'Ошибка проверки'; status.style.color = 'var(--red)'; }
   }
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Bypass features — proxy mode, blockcheck, hostlists, zapret import,
+// DPI detector, availability, autostart, auto-update
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _bypassProxyRunning = false;
+let _blockcheckPoll = null;
+let _zapretParsed = null;
+
+function _esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+async function bypassProxyStatus() {
+  try {
+    const st = await apiFetch('/proxy/status');
+    _bypassProxyRunning = !!st.running;
+    const badge = document.getElementById('bypass-proxy-badge');
+    if (badge) {
+      badge.textContent = st.running ? `127.0.0.1:${st.port}` : 'Выкл';
+      badge.className = 'badge ' + (st.running ? 'badge--active' : 'badge--inactive');
+    }
+    const btnStart = document.getElementById('bypass-btn-proxy-start');
+    const btnStop = document.getElementById('bypass-btn-proxy-stop');
+    if (btnStart) btnStart.disabled = st.running;
+    if (btnStop) btnStop.disabled = !st.running;
+    const portInput = document.getElementById('bypass-proxy-port');
+    if (portInput && document.activeElement !== portInput) portInput.value = st.port;
+    const echo = document.getElementById('bypass-port-echo');
+    if (echo) echo.textContent = st.port;
+    const doh = document.getElementById('bypass-toggle-doh');
+    if (doh) doh.checked = !!st.doh;
+    const qb = document.getElementById('bypass-toggle-quic-block');
+    if (qb) qb.checked = !!st.block_quic;
+    const fq = document.getElementById('bypass-fake-quic');
+    if (fq && document.activeElement !== fq) fq.value = st.fake_quic || 0;
+    const label = document.getElementById('bypass-strategy-label');
+    if (label && st.strategy) {
+      label.textContent = st.strategy.description || st.strategy.strategy || 'пользовательская';
+    }
+    const hlCount = document.getElementById('bypass-hostlist-count');
+    if (hlCount) hlCount.textContent = st.autohostlist_size || 0;
+  } catch (e) { /* endpoints may be absent on old servers */ }
+}
+
+async function bypassProxyStart() {
+  const port = parseInt(document.getElementById('bypass-proxy-port').value) || 1080;
+  await apiFetch('/proxy/config', {method: 'POST', body: JSON.stringify({
+    proxy_port: port,
+    proxy_doh: document.getElementById('bypass-toggle-doh').checked,
+    proxy_block_quic: document.getElementById('bypass-toggle-quic-block').checked,
+    proxy_fake_quic: parseInt(document.getElementById('bypass-fake-quic').value) || 0,
+  })});
+  const r = await apiFetch('/proxy/start', {method: 'POST'});
+  if (!r.ok) alert('Ошибка запуска прокси: ' + (r.error || '?'));
+  bypassProxyStatus();
+}
+
+async function bypassProxyStop() {
+  await apiFetch('/proxy/stop', {method: 'POST'});
+  bypassProxyStatus();
+}
+
+// ── blockcheck ──
+
+async function bypassBlockcheckStart() {
+  const btn = document.getElementById('bypass-btn-blockcheck');
+  btn.disabled = true;
+  document.getElementById('bypass-blockcheck-status').textContent = 'сканирование…';
+  document.getElementById('bypass-blockcheck-results').style.display = 'none';
+  await apiFetch('/blockcheck/start', {method: 'POST', body: JSON.stringify({})});
+  if (_blockcheckPoll) clearInterval(_blockcheckPoll);
+  _blockcheckPoll = setInterval(bypassBlockcheckPoll, 2000);
+}
+
+async function bypassBlockcheckPoll() {
+  const st = await apiFetch('/blockcheck/status');
+  const label = document.getElementById('bypass-blockcheck-status');
+  if (st.running) {
+    label.textContent = `сканирование… ${st.elapsed}s`;
+    return;
+  }
+  clearInterval(_blockcheckPoll);
+  _blockcheckPoll = null;
+  document.getElementById('bypass-btn-blockcheck').disabled = false;
+  if (st.error || !st.report) {
+    label.textContent = 'ошибка: ' + (st.error || 'нет отчёта');
+    return;
+  }
+  label.textContent = `готово за ${(st.report.duration_ms / 1000).toFixed(1)}s — лучшая: ${st.report.best_strategy}`;
+  const tbody = document.getElementById('bypass-blockcheck-tbody');
+  tbody.innerHTML = '';
+  const results = [...st.report.results].sort((a, b) => b.score - a.score);
+  for (const r of results) {
+    const tr = document.createElement('tr');
+    const isBest = r.strategy === st.report.best_strategy;
+    tr.style.borderTop = '1px solid var(--border)';
+    if (isBest) tr.style.color = 'var(--green, #0c0)';
+    tr.innerHTML = `<td style="padding:4px">${_esc(r.strategy)}${isBest ? ' ★' : ''}</td>
+      <td style="padding:4px">${r.success}/${r.total}</td>
+      <td style="padding:4px">${r.success ? Math.round(r.avg_latency_ms) + ' ms' : '—'}</td>
+      <td style="padding:4px"><button class="btn btn--sm" data-strat="${_esc(r.strategy)}">Применить</button></td>`;
+    tr.querySelector('button').addEventListener('click', () => {
+      bypassBlockcheckApply(st.report, r.strategy);
+    });
+    tbody.appendChild(tr);
+  }
+  document.getElementById('bypass-blockcheck-results').style.display = 'block';
+}
+
+async function bypassBlockcheckApply(report, strategyName) {
+  // find full strategy info: reconstruct profile JSON from report entry
+  const r = report.results.find(x => x.strategy === strategyName);
+  if (!r) return;
+  // The apply endpoint expects the strategy profile; fetch it via report
+  const strategy = {strategy: r.strategy, description: r.description};
+  // strategy detail lives server-side; ask server to apply by name
+  const resp = await apiFetch('/blockcheck/apply', {method: 'POST',
+    body: JSON.stringify({strategy: {...strategy, ...(_strategyProfileFromReport(report, strategyName))}})});
+  if (resp.ok) {
+    document.getElementById('bypass-strategy-label').textContent = r.description || r.strategy;
+    bypassProxyStatus();
+  } else {
+    alert('Не удалось применить: ' + (resp.error || '?'));
+  }
+}
+
+function _strategyProfileFromReport(report, name) {
+  // blockcheck report includes only summary per strategy; the full profile
+  // is reconstructed server-side. Send name; server maps known names.
+  return {name};
+}
+
+// ── availability ──
+
+async function bypassAvailabilityCheck() {
+  const btn = document.getElementById('bypass-btn-avail');
+  btn.disabled = true;
+  btn.textContent = 'Проверка…';
+  const box = document.getElementById('bypass-avail-results');
+  box.innerHTML = '';
+  try {
+    const r = await apiFetch('/availability?timeout=5');
+    for (const site of r.sites) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)';
+      const directBadge = site.direct.ok
+        ? `<span class="badge badge--active">${site.direct.latency_ms} ms</span>`
+        : `<span class="badge badge--inactive">${_esc(site.direct.fail || 'недоступен')}</span>`;
+      let proxyBadge = '<span class="text-muted text-sm">прокси выкл</span>';
+      if (site.via_proxy) {
+        proxyBadge = site.via_proxy.ok
+          ? `<span class="badge badge--active">${site.via_proxy.latency_ms} ms</span>`
+          : `<span class="badge badge--inactive">${_esc(site.via_proxy.fail || 'недоступен')}</span>`;
+      }
+      row.innerHTML = `<span class="text-sm">${_esc(site.name)}</span>
+        <span style="display:flex;gap:var(--sp-2);align-items:center">
+          <span class="text-muted text-sm">напрямую</span>${directBadge}
+          <span class="text-muted text-sm">через прокси</span>${proxyBadge}
+        </span>`;
+      box.appendChild(row);
+    }
+  } catch (e) {
+    box.innerHTML = `<div class="text-sm" style="color:var(--red)">Ошибка проверки: ${_esc(e.message)}</div>`;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Проверить доступ';
+}
+
+// ── hostlist ──
+
+async function bypassHostlistLoad() {
+  try {
+    const r = await apiFetch('/hostlist');
+    const box = document.getElementById('bypass-hostlist-entries');
+    box.innerHTML = '';
+    document.getElementById('bypass-hostlist-count').textContent = r.entries.length;
+    for (const e of r.entries.slice(-200).reverse()) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;justify-content:space-between;align-items:center';
+      row.innerHTML = `<span>${_esc(e)}</span><button class="btn btn--sm" style="padding:0 6px">✕</button>`;
+      row.querySelector('button').addEventListener('click', async () => {
+        await apiFetch('/hostlist/remove', {method: 'POST', body: JSON.stringify({host: e})});
+        bypassHostlistLoad();
+      });
+      box.appendChild(row);
+    }
+    if (!r.entries.length) {
+      box.innerHTML = '<span class="text-muted text-sm">пусто — заблокированные домены появятся автоматически</span>';
+    }
+  } catch (e) {}
+}
+
+async function bypassHostlistAdd() {
+  const input = document.getElementById('bypass-hostlist-input');
+  const host = input.value.trim();
+  if (!host) return;
+  await apiFetch('/hostlist/add', {method: 'POST', body: JSON.stringify({host})});
+  input.value = '';
+  bypassHostlistLoad();
+}
+
+async function bypassHostlistClear() {
+  if (!confirm('Очистить авто-хостлист?')) return;
+  await apiFetch('/hostlist/clear', {method: 'POST'});
+  bypassHostlistLoad();
+}
+
+// ── zapret import ──
+
+async function bypassZapretParse() {
+  const args = document.getElementById('bypass-zapret-args').value.trim();
+  if (!args) return;
+  const r = await apiFetch('/zapret/import', {method: 'POST', body: JSON.stringify({args})});
+  const preview = document.getElementById('bypass-zapret-preview');
+  if (!r.ok) {
+    preview.style.display = 'block';
+    preview.textContent = 'Ошибка: ' + (r.error || '?');
+    return;
+  }
+  _zapretParsed = r.profile;
+  preview.style.display = 'block';
+  let txt = `Цепочек: ${r.profile.chains.length}\n`;
+  for (const c of r.profile.chains) {
+    txt += `\n• ${c.name} [${c.proto} ${c.ports.map(p => p[0] === p[1] ? p[0] : p[0] + '-' + p[1]).join(',')}]\n  ${c.cmdline}\n`;
+  }
+  if (r.profile.warnings.length) txt += `\nПредупреждения:\n` + r.profile.warnings.map(w => '  - ' + w).join('\n');
+  if (r.profile.errors.length) txt += `\nОшибки:\n` + r.profile.errors.map(w => '  - ' + w).join('\n');
+  preview.textContent = txt;
+  document.getElementById('bypass-zapret-apply').disabled = !r.profile.ok;
+}
+
+async function bypassZapretApply() {
+  if (!_zapretParsed || !_zapretParsed.chains.length) return;
+  const chain = _zapretParsed.chains.find(c => c.proto === 'tcp') || _zapretParsed.chains[0];
+  const r = await apiFetch('/zapret/apply', {method: 'POST', body: JSON.stringify({
+    name: 'zapret-import', chain_cmdline: chain.cmdline})});
+  if (r.ok) {
+    document.getElementById('bypass-strategy-label').textContent = 'zapret (импортированная)';
+    alert('Стратегия применена. Перезапустите прокси для активации.');
+  }
+}
+
+// ── DPI detector ──
+
+async function bypassDetectorLoad() {
+  try {
+    const r = await apiFetch('/detector/events?limit=50');
+    const box = document.getElementById('bypass-detector-events');
+    box.innerHTML = '';
+    const KIND_LABELS = {
+      rst_injection: ['RST-инъекция', 'var(--red)'],
+      timeout_block: ['Таймаут-блок', 'var(--red)'],
+      tcp_reset_pre: ['RST при подключении', 'var(--yellow,#f0c000)'],
+      block_cleared: ['Доступ восстановлен', 'var(--green,#0c0)'],
+    };
+    for (const e of r.events.reverse()) {
+      const [label, color] = KIND_LABELS[e.kind] || [e.kind, 'var(--text-secondary)'];
+      const row = document.createElement('div');
+      const ts = e.ts ? new Date(e.ts * 1000).toLocaleTimeString() : '';
+      row.innerHTML = `<span class="text-sm"><span style="color:${color}">●</span> ${label}: <b>${_esc(e.host)}</b> <span class="text-muted">${ts}</span></span>`;
+      box.appendChild(row);
+    }
+    if (!r.events.length) {
+      box.innerHTML = '<span class="text-muted text-sm">событий нет — блокировок не обнаружено</span>';
+    }
+  } catch (e) {}
+}
+
+// ── update ──
+
+async function bypassUpdateCheck() {
+  const status = document.getElementById('bypass-update-status');
+  status.textContent = 'Проверка…';
+  try {
+    const r = await apiFetch('/update/check');
+    if (!r.ok) {
+      status.textContent = 'Ошибка: ' + (r.error || '?');
+      return;
+    }
+    document.getElementById('bypass-ver-latest').textContent = r.latest ? ` → последняя: ${r.latest}` : '';
+    if (r.update_available) {
+      status.textContent = `Доступна версия ${r.latest}. ${r.notes || ''}`;
+      document.getElementById('bypass-btn-update-install').disabled = false;
+    } else {
+      status.textContent = r.error ? `Обновлений нет (${r.error})` : 'У вас последняя версия';
+    }
+  } catch (e) {
+    status.textContent = 'Ошибка проверки: ' + e.message;
+  }
+}
+
+async function bypassUpdateInstall() {
+  if (!confirm('Скачать и установить обновление? Приложение перезапустится.')) return;
+  const status = document.getElementById('bypass-update-status');
+  status.textContent = 'Загрузка и проверка подписи…';
+  const r = await apiFetch('/update/install', {method: 'POST'});
+  status.textContent = r.ok ? (r.message || 'Установлено') : ('Ошибка: ' + (r.error || '?'));
+}
+
+// ── autostart ──
+
+async function bypassAutostartLoad() {
+  try {
+    const r = await apiFetch('/autostart');
+    const t = document.getElementById('bypass-toggle-autostart');
+    if (t) t.checked = !!r.enabled;
+  } catch (e) {}
+}
+
+async function bypassAutostartToggle(enabled) {
+  await apiFetch('/autostart', {method: 'POST', body: JSON.stringify({enabled})});
+}
+
+// ── init on navigation ──
+document.querySelector('[data-nav="bypass"]')?.addEventListener('click', () => {
+  bypassProxyStatus();
+  bypassHostlistLoad();
+  bypassDetectorLoad();
+  bypassAutostartLoad();
+});
+

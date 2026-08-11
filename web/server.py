@@ -94,7 +94,7 @@ FROZEN = getattr(sys, "frozen", False)
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
 EXE_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 BUILD_DIR = PROJECT_DIR / "build"
 
@@ -122,7 +122,7 @@ def _find_ncp_binary() -> Path:
     # Return default path even if not found yet
     return candidates[0]
 
-NCP_BINARY = _find_ncp_binary()
+NCP_BINARY = _find_ncp_binary().resolve()
 
 if platform.system() == "Windows":
     CONFIG_PATH = Path(os.environ.get("APPDATA", "")) / "ncp" / "config.json"
@@ -181,6 +181,11 @@ state = {
         "sni_spoof": False,
         "paranoid_mode": False,
         "auto_rotate": False,
+        # Bypass feature set (proxy mode / blockcheck / QUIC)
+        "proxy_doh": True,
+        "proxy_block_quic": False,
+        "proxy_fake_quic": 0,
+        "proxy_strategy": None,
         "rotate_interval": 3600,
         "antiforensics": False,
         "autostart": False,
@@ -1683,6 +1688,23 @@ def _initial_logs():
     push_log("INFO", "Ready")
 
 
+# ── Bypass feature routes (proxy / blockcheck / hostlists / zapret import /
+#    detector / availability / autostart / auto-update) ──
+try:
+    import bypass_routes
+    bypass_routes.register_bypass_routes(app, {
+        "state": state,
+        "push_log": push_log,
+        "save_config": save_config,
+        "ncp_binary": str(NCP_BINARY),
+        "config_dir": CONFIG_PATH.parent,
+        "exe_dir": EXE_DIR,
+    })
+    logger.info("Bypass routes registered")
+except Exception as _bypass_err:
+    logger.warning(f"Bypass routes not available: {_bypass_err}")
+
+
 if __name__ == "__main__":
     # Restore saved license
     _try_restore_license()
@@ -1694,6 +1716,23 @@ if __name__ == "__main__":
     _initial_logs()
 
     port = int(os.environ.get("NCP_WEB_PORT", 8085))
+
+    # Windows tray icon (frozen builds only, best-effort)
+    if FROZEN and platform.system() == "Windows":
+        try:
+            import ncp_tray
+            def _tray_open():
+                try:
+                    import webbrowser
+                    webbrowser.open(f"http://127.0.0.1:{port}")
+                except Exception:
+                    pass
+            def _tray_quit():
+                os._exit(0)
+            if ncp_tray.start_tray("NCP — защита активна", _tray_open, _tray_quit):
+                push_log("INFO", "Tray icon active")
+        except Exception as _tray_err:
+            push_log("WARN", f"Tray icon failed: {_tray_err}")
     logger.info(f"Starting NCP Web Interface on 127.0.0.1:{port}")
 
     # Frozen app: open the control panel in the default browser automatically

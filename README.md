@@ -141,7 +141,7 @@ pip install -r requirements.txt
 python3 server.py    # http://127.0.0.1:8085
 ```
 
-Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core. GUI-launched instances always run with `--no-kill-switch`.
+Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core. The **Bypass** section adds: one-click desync proxy start/stop, automatic strategy selection (blockcheck) with per-strategy apply, availability checker for popular sites, auto-hostlist management, zapret strategy import with preview, DPI detector event feed, signed auto-update and autostart toggle. GUI-launched instances always run with `--no-kill-switch`.
 
 License keys are issued with `web/ncp_keygen.py` (Ed25519):
 
@@ -149,6 +149,82 @@ License keys are issued with `web/ncp_keygen.py` (Ed25519):
 python3 web/ncp_keygen.py generate-keypair --out private_key.b64
 python3 web/ncp_keygen.py issue --key private_key.b64 --plan ultimate --days 0 --modules all
 ```
+
+## Bypass Features (no admin required)
+
+### Local desync proxy — `ncp proxy`
+
+SOCKS5/HTTP proxy on localhost that applies DPI-desync (TCP split at
+byte/SNI/midSLD positions, zapret chains, fake QUIC, DoH resolution) to
+relay traffic. Works without root/admin rights — point your browser or app
+at `127.0.0.1:1080` (SOCKS5 with UDP ASSOCIATE, or HTTP CONNECT).
+
+```bash
+ncp proxy --port 1080 --doh                      # default: split-2 + split-at-SNI
+ncp proxy --split-pos 5                          # split ClientHello at byte 5
+ncp proxy --multisplit 1,2,5 --split-sni         # multi-layer split
+ncp proxy --chain "--dpi-desync=fake,multisplit --dpi-desync-split-pos=midsld"
+ncp proxy --block-quic                           # drop UDP/443 (force TCP fallback)
+ncp proxy --fake-quic 3                          # 3 fake QUIC Initials per target
+ncp proxy --autohostlist /etc/ncp/autohostlist.txt --detector-log /etc/ncp/detector_events.jsonl
+```
+
+### Automatic strategy selection — `ncp blockcheck`
+
+zapret `blockcheck` equivalent: probes a set of domains through every
+built-in strategy (split-1/2/3/5, split-SNI, multisplit variants, midSLD /
+SNI-extension / end-SLD chain splits), scores them, and reports the winner:
+
+```bash
+ncp blockcheck                                   # built-in domain list
+ncp blockcheck --domains example.com,foo.org --json --out report.json
+ncp blockcheck --apply                           # best strategy as profile JSON
+```
+
+### zapret strategy import — `ncp import-zapret`
+
+Parses zapret CLI flags (`--dpi-desync`, `--dpi-desync-split-pos`,
+`--dpi-desync-fooling`, `--dpi-desync-ttl/-autottl`, `--dpi-desync-fake-*`,
+`--hostlist*`, `--new`, `--filter-tcp/udp/l3/l7`, ...) into an NCP
+`ZapretChain` profile and prints it as JSON:
+
+```bash
+ncp import-zapret --args "--filter-tcp=443 --dpi-desync=split2 --dpi-desync-split-pos=midsld"
+ncp import-zapret --file strategies.txt
+```
+
+### Hostlists
+
+Exact + suffix domain matching (`*.example.com`, bare `example.com`,
+two-level TLD aware). Auto-hostlist records hosts where DPI blocking was
+detected (timeout / RST injection) and feeds them back into chain
+selection (`--hostlist` rules).
+
+### Passive DPI detector
+
+Counts RST injections, post-ClientHello resets and connect timeouts per
+host; emits JSONL events (`rst_injection`, `timeout_block`,
+`tcp_reset_pre`, `block_cleared`) consumable by the GUI.
+
+### QUIC / HTTP3 handling
+
+* fake QUIC Initial packets (WinDivert path and proxy UDP ASSOCIATE),
+* force-TCP: `--quic-block` / proxy `--block-quic` drops UDP/443,
+* IP-level fragmentation of QUIC Initials: `--quic-frag <offset>`
+  (IPv4, 8-byte aligned, checksums recomputed).
+
+### Auto-update
+
+Signed releases: the GUI checks GitHub Releases for a `manifest.json`
+asset, verifies SHA-256 and an **Ed25519 signature** (same key pair as
+license issuance) before installing. Compromised or tampered binaries are
+rejected.
+
+### Windows tray & autostart
+
+Frozen GUI build (`ncp-gui.exe`) shows a system-tray icon (open panel /
+quit) and can register itself in autostart (HKCU `Run` on Windows,
+`~/.config/autostart/ncp.desktop` on Linux) — toggled from the GUI.
 
 ## Architecture
 - Modern C++17 with `constexpr`/`noexcept` optimization.
@@ -159,5 +235,5 @@ python3 web/ncp_keygen.py issue --key private_key.b64 --plan ultimate --days 0 -
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: August 2, 2026
+**Last Updated**: August 11, 2026
 **Version**: 1.5.0-dev
