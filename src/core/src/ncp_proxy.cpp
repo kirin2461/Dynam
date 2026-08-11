@@ -260,17 +260,21 @@ public:
     // DoH resolution (bypass DNS blocks)
     std::unique_ptr<DoHClient> doh;
     std::mutex doh_cache_mu;
-    std::map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> doh_cache;
+    std::map<std::string, std::pair<std::vector<std::string>, std::chrono::steady_clock::time_point>> doh_cache;
 
     // Resolve host to a connectable address string; returns input unchanged
     // for IP literals or when DoH is disabled/fails (fallback to system DNS).
-    std::string resolve_upstream(const std::string& host) {
-        if (!cfg.use_doh || !doh) return host;
+    // Resolve to ALL candidate addresses. DPI often blocks individual IPs of
+    // a service while others stay reachable; DoH round-robins address order,
+    // so using only the first address makes connectivity flaky. Trying every
+    // candidate in order makes the proxy robust.
+    std::vector<std::string> resolve_upstream_all(const std::string& host) {
+        if (!cfg.use_doh || !doh) return {host};
         in_addr a4{};
         in6_addr a6{};
         if (::inet_pton(AF_INET, host.c_str(), &a4) == 1 ||
             ::inet_pton(AF_INET6, host.c_str(), &a6) == 1)
-            return host;  // already an IP literal
+            return {host};  // already an IP literal
         {
             std::lock_guard<std::mutex> lk(doh_cache_mu);
             auto it = doh_cache.find(host);
@@ -282,11 +286,11 @@ public:
         auto res = doh->resolve_ipv4(host);
         if (!res.addresses.empty()) {
             std::lock_guard<std::mutex> lk(doh_cache_mu);
-            doh_cache[host] = {res.addresses.front(),
+            doh_cache[host] = {res.addresses,
                                std::chrono::steady_clock::now()};
-            return res.addresses.front();
+            return res.addresses;
         }
-        return host;  // fallback: system DNS
+        return {host};  // fallback: system DNS
     }
 
     void log(const std::string& msg) {
@@ -358,10 +362,9 @@ public:
                          socklen_t client_len);
 
     // ── Networking helpers ──
-    ncp_socket_t connect_target(const std::string& host_in, uint16_t port, int timeout_ms,
-                                bool* reset = nullptr) {
+    ncp_socket_t connect_target_one(const std::string& host, uint16_t port, int timeout_ms,
+                                    bool* reset = nullptr) {
         if (reset) *reset = false;
-        const std::string host = resolve_upstream(host_in);
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
@@ -436,6 +439,23 @@ public:
         }
         ::freeaddrinfo(res);
         return out;
+    }
+
+    ncp_socket_t connect_target(const std::string& host_in, uint16_t port, int timeout_ms,
+                                bool* reset = nullptr) {
+        if (reset) *reset = false;
+        bool any_reset = false;
+        for (const auto& candidate : resolve_upstream_all(host_in)) {
+            bool r = false;
+            ncp_socket_t s = connect_target_one(candidate, port, timeout_ms, &r);
+            if (s != NCP_INVALID_SOCK) {
+                if (reset) *reset = r;
+                return s;
+            }
+            if (r) any_reset = true;
+        }
+        if (reset) *reset = any_reset;
+        return NCP_INVALID_SOCK;
     }
 
     // send first payload with desync splitting

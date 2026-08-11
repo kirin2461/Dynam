@@ -45,22 +45,21 @@
 
 namespace ncp {
 
-#ifdef HAVE_PCAP
-// pcap_handle_deleter implementation (moved inside namespace ncp)
+// ABI-STABLE: always defined; without pcap support the handle can never be
+// non-null, so the no-op branch is unreachable in practice.
 void pcap_handle_deleter::operator()(pcap_t* p) const noexcept {
+#ifdef HAVE_PCAP
     if (p) pcap_close(p);
-}
+#else
+    (void)p;
 #endif
+}
 
 // ==================== Constructor/Destructor ====================
 
 Network::Network()
-#ifdef HAVE_PCAP
     : pcap_handle_(nullptr)
     , is_capturing_(false)
-#else
-    : is_capturing_(false)
-#endif
     , bypass_enabled_(false)
     , current_technique_(BypassTechnique::NONE)
 {

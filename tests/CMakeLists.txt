@@ -61,6 +61,21 @@ target_include_directories(ncp_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src
 )
 
+# ==================== Standalone functional check ====================
+# End-to-end functional verification of the core library (crypto, E2E, DoH,
+# QUIC/ipfrag, hostlists, zapret import, presets, detector, license, network,
+# mimicry). Not a gtest: run directly as `ncp_functional_check`.
+add_executable(ncp_functional_check functional_check.cpp)
+target_link_libraries(ncp_functional_check PRIVATE ncp_core)
+add_dependencies(ncp_functional_check ncp_core)
+target_include_directories(ncp_functional_check PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core/include
+)
+set_target_properties(ncp_functional_check PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+)
+
 # ==================== Compiler Warning Suppression ====================
 if(MSVC)
     target_compile_options(ncp_tests PRIVATE
