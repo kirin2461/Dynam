@@ -186,6 +186,7 @@ state = {
         "proxy_block_quic": False,
         "proxy_fake_quic": 0,
         "proxy_strategy": None,
+        "proxy_autopilot": True,
         "rotate_interval": 3600,
         "antiforensics": False,
         "autostart": False,

@@ -107,6 +107,10 @@
             <span class="sidebar__icon">⬆️</span>
             <span class="sidebar__label">Обход блокировок</span>
           </li>
+          <li class="sidebar__item" data-nav="monitor">
+            <span class="sidebar__icon">📡</span>
+            <span class="sidebar__label">Мониторинг</span>
+          </li>
 
         <li class="sidebar__item" data-nav="network">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -658,6 +662,77 @@
             <span class="text-sm">Запускать NCP при входе в систему</span>
             <label class="toggle"><input type="checkbox" id="bypass-toggle-autostart" onchange="bypassAutostartToggle(this.checked)"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
           </div>
+        </div>
+      </div>
+    </section>
+
+
+<!-- ══ МОНИТОРИНГ (live) ══════════════════════════════════════════════ -->
+    <section id="sec-monitor" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        Мониторинг трафика
+        <span id="monitor-live-badge" class="badge badge--inactive" style="margin-left:8px">Прокси выкл</span>
+      </h2>
+
+      <!-- Счётчики -->
+      <div class="grid-4col" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--sp-3);margin-bottom:var(--sp-4)">
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">Соединения</div><div id="mon-conn" style="font-size:1.5rem;font-weight:600">0</div><div class="text-sm" style="color:var(--text-secondary)">активных: <span id="mon-conn-active">0</span></div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">Трафик</div><div id="mon-bytes" style="font-size:1.5rem;font-weight:600">0 B</div><div class="text-sm" style="color:var(--text-secondary)">↑ <span id="mon-bytes-up">0 B</span></div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">Сплиты</div><div id="mon-splits" style="font-size:1.5rem;font-weight:600">0</div><div class="text-sm" style="color:var(--text-secondary)">desync</div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">AutoPilot hits</div><div id="mon-ap-hits" style="font-size:1.5rem;font-weight:600">0</div><div class="text-sm" style="color:var(--text-secondary)">выученных стратегий</div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">RST-блоки</div><div id="mon-rst" style="font-size:1.5rem;font-weight:600;color:var(--danger,#e5534b)">0</div><div class="text-sm" style="color:var(--text-secondary)">timeout: <span id="mon-timeout">0</span></div></div>
+      </div>
+
+      <div class="grid-2col">
+        <!-- Живой поток событий -->
+        <div class="card">
+          <div class="card__title">Живой поток соединений</div>
+          <div id="mon-events" class="text-sm" style="max-height:340px;overflow-y:auto;font-family:monospace">
+            <div style="color:var(--text-secondary)">Запустите прокси — события появятся здесь в реальном времени.</div>
+          </div>
+        </div>
+
+        <!-- Стратегии по хостам -->
+        <div class="card">
+          <div class="card__title">Стратегии по хостам</div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Хост</th><th>Стратегия</th><th>Исход</th><th>Данные</th></tr></thead>
+              <tbody id="mon-hosts"><tr><td colspan="4" style="color:var(--text-secondary)">Нет данных</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- AutoPilot -->
+      <div class="card" style="margin-top:var(--sp-4)">
+        <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+          AutoPilot — адаптивный движок
+          <span id="mon-ap-badge" class="badge badge--inactive">Выкл</span>
+        </div>
+        <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+          Самообучающийся обход: запоминает рабочую стратегию для каждого хоста,
+          следит за деградацией и переобучается автоматически.
+          БД: <code id="mon-ap-dbpath">~/.ncp/autopilot.json</code>
+        </div>
+        <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center;margin-bottom:var(--sp-3)">
+          <input type="text" class="form-input" id="mon-ap-domain" placeholder="example.com" style="max-width:220px">
+          <button class="btn btn--primary" id="mon-ap-btn-learn" onclick="monitorAutopilotLearn()">Обучить</button>
+          <button class="btn" onclick="monitorAutopilotReset()">Сбросить БД</button>
+          <div style="display:flex;align-items:center;gap:var(--sp-2);margin-left:auto">
+            <span class="text-sm">AutoPilot</span>
+            <label class="toggle"><input type="checkbox" id="mon-ap-toggle" onchange="monitorAutopilotEnabled(this.checked)"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+        <div id="mon-ap-learn-status" class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-2)"></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Хост</th><th>Стратегия</th><th>Ок/Сбой</th><th>Статус</th></tr></thead>
+            <tbody id="mon-ap-records"><tr><td colspan="4" style="color:var(--text-secondary)">Нет выученных хостов</td></tr></tbody>
+          </table>
         </div>
       </div>
     </section>

@@ -10,10 +10,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <fstream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <set>
+#include <sstream>
 #include <thread>
 
 #ifdef _WIN32
@@ -255,6 +260,81 @@ public:
     std::mutex socks_mu;
     std::set<ncp_socket_t> open_socks;
 
+    // ── Live monitoring (file-based IPC) ──
+    std::mutex events_mu;
+    std::ofstream events_stream;
+    std::thread stats_thread;
+
+    static std::string json_esc(const std::string& s) {
+        std::string out;
+        out.reserve(s.size() + 8);
+        for (char c : s) {
+            switch (c) {
+                case '"': out += "\\\""; break;
+                case '\\': out += "\\\\"; break;
+                default:
+                    if ((unsigned char)c < 0x20) out += '?';
+                    else out += c;
+            }
+        }
+        return out;
+    }
+
+    // Append one JSONL event (thread-safe, flushed). No-op when disabled.
+    void emit_event(const std::string& line) {
+        if (cfg.events_log.empty()) return;
+        std::lock_guard<std::mutex> lk(events_mu);
+        if (!events_stream.is_open()) {
+            events_stream.open(cfg.events_log, std::ios::app);
+            if (!events_stream) return;
+        }
+        events_stream << line << "\n";
+        events_stream.flush();
+    }
+
+    static int64_t now_unix() {
+        return static_cast<int64_t>(std::time(nullptr));
+    }
+
+    void write_stats_file() {
+        if (cfg.stats_file.empty()) return;
+        std::ostringstream j;
+        j << "{\"ts\": " << now_unix()
+          << ", \"connections_total\": " << cnt.total.load()
+          << ", \"connections_active\": " << cnt.active.load()
+          << ", \"bytes_client_to_server\": " << cnt.c2s.load()
+          << ", \"bytes_server_to_client\": " << cnt.s2c.load()
+          << ", \"desync_splits_applied\": " << cnt.splits.load()
+          << ", \"fake_quic_sent\": " << cnt.fake_quic.load()
+          << ", \"quic_datagrams_blocked\": " << cnt.quic_blocked.load()
+          << ", \"rst_blocks_detected\": " << cnt.rst_blocks.load()
+          << ", \"timeout_blocks_detected\": " << cnt.timeout_blocks.load()
+          << ", \"udp_sessions\": " << cnt.udp_sessions.load()
+          << ", \"autopilot_hits\": " << cnt.autopilot_hits.load()
+          << "}\n";
+        std::string tmp = cfg.stats_file + ".tmp";
+        {
+            std::ofstream f(tmp, std::ios::trunc);
+            if (!f) return;
+            f << j.str();
+            if (!f) { std::remove(tmp.c_str()); return; }
+        }
+        if (std::rename(tmp.c_str(), cfg.stats_file.c_str()) != 0) {
+            std::remove(cfg.stats_file.c_str());
+            if (std::rename(tmp.c_str(), cfg.stats_file.c_str()) != 0)
+                std::remove(tmp.c_str());
+        }
+    }
+
+    void stats_loop() {
+        while (running.load()) {
+            write_stats_file();
+            for (int i = 0; i < 20 && running.load(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        write_stats_file();  // final flush on shutdown
+    }
+
     // loaded hostlist patterns per chain
     std::vector<std::vector<std::string>> chain_patterns;
 
@@ -321,6 +401,7 @@ public:
     struct DesyncPlan {
         std::vector<DPI::ZSplitPos> positions;
         bool host_case = false;
+        std::string strategy_desc;  // "autopilot:<name>" | "chain:<name>" | "base"
     };
 
     DesyncPlan plan_for(DPI::ZProto proto, uint16_t dst_port, const std::string& host) {
@@ -334,6 +415,7 @@ public:
             if (cfg.autopilot->lookup(host, &learned)) {
                 plan.positions = learned.positions;
                 plan.host_case = learned.host_case;
+                plan.strategy_desc = "autopilot:" + learned.name;
                 cnt.autopilot_hits++;
                 return plan;
             }
@@ -341,6 +423,7 @@ public:
         const DPI::ZapretChain* chain =
             select_chain(cfg.chains, chain_patterns, proto, dst_port, host);
         if (chain) {
+            plan.strategy_desc = "chain:" + (chain->name.empty() ? std::string("unnamed") : chain->name);
             // split-family phases are applicable at socket level
             if (chain->phase2 == DPI::ZDesyncPhase2::MULTISPLIT ||
                 chain->phase2 == DPI::ZDesyncPhase2::MULTIDISORDER ||
@@ -357,6 +440,7 @@ public:
             }
         } else {
             // base DPIConfig
+            plan.strategy_desc = "base";
             if (cfg.base.enable_multi_layer_split && !cfg.base.split_positions.empty()) {
                 for (int p : cfg.base.split_positions)
                     plan.positions.push_back(DPI::ZSplitPos{DPI::ZSplitPosType::NUMERIC, p});
@@ -494,7 +578,8 @@ public:
     // relay one direction until EOF/error
     void relay(ncp_socket_t from, ncp_socket_t to, bool to_client,
                const std::string& host, bool* first_data_seen,
-               std::atomic<bool>* peer_done) {
+               std::atomic<bool>* peer_done,
+               std::atomic<uint64_t>* conn_bytes = nullptr) {
         std::vector<uint8_t> buf(16384);
         // Watch the first server→client byte (ServerHello / HTTP response):
         // its arrival, RST or timeout is the live DPI-block signal.
@@ -511,6 +596,9 @@ public:
                     if (cfg.detector) cfg.detector->on_timeout(host);
                     if (cfg.auto_hostlist) cfg.auto_hostlist->record_blocked(host);
                     if (cfg.autopilot) cfg.autopilot->report_failure(host, "timeout");
+                    emit_event("{\"ts\": " + std::to_string(now_unix()) +
+                               ", \"ev\": \"outcome\", \"host\": \"" +
+                               json_esc(host) + "\", \"result\": \"timeout\"}");
                     break;  // give up this connection
                 }
                 continue;
@@ -526,6 +614,9 @@ public:
                     if (cfg.detector) cfg.detector->on_reset_after_hello(host);
                     if (cfg.auto_hostlist) cfg.auto_hostlist->record_blocked(host);
                     if (cfg.autopilot) cfg.autopilot->report_failure(host, "rst");
+                    emit_event("{\"ts\": " + std::to_string(now_unix()) +
+                               ", \"ev\": \"outcome\", \"host\": \"" +
+                               json_esc(host) + "\", \"result\": \"rst\"}");
                 }
                 break;
             }
@@ -534,7 +625,11 @@ public:
                 if (first_data_seen) *first_data_seen = true;
                 if (cfg.detector) cfg.detector->on_success(host);
                 if (cfg.autopilot) cfg.autopilot->report_success(host, 0.0);
+                emit_event("{\"ts\": " + std::to_string(now_unix()) +
+                           ", \"ev\": \"outcome\", \"host\": \"" +
+                           json_esc(host) + "\", \"result\": \"ok\"}");
             }
+            if (conn_bytes) *conn_bytes += static_cast<uint64_t>(r);
             if (to_client) cnt.s2c += static_cast<uint64_t>(r);
             else cnt.c2s += static_cast<uint64_t>(r);
             if (!ncp_send_all(to, buf.data(), static_cast<size_t>(r))) break;
@@ -929,6 +1024,11 @@ void DesyncProxy::Impl::handle_tcp(ncp_socket_t client,
             } else if (impl->cfg.detector) {
                 impl->cfg.detector->on_timeout(host_norm);
             }
+            impl->emit_event("{\"ts\": " + std::to_string(Impl::now_unix()) +
+                             ", \"ev\": \"outcome\", \"host\": \"" +
+                             Impl::json_esc(host_norm) +
+                             (conn_reset ? "\", \"result\": \"connect_rst\"}"
+                                         : "\", \"result\": \"connect_fail\"}"));
             if (is_socks) socks5_reply(client, 0x05);
             else {
                 static const char bad[] =
@@ -956,6 +1056,16 @@ void DesyncProxy::Impl::handle_tcp(ncp_socket_t client,
         const Impl::DesyncPlan plan =
             impl->plan_for(DPI::ZProto::TCP, preq.port, host_norm);
 
+        impl->emit_event("{\"ts\": " + std::to_string(Impl::now_unix()) +
+                         ", \"ev\": \"connect\", \"host\": \"" +
+                         Impl::json_esc(host_norm) + "\", \"port\": " +
+                         std::to_string(preq.port) + ", \"strategy\": \"" +
+                         Impl::json_esc(plan.strategy_desc) + "\"}");
+
+        const auto conn_t0 = std::chrono::steady_clock::now();
+        auto conn_c2s = std::make_shared<std::atomic<uint64_t>>(0);
+        auto conn_s2c = std::make_shared<std::atomic<uint64_t>>(0);
+
         std::atomic<bool> peer_done{false};
         bool first_data_seen = false;
 
@@ -976,6 +1086,7 @@ void DesyncProxy::Impl::handle_tcp(ncp_socket_t client,
                                static_cast<int>(buf.size()), 0);
                 if (n <= 0) break;
                 impl->cnt.c2s += static_cast<uint64_t>(n);
+                *conn_c2s += static_cast<uint64_t>(n);
                 if (first_payload) {
                     first_payload = false;
                     if (!impl->send_first_payload(upstream, buf.data(),
@@ -991,11 +1102,20 @@ void DesyncProxy::Impl::handle_tcp(ncp_socket_t client,
 
         std::thread t_sc([&] {
             impl->relay(upstream, client, true, host_norm,
-                        &first_data_seen, &peer_done);
+                        &first_data_seen, &peer_done, conn_s2c.get());
         });
 
     if (t_cs.joinable()) t_cs.join();
     if (t_sc.joinable()) t_sc.join();
+
+    const auto conn_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - conn_t0).count();
+    impl->emit_event("{\"ts\": " + std::to_string(Impl::now_unix()) +
+                     ", \"ev\": \"close\", \"host\": \"" +
+                     Impl::json_esc(host_norm) + "\", \"c2s\": " +
+                     std::to_string(conn_c2s->load()) + ", \"s2c\": " +
+                     std::to_string(conn_s2c->load()) + ", \"ms\": " +
+                     std::to_string(conn_ms) + "}");
 }
 
 bool DesyncProxy::start(const Config& cfg) {
@@ -1078,6 +1198,17 @@ bool DesyncProxy::start(const Config& cfg) {
                 .detach();
         }
     });
+    if (!cfg.events_log.empty()) {
+        std::lock_guard<std::mutex> lk(impl_->events_mu);
+        impl_->events_stream.open(cfg.events_log, std::ios::app);
+        if (!impl_->events_stream)
+            impl_->log("proxy: cannot open events log " + cfg.events_log);
+    }
+    if (!cfg.stats_file.empty()) {
+        impl_->write_stats_file();
+        impl_->stats_thread = std::thread(&Impl::stats_loop, impl_.get());
+    }
+
     impl_->log("proxy: listening on " + cfg.listen_host + ":" +
                std::to_string(impl_->bound_port_));
     return true;
@@ -1106,6 +1237,11 @@ void DesyncProxy::stop() {
     {
         std::lock_guard<std::mutex> lk(impl_->socks_mu);
         impl_->open_socks.clear();
+    }
+    if (impl_->stats_thread.joinable()) impl_->stats_thread.join();
+    {
+        std::lock_guard<std::mutex> lk(impl_->events_mu);
+        if (impl_->events_stream.is_open()) impl_->events_stream.close();
     }
     impl_->bound_port_ = 0;
 }

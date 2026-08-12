@@ -1999,7 +1999,9 @@ void handle_proxy(const std::vector<std::string>& args) {
                   << "  --autohostlist FILE   Auto-record blocked hosts to FILE\n"
                   << "  --detector-log FILE   Append DPI detector events (JSONL)\n"
                   << "  --autopilot           Enable adaptive engine (learned per-host strategies,\n"
-                  << "                        live degradation feedback, background re-learning)\n";
+                  << "                        live degradation feedback, background re-learning)\n"
+                  << "  --events-log FILE     Append live connection events (JSONL) to FILE\n"
+                  << "  --stats-file FILE     Rewrite full stats JSON to FILE every 2s (atomic)\n";
         return;
     }
     ncp::DesyncProxy::Config cfg;
@@ -2102,6 +2104,8 @@ void handle_proxy(const std::vector<std::string>& args) {
     if (!detlog.empty()) detector.set_log_file(detlog);
     cfg.detector = &detector;
     cfg.log_cb = [](const std::string& m) { std::cout << "[proxy] " << m << "\n"; };
+    cfg.events_log = get_option(args, "--events-log", "");
+    cfg.stats_file = get_option(args, "--stats-file", "");
 
     // AutoPilot: adaptive per-host strategies. Active when --autopilot is
     // passed OR the DB was enabled via `ncp autopilot enable`.
@@ -2132,6 +2136,8 @@ void handle_proxy(const std::vector<std::string>& args) {
               << "    Fake QUIC:     " << cfg.fake_quic_repeats << " per target\n"
               << "    DoH upstream:  " << (cfg.use_doh ? "on (1.1.1.1)" : "off") << "\n"
               << "    Chains:        " << cfg.chains.size() << "\n"
+              << (cfg.events_log.empty() ? "" : ("    Events log:    " + cfg.events_log + "\n"))
+              << (cfg.stats_file.empty() ? "" : ("    Stats file:    " + cfg.stats_file + "\n"))
               << "    AutoPilot:     " << (autopilot_active
                         ? ("on (" + std::to_string(autopilot.records().size()) +
                            " learned hosts, DB: " + ncp::AutoPilot::default_db_path() + ")")

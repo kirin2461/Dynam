@@ -81,6 +81,15 @@ public:
         // precedence over chains/base and live outcomes are reported back.
         AutoPilot* autopilot = nullptr;
         std::function<void(const std::string&)> log_cb;
+
+        // Live monitoring (file-based IPC for the GUI):
+        //   events_log — JSONL stream, one event per line:
+        //     {"ts":N,"ev":"connect","host":"...","port":443,"strategy":"autopilot:split-2"}
+        //     {"ts":N,"ev":"outcome","host":"...","result":"ok|rst|timeout|connect_fail"}
+        //     {"ts":N,"ev":"close","host":"...","c2s":N,"s2c":N,"ms":N}
+        //   stats_file — full stats JSON, atomically rewritten every 2s.
+        std::string events_log;
+        std::string stats_file;
     };
 
     DesyncProxy();

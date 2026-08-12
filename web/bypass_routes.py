@@ -40,6 +40,14 @@ _blockcheck = {
 }
 _blockcheck_lock = threading.Lock()
 
+_ap_learn = {
+    "running": False,
+    "domain": None,
+    "result": None,
+    "error": None,
+}
+_ap_learn_lock = threading.Lock()
+
 CHECK_SITES = [
     ("YouTube", "www.youtube.com"),
     ("Discord", "discord.com"),
@@ -152,6 +160,20 @@ def register_bypass_routes(app, ctx):
 
     autohl_path = config_dir / "autohostlist.txt"
     detector_log = config_dir / "detector_events.jsonl"
+    events_log = config_dir / "proxy_events.jsonl"
+    stats_file = config_dir / "proxy_stats.json"
+
+    def _autopilot_db_path() -> Path:
+        """Mirror AutoPilot::default_db_path() from the C++ core."""
+        if platform.system() == "Windows":
+            appdata = os.environ.get("APPDATA")
+            if appdata:
+                return Path(appdata) / "ncp" / "autopilot.json"
+            return Path("autopilot.json")
+        home = os.environ.get("HOME")
+        if home:
+            return Path(home) / ".ncp" / "autopilot.json"
+        return Path("autopilot.json")
 
     # ── proxy control ────────────────────────────────────────────────────
 
@@ -160,9 +182,13 @@ def register_bypass_routes(app, ctx):
                 "--port", str(cfg.get("proxy_port", 1080)),
                 "--bind", "127.0.0.1",
                 "--autohostlist", str(autohl_path),
-                "--detector-log", str(detector_log)]
+                "--detector-log", str(detector_log),
+                "--events-log", str(events_log),
+                "--stats-file", str(stats_file)]
         if cfg.get("proxy_doh", True):
             args.append("--doh")
+        if cfg.get("proxy_autopilot", True):
+            args.append("--autopilot")
         if cfg.get("proxy_block_quic", False):
             args.append("--block-quic")
         fq = int(cfg.get("proxy_fake_quic", 0) or 0)
@@ -193,6 +219,11 @@ def register_bypass_routes(app, ctx):
                 return jsonify({"ok": False, "error": "Прокси уже запущен"}), 409
             cfg = state["config"]
             args = _proxy_args(cfg)
+            # fresh event stream per proxy run (bounded growth)
+            try:
+                events_log.write_text("")
+            except Exception:
+                pass
             try:
                 _proxy_proc = subprocess.Popen(
                     args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -243,11 +274,161 @@ def register_bypass_routes(app, ctx):
     def api_proxy_config():
         body = request.get_json(force=True) or {}
         cfg = state["config"]
-        for key in ("proxy_port", "proxy_doh", "proxy_block_quic", "proxy_fake_quic"):
+        for key in ("proxy_port", "proxy_doh", "proxy_block_quic", "proxy_fake_quic",
+                    "proxy_autopilot"):
             if key in body:
                 cfg[key] = body[key]
         save_config(cfg)
         return jsonify({"ok": True})
+
+    # ── live monitor (events JSONL + stats file emitted by the proxy) ────
+
+    @app.route("/api/monitor/stats")
+    def api_monitor_stats():
+        running = bool(_proxy_proc and _proxy_proc.poll() is None)
+        stats = None
+        try:
+            if stats_file.exists():
+                stats = json.loads(stats_file.read_text().strip())
+        except Exception:
+            stats = None
+        return jsonify({
+            "running": running,
+            "stats": stats,
+            "autopilot_enabled": _read_autopilot_db()[0].get("enabled", False),
+        })
+
+    def _read_autopilot_db():
+        """Returns (db_dict, records_list). Missing/corrupt → empty."""
+        try:
+            p = _autopilot_db_path()
+            if p.exists():
+                db = json.loads(p.read_text())
+                recs = db.get("records", {}) or {}
+                return db, recs
+        except Exception:
+            pass
+        return {}, {}
+
+    @app.route("/api/monitor/events")
+    def api_monitor_events():
+        # Incremental tail: ?since=<byte offset>. Resets when the file shrank
+        # (proxy restart truncates the log).
+        try:
+            since = int(request.args.get("since", "0"))
+        except ValueError:
+            since = 0
+        events = []
+        offset = 0
+        try:
+            size = events_log.stat().st_size if events_log.exists() else 0
+            if since < 0 or since > size:
+                since = 0
+            offset = since
+            if events_log.exists() and size > since:
+                with open(events_log, "rb") as f:
+                    f.seek(since)
+                    chunk = f.read()
+                offset = size
+                for raw in chunk.decode("utf-8", errors="replace").splitlines():
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        events.append(json.loads(raw))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        # cap payload: newest 200 events
+        if len(events) > 200:
+            events = events[-200:]
+        return jsonify({"events": events, "offset": offset})
+
+    @app.route("/api/monitor/autopilot")
+    def api_monitor_autopilot():
+        db, recs = _read_autopilot_db()
+        out = []
+        for host, r in recs.items():
+            out.append({
+                "host": host,
+                "strategy": r.get("strategy", "?"),
+                "successes": r.get("successes", 0),
+                "failures": r.get("failures", 0),
+                "consec_failures": r.get("consec_failures", 0),
+                "ewma_latency_ms": r.get("ewma_latency_ms", 0),
+                "degraded": bool(r.get("degraded", False)),
+                "last_outcome": r.get("last_outcome", 0),
+            })
+        out.sort(key=lambda x: x["last_outcome"], reverse=True)
+        return jsonify({
+            "enabled": db.get("enabled", False),
+            "records": out,
+            "db_path": str(_autopilot_db_path()),
+            "learn": dict(_ap_learn),
+        })
+
+    def _run_ap_learn(domain, use_doh):
+        global _ap_learn
+        args = [ncp_binary, "autopilot", "learn", domain, "--timeout", "6000"]
+        if use_doh:
+            args.append("--doh")
+        try:
+            proc = subprocess.run(args, capture_output=True, text=True, timeout=180)
+            ok = "[+]" in (proc.stdout or "")
+            with _ap_learn_lock:
+                _ap_learn["running"] = False
+                _ap_learn["result"] = (proc.stdout or proc.stderr or "").strip()[-500:]
+                _ap_learn["error"] = None if ok else "no working strategy"
+        except Exception as e:
+            with _ap_learn_lock:
+                _ap_learn["running"] = False
+                _ap_learn["error"] = str(e)
+
+    @app.route("/api/monitor/autopilot/learn", methods=["POST"])
+    def api_monitor_autopilot_learn():
+        body = request.get_json(force=True) or {}
+        domain = (body.get("domain") or "").strip().lower()
+        if not domain or " " in domain or "/" in domain:
+            return jsonify({"ok": False, "error": "Некорректный домен"}), 400
+        with _ap_learn_lock:
+            if _ap_learn["running"]:
+                return jsonify({"ok": False, "error": "Обучение уже идёт"}), 409
+            _ap_learn.update({"running": True, "domain": domain,
+                              "result": None, "error": None})
+        use_doh = bool(state["config"].get("proxy_doh", True))
+        threading.Thread(target=_run_ap_learn, args=(domain, use_doh),
+                         daemon=True).start()
+        push_log("INFO", f"AutoPilot: learning {domain}…")
+        return jsonify({"ok": True})
+
+    @app.route("/api/monitor/autopilot/reset", methods=["POST"])
+    def api_monitor_autopilot_reset():
+        body = request.get_json(force=True) or {}
+        domain = (body.get("domain") or "").strip().lower()
+        args = [ncp_binary, "autopilot", "reset"] + ([domain] if domain else [])
+        try:
+            subprocess.run(args, capture_output=True, timeout=15)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        push_log("INFO", f"AutoPilot DB reset: {domain or 'all'}")
+        return jsonify({"ok": True})
+
+    @app.route("/api/monitor/autopilot/enabled", methods=["POST"])
+    def api_monitor_autopilot_enabled():
+        body = request.get_json(force=True) or {}
+        enabled = bool(body.get("enabled"))
+        try:
+            subprocess.run([ncp_binary, "autopilot",
+                            "enable" if enabled else "disable"],
+                           capture_output=True, timeout=15)
+        except Exception as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+        # also persist as proxy default
+        cfg = state["config"]
+        cfg["proxy_autopilot"] = enabled
+        save_config(cfg)
+        return jsonify({"ok": True, "enabled": enabled})
 
     # ── blockcheck ───────────────────────────────────────────────────────
 

@@ -87,6 +87,7 @@ function loadSectionData(id) {
     case 'covert':    loadModuleStats(); break;
     case 'transport': loadModuleStats(); break;
     case 'telegram':  loadTgProxies(); break;
+    case 'monitor':   monitorInit(); break;
   }
 }
 
@@ -1789,3 +1790,160 @@ document.querySelector('[data-nav="bypass"]')?.addEventListener('click', () => {
   bypassAutostartLoad();
 });
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Monitor — live traffic dashboard (events JSONL + stats file from the proxy)
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _monEventsOffset = 0;
+let _monTimer = null;
+const _monHosts = {};   // host -> {strategy, outcome, bytes}
+
+function monitorInit() {
+  _monEventsOffset = 0;
+  monitorPoll();
+  if (_monTimer) clearInterval(_monTimer);
+  _monTimer = setInterval(() => {
+    if (typeof currentSection !== 'undefined' && currentSection !== 'monitor') {
+      clearInterval(_monTimer);
+      _monTimer = null;
+      return;
+    }
+    monitorPoll();
+  }, 2000);
+}
+
+async function monitorPoll() {
+  await Promise.all([monitorStatsPoll(), monitorEventsPoll(), monitorAutopilotPoll()]);
+}
+
+function _monFmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return n.toFixed(n >= 100 || i === 0 ? 0 : 1) + ' ' + u[i];
+}
+
+function _monSet(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+async function monitorStatsPoll() {
+  const data = await apiFetch('/monitor/stats');
+  if (!data) return;
+  const badge = document.getElementById('monitor-live-badge');
+  if (badge) {
+    badge.textContent = data.running ? 'LIVE' : 'Прокси выкл';
+    badge.className = 'badge ' + (data.running ? 'badge--active' : 'badge--inactive');
+  }
+  const s = data.stats || {};
+  _monSet('mon-conn', s.connections_total ?? 0);
+  _monSet('mon-conn-active', s.connections_active ?? 0);
+  _monSet('mon-bytes', _monFmtBytes(s.bytes_server_to_client ?? 0));
+  _monSet('mon-bytes-up', _monFmtBytes(s.bytes_client_to_server ?? 0));
+  _monSet('mon-splits', s.desync_splits_applied ?? 0);
+  _monSet('mon-ap-hits', s.autopilot_hits ?? 0);
+  _monSet('mon-rst', s.rst_blocks_detected ?? 0);
+  _monSet('mon-timeout', s.timeout_blocks_detected ?? 0);
+}
+
+async function monitorEventsPoll() {
+  const data = await apiFetch('/monitor/events?since=' + _monEventsOffset);
+  if (!data) return;
+  _monEventsOffset = data.offset || 0;
+  const feed = document.getElementById('mon-events');
+  if (!feed) return;
+  for (const ev of (data.events || [])) {
+    const t = new Date((ev.ts || 0) * 1000).toLocaleTimeString();
+    const div = document.createElement('div');
+    if (ev.ev === 'connect') {
+      div.innerHTML = `<span style="color:var(--text-secondary)">${t}</span> → <b>${ev.host}</b>:${ev.port} <span class="badge" style="font-size:0.7em">${ev.strategy || 'base'}</span>`;
+      _monHosts[ev.host] = {strategy: ev.strategy || 'base', outcome: '…', bytes: 0};
+    } else if (ev.ev === 'outcome') {
+      const colors = {ok: '#3fb950', rst: '#e5534b', timeout: '#d29922', connect_fail: '#e5534b', connect_rst: '#e5534b'};
+      const c = colors[ev.result] || '#8b949e';
+      div.innerHTML = `<span style="color:var(--text-secondary)">${t}</span> ⏱ <b>${ev.host}</b> → <span style="color:${c}">${ev.result}</span>`;
+      if (_monHosts[ev.host]) _monHosts[ev.host].outcome = ev.result;
+    } else if (ev.ev === 'close') {
+      div.innerHTML = `<span style="color:var(--text-secondary)">${t}</span> ✓ <b>${ev.host}</b> ↓${_monFmtBytes(ev.s2c)} ↑${_monFmtBytes(ev.c2s)} ${ev.ms}ms`;
+      if (_monHosts[ev.host]) _monHosts[ev.host].bytes = (ev.s2c || 0) + (ev.c2s || 0);
+    }
+    feed.appendChild(div);
+  }
+  while (feed.children.length > 150) feed.removeChild(feed.firstChild);
+  feed.scrollTop = feed.scrollHeight;
+  if ((data.events || []).length) monitorRenderHosts();
+}
+
+function monitorRenderHosts() {
+  const tbody = document.getElementById('mon-hosts');
+  if (!tbody) return;
+  const hosts = Object.keys(_monHosts);
+  if (!hosts.length) return;
+  const colors = {ok: '#3fb950', rst: '#e5534b', timeout: '#d29922', connect_fail: '#e5534b', connect_rst: '#e5534b'};
+  tbody.innerHTML = hosts.map(h => {
+    const r = _monHosts[h];
+    const oc = r.outcome === '…' ? '<span style="color:var(--text-secondary)">…</span>'
+      : `<span style="color:${colors[r.outcome] || '#8b949e'}">${r.outcome}</span>`;
+    return `<tr><td>${h}</td><td><code>${r.strategy}</code></td><td>${oc}</td><td>${_monFmtBytes(r.bytes)}</td></tr>`;
+  }).join('');
+}
+
+async function monitorAutopilotPoll() {
+  const data = await apiFetch('/monitor/autopilot');
+  if (!data) return;
+  const badge = document.getElementById('mon-ap-badge');
+  if (badge) {
+    badge.textContent = data.enabled ? 'Вкл' : 'Выкл';
+    badge.className = 'badge ' + (data.enabled ? 'badge--active' : 'badge--inactive');
+  }
+  const toggle = document.getElementById('mon-ap-toggle');
+  if (toggle && document.activeElement !== toggle) toggle.checked = !!data.enabled;
+  _monSet('mon-ap-dbpath', data.db_path || '');
+  const st = document.getElementById('mon-ap-learn-status');
+  const btn = document.getElementById('mon-ap-btn-learn');
+  if (data.learn && data.learn.running) {
+    if (st) st.textContent = `Обучение ${data.learn.domain}… (пробинг стратегий, до ~60с)`;
+    if (btn) btn.disabled = true;
+  } else {
+    if (btn) btn.disabled = false;
+    if (st && data.learn && (data.learn.result || data.learn.error)) {
+      st.textContent = data.learn.error
+        ? `AutoPilot: стратегия не найдена (${data.learn.domain}) — хост недоступен или заблокирован на IP-уровне`
+        : (data.learn.result || '').split('\n').pop();
+    }
+  }
+  const tbody = document.getElementById('mon-ap-records');
+  if (!tbody) return;
+  const recs = data.records || [];
+  if (!recs.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Нет выученных хостов — нажмите «Обучить»</td></tr>';
+    return;
+  }
+  tbody.innerHTML = recs.map(r => {
+    const status = r.degraded
+      ? '<span style="color:#d29922">degraded — переобучение</span>'
+      : '<span style="color:#3fb950">активна</span>';
+    return `<tr><td>${r.host}</td><td><code>${r.strategy}</code></td><td>${r.successes}/${r.failures}</td><td>${status}</td></tr>`;
+  }).join('');
+}
+
+async function monitorAutopilotLearn() {
+  const inp = document.getElementById('mon-ap-domain');
+  const domain = (inp && inp.value || '').trim();
+  if (!domain) return;
+  await apiFetch('/monitor/autopilot/learn', {method: 'POST', body: JSON.stringify({domain})});
+  monitorAutopilotPoll();
+}
+
+async function monitorAutopilotReset(domain) {
+  await apiFetch('/monitor/autopilot/reset', {method: 'POST', body: JSON.stringify({domain: domain || ''})});
+  monitorAutopilotPoll();
+}
+
+async function monitorAutopilotEnabled(enabled) {
+  await apiFetch('/monitor/autopilot/enabled', {method: 'POST', body: JSON.stringify({enabled})});
+  monitorAutopilotPoll();
+}
