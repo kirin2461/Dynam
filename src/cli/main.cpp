@@ -21,6 +21,7 @@
 #include "ncp_covert_channel.hpp"
 #include "ncp_transport_manager.hpp"
 #include "ncp_proxy.hpp"
+#include "ncp_tor_manager.hpp"
 #include "ncp_blockcheck.hpp"
 #include "ncp_zapret_import.hpp"
 #include "ncp_hostlist.hpp"
@@ -712,6 +713,12 @@ static std::string get_option(const std::vector<std::string>& args, const std::s
     return default_val;
 }
 
+static std::vector<std::string> get_options_all(const std::vector<std::string>& args, const std::string& option) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i] == option) out.push_back(args[i + 1]);
+    return out;
+}
 static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val) {
     std::string val = get_option(args, option);
     if (val.empty()) return default_val;
@@ -832,7 +839,7 @@ int main(int argc, char* argv[]) {
     parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
-    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]", "[--upstream socks5://127.0.0.1:9050]", "[--tor]"});
+    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]", "[--upstream socks5://127.0.0.1:9050]", "[--tor]", "[--tor-exec /path/tor --tor-bridge \"obfs4 ...\" --pt-obfs4 /path/lyrebird]"});
     parser.add_command("blockcheck", "Auto-select best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--json]", "[--out file]", "[--apply profile.json]"});
     parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable|learn-preset>", "[domain|preset]", "[--json]", "[--timeout ms]"});
     parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
@@ -2324,7 +2331,29 @@ void handle_dpi(const std::vector<std::string>& args) {
     config.enable_fake_packet = !has_flag(args, "--no-fake");
     config.fake_ttl = get_option_int(args, "--fake-ttl", 1);
     config.enable_disorder = !has_flag(args, "--no-disorder");
-    
+
+    // Kill switch: EXPLICIT opt-in only, never default. Drops all direct
+    // outbound traffic (WinDivert driver mode) so nothing leaks if the
+    // chain goes down. --no-kill-switch always wins.
+    config.kill_switch = has_flag(args, "--kill-switch") &&
+                         !has_flag(args, "--no-kill-switch");
+    if (config.kill_switch) {
+        std::string ksa = get_option(args, "--ks-allow", "");
+        if (!ksa.empty()) {
+            auto colon = ksa.rfind(':');
+            if (colon != std::string::npos) {
+                config.kill_switch_allow_host = ksa.substr(0, colon);
+                config.kill_switch_allow_port =
+                    static_cast<uint16_t>(std::atoi(ksa.substr(colon + 1).c_str()));
+            }
+        }
+#ifndef _WIN32
+        std::cerr << "[!] --kill-switch requires the WinDivert driver mode "
+                     "(Windows). On Linux use 'ncp run' (iptables-based). "
+                     "Ignoring for this session.\n";
+#endif
+    }
+
     std::string preset = get_option(args, "--preset");
     if (!preset.empty()) {
         DPI::DPIPreset p = DPI::preset_from_string(preset);
@@ -2515,7 +2544,12 @@ void handle_proxy(const std::vector<std::string>& args) {
                   << "  --upstream URL        Chain through upstream proxy (hides your IP):\n"
                   << "                        socks5://127.0.0.1:9050 or http://127.0.0.1:8080\n"
                   << "  --tor                 Shortcut for --upstream socks5://127.0.0.1:9050\n"
-                  << "                        (Tor Browser uses port 9150 instead)\n";
+                  << "                        (Tor Browser uses port 9150 instead)\n"
+                  << "  --tor-exec PATH       Managed Tor: spawn tor binary, auto-chain through it\n"
+                  << "  --tor-bridge \"LINE\"  Bridge line (repeatable) — hides Tor usage itself:\n"
+                  << "                        obfs4 IP:PORT FINGERPRINT cert=... iat-mode=0\n"
+                  << "  --pt-obfs4 PATH       lyrebird/obfs4proxy binary (for obfs4 bridges)\n"
+                  << "  --pt-snowflake PATH   snowflake-client binary (for Snowflake bridges)\n";
         return;
     }
     ncp::DesyncProxy::Config cfg;
@@ -2637,8 +2671,36 @@ void handle_proxy(const std::vector<std::string>& args) {
     }
 
     ncp::DesyncProxy proxy;
-    // ── Upstream chain (Tor / SOCKS5 / HTTP CONNECT) ──
+    // ── Managed Tor with pluggable transports (obfs4 / Snowflake) ──
+    ncp::TorManager tor_mgr;
     {
+        std::string tor_bin = get_option(args, "--tor-exec", "");
+        if (!tor_bin.empty()) {
+            ncp::TorLaunchConfig tcfg;
+            tcfg.tor_binary = tor_bin;
+            tcfg.obfs4_binary = get_option(args, "--pt-obfs4", "");
+            tcfg.snowflake_binary = get_option(args, "--pt-snowflake", "");
+            tcfg.bridges = get_options_all(args, "--tor-bridge");
+            std::cerr << "[*] Starting managed Tor"
+                      << (tcfg.bridges.empty()
+                              ? " (no bridges — Tor usage visible to ISP!)"
+                              : " with " + std::to_string(tcfg.bridges.size()) +
+                                    " bridge(s) — Tor usage hidden")
+                      << "...\n";
+            std::string err;
+            if (!tor_mgr.start(tcfg, &err)) {
+                std::cerr << "[!] Managed Tor failed: " << err << "\n";
+                return;
+            }
+            std::cerr << "[+] Tor bootstrapped 100% — SOCKS5 on 127.0.0.1:"
+                      << tor_mgr.socks_port() << "\n";
+            cfg.upstream_type = "socks5";
+            cfg.upstream_host = "127.0.0.1";
+            cfg.upstream_port = tor_mgr.socks_port();
+        }
+    }
+    // ── Upstream chain (Tor / SOCKS5 / HTTP CONNECT) ──
+    if (!tor_mgr.running()) {
         std::string ups = get_option(args, "--upstream", "");
         if (has_flag(args, "--tor")) ups = "socks5://127.0.0.1:9050";
         if (!ups.empty()) {
@@ -2696,9 +2758,11 @@ void handle_proxy(const std::vector<std::string>& args) {
               << (cfg.upstream_port
                       ? ("    Chain:         " + cfg.upstream_type + "://" +
                          cfg.upstream_host + ":" + std::to_string(cfg.upstream_port) +
-                         (cfg.upstream_port == 9050 || cfg.upstream_port == 9150
-                              ? " (Tor — destination IP hidden from ISP)"
-                              : " (upstream — destination IP hidden from ISP)") +
+                         (tor_mgr.running()
+                              ? " (managed Tor + bridges — destination AND Tor usage hidden)"
+                              : (cfg.upstream_port == 9050 || cfg.upstream_port == 9150
+                                     ? " (Tor — destination IP hidden from ISP)"
+                                     : " (upstream — destination IP hidden from ISP)")) +
                          "\n")
                       : "")
               << "    Chains:        " << cfg.chains.size() << "\n"

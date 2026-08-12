@@ -192,8 +192,19 @@ def register_bypass_routes(app, ctx):
             args.append("--autopilot")
         if cfg.get("proxy_system_wide"):
             args.append("--system-proxy")
+        tb = (cfg.get("tor_binary") or "").strip()
+        if tb:
+            args += ["--tor-exec", tb]
+            for line in (cfg.get("tor_bridges") or "").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    args += ["--tor-bridge", line]
+            if (cfg.get("pt_obfs4") or "").strip():
+                args += ["--pt-obfs4", cfg["pt_obfs4"].strip()]
+            if (cfg.get("pt_snowflake") or "").strip():
+                args += ["--pt-snowflake", cfg["pt_snowflake"].strip()]
         up = (cfg.get("proxy_upstream") or "").strip()
-        if up:
+        if up and not tb:
             args += ["--upstream", up]
         if cfg.get("proxy_block_quic", False):
             args.append("--block-quic")
@@ -273,6 +284,10 @@ def register_bypass_routes(app, ctx):
             "block_quic": cfg.get("proxy_block_quic", False),
             "system_wide": cfg.get("proxy_system_wide", False),
             "upstream": cfg.get("proxy_upstream", ""),
+            "tor_binary": cfg.get("tor_binary", ""),
+            "tor_bridges": cfg.get("tor_bridges", ""),
+            "pt_obfs4": cfg.get("pt_obfs4", ""),
+            "pt_snowflake": cfg.get("pt_snowflake", ""),
             "fake_quic": cfg.get("proxy_fake_quic", 0),
             "strategy": cfg.get("proxy_strategy"),
             "autohostlist_size": autohl_size,
@@ -285,11 +300,92 @@ def register_bypass_routes(app, ctx):
         for key in ("proxy_port", "proxy_doh", "proxy_block_quic", "proxy_fake_quic",
                     "proxy_system_wide",
                     "proxy_upstream",
+                    "tor_binary", "tor_bridges", "pt_obfs4", "pt_snowflake",
                     "proxy_autopilot"):
             if key in body:
                 cfg[key] = body[key]
         save_config(cfg)
         return jsonify({"ok": True})
+
+    def _leak_fetch(eh, ep, epth, socks_port=0, timeout=6):
+        # Minimal HTTP GET, optionally via local SOCKS5 (domain-form CONNECT,
+        # so the proxy/upstream resolves — mirroring real proxied DNS path).
+        if socks_port:
+            s = socket.create_connection(("127.0.0.1", socks_port), timeout=timeout)
+            s.sendall(b"\x05\x01\x00")
+            r = s.recv(2)
+            if len(r) != 2 or r[0] != 5 or r[1] != 0:
+                s.close(); raise IOError("socks5_greeting")
+            hb = eh.encode()
+            s.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb + struct.pack(">H", ep))
+            hdr = s.recv(4)
+            if len(hdr) < 4 or hdr[1] != 0:
+                s.close(); raise IOError("socks5_connect_%d" % (hdr[1] if len(hdr) > 1 else -1))
+            atyp = hdr[3]
+            if atyp == 1: s.recv(4)
+            elif atyp == 3:
+                ln = s.recv(1)[0]; s.recv(ln)
+            elif atyp == 4: s.recv(16)
+            s.recv(2)
+        else:
+            s = socket.create_connection((eh, ep), timeout=timeout)
+        try:
+            req = ("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n"
+                   % (epth, eh)).encode()
+            s.sendall(req)
+            data = b""
+            while True:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        finally:
+            s.close()
+        body = data.split(b"\r\n\r\n", 1)[-1]
+        return body.decode(errors="replace").strip()
+
+    @app.route("/api/proxy/leak-test", methods=["POST"])
+    def api_proxy_leak_test():
+        # Compares the IP seen directly vs through the proxy — visible proof
+        # that the chain actually hides the user (or an honest leak verdict).
+        body = request.get_json(force=True) or {}
+        cfg = state["config"]
+        echo_url = body.get("echo_url") or "http://api.ipify.org/"
+        m = re.match(r"^http://([^:/]+)(?::(\d+))?(/\S*)?$", echo_url)
+        if not m:
+            return jsonify({"ok": False, "error": "bad_echo_url"})
+        eh, ep, epth = m.group(1), int(m.group(2) or 80), m.group(3) or "/"
+        running = bool(_proxy_proc and _proxy_proc.poll() is None)
+        res = {"ok": True, "proxy_running": running,
+               "doh": bool(cfg.get("proxy_doh", True)),
+               "upstream": cfg.get("proxy_upstream", ""),
+               "tor_managed": bool((cfg.get("tor_binary") or "").strip())}
+        try:
+            res["direct_ip"] = _leak_fetch(eh, ep, epth)
+        except Exception as e:
+            res["direct_ip"] = None
+            res["direct_error"] = str(e) or type(e).__name__
+        if running:
+            try:
+                res["proxied_ip"] = _leak_fetch(
+                    eh, ep, epth, socks_port=int(cfg.get("proxy_port", 1080)))
+            except Exception as e:
+                res["proxied_ip"] = None
+                res["proxied_error"] = str(e) or type(e).__name__
+        else:
+            res["proxied_ip"] = None
+        d, p = res.get("direct_ip"), res.get("proxied_ip")
+        if p and d and p != d:
+            res["verdict"] = "hidden"
+        elif p and d and p == d:
+            res["verdict"] = "leak"
+        elif p and not d:
+            res["verdict"] = "proxied_only"
+        elif running and not p:
+            res["verdict"] = "proxy_error"
+        else:
+            res["verdict"] = "proxy_off"
+        return jsonify(res)
 
     @app.route("/api/proxy/upstream-probe", methods=["POST"])
     def api_proxy_upstream_probe():

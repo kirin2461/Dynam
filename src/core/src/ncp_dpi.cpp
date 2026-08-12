@@ -1380,6 +1380,8 @@ public:
 
 #if defined(HAVE_WINDIVERT) && defined(_WIN32)
     HANDLE wd_handle_ = nullptr;
+    HANDLE wd_ks_handle_ = nullptr;   // kill switch drop handle (opt-in)
+    std::thread ks_thread_;
 
     // Clean up a stale WinDivert driver service from the Windows SCM.
     // Error 1058 is almost always caused by a leftover registry entry
@@ -1569,6 +1571,39 @@ public:
     // When we see this ID on an intercepted packet we know it is one of
     // our own fragments and must be passed through without re-processing.
     static constexpr uint16_t MAGIC_IP_ID = 0x4E43; // "NC" in hex
+
+    bool init_kill_switch() {
+        DPIConfig c = snapshot_config();
+        std::string f = build_kill_switch_filter(c.kill_switch_allow_host,
+                                                 c.kill_switch_allow_port);
+        // Priority 1000: the drop handle sees packets BEFORE the divert
+        // handle (priority 0), so direct traffic is discarded first.
+        wd_ks_handle_ = WinDivertOpen(f.c_str(), WINDIVERT_LAYER_NETWORK, 1000, 0);
+        if (wd_ks_handle_ == INVALID_HANDLE_VALUE) {
+            wd_ks_handle_ = nullptr;
+            log("kill switch: WinDivertOpen failed, error=" +
+                std::to_string(GetLastError()));
+            return false;
+        }
+        log("kill switch ARMED - all direct outbound traffic is dropped "
+            "(exempt: loopback proxy/Tor, DNS hook, DHCP" +
+            std::string(c.kill_switch_allow_host.empty()
+                ? "" : ", allow " + c.kill_switch_allow_host + ":" +
+                       std::to_string(c.kill_switch_allow_port)) + ")");
+        return true;
+    }
+
+    void kill_switch_loop() {
+        uint8_t packet[65535];
+        UINT packet_len;
+        WINDIVERT_ADDRESS addr;
+        while (running) {
+            if (!WinDivertRecv(wd_ks_handle_, packet, sizeof(packet),
+                               &packet_len, &addr))
+                break;  // handle closed -> stop requested
+            // Deliberately NOT reinjected: the packet is dropped.
+        }
+    }
 
     void windivert_loop() {
         uint8_t packet[65535];
@@ -2351,6 +2386,11 @@ public:
     }
 
     void cleanup_windivert() {
+        if (wd_ks_handle_ && wd_ks_handle_ != INVALID_HANDLE_VALUE) {
+            WinDivertClose(wd_ks_handle_);  // unblocks kill_switch_loop Recv
+            wd_ks_handle_ = nullptr;
+        }
+        if (ks_thread_.joinable()) ks_thread_.join();
         if (wd_handle_ && wd_handle_ != INVALID_HANDLE_VALUE) {
             WinDivertClose(wd_handle_);
             wd_handle_ = nullptr;
@@ -2795,6 +2835,14 @@ bool DPIBypass::start() {
         impl_->running = true;
         impl_->intercept_active = true;
         impl_->worker_thread = std::thread(&Impl::windivert_loop, impl_.get());
+        if (cfg_snap.kill_switch) {
+            if (impl_->init_kill_switch()) {
+                impl_->ks_thread_ = std::thread(&Impl::kill_switch_loop, impl_.get());
+            } else {
+                impl_->log("[!] kill switch was explicitly requested but FAILED "
+                           "to arm - continuing WITHOUT it (traffic can go direct)");
+            }
+        }
         impl_->log("DPI bypass started (WinDivert driver mode)" +
                   std::string(impl_->advanced_enabled_.load(std::memory_order_acquire) ? " + Advanced" : ""));
         return true;
@@ -2845,6 +2893,18 @@ bool DPIBypass::start() {
     impl_->log("!!! DPI bypass started in PASSIVE mode - NO packets are being intercepted !!!");
 #endif
     return true;
+}
+
+std::string build_kill_switch_filter(const std::string& allow_host,
+                                     uint16_t allow_port) {
+    std::string f =
+        "outbound and !loopback and (tcp or udp) and "
+        "udp.DstPort != 53 and udp.DstPort != 67 and udp.DstPort != 68";
+    if (!allow_host.empty() && allow_port != 0) {
+        f += " and not (ip.DstAddr == " + allow_host +
+             " and tcp.DstPort == " + std::to_string(allow_port) + ")";
+    }
+    return f;
 }
 
 void DPIBypass::stop() {

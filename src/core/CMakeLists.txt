@@ -29,6 +29,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_hostlist.cpp
     src/ncp_zapret_import.cpp
     src/ncp_proxy.cpp
+    src/ncp_tor_manager.cpp       # Managed Tor + pluggable transports (obfs4/Snowflake)
     src/ncp_blockcheck.cpp
     src/autopilot.cpp
     src/ncp_dpi_detector.cpp

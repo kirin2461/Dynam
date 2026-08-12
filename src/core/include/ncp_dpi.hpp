@@ -114,6 +114,16 @@ struct DPIConfig {
     bool enable_adaptive_fragmentation = true;  // Adapt fragmentation based on detection
     int max_fragment_retries = 3;  // Max retries before changing strategy
 
+    // Kill switch (DRIVER/WinDivert mode only): drop ALL direct outbound
+    // TCP/UDP that bypasses NCP — if the proxy/Tor chain goes down, traffic
+    // cannot silently leak direct. NEVER enabled by default; requires an
+    // explicit opt-in flag (--kill-switch). Exemptions are loopback (local
+    // proxy/Tor), DNS udp/53 (owned by the DNS leak prevention hooks) and
+    // DHCP; an optional allow endpoint can be configured for the upstream.
+    bool kill_switch = false;
+    std::string kill_switch_allow_host;    // e.g. upstream proxy IP (optional)
+    uint16_t kill_switch_allow_port = 0;   // e.g. 9050
+
     // Reverse fragment order (send second fragment first, then first)
     // Mimics GoodbyeDPI --reverse-frag; effective on Beeline and some TSPU
     bool enable_reverse_frag = false;
@@ -462,6 +472,11 @@ using ConfigChangeCallback = std::function<void(const DPIConfig&, const DPIConfi
  */
 using TransformCallback = std::function<std::vector<uint8_t>(
     const std::vector<uint8_t>& payload)>;
+
+// Builds the WinDivert filter string used by the kill switch. Pure string
+// logic, compiled on all platforms so unit tests can verify it.
+std::string build_kill_switch_filter(const std::string& allow_host,
+                                     uint16_t allow_port);
 
 struct DPIStats {
     std::atomic<uint64_t> packets_total{0};

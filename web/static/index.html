@@ -568,6 +568,21 @@
                 <span id="bypass-upstream-status" class="text-sm" style="color:var(--text-secondary)"></span>
               </div>
             </div>
+            <div style="margin-top:var(--sp-2)">
+              <div class="text-sm" title="NCP сам запускает tor с мостами obfs4/Snowflake: провайдер не видит ни адресов сайтов, ни самого факта использования Tor. Нужен tor.exe (Tor Expert Bundle); для obfs4-мостов — lyrebird.exe. Если поле tor.exe заполнено, обычная цепочка выше игнорируется." style="margin-bottom:var(--sp-2)">Управляемый Tor (мосты — скрывает сам факт Tor)</div>
+              <input type="text" class="form-input" id="bypass-tor-binary" placeholder="Путь к tor.exe (пусто = выкл)" style="margin-bottom:var(--sp-1)">
+              <input type="text" class="form-input" id="bypass-pt-obfs4" placeholder="Путь к lyrebird.exe (obfs4, опционально)" style="margin-bottom:var(--sp-1)">
+              <input type="text" class="form-input" id="bypass-pt-snowflake" placeholder="Путь к snowflake-client.exe (опционально)" style="margin-bottom:var(--sp-1)">
+              <textarea class="form-input" id="bypass-tor-bridges" rows="2" placeholder="obfs4 IP:PORT FINGERPRINT cert=... iat-mode=0 (каждый мост с новой строки)"></textarea>
+            </div>
+            <div style="margin-top:var(--sp-2)">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span class="text-sm" title="Сравнивает ваш IP напрямую и через прокси — видимое доказательство, что маскировка реально работает, а не 'типо работает'">Проверка утечек</span>
+                <button class="btn" id="bypass-btn-leaktest" onclick="bypassLeakTest()">Проверить</button>
+              </div>
+              <div id="bypass-leaktest-result" class="text-sm" style="margin-top:var(--sp-2);color:var(--text-secondary)"></div>
+            </div>
+            <div class="text-sm" style="margin-top:var(--sp-2);color:var(--text-secondary)" title="Блокирует ВЕСЬ прямой исходящий трафик: если Tor/прокси упал, ничего не утечёт напрямую. Работает только в driver-режиме (нужны права администратора). По умолчанию выключен.">Kill switch: <code>ncp dpi --kill-switch</code> (driver-режим, по умолчанию ВЫКЛ)</div>
           </div>
           <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
             <button class="btn btn--primary" id="bypass-btn-proxy-start" onclick="bypassProxyStart()">Запустить прокси</button>

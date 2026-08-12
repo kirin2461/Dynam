@@ -140,6 +140,36 @@ LOG_BUFFER_SIZE = 500
 
 # ─── App & SocketIO ──────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
+
+# ── Local API protection ─────────────────────────────────────────────
+# Threat model: a website open in the user's browser can blind-POST to
+# http://127.0.0.1:<port>/api/* (CSRF) or use DNS rebinding to read
+# responses. Countermeasures:
+#   1. Per-start random token injected into the served page only — a
+#      cross-site page cannot read it (SOP) and cannot call the API.
+#   2. Host header must be loopback — defeats DNS-rebinding (the Host
+#      would be the attacker's domain).
+#   3. Cross-site Origin/Referer rejected.
+import secrets as _secrets
+_API_TOKEN = _secrets.token_hex(16)
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+@app.before_request
+def _api_guard():
+    if not request.path.startswith("/api/"):
+        return None
+    host = (request.host or "").split(":")[0].lower().strip("[]")
+    if host not in _LOOPBACK_HOSTS:
+        return jsonify({"ok": False, "error": "forbidden_host"}), 403
+    if request.headers.get("X-NCP-Token", "") != _API_TOKEN:
+        return jsonify({"ok": False, "error": "forbidden_token"}), 403
+    origin = (request.headers.get("Origin") or request.headers.get("Referer") or "")
+    if origin:
+        ohost = origin.split("://", 1)[-1].split("/")[0].split(":")[0].lower().strip("[]")
+        if ohost and ohost not in _LOOPBACK_HOSTS:
+            return jsonify({"ok": False, "error": "forbidden_origin"}), 403
+    return None
 app.config["SECRET_KEY"] = os.urandom(24).hex()
 CORS(app, origins=["http://127.0.0.1:8085", "http://localhost:8085"])
 socketio = SocketIO(app, cors_allowed_origins=["http://127.0.0.1:8085", "http://localhost:8085"], async_mode="threading")
@@ -189,6 +219,10 @@ state = {
         "proxy_autopilot": True,
         "proxy_system_wide": False,
         "proxy_upstream": "",
+        "tor_binary": "",
+        "tor_bridges": "",
+        "pt_obfs4": "",
+        "pt_snowflake": "",
         "rotate_interval": 3600,
         "antiforensics": False,
         "autostart": False,
@@ -524,7 +558,12 @@ def read_process_output(proc):
 
 @app.route("/")
 def index():
-    return send_from_directory(str(STATIC_DIR), "index.html")
+    # Inject the per-start API token — readable only by the same-origin page.
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    meta = '<meta name="ncp-token" content="%s">' % _API_TOKEN
+    if "</head>" in html:
+        html = html.replace("</head>", meta + "</head>", 1)
+    return app.response_class(html, mimetype="text/html")
 
 
 @app.route("/api/status")

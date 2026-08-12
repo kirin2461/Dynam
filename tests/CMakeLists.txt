@@ -25,6 +25,8 @@ add_executable(ncp_tests
     test_paranoid.cpp
     test_secure_memory.cpp
     test_i2p.cpp
+    test_tor_manager.cpp      # Managed Tor + PT tests
+    test_kill_switch.cpp        # Kill switch filter tests
     test_critical_fixes.cpp  # Critical security fixes tests (Issue #17)
     test_l3_l2_stealth.cpp   # L3/L2 Stealth tests (Phase 1-3)
     # --- New comprehensive test suite ---

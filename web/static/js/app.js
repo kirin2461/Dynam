@@ -10,10 +10,12 @@ const API_BASE = (() => {
   return meta ? meta.content.replace(/\/+$/, '') : '';
 })();
 
+const NCP_TOKEN = (document.querySelector('meta[name=ncp-token]') || {}).content || '';
+
 async function apiFetch(path, opts = {}) {
   try {
     const resp = await fetch(API_BASE + path, {
-      headers: { 'Content-Type': 'application/json', ...opts.headers },
+      headers: { 'Content-Type': 'application/json', 'X-NCP-Token': NCP_TOKEN, ...opts.headers },
       ...opts,
     });
     if (!resp.ok) {
@@ -1516,6 +1518,16 @@ async function bypassProxyStatus() {
       }
       bypassUpstreamPreset();
     }
+    const torFields = {
+      'bypass-tor-binary': st.tor_binary,
+      'bypass-tor-bridges': st.tor_bridges,
+      'bypass-pt-obfs4': st.pt_obfs4,
+      'bypass-pt-snowflake': st.pt_snowflake,
+    };
+    for (const [id, val] of Object.entries(torFields)) {
+      const el = document.getElementById(id);
+      if (el && document.activeElement !== el) el.value = val || '';
+    }
     const fq = document.getElementById('bypass-fake-quic');
     if (fq && document.activeElement !== fq) fq.value = st.fake_quic || 0;
     const label = document.getElementById('bypass-strategy-label');
@@ -1552,6 +1564,42 @@ async function bypassUpstreamProbe() {
   } catch (e) { st.textContent = '✗ ошибка проверки'; st.style.color = 'var(--red)'; }
 }
 
+async function bypassLeakTest() {
+  const box = document.getElementById('bypass-leaktest-result');
+  const btn = document.getElementById('bypass-btn-leaktest');
+  btn.disabled = true;
+  box.style.color = 'var(--text-secondary)';
+  box.textContent = 'проверка (прямой запрос и через прокси)…';
+  try {
+    const j = await apiFetch('/proxy/leak-test', {method: 'POST', body: JSON.stringify({})});
+    const chain = j.tor_managed ? ' (управляемый Tor + мосты)'
+      : j.upstream ? ' (цепочка: ' + j.upstream + ')' : '';
+    const dns = j.doh ? 'DNS: DoH' : 'DNS: системный';
+    if (j.verdict === 'hidden') {
+      box.innerHTML = '✓ <b>IP скрыт</b>: напрямую ' + _esc(j.direct_ip) +
+        ', через прокси ' + _esc(j.proxied_ip) + _esc(chain) + '<br>' + dns;
+      box.style.color = 'var(--green)';
+    } else if (j.verdict === 'leak') {
+      box.innerHTML = '✗ <b>УТЕЧКА</b>: IP совпадает (' + _esc(j.direct_ip) +
+        ') — цепочка не работает!' + '<br>' + dns;
+      box.style.color = 'var(--red)';
+    } else if (j.verdict === 'proxy_error') {
+      box.innerHTML = '⚠ Прокси запущен, но запрос через него не прошёл: ' +
+        _esc(j.proxied_error || '?') + '<br>Напрямую: ' + _esc(j.direct_ip || j.direct_error || '?');
+      box.style.color = 'var(--red)';
+    } else {
+      box.innerHTML = 'Прокси не запущен — трафик идёт напрямую, ваш IP: ' +
+        _esc(j.direct_ip || j.direct_error || 'недоступен');
+      box.style.color = 'var(--text-secondary)';
+    }
+  } catch (e) {
+    box.textContent = 'Ошибка проверки: ' + e.message;
+    box.style.color = 'var(--red)';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function bypassProxyStart() {
   const port = parseInt(document.getElementById('bypass-proxy-port').value) || 1080;
   await apiFetch('/proxy/config', {method: 'POST', body: JSON.stringify({
@@ -1560,6 +1608,10 @@ async function bypassProxyStart() {
     proxy_block_quic: document.getElementById('bypass-toggle-quic-block').checked,
     proxy_system_wide: document.getElementById('bypass-toggle-sysproxy').checked,
     proxy_upstream: bypassUpstreamValue(),
+    tor_binary: document.getElementById('bypass-tor-binary').value.trim(),
+    tor_bridges: document.getElementById('bypass-tor-bridges').value,
+    pt_obfs4: document.getElementById('bypass-pt-obfs4').value.trim(),
+    pt_snowflake: document.getElementById('bypass-pt-snowflake').value.trim(),
     proxy_fake_quic: parseInt(document.getElementById('bypass-fake-quic').value) || 0,
   })});
   const r = await apiFetch('/proxy/start', {method: 'POST'});
