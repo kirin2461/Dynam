@@ -36,6 +36,7 @@ namespace ncp {
 
 class DpiDetector;
 class AutoHostlist;
+class AutoPilot;
 
 struct ProxyStats {
     uint64_t connections_total = 0;
@@ -48,6 +49,7 @@ struct ProxyStats {
     uint64_t rst_blocks_detected = 0;
     uint64_t timeout_blocks_detected = 0;
     uint64_t udp_sessions = 0;
+    uint64_t autopilot_hits = 0;        // connections served by a learned strategy
 };
 
 class DesyncProxy {
@@ -75,6 +77,9 @@ public:
         // Optional sinks
         DpiDetector* detector = nullptr;
         AutoHostlist* auto_hostlist = nullptr;
+        // Adaptive engine: when set, learned per-host strategies take
+        // precedence over chains/base and live outcomes are reported back.
+        AutoPilot* autopilot = nullptr;
         std::function<void(const std::string&)> log_cb;
     };
 

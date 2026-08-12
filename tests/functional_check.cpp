@@ -10,12 +10,16 @@
 #include "ncp_dpi.hpp"
 #include "ncp_dpi_detector.hpp"
 #include "ncp_blockcheck.hpp"
+#include "ncp_autopilot.hpp"
+#include "ncp_proxy.hpp"
 #include "ncp_tls_parse.hpp"
 #include "ncp_license.hpp"
 #include "ncp_network.hpp"
 #include "ncp_mimicry.hpp"
 
+#include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -305,6 +309,117 @@ static void test_mimicry() {
     CHECK("all 8 mimic profiles construct", ok == 8);
 }
 
+static void test_autopilot() {
+    std::cout << "\n== AutoPilot (adaptive engine) ==\n";
+    const std::string db = "/tmp/ncp_autopilot_test.json";
+    std::remove(db.c_str());
+
+    CHECK("normalize_host lowercase+dot",
+          AutoPilot::normalize_host("WWW.YouTube.COM.") == "www.youtube.com");
+
+    AutoPilot ap;
+    AutoPilot::Config cfg;
+    cfg.db_path = db;
+    cfg.max_records = 4;
+    ap.load(cfg);
+
+    // Seed a record directly through learn-independent path: report_failure
+    // on unknown host -> pending -> placeholder at threshold
+    ap.report_failure("youtube.com", "rst");
+    ap.report_failure("youtube.com", "rst");
+    AutoPilotStrategy st;
+    CHECK("lookup empty before threshold", !ap.lookup("youtube.com", &st));
+    ap.report_failure("youtube.com", "rst");
+    CHECK("placeholder record after threshold", ap.records().size() == 1);
+    CHECK("placeholder not served by lookup", !ap.lookup("youtube.com", &st));
+    CHECK("placeholder is degraded", ap.records()[0].degraded);
+
+    // Unknown-host success is a no-op (keeps DB clean)
+    ap.report_success("never-seen.example", 10.0);
+    bool found_unseen = false;
+    for (const auto& r : ap.records())
+        if (r.host == "never-seen.example") found_unseen = true;
+    CHECK("unknown-host success no-op", !found_unseen);
+
+    // Simulate a learned record: craft via JSON roundtrip
+    ap.reset("");
+    {
+        std::ofstream f(db, std::ios::trunc);
+        f << "{\"version\":1,\"enabled\":true,\"records\":{\"youtube.com\":{"
+             "\"strategy\":\"multisplit-1-midsld\","
+             "\"positions\":[{\"type\":0,\"offset\":1},{\"type\":6,\"offset\":0}],"
+             "\"host_case\":false,\"successes\":3,\"failures\":0,"
+             "\"consec_failures\":0,\"ewma_latency_ms\":120.5,"
+             "\"last_learned\":1723300000,\"last_outcome\":1723300100,"
+             "\"cooldown\":120.0,\"degraded\":false}}}\n";
+    }
+    AutoPilot ap2;
+    AutoPilot::Config cfg2;
+    cfg2.db_path = db;
+    ap2.load(cfg2);
+    CHECK("db load: enabled persisted", ap2.enabled());
+    CHECK("db load: record parsed", ap2.records().size() == 1);
+    CHECK("lookup exact", ap2.lookup("youtube.com", &st) &&
+          st.name == "multisplit-1-midsld" && st.positions.size() == 2);
+    CHECK("lookup longest-suffix (www.youtube.com)",
+          ap2.lookup("www.youtube.com", &st));
+    CHECK("lookup position types preserved",
+          st.positions[0].type == DPI::ZSplitPosType::NUMERIC &&
+          st.positions[1].type == DPI::ZSplitPosType::MIDSLD);
+    CHECK("lookup miss for other host", !ap2.lookup("google.com", &st));
+
+    // Degradation: 3 consecutive failures -> degraded -> lookup skips
+    ap2.report_failure("youtube.com", "rst");
+    ap2.report_failure("youtube.com", "rst");
+    CHECK("not degraded before threshold", ap2.lookup("youtube.com", &st));
+    ap2.report_failure("youtube.com", "timeout");
+    auto recs = ap2.records();
+    bool degr = !recs.empty() && recs[0].degraded && recs[0].consec_failures == 3;
+    CHECK("degraded at threshold", degr);
+    CHECK("lookup skips degraded", !ap2.lookup("youtube.com", &st));
+
+    // Degradation persisted to disk
+    AutoPilot ap3;
+    AutoPilot::Config cfg3;
+    cfg3.db_path = db;
+    ap3.load(cfg3);
+    auto recs3 = ap3.records();
+    CHECK("degradation persisted", !recs3.empty() && recs3[0].degraded);
+
+    // LRU eviction
+    AutoPilot ap4;
+    AutoPilot::Config cfg4;
+    cfg4.db_path = "/tmp/ncp_autopilot_lru.json";
+    cfg4.max_records = 3;
+    cfg4.degrade_threshold = 1;  // immediate placeholder
+    ap4.load(cfg4);
+    std::remove("/tmp/ncp_autopilot_lru.json");
+    ap4.report_failure("a.example", "rst");
+    ap4.report_failure("b.example", "rst");
+    ap4.report_failure("c.example", "rst");
+    ap4.report_failure("d.example", "rst");
+    CHECK("LRU cap enforced", ap4.records().size() == 3);
+
+    CHECK("to_json contains records", ap2.to_json().find("\"records\"") != std::string::npos);
+
+    // LIVE: learn a strategy for a real domain through temp proxies.
+    // On this filtered server youtube.com needs desync; on open networks
+    // "direct" wins — either way learn() must succeed and store a record.
+    AutoPilot ap5;
+    AutoPilot::Config cfg5;
+    cfg5.db_path = "/tmp/ncp_autopilot_live.json";
+    cfg5.probe_timeout_ms = 6000;
+    cfg5.use_doh = true;  // this server has poisoned DNS; harmless elsewhere
+    ap5.load(cfg5);
+    std::string learned;
+    bool lok = ap5.learn("www.youtube.com", &learned);
+    CHECK("live learn youtube.com", lok);
+    if (lok) {
+        std::cout << "       learned strategy: " << learned << "\n";
+        CHECK("live learned record servable", ap5.lookup("www.youtube.com", &st));
+    }
+}
+
 int main() {
     std::cout << "=== NCP C++ FUNCTIONAL CHECK ===\n";
     test_crypto();
@@ -318,6 +433,7 @@ int main() {
     test_blockcheck_statics();
     test_license_network();
     test_mimicry();
+    test_autopilot();
     std::cout << "\n=== RESULT: " << g_pass << " passed, " << g_fail << " failed ===\n";
     return g_fail == 0 ? 0 : 1;
 }

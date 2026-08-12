@@ -64,6 +64,9 @@ public:
         std::vector<std::string> domains;
         std::vector<BlockcheckStrategy> strategies;  // empty → default_strategies()
         int timeout_ms = 5000;
+        // Resolve probe targets via DNS-over-HTTPS inside the temporary
+        // probing proxies (needed on networks with poisoned/filtered DNS).
+        bool use_doh = false;
         // progress(strategy_name, domain, ok) — called after each probe
         std::function<void(const std::string&, const std::string&, bool)> progress_cb;
         // cancel check — return true to abort

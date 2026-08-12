@@ -181,6 +181,37 @@ ncp blockcheck --domains example.com,foo.org --json --out report.json
 ncp blockcheck --apply                           # best strategy as profile JSON
 ```
 
+### AutoPilot — adaptive self-learning engine (`ncp autopilot`)
+
+AutoPilot turns one-shot blockcheck into a continuous, per-host learning loop:
+
+- **Learns** the best desync strategy for each host by live probing (TLS
+  ClientHello over TCP/443 through a temporary local proxy — no admin, no
+  firewall changes) and persists it to `~/.ncp/autopilot.json`
+  (`%APPDATA%\ncp\autopilot.json` on Windows).
+- **Applies** learned strategies inside `ncp proxy --autopilot` (or whenever
+  the DB is enabled): a learned record takes precedence over chains and the
+  base strategy; longest-suffix matching covers subdomains automatically.
+- **Watches** live traffic: RST-after-ClientHello and server-hello timeouts
+  are reported back per host. Three consecutive failures mark the record
+  *degraded* — connections instantly fall back to chains/base while a
+  background janitor re-learns the host (rate-limited, exponential backoff).
+- **Self-extends**: repeated failures on an unknown host create a placeholder
+  that the janitor learns automatically.
+
+```bash
+ncp autopilot learn www.youtube.com --doh   # probe & store best strategy
+ncp autopilot status                        # human-readable DB view
+ncp autopilot status --json                 # machine-readable (GUI-ready)
+ncp autopilot enable                        # proxy picks it up automatically
+ncp proxy --doh --autopilot                 # learned strategies + live feedback
+ncp autopilot reset [domain]                # drop one record / all
+```
+
+Probing is plain TCP/443 only — no TUN, no VPN, no packet injection. Use
+`--doh` (both in `learn` and `proxy`) on networks with poisoned DNS so that
+learning happens in the same DNS reality the proxy runs in.
+
 ### zapret strategy import — `ncp import-zapret`
 
 Parses zapret CLI flags (`--dpi-desync`, `--dpi-desync-split-pos`,

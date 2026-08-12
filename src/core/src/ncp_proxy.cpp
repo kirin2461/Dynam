@@ -4,6 +4,7 @@
 #include "ncp_quic.hpp"
 #include "ncp_hostlist.hpp"
 #include "ncp_dpi_detector.hpp"
+#include "ncp_autopilot.hpp"
 #include "ncp_doh.hpp"
 
 #include <algorithm>
@@ -248,7 +249,7 @@ public:
     struct Counters {
         std::atomic<uint64_t> total{0}, active{0}, c2s{0}, s2c{0},
             splits{0}, fake_quic{0}, quic_blocked{0}, rst_blocks{0},
-            timeout_blocks{0}, udp_sessions{0};
+            timeout_blocks{0}, udp_sessions{0}, autopilot_hits{0};
     } cnt;
 
     std::mutex socks_mu;
@@ -324,6 +325,19 @@ public:
 
     DesyncPlan plan_for(DPI::ZProto proto, uint16_t dst_port, const std::string& host) {
         DesyncPlan plan;
+        // AutoPilot learned strategies take precedence: they are empirical
+        // (probed live on this exact network for this exact host). Degraded
+        // records are skipped by lookup() and fall through to chains/base
+        // while the background janitor re-learns them.
+        if (cfg.autopilot) {
+            AutoPilotStrategy learned;
+            if (cfg.autopilot->lookup(host, &learned)) {
+                plan.positions = learned.positions;
+                plan.host_case = learned.host_case;
+                cnt.autopilot_hits++;
+                return plan;
+            }
+        }
         const DPI::ZapretChain* chain =
             select_chain(cfg.chains, chain_patterns, proto, dst_port, host);
         if (chain) {
@@ -482,7 +496,10 @@ public:
                const std::string& host, bool* first_data_seen,
                std::atomic<bool>* peer_done) {
         std::vector<uint8_t> buf(16384);
-        bool hello_wait = !to_client;  // server→client: watch first byte
+        // Watch the first server→client byte (ServerHello / HTTP response):
+        // its arrival, RST or timeout is the live DPI-block signal.
+        // This relay instance is called with to_client=true for server→client.
+        bool hello_wait = to_client;
         while (running.load()) {
             if (peer_done && peer_done->load()) break;
             int wr = ncp_wait_readable(from, hello_wait ? cfg.hello_timeout_ms : 2000);
@@ -493,6 +510,7 @@ public:
                     cnt.timeout_blocks++;
                     if (cfg.detector) cfg.detector->on_timeout(host);
                     if (cfg.auto_hostlist) cfg.auto_hostlist->record_blocked(host);
+                    if (cfg.autopilot) cfg.autopilot->report_failure(host, "timeout");
                     break;  // give up this connection
                 }
                 continue;
@@ -507,6 +525,7 @@ public:
                     cnt.rst_blocks++;
                     if (cfg.detector) cfg.detector->on_reset_after_hello(host);
                     if (cfg.auto_hostlist) cfg.auto_hostlist->record_blocked(host);
+                    if (cfg.autopilot) cfg.autopilot->report_failure(host, "rst");
                 }
                 break;
             }
@@ -514,6 +533,7 @@ public:
                 hello_wait = false;
                 if (first_data_seen) *first_data_seen = true;
                 if (cfg.detector) cfg.detector->on_success(host);
+                if (cfg.autopilot) cfg.autopilot->report_success(host, 0.0);
             }
             if (to_client) cnt.s2c += static_cast<uint64_t>(r);
             else cnt.c2s += static_cast<uint64_t>(r);
@@ -541,6 +561,7 @@ ProxyStats DesyncProxy::stats() const {
     s.rst_blocks_detected = impl_->cnt.rst_blocks.load();
     s.timeout_blocks_detected = impl_->cnt.timeout_blocks.load();
     s.udp_sessions = impl_->cnt.udp_sessions.load();
+    s.autopilot_hits = impl_->cnt.autopilot_hits.load();
     return s;
 }
 

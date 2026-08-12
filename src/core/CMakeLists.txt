@@ -30,6 +30,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_zapret_import.cpp
     src/ncp_proxy.cpp
     src/ncp_blockcheck.cpp
+    src/autopilot.cpp
     src/ncp_dpi_detector.cpp
     src/ncp_quic.cpp
     src/ncp_ipfrag.cpp

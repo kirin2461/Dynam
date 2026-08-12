@@ -403,6 +403,7 @@ BlockcheckReport BlockChecker::run(const Config& cfg) {
         if (!strat.is_direct) {
             DesyncProxy::Config pcfg;
             pcfg.port = 0;
+            pcfg.use_doh = cfg.use_doh;
             if (strat.use_chain) {
                 pcfg.chains = {strat.chain};
                 // neutral base — chain always matches (no hostlist)

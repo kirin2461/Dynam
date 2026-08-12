@@ -25,6 +25,7 @@
 #include "ncp_zapret_import.hpp"
 #include "ncp_hostlist.hpp"
 #include "ncp_dpi_detector.hpp"
+#include "ncp_autopilot.hpp"
 
 #include <iostream>
 #include <string>
@@ -509,6 +510,7 @@ void handle_i2p(const std::vector<std::string>& args);
 void handle_mimic(const std::vector<std::string>& args);
 void handle_proxy(const std::vector<std::string>& args);
 void handle_blockcheck(const std::vector<std::string>& args);
+void handle_autopilot(const std::vector<std::string>& args);
 void handle_import_zapret(const std::vector<std::string>& args);
 
 // ============================================================================
@@ -533,6 +535,7 @@ int main(int argc, char* argv[]) {
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
     parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]"});
     parser.add_command("blockcheck", "Auto-select best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--json]", "[--out file]", "[--apply profile.json]"});
+    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable>", "[domain]", "[--json]", "[--timeout ms]"});
     parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
 
     parser.parse_and_execute(argc, argv);
@@ -1994,7 +1997,9 @@ void handle_proxy(const std::vector<std::string>& args) {
                   << "  --fake-quic N         Send N fake QUIC Initials per target\n"
                   << "  --doh                 Resolve targets via DNS-over-HTTPS\n"
                   << "  --autohostlist FILE   Auto-record blocked hosts to FILE\n"
-                  << "  --detector-log FILE   Append DPI detector events (JSONL)\n";
+                  << "  --detector-log FILE   Append DPI detector events (JSONL)\n"
+                  << "  --autopilot           Enable adaptive engine (learned per-host strategies,\n"
+                  << "                        live degradation feedback, background re-learning)\n";
         return;
     }
     ncp::DesyncProxy::Config cfg;
@@ -2098,6 +2103,21 @@ void handle_proxy(const std::vector<std::string>& args) {
     cfg.detector = &detector;
     cfg.log_cb = [](const std::string& m) { std::cout << "[proxy] " << m << "\n"; };
 
+    // AutoPilot: adaptive per-host strategies. Active when --autopilot is
+    // passed OR the DB was enabled via `ncp autopilot enable`.
+    ncp::AutoPilot autopilot;
+    bool autopilot_active = false;
+    {
+        ncp::AutoPilot::Config apcfg;
+        apcfg.use_doh = cfg.use_doh;  // learn in the same DNS reality the proxy runs in
+        autopilot.load(apcfg);
+        if (has_flag(args, "--autopilot") || autopilot.enabled()) {
+            cfg.autopilot = &autopilot;
+            autopilot.start();  // background re-learn janitor
+            autopilot_active = true;
+        }
+    }
+
     ncp::DesyncProxy proxy;
     if (!proxy.start(cfg)) {
         std::cerr << "[!] Failed to start proxy on " << cfg.listen_host << ":"
@@ -2112,6 +2132,10 @@ void handle_proxy(const std::vector<std::string>& args) {
               << "    Fake QUIC:     " << cfg.fake_quic_repeats << " per target\n"
               << "    DoH upstream:  " << (cfg.use_doh ? "on (1.1.1.1)" : "off") << "\n"
               << "    Chains:        " << cfg.chains.size() << "\n"
+              << "    AutoPilot:     " << (autopilot_active
+                        ? ("on (" + std::to_string(autopilot.records().size()) +
+                           " learned hosts, DB: " + ncp::AutoPilot::default_db_path() + ")")
+                        : std::string("off")) << "\n"
               << "Point your browser/system proxy at this address. Ctrl+C to stop.\n";
 
     g_running = 1;
@@ -2119,13 +2143,20 @@ void handle_proxy(const std::vector<std::string>& args) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     proxy.stop();
+    if (autopilot_active) {
+        autopilot.stop();
+        autopilot.save();
+    }
     auto st = proxy.stats();
     std::cout << "[+] Proxy stopped. Connections: " << st.connections_total
               << ", splits applied: " << st.desync_splits_applied
               << ", fake QUIC sent: " << st.fake_quic_sent
               << ", QUIC blocked: " << st.quic_datagrams_blocked
               << ", RST blocks: " << st.rst_blocks_detected
-              << ", timeout blocks: " << st.timeout_blocks_detected << "\n";
+              << ", timeout blocks: " << st.timeout_blocks_detected;
+    if (autopilot_active)
+        std::cout << ", AutoPilot learned-strategy hits: " << st.autopilot_hits;
+    std::cout << "\n";
 }
 
 // ============================================================================
@@ -2198,6 +2229,113 @@ void handle_blockcheck(const std::vector<std::string>& args) {
         f << ncp::BlockChecker::best_strategy_to_profile_json(report);
         std::cout << "[+] Best strategy profile written to " << apply_path << "\n";
     }
+}
+
+// ============================================================================
+// ncp autopilot — adaptive self-learning DPI bypass engine
+// ============================================================================
+void handle_autopilot(const std::vector<std::string>& args) {
+    // first non-flag token = action
+    std::string action;
+    std::string positional;
+    for (const auto& a : args) {
+        if (!a.empty() && a[0] == '-') continue;
+        if (action.empty()) { action = a; continue; }
+        if (positional.empty()) { positional = a; continue; }
+    }
+    if (action.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp autopilot <action> [options]\n"
+                  << "  status [--json]        Show learned per-host strategies\n"
+                  << "  learn <domain>         Probe all strategies for domain, store the best\n"
+                  << "                         (--doh: resolve probe targets via DNS-over-HTTPS)\n"
+                  << "  reset [domain]         Drop one record (or all, if omitted)\n"
+                  << "  enable                 Persistently enable AutoPilot (proxy picks it up)\n"
+                  << "  disable                Persistently disable AutoPilot\n"
+                  << "\n"
+                  << "AutoPilot learns which desync strategy works for each host by live\n"
+                  << "probing (TLS ClientHello over TCP/443 through a temporary local proxy),\n"
+                  << "applies it inside `ncp proxy`, watches live traffic for degradation\n"
+                  << "(RST/timeout) and re-learns automatically in the background.\n"
+                  << "DB: " << ncp::AutoPilot::default_db_path() << "\n";
+        return;
+    }
+
+    ncp::AutoPilot ap;
+    ncp::AutoPilot::Config cfg;
+    cfg.probe_timeout_ms = get_option_int(args, "--timeout", 5000);
+    cfg.use_doh = has_flag(args, "--doh");
+    ap.load(cfg);
+
+    if (action == "status") {
+        if (has_flag(args, "--json")) {
+            std::cout << ap.to_json();
+            return;
+        }
+        auto recs = ap.records();
+        std::cout << "═══ AutoPilot status ═══\n"
+                  << "  Enabled:   " << (ap.enabled() ? "yes" : "no") << "\n"
+                  << "  DB:        " << ncp::AutoPilot::default_db_path() << "\n"
+                  << "  Records:   " << recs.size() << "\n";
+        if (recs.empty()) {
+            std::cout << "  (no learned hosts yet — use `ncp autopilot learn <domain>`)\n";
+            return;
+        }
+        std::cout << "  ────────────────────────────────────────────────────────────\n";
+        for (const auto& r : recs) {
+            std::cout << "  " << r.host << "\n"
+                      << "      strategy: " << r.strategy.name
+                      << (r.degraded ? "  [DEGRADED — will re-learn]" : "") << "\n"
+                      << "      ok/fail:  " << r.successes << "/" << r.failures
+                      << " (streak " << r.consec_failures << ")";
+            if (r.ewma_latency_ms > 0.0)
+                std::cout << ", ewma " << r.ewma_latency_ms << " ms";
+            std::cout << "\n";
+        }
+        return;
+    }
+
+    if (action == "learn") {
+        if (positional.empty()) {
+            std::cerr << "[!] Usage: ncp autopilot learn <domain> [--timeout ms]\n";
+            return;
+        }
+        std::cout << "[*] AutoPilot learning " << positional
+                  << " (probing strategies, timeout " << cfg.probe_timeout_ms << "ms)...\n";
+        std::string learned;
+        bool ok = ap.learn(positional, &learned);
+        if (ok) {
+            std::cout << "[+] Learned " << ncp::AutoPilot::normalize_host(positional)
+                      << ": best strategy = " << learned << "\n";
+        } else {
+            std::cout << "[-] No working strategy found for " << positional
+                      << " (host unreachable or IP-level blocked). "
+                      << "Marked degraded; background re-learn will retry with backoff.\n";
+        }
+        return;
+    }
+
+    if (action == "reset") {
+        ap.reset(positional);
+        std::cout << "[+] AutoPilot DB "
+                  << (positional.empty() ? "wiped" : ("record dropped: " + positional))
+                  << "\n";
+        return;
+    }
+
+    if (action == "enable") {
+        ap.set_enabled(true);
+        std::cout << "[+] AutoPilot enabled. `ncp proxy` will now use learned "
+                     "per-host strategies automatically.\n";
+        return;
+    }
+    if (action == "disable") {
+        ap.set_enabled(false);
+        std::cout << "[+] AutoPilot disabled.\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown autopilot action: " << action
+              << " (try: ncp autopilot --help)\n";
 }
 
 // ============================================================================
