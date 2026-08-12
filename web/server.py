@@ -188,6 +188,7 @@ state = {
         "proxy_strategy": None,
         "proxy_autopilot": True,
         "proxy_system_wide": False,
+        "proxy_upstream": "",
         "rotate_interval": 3600,
         "antiforensics": False,
         "autostart": False,

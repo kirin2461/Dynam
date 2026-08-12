@@ -1504,6 +1504,18 @@ async function bypassProxyStatus() {
     if (qb) qb.checked = !!st.block_quic;
     const sw = document.getElementById('bypass-toggle-sysproxy');
     if (sw) sw.checked = !!st.system_wide;
+    const upPreset = document.getElementById('bypass-upstream-preset');
+    if (upPreset && document.activeElement !== upPreset) {
+      const uv = st.upstream || '';
+      if (uv === '' || uv === 'socks5://127.0.0.1:9050' || uv === 'socks5://127.0.0.1:9150') {
+        upPreset.value = uv;
+      } else {
+        upPreset.value = 'custom';
+        const ci = document.getElementById('bypass-upstream-custom');
+        if (ci && document.activeElement !== ci) ci.value = uv;
+      }
+      bypassUpstreamPreset();
+    }
     const fq = document.getElementById('bypass-fake-quic');
     if (fq && document.activeElement !== fq) fq.value = st.fake_quic || 0;
     const label = document.getElementById('bypass-strategy-label');
@@ -1515,6 +1527,31 @@ async function bypassProxyStatus() {
   } catch (e) { /* endpoints may be absent on old servers */ }
 }
 
+function bypassUpstreamPreset() {
+  const v = document.getElementById('bypass-upstream-preset').value;
+  document.getElementById('bypass-upstream-custom').style.display = v === 'custom' ? '' : 'none';
+  document.getElementById('bypass-btn-upstream-probe').style.display = v ? '' : 'none';
+  if (!v) document.getElementById('bypass-upstream-status').textContent = '';
+}
+
+function bypassUpstreamValue() {
+  const v = document.getElementById('bypass-upstream-preset').value;
+  if (v === 'custom') return document.getElementById('bypass-upstream-custom').value.trim();
+  return v;
+}
+
+async function bypassUpstreamProbe() {
+  const st = document.getElementById('bypass-upstream-status');
+  const url = bypassUpstreamValue();
+  if (!url) { st.textContent = ''; return; }
+  st.textContent = 'проверка…'; st.style.color = 'var(--text-secondary)';
+  try {
+    const j = await apiFetch('/proxy/upstream-probe', {method: 'POST', body: JSON.stringify({upstream: url})});
+    if (j.ok) { st.textContent = '✓ доступен (' + j.latency_ms + ' мс)' + (j.tor ? ' — Tor' : ''); st.style.color = 'var(--green)'; }
+    else { st.textContent = '✗ недоступен (' + (j.error || '?') + ')'; st.style.color = 'var(--red)'; }
+  } catch (e) { st.textContent = '✗ ошибка проверки'; st.style.color = 'var(--red)'; }
+}
+
 async function bypassProxyStart() {
   const port = parseInt(document.getElementById('bypass-proxy-port').value) || 1080;
   await apiFetch('/proxy/config', {method: 'POST', body: JSON.stringify({
@@ -1522,6 +1559,7 @@ async function bypassProxyStart() {
     proxy_doh: document.getElementById('bypass-toggle-doh').checked,
     proxy_block_quic: document.getElementById('bypass-toggle-quic-block').checked,
     proxy_system_wide: document.getElementById('bypass-toggle-sysproxy').checked,
+    proxy_upstream: bypassUpstreamValue(),
     proxy_fake_quic: parseInt(document.getElementById('bypass-fake-quic').value) || 0,
   })});
   const r = await apiFetch('/proxy/start', {method: 'POST'});

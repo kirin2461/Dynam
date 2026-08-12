@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <csignal>
 #include <ctime>
 #include <fstream>
 #include <map>
@@ -103,11 +104,10 @@ static bool ncp_send_all(ncp_socket_t s, const uint8_t* data, size_t len) {
     while (sent < len) {
         int r = ::send(s, reinterpret_cast<const char*>(data + sent),
 #ifdef _WIN32
-                       static_cast<int>(len - sent),
+                       static_cast<int>(len - sent), 0);
 #else
-                       len - sent,
+                       len - sent, MSG_NOSIGNAL);
 #endif
-                       0);
         if (r <= 0) return false;
         sent += static_cast<size_t>(r);
     }
@@ -460,6 +460,95 @@ public:
                          socklen_t client_len);
 
     // ── Networking helpers ──
+    // ── Upstream chain handshakes ─────────────────────────────────────────
+    // SOCKS5 (RFC 1928, no-auth, DOMAIN form so the upstream resolves).
+    bool upstream_socks5_handshake(ncp_socket_t s, const std::string& host,
+                                   uint16_t port, int timeout_ms) {
+        // greeting: VER=5, 1 method, NO-AUTH
+        const uint8_t greet[3] = {0x05, 0x01, 0x00};
+        if (!ncp_send_all(s, greet, sizeof(greet))) return false;
+        if (ncp_wait_readable(s, timeout_ms) <= 0) return false;
+        uint8_t gr[2] = {0, 0};
+        if (::recv(s, reinterpret_cast<char*>(gr), 2, 0) != 2) return false;
+        if (gr[0] != 0x05 || gr[1] != 0x00) return false;
+
+        if (host.size() > 255) return false;
+        std::vector<uint8_t> req;
+        req.reserve(7 + host.size());
+        req.insert(req.end(), {0x05, 0x01, 0x00, 0x03});  // CONNECT, DOMAIN
+        req.push_back(static_cast<uint8_t>(host.size()));
+        req.insert(req.end(), host.begin(), host.end());
+        req.push_back(static_cast<uint8_t>((port >> 8) & 0xFF));
+        req.push_back(static_cast<uint8_t>(port & 0xFF));
+        if (!ncp_send_all(s, req.data(), req.size())) return false;
+
+        if (ncp_wait_readable(s, timeout_ms) <= 0) return false;
+        uint8_t rh[4] = {0, 0, 0, 0};
+        if (::recv(s, reinterpret_cast<char*>(rh), 4, 0) != 4) return false;
+        if (rh[0] != 0x05 || rh[1] != 0x00) return false;  // REP != success
+        // consume bound address per ATYP
+        size_t need = 0;
+        if (rh[3] == 0x01) need = 4 + 2;
+        else if (rh[3] == 0x04) need = 16 + 2;
+        else if (rh[3] == 0x03) {
+            if (ncp_wait_readable(s, timeout_ms) <= 0) return false;
+            uint8_t dl = 0;
+            if (::recv(s, reinterpret_cast<char*>(&dl), 1, 0) != 1) return false;
+            need = static_cast<size_t>(dl) + 2;
+        } else return false;
+        uint8_t buf[260];
+        size_t got = 0;
+        while (got < need) {
+            if (ncp_wait_readable(s, timeout_ms) <= 0) return false;
+            int r = ::recv(s, reinterpret_cast<char*>(buf + got),
+                           static_cast<int>(need - got), 0);
+            if (r <= 0) return false;
+            got += static_cast<size_t>(r);
+        }
+        return true;
+    }
+
+    // HTTP CONNECT (upstream resolves via Host header).
+    bool upstream_http_handshake(ncp_socket_t s, const std::string& host,
+                                 uint16_t port, int timeout_ms) {
+        std::string target = host + ":" + std::to_string(port);
+        std::string req = "CONNECT " + target + " HTTP/1.1\r\nHost: " + target +
+                          "\r\n\r\n";
+        if (!ncp_send_all(s, reinterpret_cast<const uint8_t*>(req.data()),
+                          req.size()))
+            return false;
+        std::string resp;
+        resp.reserve(128);
+        char c;
+        while (resp.size() < 4096 &&
+               resp.find("\r\n\r\n") == std::string::npos) {
+            if (ncp_wait_readable(s, timeout_ms) <= 0) return false;
+            if (::recv(s, &c, 1, 0) != 1) return false;
+            resp.push_back(c);
+        }
+        // status line must be "HTTP/1.x 200 ..."
+        auto sp1 = resp.find(' ');
+        if (sp1 == std::string::npos) return false;
+        return resp.compare(sp1 + 1, 3, "200") == 0;
+    }
+
+    // Connect to the configured upstream proxy and handshake toward the
+    // target. Returns NCP_INVALID_SOCK on any failure.
+    ncp_socket_t connect_via_upstream(const std::string& host, uint16_t port,
+                                      int timeout_ms) {
+        ncp_socket_t s = connect_target_one(cfg.upstream_host, cfg.upstream_port,
+                                            timeout_ms, nullptr);
+        if (s == NCP_INVALID_SOCK) return NCP_INVALID_SOCK;
+        bool ok = (cfg.upstream_type == "http")
+                      ? upstream_http_handshake(s, host, port, timeout_ms)
+                      : upstream_socks5_handshake(s, host, port, timeout_ms);
+        if (!ok) {
+            NCP_CLOSE_SOCKET(s);
+            return NCP_INVALID_SOCK;
+        }
+        return s;
+    }
+
     ncp_socket_t connect_target_one(const std::string& host, uint16_t port, int timeout_ms,
                                     bool* reset = nullptr) {
         if (reset) *reset = false;
@@ -928,12 +1017,22 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
                 for (int i = 0; i < impl->cfg.fake_quic_repeats; ++i) {
                     auto fake = build_fake_quic_initial(1200);
                     ::send(up, reinterpret_cast<const char*>(fake.data()),
-                           static_cast<int>(fake.size()), 0);
+                           static_cast<int>(fake.size()),
+#ifdef _WIN32
+                           0);
+#else
+                           MSG_NOSIGNAL);
+#endif
                     impl->cnt.fake_quic++;
                 }
             }
             ::send(up, reinterpret_cast<const char*>(payload),
-                   static_cast<int>(payload_len), 0);
+                   static_cast<int>(payload_len),
+#ifdef _WIN32
+                   0);
+#else
+                   MSG_NOSIGNAL);
+#endif
 
             // drain all pending upstream replies
             for (auto& kv : upstreams) {
@@ -1013,8 +1112,14 @@ void DesyncProxy::Impl::handle_tcp(ncp_socket_t client,
 
         const std::string host_norm = HostlistMatcher::normalize(preq.host);
         bool conn_reset = false;
-        ncp_socket_t upstream = impl->connect_target(
-            preq.host, preq.port, impl->cfg.connect_timeout_ms, &conn_reset);
+        // Chain mode: route through upstream proxy (Tor / SOCKS5 / HTTP).
+        // The upstream resolves the target — no local DNS lookup happens.
+        ncp_socket_t upstream =
+            (impl->cfg.upstream_port != 0)
+                ? impl->connect_via_upstream(preq.host, preq.port,
+                                             impl->cfg.connect_timeout_ms)
+                : impl->connect_target(preq.host, preq.port,
+                                       impl->cfg.connect_timeout_ms, &conn_reset);
         if (upstream == NCP_INVALID_SOCK) {
             if (conn_reset) {
                 impl->cnt.rst_blocks++;
@@ -1069,15 +1174,20 @@ void DesyncProxy::Impl::handle_tcp(ncp_socket_t client,
         std::atomic<bool> peer_done{false};
         bool first_data_seen = false;
 
-        if (preq.is_http_plain && !preq.http_head.empty()) {
-            if (!impl->send_first_payload(upstream, preq.http_head.data(),
-                                          preq.http_head.size(), plan))
-                return;
-        }
-
         std::thread t_cs([&] {
             std::vector<uint8_t> buf(16384);
-            bool first_payload = !preq.is_http_plain;
+            // Plain-HTTP head is sent from THIS thread (not the main one) so
+            // the server->client relay is already running: a fast server may
+            // respond + close after the first split segment; sending from the
+            // main thread before t_sc started lost that response (EPIPE abort
+            // with an undrained reply — observed with plain-HTTP proxying).
+            bool first_payload = true;
+            if (preq.is_http_plain && !preq.http_head.empty()) {
+                first_payload = false;
+                if (!impl->send_first_payload(upstream, preq.http_head.data(),
+                                              preq.http_head.size(), plan))
+                    peer_done = true;
+            }
             while (impl->running.load() && !peer_done.load()) {
                 int wr = ncp_wait_readable(client, 2000);
                 if (wr < 0) break;
@@ -1120,6 +1230,10 @@ void DesyncProxy::Impl::handle_tcp(ncp_socket_t client,
 
 bool DesyncProxy::start(const Config& cfg) {
     if (impl_->running.load()) return false;
+#ifndef _WIN32
+    // A closed peer must never kill the whole proxy via SIGPIPE.
+    ::signal(SIGPIPE, SIG_IGN);
+#endif
     ncp_net_init();
     impl_->cfg = cfg;
 

@@ -552,6 +552,22 @@
               <span class="text-sm">Фейковые QUIC Initial (шт.)</span>
               <input type="number" class="form-input" id="bypass-fake-quic" value="0" min="0" max="10" style="max-width:80px">
             </div>
+            <div style="margin-top:var(--sp-2)">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-2)">
+                <span class="text-sm" title="Трафик прокси дополнительно заворачивается в Tor или другой вышестоящий прокси: сайты не видят ваш IP, провайдер не видит адресов назначения. Требует запущенного Tor.">Цепочка через Tor / вышестоящий прокси</span>
+                <select class="form-input" id="bypass-upstream-preset" style="max-width:210px" onchange="bypassUpstreamPreset()">
+                  <option value="">Выключено</option>
+                  <option value="socks5://127.0.0.1:9050">Tor (служба, :9050)</option>
+                  <option value="socks5://127.0.0.1:9150">Tor Browser (:9150)</option>
+                  <option value="custom">Свой адрес…</option>
+                </select>
+              </div>
+              <div style="display:flex;gap:var(--sp-2);align-items:center">
+                <input type="text" class="form-input" id="bypass-upstream-custom" placeholder="socks5://127.0.0.1:9050" style="flex:1;display:none">
+                <button class="btn" id="bypass-btn-upstream-probe" onclick="bypassUpstreamProbe()" style="display:none">Проверить</button>
+                <span id="bypass-upstream-status" class="text-sm" style="color:var(--text-secondary)"></span>
+              </div>
+            </div>
           </div>
           <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
             <button class="btn btn--primary" id="bypass-btn-proxy-start" onclick="bypassProxyStart()">Запустить прокси</button>

@@ -832,7 +832,7 @@ int main(int argc, char* argv[]) {
     parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
-    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]"});
+    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]", "[--upstream socks5://127.0.0.1:9050]", "[--tor]"});
     parser.add_command("blockcheck", "Auto-select best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--json]", "[--out file]", "[--apply profile.json]"});
     parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable|learn-preset>", "[domain|preset]", "[--json]", "[--timeout ms]"});
     parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
@@ -2511,7 +2511,11 @@ void handle_proxy(const std::vector<std::string>& args) {
                   << "  --events-log FILE     Append live connection events (JSONL) to FILE\n"
                   << "  --stats-file FILE     Rewrite full stats JSON to FILE every 2s (atomic)\n"
                   << "  --system-proxy        Route ALL proxy-aware apps (Discord etc.) through\n"
-                  << "                        this proxy; previous settings restored on exit\n";
+                  << "                        this proxy; previous settings restored on exit\n"
+                  << "  --upstream URL        Chain through upstream proxy (hides your IP):\n"
+                  << "                        socks5://127.0.0.1:9050 or http://127.0.0.1:8080\n"
+                  << "  --tor                 Shortcut for --upstream socks5://127.0.0.1:9050\n"
+                  << "                        (Tor Browser uses port 9150 instead)\n";
         return;
     }
     ncp::DesyncProxy::Config cfg;
@@ -2633,6 +2637,37 @@ void handle_proxy(const std::vector<std::string>& args) {
     }
 
     ncp::DesyncProxy proxy;
+    // ── Upstream chain (Tor / SOCKS5 / HTTP CONNECT) ──
+    {
+        std::string ups = get_option(args, "--upstream", "");
+        if (has_flag(args, "--tor")) ups = "socks5://127.0.0.1:9050";
+        if (!ups.empty()) {
+            std::string rest = ups;
+            auto scheme = rest.find("://");
+            if (scheme != std::string::npos) {
+                cfg.upstream_type = rest.substr(0, scheme);
+                rest = rest.substr(scheme + 3);
+            } else {
+                cfg.upstream_type = "socks5";
+            }
+            if (cfg.upstream_type == "socks") cfg.upstream_type = "socks5";
+            auto colon = rest.rfind(':');
+            if (colon == std::string::npos ||
+                (cfg.upstream_type != "socks5" && cfg.upstream_type != "http")) {
+                std::cerr << "[!] Invalid --upstream: " << ups
+                          << " (expected socks5://host:port or http://host:port)\n";
+                return;
+            }
+            cfg.upstream_host = rest.substr(0, colon);
+            int pnum = std::atoi(rest.substr(colon + 1).c_str());
+            if (pnum <= 0 || pnum > 65535) {
+                std::cerr << "[!] Invalid --upstream port in: " << ups << "\n";
+                return;
+            }
+            cfg.upstream_port = static_cast<uint16_t>(pnum);
+        }
+    }
+
     if (!proxy.start(cfg)) {
         std::cerr << "[!] Failed to start proxy on " << cfg.listen_host << ":"
                   << cfg.port << "\n";
@@ -2658,6 +2693,14 @@ void handle_proxy(const std::vector<std::string>& args) {
               << "    QUIC block:    " << (cfg.block_quic ? "on (forces TCP fallback)" : "off") << "\n"
               << "    Fake QUIC:     " << cfg.fake_quic_repeats << " per target\n"
               << "    DoH upstream:  " << (cfg.use_doh ? "on (1.1.1.1)" : "off") << "\n"
+              << (cfg.upstream_port
+                      ? ("    Chain:         " + cfg.upstream_type + "://" +
+                         cfg.upstream_host + ":" + std::to_string(cfg.upstream_port) +
+                         (cfg.upstream_port == 9050 || cfg.upstream_port == 9150
+                              ? " (Tor — destination IP hidden from ISP)"
+                              : " (upstream — destination IP hidden from ISP)") +
+                         "\n")
+                      : "")
               << "    Chains:        " << cfg.chains.size() << "\n"
               << (cfg.events_log.empty() ? "" : ("    Events log:    " + cfg.events_log + "\n"))
               << (cfg.stats_file.empty() ? "" : ("    Stats file:    " + cfg.stats_file + "\n"))

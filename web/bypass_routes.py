@@ -192,6 +192,9 @@ def register_bypass_routes(app, ctx):
             args.append("--autopilot")
         if cfg.get("proxy_system_wide"):
             args.append("--system-proxy")
+        up = (cfg.get("proxy_upstream") or "").strip()
+        if up:
+            args += ["--upstream", up]
         if cfg.get("proxy_block_quic", False):
             args.append("--block-quic")
         fq = int(cfg.get("proxy_fake_quic", 0) or 0)
@@ -269,6 +272,7 @@ def register_bypass_routes(app, ctx):
             "doh": cfg.get("proxy_doh", True),
             "block_quic": cfg.get("proxy_block_quic", False),
             "system_wide": cfg.get("proxy_system_wide", False),
+            "upstream": cfg.get("proxy_upstream", ""),
             "fake_quic": cfg.get("proxy_fake_quic", 0),
             "strategy": cfg.get("proxy_strategy"),
             "autohostlist_size": autohl_size,
@@ -280,11 +284,36 @@ def register_bypass_routes(app, ctx):
         cfg = state["config"]
         for key in ("proxy_port", "proxy_doh", "proxy_block_quic", "proxy_fake_quic",
                     "proxy_system_wide",
+                    "proxy_upstream",
                     "proxy_autopilot"):
             if key in body:
                 cfg[key] = body[key]
         save_config(cfg)
         return jsonify({"ok": True})
+
+    @app.route("/api/proxy/upstream-probe", methods=["POST"])
+    def api_proxy_upstream_probe():
+        # TCP-probe the upstream proxy (Tor etc.) - no system changes.
+        body = request.get_json(force=True) or {}
+        url = (body.get("upstream") or state["config"].get("proxy_upstream") or "").strip()
+        m = re.match(r"^(socks5|socks|http)://([^:/]+):(\d+)$", url)
+        if not m:
+            return jsonify({"ok": False, "error": "no_upstream"})
+        host, port = m.group(2), int(m.group(3))
+        t0 = time.time()
+        try:
+            with socket.create_connection((host, port), timeout=3) as s:
+                latency = int((time.time() - t0) * 1000)
+                if m.group(1) in ("socks5", "socks"):
+                    s.sendall(b"\x05\x01\x00")
+                    resp = s.recv(2)
+                    ok = len(resp) == 2 and resp[0] == 5
+                else:
+                    ok = True
+            return jsonify({"ok": bool(ok), "latency_ms": latency,
+                            "tor": port in (9050, 9150)})
+        except Exception as e:
+            return jsonify({"ok": False, "error": type(e).__name__})
 
     # ── live monitor (events JSONL + stats file emitted by the proxy) ────
 

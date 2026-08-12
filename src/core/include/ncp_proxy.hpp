@@ -71,6 +71,18 @@ public:
         // Resolve target domains via DNS-over-HTTPS (bypasses DNS-level blocks)
         bool use_doh = false;
 
+        // ── Upstream proxy chain (Tor / any SOCKS5 / HTTP CONNECT) ──
+        // When upstream_port != 0, every target connection is established
+        // through the upstream proxy instead of a direct connect:
+        //   client -> ncp (desync) -> upstream (e.g. Tor :9050) -> target.
+        // The upstream resolves the target host itself (no local DNS at all),
+        // hiding both the destination IP and DNS queries from the ISP.
+        // Desync techniques still apply to the first payload sent upstream
+        // (e.g. fragments Tor's TLS ClientHello to the guard).
+        std::string upstream_type;      // "" (off) | "socks5" | "http"
+        std::string upstream_host;      // e.g. "127.0.0.1"
+        uint16_t upstream_port = 0;     // e.g. 9050 (Tor service) / 9150 (Tor Browser)
+
         int connect_timeout_ms = 8000;
         int hello_timeout_ms = 10000;       // first server byte after CH
 
