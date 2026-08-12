@@ -38,6 +38,8 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <iphlpapi.h>
+#include <wininet.h>
+#include <direct.h>
 #pragma comment(lib, "iphlpapi.lib")
 #else
 #include <unistd.h>
@@ -335,6 +337,302 @@ static long ncp_current_pid() {
 #endif
 }
 
+// forward decls (defined below, used by sysproxy/autopilot handlers)
+static bool has_flag(const std::vector<std::string>& args, const std::string& flag);
+static std::string get_option(const std::vector<std::string>& args, const std::string& option, const std::string& default_val = "");
+static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val = 0);
+
+// ============================================================================
+// System-wide proxy (application mode) — routes ALL proxy-aware applications
+// (Discord, browsers, Electron/Chromium apps) through the local NCP proxy.
+//
+// Windows: per-user WinINET settings (HKCU — no admin needed), live-notified
+// via InternetSetOptionW. Linux: GNOME gsettings when available, otherwise
+// prints shell env instructions.
+//
+// SAFETY CONTRACT: previous settings are always saved to
+// <state_dir>/sysproxy_state.json BEFORE changing anything; `off` restores
+// exactly what was there (including "proxy was disabled"). If ncp crashes,
+// `ncp sysproxy off` recovers from the state file.
+// ============================================================================
+static std::string ncp_sysproxy_state_file() {
+#ifdef _WIN32
+    return ncp_state_dir() + "\\sysproxy_state.json";
+#else
+    return ncp_state_dir() + "/sysproxy_state.json";
+#endif
+}
+
+// minimal flat-JSON field extractors (our own written format)
+static std::string sp_json_get_str(const std::string& j, const std::string& key) {
+    std::string pat = "\"" + key + "\": \"";
+    size_t p = j.find(pat);
+    if (p == std::string::npos) return "";
+    p += pat.size();
+    size_t e = j.find('"', p);
+    if (e == std::string::npos) return "";
+    return j.substr(p, e - p);
+}
+static long sp_json_get_num(const std::string& j, const std::string& key, long dflt = -1) {
+    std::string pat = "\"" + key + "\": ";
+    size_t p = j.find(pat);
+    if (p == std::string::npos) return dflt;
+    p += pat.size();
+    try { return std::stol(j.substr(p, 16)); } catch (...) { return dflt; }
+}
+
+struct SysproxySaved {
+    bool valid = false;
+    long enable = 0;                 // Windows ProxyEnable
+    std::string server;              // Windows ProxyServer ("" = was unset)
+    std::string override_list;       // Windows ProxyOverride
+    std::string gnome_mode;          // Linux gsettings mode ("none"/"manual"/"auto")
+};
+
+static bool sysproxy_load_saved(SysproxySaved& out) {
+    std::ifstream f(ncp_sysproxy_state_file());
+    if (!f) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string j = ss.str();
+    out.enable = sp_json_get_num(j, "enable", 0);
+    out.server = sp_json_get_str(j, "server");
+    out.override_list = sp_json_get_str(j, "override");
+    out.gnome_mode = sp_json_get_str(j, "gnome_mode");
+    out.valid = true;
+    return true;
+}
+
+static void sysproxy_write_state(bool active, long port, const SysproxySaved& sv) {
+    std::string path = ncp_sysproxy_state_file();
+    // ensure dir exists
+    size_t slash = path.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        std::string dir = path.substr(0, slash);
+#ifdef _WIN32
+        _mkdir(dir.c_str());
+#else
+        mkdir(dir.c_str(), 0700);
+#endif
+    }
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) return;
+    f << "{\"active\": " << (active ? "true" : "false")
+      << ", \"port\": " << port
+      << ", \"enable\": " << sv.enable
+      << ", \"server\": \"" << sv.server << "\""
+      << ", \"override\": \"" << sv.override_list << "\""
+      << ", \"gnome_mode\": \"" << sv.gnome_mode << "\"}\n";
+}
+
+static bool sysproxy_is_active() {
+    std::ifstream f(ncp_sysproxy_state_file());
+    if (!f) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str().find("\"active\": true") != std::string::npos;
+}
+
+#ifdef _WIN32
+static const char* WIN_INET_KEY =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+
+static bool win_reg_read_dword(HKEY root, const char* sub, const char* name, DWORD& out) {
+    HKEY h;
+    if (RegOpenKeyExA(root, sub, 0, KEY_READ, &h) != ERROR_SUCCESS) return false;
+    DWORD val = 0, sz = sizeof(val), type = 0;
+    bool ok = RegQueryValueExA(h, name, nullptr, &type,
+                               reinterpret_cast<LPBYTE>(&val), &sz) == ERROR_SUCCESS;
+    RegCloseKey(h);
+    if (ok) out = val;
+    return ok;
+}
+static std::string win_reg_read_str(HKEY root, const char* sub, const char* name) {
+    HKEY h;
+    if (RegOpenKeyExA(root, sub, 0, KEY_READ, &h) != ERROR_SUCCESS) return "";
+    char buf[1024] = {0};
+    DWORD sz = sizeof(buf), type = 0;
+    std::string out;
+    if (RegQueryValueExA(h, name, nullptr, &type,
+                         reinterpret_cast<LPBYTE>(buf), &sz) == ERROR_SUCCESS)
+        out = buf;
+    RegCloseKey(h);
+    return out;
+}
+static void win_inet_notify() {
+    InternetSetOptionA(nullptr, INTERNET_OPTION_SETTINGS_CHANGED, nullptr, 0);
+    InternetSetOptionA(nullptr, INTERNET_OPTION_REFRESH, nullptr, 0);
+}
+#endif
+
+// Apply system proxy to 127.0.0.1:port. Saves previous settings first.
+static bool sysproxy_apply(uint16_t port, std::string* err) {
+    SysproxySaved sv;
+#ifdef _WIN32
+    DWORD en = 0;
+    sv.enable = win_reg_read_dword(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyEnable", en)
+                    ? static_cast<long>(en) : 0;
+    sv.server = win_reg_read_str(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyServer");
+    sv.override_list = win_reg_read_str(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyOverride");
+    sv.valid = true;
+    sysproxy_write_state(true, port, sv);  // save BEFORE changing
+
+    HKEY h;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, WIN_INET_KEY, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &h, nullptr) != ERROR_SUCCESS) {
+        if (err) *err = "cannot open Internet Settings key";
+        return false;
+    }
+    DWORD one = 1;
+    RegSetValueExA(h, "ProxyEnable", 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&one), sizeof(one));
+    std::string server = "127.0.0.1:" + std::to_string(port);
+    RegSetValueExA(h, "ProxyServer", 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(server.c_str()),
+                   static_cast<DWORD>(server.size() + 1));
+    std::string ovr = "localhost;127.*;10.*;172.16.*;192.168.*;<local>";
+    RegSetValueExA(h, "ProxyOverride", 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(ovr.c_str()),
+                   static_cast<DWORD>(ovr.size() + 1));
+    RegCloseKey(h);
+    win_inet_notify();
+    return true;
+#else
+    // Linux: GNOME gsettings if available
+    sv.valid = true;
+    if (std::system("which gsettings >/dev/null 2>&1") == 0) {
+        char mode[64] = {0};
+        FILE* p = popen("gsettings get org.gnome.system.proxy mode 2>/dev/null", "r");
+        if (p) {
+            if (fgets(mode, sizeof(mode), p)) {
+                std::string m = mode;
+                while (!m.empty() && (m.back() == '\n' || m.back() == '\'' || m.back() == ' '))
+                    m.pop_back();
+                while (!m.empty() && m.front() == '\'') m.erase(m.begin());
+                sv.gnome_mode = m;
+            }
+            pclose(p);
+        }
+        sysproxy_write_state(true, port, sv);
+        std::string base = "gsettings set org.gnome.system.proxy";
+        std::system((base + " mode 'manual'").c_str());
+        std::system((base + ".socks host '127.0.0.1'").c_str());
+        std::system((base + ".socks port " + std::to_string(port)).c_str());
+        std::system((base + ".http host '127.0.0.1'").c_str());
+        std::system((base + ".http port " + std::to_string(port)).c_str());
+        std::system((base + ".https host '127.0.0.1'").c_str());
+        std::system((base + ".https port " + std::to_string(port)).c_str());
+        std::system((base + " ignore-hosts \"['localhost', '127.0.0.0/8', '10.0.0.0/8', '192.168.0.0/16', '172.16.0.0/12']\"").c_str());
+        return true;
+    }
+    // No gsettings: record state anyway and give manual instructions
+    sysproxy_write_state(true, port, sv);
+    std::cout << "[i] gsettings not found — set these env vars for your apps:\n"
+              << "    export http_proxy=http://127.0.0.1:" << port << "\n"
+              << "    export https_proxy=http://127.0.0.1:" << port << "\n"
+              << "    export all_proxy=socks5h://127.0.0.1:" << port << "\n";
+    return true;
+#endif
+}
+
+// Restore previous settings from the state file.
+static bool sysproxy_restore(std::string* err) {
+    SysproxySaved sv;
+    if (!sysproxy_load_saved(sv)) {
+        if (err) *err = "no saved state (system proxy was not applied by ncp)";
+        return false;
+    }
+#ifdef _WIN32
+    HKEY h;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, WIN_INET_KEY, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &h, nullptr) != ERROR_SUCCESS) {
+        if (err) *err = "cannot open Internet Settings key";
+        return false;
+    }
+    DWORD en = static_cast<DWORD>(sv.enable);
+    RegSetValueExA(h, "ProxyEnable", 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&en), sizeof(en));
+    if (!sv.server.empty())
+        RegSetValueExA(h, "ProxyServer", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(sv.server.c_str()),
+                       static_cast<DWORD>(sv.server.size() + 1));
+    else
+        RegDeleteValueA(h, "ProxyServer");
+    if (!sv.override_list.empty())
+        RegSetValueExA(h, "ProxyOverride", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(sv.override_list.c_str()),
+                       static_cast<DWORD>(sv.override_list.size() + 1));
+    else
+        RegDeleteValueA(h, "ProxyOverride");
+    RegCloseKey(h);
+    win_inet_notify();
+#else
+    if (!sv.gnome_mode.empty() &&
+        std::system("which gsettings >/dev/null 2>&1") == 0) {
+        std::string cmd = "gsettings set org.gnome.system.proxy mode '" +
+                          sv.gnome_mode + "'";
+        std::system(cmd.c_str());
+    }
+#endif
+    sysproxy_write_state(false, 0, sv);
+    return true;
+}
+
+void handle_sysproxy(const std::vector<std::string>& args) {
+    std::string action;
+    for (const auto& a : args) {
+        if (!a.empty() && a[0] != '-') { action = a; break; }
+    }
+    if (action.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp sysproxy <action>\n"
+                  << "  on [--port N]   Route all proxy-aware applications through 127.0.0.1:N\n"
+                  << "                  (Discord, browsers, Electron apps — no admin needed)\n"
+                  << "  off             Restore previous system proxy settings\n"
+                  << "  status          Show whether ncp system proxy is active\n"
+                  << "\n"
+                  << "Start the desync proxy first: ncp proxy --doh --autopilot\n"
+                  << "(or use `ncp proxy --system-proxy` to do both in one command)\n";
+        return;
+    }
+    if (action == "on") {
+        int port = get_option_int(args, "--port", 1080);
+        std::string err;
+        if (!sysproxy_apply(static_cast<uint16_t>(port), &err)) {
+            std::cerr << "[!] sysproxy on failed: " << err << "\n";
+            return;
+        }
+        std::cout << "[+] System proxy set to 127.0.0.1:" << port << "\n"
+                  << "    Applications (Discord etc.) now route through the NCP proxy.\n"
+                  << "    Restore with: ncp sysproxy off\n";
+        return;
+    }
+    if (action == "off") {
+        std::string err;
+        if (!sysproxy_restore(&err)) {
+            std::cerr << "[!] " << err << "\n";
+            return;
+        }
+        std::cout << "[+] System proxy settings restored\n";
+        return;
+    }
+    if (action == "status") {
+        std::cout << "System proxy (ncp): "
+                  << (sysproxy_is_active() ? "ACTIVE" : "inactive") << "\n";
+#ifdef _WIN32
+        DWORD en = 0;
+        bool have = win_reg_read_dword(HKEY_CURRENT_USER, WIN_INET_KEY,
+                                       "ProxyEnable", en);
+        std::cout << "Windows WinINET: ProxyEnable="
+                  << (have ? std::to_string(en) : std::string("?"))
+                  << " ProxyServer="
+                  << win_reg_read_str(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyServer")
+                  << "\n";
+#endif
+        return;
+    }
+    std::cerr << "[!] Unknown sysproxy action: " << action << "\n";
+}
+
 static bool ncp_pid_alive(long pid) {
     if (pid <= 0) return false;
 #ifdef _WIN32
@@ -408,13 +706,13 @@ static bool has_flag(const std::vector<std::string>& args, const std::string& fl
     return std::find(args.begin(), args.end(), flag) != args.end();
 }
 
-static std::string get_option(const std::vector<std::string>& args, const std::string& option, const std::string& default_val = "") {
+static std::string get_option(const std::vector<std::string>& args, const std::string& option, const std::string& default_val) {
     auto it = std::find(args.begin(), args.end(), option);
     if (it != args.end() && ++it != args.end()) return *it;
     return default_val;
 }
 
-static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val = 0) {
+static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val) {
     std::string val = get_option(args, option);
     if (val.empty()) return default_val;
     try {
@@ -511,6 +809,7 @@ void handle_mimic(const std::vector<std::string>& args);
 void handle_proxy(const std::vector<std::string>& args);
 void handle_blockcheck(const std::vector<std::string>& args);
 void handle_autopilot(const std::vector<std::string>& args);
+void handle_sysproxy(const std::vector<std::string>& args);
 void handle_import_zapret(const std::vector<std::string>& args);
 
 // ============================================================================
@@ -535,7 +834,8 @@ int main(int argc, char* argv[]) {
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
     parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]"});
     parser.add_command("blockcheck", "Auto-select best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--json]", "[--out file]", "[--apply profile.json]"});
-    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable>", "[domain]", "[--json]", "[--timeout ms]"});
+    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable|learn-preset>", "[domain|preset]", "[--json]", "[--timeout ms]"});
+    parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
     parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
 
     parser.parse_and_execute(argc, argv);
@@ -2001,7 +2301,9 @@ void handle_proxy(const std::vector<std::string>& args) {
                   << "  --autopilot           Enable adaptive engine (learned per-host strategies,\n"
                   << "                        live degradation feedback, background re-learning)\n"
                   << "  --events-log FILE     Append live connection events (JSONL) to FILE\n"
-                  << "  --stats-file FILE     Rewrite full stats JSON to FILE every 2s (atomic)\n";
+                  << "  --stats-file FILE     Rewrite full stats JSON to FILE every 2s (atomic)\n"
+                  << "  --system-proxy        Route ALL proxy-aware apps (Discord etc.) through\n"
+                  << "                        this proxy; previous settings restored on exit\n";
         return;
     }
     ncp::DesyncProxy::Config cfg;
@@ -2129,6 +2431,19 @@ void handle_proxy(const std::vector<std::string>& args) {
         return;
     }
 
+    // Application mode: point the OS system proxy at us (restored on exit)
+    bool sysproxy_on = false;
+    if (has_flag(args, "--system-proxy")) {
+        std::string sp_err;
+        if (sysproxy_apply(proxy.bound_port(), &sp_err)) {
+            sysproxy_on = true;
+            std::cout << "[+] System proxy enabled — applications (Discord etc.) "
+                         "now route through NCP. Restored automatically on exit.\n";
+        } else {
+            std::cerr << "[!] --system-proxy failed: " << sp_err << "\n";
+        }
+    }
+
     std::cout << "[+] NCP desync proxy active\n"
               << "    SOCKS5:        " << cfg.listen_host << ":" << proxy.bound_port() << "\n"
               << "    HTTP CONNECT:  " << cfg.listen_host << ":" << proxy.bound_port() << "\n"
@@ -2142,6 +2457,7 @@ void handle_proxy(const std::vector<std::string>& args) {
                         ? ("on (" + std::to_string(autopilot.records().size()) +
                            " learned hosts, DB: " + ncp::AutoPilot::default_db_path() + ")")
                         : std::string("off")) << "\n"
+              << "    System proxy:  " << (sysproxy_on ? "on (all applications)" : "off") << "\n"
               << "Point your browser/system proxy at this address. Ctrl+C to stop.\n";
 
     g_running = 1;
@@ -2149,6 +2465,14 @@ void handle_proxy(const std::vector<std::string>& args) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
     proxy.stop();
+    if (sysproxy_on) {
+        std::string sp_err;
+        if (sysproxy_restore(&sp_err))
+            std::cout << "[+] System proxy settings restored\n";
+        else
+            std::cerr << "[!] System proxy restore failed: " << sp_err
+                      << " (run: ncp sysproxy off)\n";
+    }
     if (autopilot_active) {
         autopilot.stop();
         autopilot.save();
@@ -2240,6 +2564,25 @@ void handle_blockcheck(const std::vector<std::string>& args) {
 // ============================================================================
 // ncp autopilot — adaptive self-learning DPI bypass engine
 // ============================================================================
+
+// Application domain presets: learning these covers the whole app, not just
+// its main website (e.g. Discord uses separate domains for gateway/CDN/media).
+static const std::map<std::string, std::vector<std::string>>& autopilot_presets() {
+    static const std::map<std::string, std::vector<std::string>> presets = {
+        {"discord", {"discord.com", "www.discord.com", "discord.gg",
+                     "gateway.discord.gg", "cdn.discordapp.com",
+                     "media.discordapp.net", "images-ext-1.discordapp.net",
+                     "discord.media", "discordapp.com", "discordapp.net",
+                     "status.discord.com", "ptb.discord.com"}},
+        {"youtube", {"youtube.com", "www.youtube.com", "m.youtube.com",
+                     "googlevideo.com", "i.ytimg.com", "yt3.ggpht.com",
+                     "youtu.be"}},
+        {"x", {"x.com", "www.x.com", "twitter.com", "api.x.com",
+               "abs.twimg.com", "pbs.twimg.com", "video.twimg.com"}},
+    };
+    return presets;
+}
+
 void handle_autopilot(const std::vector<std::string>& args) {
     // first non-flag token = action
     std::string action;
@@ -2254,6 +2597,7 @@ void handle_autopilot(const std::vector<std::string>& args) {
                   << "  status [--json]        Show learned per-host strategies\n"
                   << "  learn <domain>         Probe all strategies for domain, store the best\n"
                   << "                         (--doh: resolve probe targets via DNS-over-HTTPS)\n"
+                  << "  learn-preset <name>    Learn all domains of an app: discord|youtube|x\n"
                   << "  reset [domain]         Drop one record (or all, if omitted)\n"
                   << "  enable                 Persistently enable AutoPilot (proxy picks it up)\n"
                   << "  disable                Persistently disable AutoPilot\n"
@@ -2325,6 +2669,43 @@ void handle_autopilot(const std::vector<std::string>& args) {
         std::cout << "[+] AutoPilot DB "
                   << (positional.empty() ? "wiped" : ("record dropped: " + positional))
                   << "\n";
+        return;
+    }
+
+    if (action == "learn-preset") {
+        if (positional.empty()) {
+            std::cerr << "[!] Usage: ncp autopilot learn-preset <";
+            bool first = true;
+            for (const auto& kv : autopilot_presets()) {
+                std::cerr << (first ? "" : "|") << kv.first;
+                first = false;
+            }
+            std::cerr << "> [--doh] [--timeout ms]\n";
+            return;
+        }
+        auto it = autopilot_presets().find(positional);
+        if (it == autopilot_presets().end()) {
+            std::cerr << "[!] Unknown preset: " << positional << "\n";
+            return;
+        }
+        std::cout << "[*] AutoPilot learning preset '" << positional << "' ("
+                  << it->second.size() << " domains)...\n";
+        int ok_count = 0;
+        int idx = 0;
+        for (const auto& domain : it->second) {
+            ++idx;
+            std::cout << "  [" << idx << "/" << it->second.size() << "] " << domain
+                      << " ... " << std::flush;
+            std::string learned;
+            if (ap.learn(domain, &learned)) {
+                std::cout << learned << "\n";
+                ++ok_count;
+            } else {
+                std::cout << "no working strategy (marked degraded)\n";
+            }
+        }
+        std::cout << "[+] Preset '" << positional << "': " << ok_count << "/"
+                  << it->second.size() << " domains learned\n";
         return;
     }
 

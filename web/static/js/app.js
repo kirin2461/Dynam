@@ -1502,6 +1502,8 @@ async function bypassProxyStatus() {
     if (doh) doh.checked = !!st.doh;
     const qb = document.getElementById('bypass-toggle-quic-block');
     if (qb) qb.checked = !!st.block_quic;
+    const sw = document.getElementById('bypass-toggle-sysproxy');
+    if (sw) sw.checked = !!st.system_wide;
     const fq = document.getElementById('bypass-fake-quic');
     if (fq && document.activeElement !== fq) fq.value = st.fake_quic || 0;
     const label = document.getElementById('bypass-strategy-label');
@@ -1519,6 +1521,7 @@ async function bypassProxyStart() {
     proxy_port: port,
     proxy_doh: document.getElementById('bypass-toggle-doh').checked,
     proxy_block_quic: document.getElementById('bypass-toggle-quic-block').checked,
+    proxy_system_wide: document.getElementById('bypass-toggle-sysproxy').checked,
     proxy_fake_quic: parseInt(document.getElementById('bypass-fake-quic').value) || 0,
   })});
   const r = await apiFetch('/proxy/start', {method: 'POST'});
@@ -1945,5 +1948,38 @@ async function monitorAutopilotReset(domain) {
 
 async function monitorAutopilotEnabled(enabled) {
   await apiFetch('/monitor/autopilot/enabled', {method: 'POST', body: JSON.stringify({enabled})});
+  monitorAutopilotPoll();
+}
+
+let _apPresetPoll = null;
+
+async function monitorAutopilotPreset(preset) {
+  const st = document.getElementById('mon-ap-preset-status');
+  const r = await apiFetch('/monitor/autopilot/learn-preset', {method: 'POST', body: JSON.stringify({preset})});
+  if (!r.ok) { if (st) st.textContent = r.error || 'ошибка'; return; }
+  ['discord', 'youtube', 'x'].forEach(x => {
+    const b = document.getElementById('mon-ap-preset-' + x);
+    if (b) b.disabled = true;
+  });
+  if (_apPresetPoll) clearInterval(_apPresetPoll);
+  _apPresetPoll = setInterval(monitorAutopilotPresetPoll, 2000);
+  monitorAutopilotPresetPoll();
+}
+
+async function monitorAutopilotPresetPoll() {
+  const st = document.getElementById('mon-ap-preset-status');
+  const r = await apiFetch('/monitor/autopilot/learn-preset');
+  if (r.running) {
+    if (st) st.textContent = (r.total ? `[${r.done}/${r.total}] ` : '') + (r.line || 'обучение…');
+    return;
+  }
+  if (_apPresetPoll) { clearInterval(_apPresetPoll); _apPresetPoll = null; }
+  ['discord', 'youtube', 'x'].forEach(x => {
+    const b = document.getElementById('mon-ap-preset-' + x);
+    if (b) b.disabled = false;
+  });
+  if (st && r.preset) {
+    st.textContent = r.ok ? `пресет ${r.preset}: готово` : `пресет ${r.preset}: ошибка`;
+  }
   monitorAutopilotPoll();
 }

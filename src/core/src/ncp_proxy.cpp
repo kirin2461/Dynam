@@ -638,7 +638,7 @@ public:
     }
 };
 
-DesyncProxy::DesyncProxy() : impl_(std::make_unique<Impl>()) {}
+DesyncProxy::DesyncProxy() : impl_(std::make_shared<Impl>()) {}
 DesyncProxy::~DesyncProxy() { stop(); }
 
 bool DesyncProxy::running() const { return impl_->running.load(); }
@@ -1194,7 +1194,8 @@ bool DesyncProxy::start(const Config& cfg) {
                                       reinterpret_cast<sockaddr*>(&peer), &pl);
             if (c == NCP_INVALID_SOCK) continue;
             impl_->track(c);
-            std::thread(&Impl::handle_tcp, impl_.get(), c, peer, pl)
+            std::shared_ptr<Impl> keep = impl_;
+            std::thread([keep, c, peer, pl] { keep->handle_tcp(c, peer, pl); })
                 .detach();
         }
     });

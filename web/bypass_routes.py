@@ -18,6 +18,7 @@ import os
 import platform
 import socket
 import struct
+import re
 import subprocess
 import threading
 import time
@@ -189,6 +190,8 @@ def register_bypass_routes(app, ctx):
             args.append("--doh")
         if cfg.get("proxy_autopilot", True):
             args.append("--autopilot")
+        if cfg.get("proxy_system_wide"):
+            args.append("--system-proxy")
         if cfg.get("proxy_block_quic", False):
             args.append("--block-quic")
         fq = int(cfg.get("proxy_fake_quic", 0) or 0)
@@ -265,6 +268,7 @@ def register_bypass_routes(app, ctx):
             "port": cfg.get("proxy_port", 1080),
             "doh": cfg.get("proxy_doh", True),
             "block_quic": cfg.get("proxy_block_quic", False),
+            "system_wide": cfg.get("proxy_system_wide", False),
             "fake_quic": cfg.get("proxy_fake_quic", 0),
             "strategy": cfg.get("proxy_strategy"),
             "autohostlist_size": autohl_size,
@@ -275,6 +279,7 @@ def register_bypass_routes(app, ctx):
         body = request.get_json(force=True) or {}
         cfg = state["config"]
         for key in ("proxy_port", "proxy_doh", "proxy_block_quic", "proxy_fake_quic",
+                    "proxy_system_wide",
                     "proxy_autopilot"):
             if key in body:
                 cfg[key] = body[key]
@@ -384,6 +389,54 @@ def register_bypass_routes(app, ctx):
             with _ap_learn_lock:
                 _ap_learn["running"] = False
                 _ap_learn["error"] = str(e)
+
+    _ap_preset = {"running": False, "preset": "", "done": 0, "total": 0,
+                  "line": "", "ok": None}
+    _ap_preset_lock = threading.Lock()
+
+    def _run_ap_preset(preset):
+        args = [ncp_binary, "autopilot", "learn-preset", preset,
+                "--doh", "--timeout", "4000"]
+        try:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE,
+                                    stderr=subprocess.STDOUT, text=True)
+            for ln in proc.stdout:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                with _ap_preset_lock:
+                    _ap_preset["line"] = ln
+                    m = re.match(r"\[(\d+)/(\d+)\]", ln)
+                    if m:
+                        _ap_preset["done"] = int(m.group(1))
+                        _ap_preset["total"] = int(m.group(2))
+            proc.wait(timeout=1800)
+            with _ap_preset_lock:
+                _ap_preset["ok"] = proc.returncode == 0
+        except Exception:
+            with _ap_preset_lock:
+                _ap_preset["ok"] = False
+        finally:
+            with _ap_preset_lock:
+                _ap_preset["running"] = False
+
+    @app.route("/api/monitor/autopilot/learn-preset", methods=["GET", "POST"])
+    def api_monitor_autopilot_learn_preset():
+        if request.method == "GET":
+            with _ap_preset_lock:
+                return jsonify(dict(_ap_preset))
+        body = request.get_json(force=True) or {}
+        preset = (body.get("preset") or "").strip().lower()
+        if preset not in ("discord", "youtube", "x"):
+            return jsonify({"ok": False, "error": "unknown preset"}), 400
+        with _ap_preset_lock:
+            if _ap_preset["running"]:
+                return jsonify({"ok": False, "error": "busy"}), 409
+            _ap_preset.update({"running": True, "preset": preset, "done": 0,
+                               "total": 0, "line": "", "ok": None})
+        threading.Thread(target=_run_ap_preset, args=(preset,),
+                         daemon=True).start()
+        return jsonify({"ok": True, "preset": preset})
 
     @app.route("/api/monitor/autopilot/learn", methods=["POST"])
     def api_monitor_autopilot_learn():

@@ -545,6 +545,10 @@
               <label class="toggle"><input type="checkbox" id="bypass-toggle-quic-block"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
             </div>
             <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="text-sm" title="Пропускает через обход все приложения, использующие системный прокси (Discord, браузеры и др.). Без прав администратора.">Все приложения (системный прокси)</span>
+              <label class="toggle"><input type="checkbox" id="bypass-toggle-sysproxy"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
               <span class="text-sm">Фейковые QUIC Initial (шт.)</span>
               <input type="number" class="form-input" id="bypass-fake-quic" value="0" min="0" max="10" style="max-width:80px">
             </div>
@@ -726,6 +730,13 @@
             <span class="text-sm">AutoPilot</span>
             <label class="toggle"><input type="checkbox" id="mon-ap-toggle" onchange="monitorAutopilotEnabled(this.checked)"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
           </div>
+        </div>
+        <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center;margin-bottom:var(--sp-3)">
+          <span class="text-sm" style="color:var(--text-secondary)">Пресеты приложений:</span>
+          <button class="btn" id="mon-ap-preset-discord" onclick="monitorAutopilotPreset('discord')">Discord</button>
+          <button class="btn" id="mon-ap-preset-youtube" onclick="monitorAutopilotPreset('youtube')">YouTube</button>
+          <button class="btn" id="mon-ap-preset-x" onclick="monitorAutopilotPreset('x')">X / Twitter</button>
+          <span id="mon-ap-preset-status" class="text-sm" style="color:var(--text-secondary)"></span>
         </div>
         <div id="mon-ap-learn-status" class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-2)"></div>
         <div class="table-wrap">
