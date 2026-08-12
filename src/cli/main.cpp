@@ -1011,12 +1011,17 @@ void handle_run(const std::vector<std::string>& args) {
             std::cerr << "[!] Warning: DPI bypass failed to start (continuing without it)\n";
             g_app.dpi_bypass.reset();
         } else {
-            std::cout << "[+] DPI bypass active (" << DPI::preset_to_string(chosen_preset)
-                      << ": fake+" << (dpi_cfg.enable_disorder ? "disorder" :
-                                        dpi_cfg.enable_reverse_frag ? "reverse-frag" : "split")
-                      << ", ttl=" << dpi_cfg.fake_ttl
-                      << (dpi_cfg.enable_autottl ? " autottl" : "")
-                      << ")\n";
+            if (g_app.dpi_bypass->interception_active()) {
+                std::cout << "[+] DPI bypass active (" << DPI::preset_to_string(chosen_preset)
+                          << ": fake+" << (dpi_cfg.enable_disorder ? "disorder" :
+                                            dpi_cfg.enable_reverse_frag ? "reverse-frag" : "split")
+                          << ", ttl=" << dpi_cfg.fake_ttl
+                          << (dpi_cfg.enable_autottl ? " autottl" : "")
+                          << ") — intercepting traffic\n";
+            } else {
+                std::cout << "[!] DPI bypass configured (" << DPI::preset_to_string(chosen_preset)
+                          << ") but running PASSIVE — no traffic interception, see warnings above\n";
+            }
 
             // --- Zapret chain-based DPI ---
             std::string zapret_profile_name = get_option(args, "--zapret-profile", "");
@@ -1347,7 +1352,35 @@ void handle_run(const std::vector<std::string>& args) {
             };
             
             g_app.dpi_bypass->set_module_hooks(hooks);
-            std::cout << "[+] Module hooks wired into DPI pipeline\n";
+            if (g_app.dpi_bypass->interception_active()) {
+                std::cout << "[+] Module hooks wired into DPI pipeline (live traffic)\n";
+            } else {
+                std::cout << "[!] Module hooks wired, but DPI is PASSIVE — hook modules will see\n"
+                             "[!] ZERO packets and are effectively INACTIVE: l3-stealth, self-test\n"
+                             "[!] packet feed, wf-defense, volume-normalizer, behavioral-cloak,\n"
+                             "[!] time-correlation-breaker. Use `ncp proxy --system-proxy` for real\n"
+                             "[!] coverage without admin rights.\n";
+            }
+        }
+
+        // ── Honest wiring report: modules that never touch the packet path ──
+        {
+            std::vector<std::string> config_only;
+            if (g_app.rtt_equalizer)     config_only.push_back("rtt-equalizer");
+            if (g_app.geneva)            config_only.push_back("geneva");
+            if (g_app.session_frag)      config_only.push_back("session-fragmenter");
+            if (g_app.cross_layer)       config_only.push_back("cross-layer-correlator");
+            if (g_app.covert_channel)    config_only.push_back("covert-channel");
+            if (g_app.protocol_rotation) config_only.push_back("protocol-rotation");
+            if (g_app.as_router)         config_only.push_back("as-router");
+            if (g_app.geo_obfuscator)    config_only.push_back("geo-obfuscator");
+            if (!config_only.empty()) {
+                std::cout << "[i] Modules loaded but NOT in the packet path in run mode\n"
+                             "[i] (config/schedulers only — they do not modify your traffic):\n[i]   ";
+                for (size_t i = 0; i < config_only.size(); ++i)
+                    std::cout << (i ? ", " : "") << config_only[i];
+                std::cout << "\n";
+            }
         }
 
         // Check if at least one layer is active
@@ -1402,13 +1435,188 @@ void handle_run(const std::vector<std::string>& args) {
 
         g_running = true;
 
+        // ── Runtime heartbeat: live counters prove modules actually work ──
+        int status_interval = get_option_int(args, "--status-interval", 30);
+        if (status_interval > 0)
+            std::cout << "[*] Runtime status heartbeat every " << status_interval
+                      << "s (--status-interval 0 to disable)\n";
+        auto hb_start = std::chrono::steady_clock::now();
+        uint64_t prev_dpi_pkts = 0;
+        int dpi_zero_streak = 0;
+        bool hooks_zero_warned = false;
+        int tick = 0;
+
         // Wait loop
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (status_interval <= 0) continue;
+            if (++tick < status_interval) continue;
+            tick = 0;
+
+            long elapsed = static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - hb_start).count());
+            std::ostringstream hb;
+            hb << "[hb " << elapsed << "s]";
+
+            uint64_t dpi_pkts = 0;
+            bool intercept = false;
+            if (g_app.dpi_bypass) {
+                auto ds = g_app.dpi_bypass->get_stats();
+                dpi_pkts = ds.packets_total.load();
+                intercept = g_app.dpi_bypass->interception_active();
+                hb << " dpi[pkts=" << dpi_pkts << " +" << (dpi_pkts - prev_dpi_pkts)
+                   << " mod=" << ds.packets_modified.load()
+                   << " frag=" << ds.packets_fragmented.load()
+                   << " fake=" << ds.fake_packets_sent.load()
+                   << " drop=" << ds.packets_dropped.load()
+                   << " err=" << ds.send_errors.load()
+                   << " conn=" << ds.connections_handled.load() << "]";
+                if (!intercept) hb << " PASSIVE";
+            }
+
+            uint64_t hook_sum = 0;
+            bool any_hook = false;
+            std::ostringstream hk;
+            if (g_app.l3_stealth) {
+                auto v = g_app.l3_stealth->get_stats();
+                hook_sum += v.packets_processed.load(); any_hook = true;
+                hk << " l3=" << v.packets_processed.load()
+                   << "(ttl:" << v.ttl_normalized.load() << ",ipid:" << v.ipid_rewritten.load() << ")";
+            }
+            if (g_app.self_test) {
+                auto v = g_app.self_test->get_stats();
+                hook_sum += v.packets_fed.load(); any_hook = true;
+                hk << " selftest-fed=" << v.packets_fed.load()
+                   << "(tests:" << v.tests_run.load() << ",fail:" << v.tests_failed.load() << ")";
+            }
+            if (g_app.wf_defense) {
+                auto v = g_app.wf_defense->get_stats();
+                hook_sum += v.real_packets_processed.load(); any_hook = true;
+                hk << " wf=" << v.real_packets_processed.load()
+                   << "(dummy:" << v.dummy_packets_sent.load() << ")";
+            }
+            if (g_app.volume_normalizer) {
+                auto v = g_app.volume_normalizer->get_stats();
+                hook_sum += v.requests_normalized.load(); any_hook = true;
+                hk << " volnorm=" << v.requests_normalized.load()
+                   << "(pad:" << v.bytes_padded.load() << "B)";
+            }
+            if (g_app.behavioral_cloak) {
+                auto v = g_app.behavioral_cloak->get_stats();
+                hook_sum += v.packets_shaped.load(); any_hook = true;
+                hk << " cloak=" << v.packets_shaped.load();
+            }
+            if (g_app.time_breaker) {
+                auto v = g_app.time_breaker->get_stats();
+                hook_sum += v.jitters_applied.load(); any_hook = true;
+                hk << " timebreak=" << v.jitters_applied.load();
+            }
+            if (any_hook) hb << " hooks[" << hk.str() << " ]";
+
+            // Background/own-channel modules with real counters
+            std::ostringstream bg;
+            if (g_app.dns_leak && g_app.dns_leak->is_active()) {
+                auto v = g_app.dns_leak->get_stats();
+                bg << " dns-block=" << v.dns_queries_blocked.load()
+                   << " stun-block=" << v.stun_packets_blocked.load();
+            }
+            if (!bg.str().empty()) hb << " |" << bg.str();
+
+            std::cout << hb.str() << "\n";
+
+            // ── Zero-activity alarms ──
+            if (intercept) {
+                if (dpi_pkts == 0) {
+                    if (++dpi_zero_streak >= 2)
+                        std::cout << "[!] ALARM: interception backend is running but captured 0 packets"
+                                     " in " << (dpi_zero_streak * status_interval) <<
+                                     "s — interception is NOT working (check admin rights / driver)\n";
+                } else {
+                    dpi_zero_streak = 0;
+                }
+                if (dpi_pkts > 0 && any_hook && hook_sum == 0 && !hooks_zero_warned) {
+                    hooks_zero_warned = true;
+                    std::cout << "[!] ALARM: DPI captured " << dpi_pkts <<
+                                 " packets but ALL hook modules report 0 — module pipeline not wired\n";
+                }
+            }
+            prev_dpi_pkts = dpi_pkts;
         }
 
         // Cleanup after loop exit (RAII compliance)
         std::cout << "\n[*] Shutting down services...\n";
+
+        // ── Final module statistics: proof of work for the whole session ──
+        std::cout << "\n=== Final module statistics ===\n";
+        if (g_app.dpi_bypass) {
+            auto ds = g_app.dpi_bypass->get_stats();
+            std::cout << "  DPI bypass: interception="
+                      << (g_app.dpi_bypass->interception_active() ? "ACTIVE" : "PASSIVE (no traffic processed)")
+                      << " pkts=" << ds.packets_total.load()
+                      << " modified=" << ds.packets_modified.load()
+                      << " fragmented=" << ds.packets_fragmented.load()
+                      << " fakes=" << ds.fake_packets_sent.load()
+                      << " dropped=" << ds.packets_dropped.load()
+                      << " send_errors=" << ds.send_errors.load()
+                      << " conns=" << ds.connections_handled.load() << "\n";
+        }
+        if (g_app.l3_stealth) {
+            auto v = g_app.l3_stealth->get_stats();
+            std::cout << "  L3 Stealth: packets=" << v.packets_processed.load()
+                      << " ttl_norm=" << v.ttl_normalized.load()
+                      << " ipid=" << v.ipid_rewritten.load()
+                      << " mss_clamped=" << v.mss_clamped.load() << "\n";
+        }
+        if (g_app.self_test) {
+            auto v = g_app.self_test->get_stats();
+            std::cout << "  Self-Test: packets_fed=" << v.packets_fed.load()
+                      << " tests=" << v.tests_run.load()
+                      << " failed=" << v.tests_failed.load()
+                      << " countermeasures=" << v.countermeasures_applied.load() << "\n";
+        }
+        if (g_app.wf_defense) {
+            auto v = g_app.wf_defense->get_stats();
+            std::cout << "  WF Defense: real=" << v.real_packets_processed.load()
+                      << " dummy=" << v.dummy_packets_sent.load()
+                      << " pages=" << v.pages_defended.load() << "\n";
+        }
+        if (g_app.volume_normalizer) {
+            auto v = g_app.volume_normalizer->get_stats();
+            std::cout << "  Volume Normalizer: requests=" << v.requests_normalized.load()
+                      << " orig=" << v.bytes_original.load() << "B"
+                      << " padded=" << v.bytes_padded.load() << "B"
+                      << " cover=" << v.cover_bytes_sent.load() << "B\n";
+        }
+        if (g_app.behavioral_cloak) {
+            auto v = g_app.behavioral_cloak->get_stats();
+            std::cout << "  Behavioral Cloak: shaped=" << v.packets_shaped.load()
+                      << " bursts=" << v.bursts_generated.load()
+                      << " idles=" << v.idle_periods_injected.load() << "\n";
+        }
+        if (g_app.time_breaker) {
+            auto v = g_app.time_breaker->get_stats();
+            std::cout << "  Time Breaker: jitters=" << v.jitters_applied.load()
+                      << " total=" << v.total_jitter_us.load() << "us\n";
+        }
+        if (g_app.rtt_equalizer) {
+            auto v = g_app.rtt_equalizer->get_stats();
+            std::cout << "  RTT Equalizer: acks_delayed=" << v.acks_delayed.load()
+                      << " samples=" << v.samples_collected.load()
+                      << " (not in packet path in run mode)\n";
+        }
+        if (g_app.geneva) {
+            const auto& v = g_app.geneva->get_stats();
+            std::cout << "  Geneva: packets_processed=" << v.packets_processed
+                      << " tampered=" << v.packets_tampered
+                      << " (not in packet path in run mode)\n";
+        }
+        if (g_app.dns_leak && g_app.dns_leak->is_active()) {
+            auto v = g_app.dns_leak->get_stats();
+            std::cout << "  DNS Leak Prevention: dns_blocked=" << v.dns_queries_blocked.load()
+                      << " stun_blocked=" << v.stun_packets_blocked.load()
+                      << " leaks=" << v.leaks_detected.load() << "\n";
+        }
+        std::cout << "=== end of statistics ===\n\n";
         ncp_clear_state();
 
         // Stop modules in reverse initialization order

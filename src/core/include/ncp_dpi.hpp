@@ -560,6 +560,10 @@ public:
     void stop();
     void shutdown();
     bool is_running() const;
+    /// True only when a real interception backend is processing packets
+    /// (nfqueue / WinDivert / TCP proxy / WS tunnel). False in passive mode,
+    /// where start() succeeds but NO traffic is touched.
+    bool interception_active() const;
 
     DPIConfig get_config() const;
     bool update_config(const DPIConfig& config);

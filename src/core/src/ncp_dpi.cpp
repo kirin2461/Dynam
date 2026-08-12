@@ -193,6 +193,9 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
 class DPIBypass::Impl {
 public:
     std::atomic<bool> running{false};
+    // Set only when a real packet-interception backend started (nfqueue,
+    // WinDivert, TCP proxy, WS tunnel). Passive mode leaves this false.
+    std::atomic<bool> intercept_active{false};
     DPIConfig config;
 
     // When true, initialize() will NOT create an AdvancedDPIBypass child.
@@ -2776,6 +2779,7 @@ bool DPIBypass::start() {
     if (impl_->snapshot_config().mode == DPIMode::DRIVER) {
         if (!impl_->init_nfqueue()) return false;
         impl_->running = true;
+        impl_->intercept_active = true;
         impl_->worker_thread = std::thread(&Impl::nfqueue_loop, impl_.get());
         impl_->log("DPI bypass started (driver mode via nfqueue, queue=" +
                   std::to_string(impl_->snapshot_config().nfqueue_num) + ")");
@@ -2789,6 +2793,7 @@ bool DPIBypass::start() {
     if (cfg_snap.mode == DPIMode::DRIVER) {
         if (!impl_->init_windivert()) return false;
         impl_->running = true;
+        impl_->intercept_active = true;
         impl_->worker_thread = std::thread(&Impl::windivert_loop, impl_.get());
         impl_->log("DPI bypass started (WinDivert driver mode)" +
                   std::string(impl_->advanced_enabled_.load(std::memory_order_acquire) ? " + Advanced" : ""));
@@ -2798,6 +2803,7 @@ bool DPIBypass::start() {
 
     if (cfg_snap.mode == DPIMode::PROXY) {
         impl_->running = true;
+        impl_->intercept_active = true;
         impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl_.get());
         impl_->log("DPI bypass started (TCP proxy mode" +
                   std::string(impl_->advanced_enabled_.load(std::memory_order_acquire) ? " + Advanced" : "") + ")");
@@ -2813,6 +2819,7 @@ bool DPIBypass::start() {
         if (!impl_->start_ws_tunnel()) {
             return false;
         }
+        impl_->intercept_active = true;
         impl_->log("DPI bypass started (WebSocket tunnel mode -> " +
                    cfg_snap.ws_server_url + ")");
         return true;
@@ -2820,7 +2827,23 @@ bool DPIBypass::start() {
 #endif
 
     impl_->running = true;
-    impl_->log("DPI bypass started (passive mode - nfqueue/proxy not active)");
+    impl_->intercept_active = false;
+#ifdef _WIN32
+    impl_->log("!!! DPI bypass started in PASSIVE mode - NO packets are being intercepted !!!");
+    impl_->log("!!! Reason: mode=DRIVER was requested, but this build has no WinDivert");
+    impl_->log("!!! backend (SDK not present at build time). Desync techniques will NOT");
+    impl_->log("!!! touch your traffic, and all hook-based modules (L3 stealth, WF defense,");
+    impl_->log("!!! behavioral cloak, time breaker, volume normalizer, self-test feed) will");
+    impl_->log("!!! report ZERO activity. Remedies: run `ncp proxy --system-proxy` (works");
+    impl_->log("!!! without admin), or use a build with the WinDivert SDK (needs admin).");
+#elif defined(__linux__)
+    impl_->log("!!! DPI bypass started in PASSIVE mode - NO packets are being intercepted !!!");
+    impl_->log("!!! Reason: no nfqueue/libnetfilter_queue backend in this build or mode.");
+    impl_->log("!!! Desync techniques will NOT touch your traffic. Remedies: use PROXY");
+    impl_->log("!!! mode (`ncp proxy`) or build with nfqueue support + iptables rules.");
+#else
+    impl_->log("!!! DPI bypass started in PASSIVE mode - NO packets are being intercepted !!!");
+#endif
     return true;
 }
 
@@ -2874,6 +2897,8 @@ void DPIBypass::stop() {
 
 void DPIBypass::shutdown() { stop(); }
 bool DPIBypass::is_running() const { return impl_->running; }
+
+bool DPIBypass::interception_active() const { return impl_->intercept_active.load(); }
 
 DPIStats DPIBypass::get_stats() const {
     std::lock_guard<std::mutex> lock(impl_->stats_mutex);
