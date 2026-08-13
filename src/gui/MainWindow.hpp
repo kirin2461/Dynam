@@ -6,20 +6,9 @@
 #include <QTimer>
 #include <memory>
 
-// Optional QtWebEngine support: use QWebEngineView if available,
-// fall back to QTextBrowser (hyperlink viewer) otherwise.
-#ifdef HAVE_QTWEBENGINE
-#include <QWebEngineView>
-#endif
-#include <QTextBrowser>  // always available as fallback
+#include "ProxyController.hpp"
 
-// Forward declarations
-namespace ncp {
-    class Crypto;
-    class License;
-    class Database;
-    class Network;
-}
+namespace ncp { class License; }
 
 class StatusPanel;
 class NetworkMonitor;
@@ -33,20 +22,14 @@ class SettingsDialog;
 namespace ncp::GUI {
 
 /**
- * @brief Main application window for Network Control Protocol
- * 
- * Implements a modern dark-themed dashboard with:
- * - Status panel with connection info
- * - Network flow monitoring
- * - DPI bypass controls
- * - Traffic analytics
- * - System statistics
- * - Activity logging
+ * @brief Main application window for Network Control Protocol (Qt6).
  *
- * The central widget hosts the web UI served at localhost:8080.
- * When HAVE_QTWEBENGINE is defined, a QWebEngineView loads the URL
- * directly; otherwise a QTextBrowser is shown as a thin launcher
- * with a clickable link.
+ * Native dashboard driving ncp_core in-process via ProxyController:
+ *  - Status panel with protection state + start/stop
+ *  - DPI bypass strategy controls
+ *  - Live network monitor + traffic chart
+ *  - System stats, activity log, license panel
+ *  - Managed Tor (obfs4/Snowflake bridges) via SettingsDialog
  */
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -55,33 +38,21 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
     ~MainWindow() override;
 
-    // Prevent copying
     MainWindow(const MainWindow&) = delete;
     MainWindow& operator=(const MainWindow&) = delete;
 
 public slots:
-    // Connection control
     void onConnectClicked();
     void onDisconnectClicked();
     void onQuickConnectClicked();
-    
-    // DPI Bypass control
     void onBypassToggled(bool enabled);
     void onBypassTechniqueChanged(int index);
-    
-    // Settings
     void onSettingsClicked();
     void onThemeChanged(const QString& theme);
-    
-    // System tray
     void onTrayIconActivated(QSystemTrayIcon::ActivationReason reason);
     void onMinimizeToTray();
-    
-    // License
     void onLicenseActivate();
     void onLicenseDeactivate();
-    
-    // Updates
     void onCheckForUpdates();
 
 protected:
@@ -90,31 +61,27 @@ protected:
 
 private slots:
     void updateStats();
-    void updateNetworkFlow();
-    void updateActivityLog();
-    void refreshLicenseStatus();
+    void onStartFinished(bool ok, const QString& message);
+    void appendLog(const QString& line);
 
 private:
     void setupUI();
     void setupMenuBar();
     void setupToolBar();
     void setupStatusBar();
-    void setupCentralWidget();  ///< Creates web-UI wrapper (QWebEngineView or QTextBrowser)
     void setupSystemTray();
     void setupConnections();
     void loadSettings();
     void saveSettings();
     void applyTheme(const QString& themeName);
-    QString loadStyleSheet(const QString& themeName);
+    GuiProxyConfig collectConfig() const;
+    void persistConfig(const GuiProxyConfig& cfg);
 
-    // Core modules
-    std::unique_ptr<ncp::Crypto> crypto_;
+    // Core
     std::unique_ptr<ncp::License> license_;
-    std::unique_ptr<ncp::Database> database_;
-    std::unique_ptr<ncp::Network> network_;
+    ProxyController* controller_;   // child of this
 
     // UI Components
-    QStackedWidget* stackedWidget_;
     StatusPanel* statusPanel_;
     NetworkMonitor* networkMonitor_;
     DPIControl* dpiControl_;
@@ -122,14 +89,6 @@ private:
     SystemStats* systemStats_;
     ActivityLog* activityLog_;
     LicenseInfo* licenseInfo_;
-    SettingsDialog* settingsDialog_;
-
-    // Web UI central widget (thin wrapper around localhost:8080)
-    // Exactly one of these is non-null, depending on compile-time availability.
-#ifdef HAVE_QTWEBENGINE
-    QWebEngineView* webView_ = nullptr;   ///< QWebEngineView (preferred)
-#endif
-    QTextBrowser*   textBrowser_ = nullptr; ///< QTextBrowser fallback
 
     // System tray
     QSystemTrayIcon* trayIcon_;
@@ -137,12 +96,11 @@ private:
 
     // Timers
     QTimer* statsTimer_;
-    QTimer* networkTimer_;
-    QTimer* logTimer_;
 
     // State
-    bool isConnected_;
-    bool bypassEnabled_;
+    bool isConnected_ = false;
+    bool bypassEnabled_ = true;
+    bool quitRequested_ = false;
     QString currentTheme_;
 };
 
