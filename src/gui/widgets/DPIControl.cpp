@@ -5,6 +5,7 @@
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
+#include <QLineEdit>
 #include <QSpinBox>
 #include <QVBoxLayout>
 
@@ -46,6 +47,44 @@ DPIControl::DPIControl(QWidget* parent) : QWidget(parent) {
     form->addRow(QString(), dohBox_);
 
     lay->addLayout(form);
+
+    // ---- Driver mode (`ncp.exe run`), parity with the Web UI ----
+    auto* drvGroup = new QGroupBox(QStringLiteral("Режим драйвера (ncp run)"), this);
+    auto* drvForm = new QFormLayout(drvGroup);
+
+    ifaceCombo_ = new QComboBox(drvGroup);
+    ifaceCombo_->setEditable(true);
+    ifaceCombo_->addItem(QStringLiteral("авто"), QString());
+    ifaceCombo_->lineEdit()->setPlaceholderText(
+        QStringLiteral("имя интерфейса, напр. «Беспроводная сеть 2»"));
+    drvForm->addRow(QStringLiteral("Интерфейс:"), ifaceCombo_);
+
+    driverPresetCombo_ = new QComboBox(drvGroup);
+    // Valid values per src/cli/main.cpp
+    for (const char* p : {"tspu", "beeline", "mts", "megafon", "tele2", "mobile", "auto"})
+        driverPresetCombo_->addItem(QStringLiteral("operator: %1").arg(QLatin1String(p)),
+                                    QString::fromLatin1(p));
+    drvForm->addRow(QStringLiteral("Пресет оператора:"), driverPresetCombo_);
+
+    zapretCombo_ = new QComboBox(drvGroup);
+    zapretCombo_->addItem(QStringLiteral("выкл"), QString());
+    // list_zapret_profiles() in ncp_dpi_zapret.cpp
+    for (const char* z : {"zapret_full", "zapret_general", "zapret_discord",
+                          "zapret_google", "zapret_quic", "zapret_tcp",
+                          "zapret_youtube", "zapret_rublock"})
+        zapretCombo_->addItem(QString::fromLatin1(z), QString::fromLatin1(z));
+    drvForm->addRow(QStringLiteral("Zapret-профиль:"), zapretCombo_);
+
+    chainsEdit_ = new QLineEdit(drvGroup);
+    chainsEdit_->setPlaceholderText(
+        QStringLiteral("свои цепочки через запятую, напр. quic_general,youtube_tls"));
+    drvForm->addRow(QStringLiteral("Zapret-цепочки:"), chainsEdit_);
+
+    covertBox_ = new QCheckBox(
+        QStringLiteral("Covert channel (маскировка под легитимный трафик)"), drvGroup);
+    drvForm->addRow(QString(), covertBox_);
+
+    lay->addWidget(drvGroup);
     lay->addStretch(1);
 
     connect(enableBox_, &QCheckBox::toggled, this, &DPIControl::bypassToggled);
@@ -67,3 +106,41 @@ int DPIControl::fakeQuic() const { return fakeQuicSpin_->value(); }
 bool DPIControl::blockQuic() const { return blockQuicBox_->isChecked(); }
 bool DPIControl::dohEnabled() const { return dohBox_->isChecked(); }
 void DPIControl::setBypassEnabled(bool enabled) { enableBox_->setChecked(enabled); }
+
+QString DPIControl::driverInterface() const {
+    // editable combo: currentData() is "" for the "авто" entry; typed text
+    // may carry " (ip)" suffix when picked from the enumerated list
+    QString t = ifaceCombo_->currentText().trimmed();
+    const int paren = t.indexOf(QStringLiteral(" ("));
+    if (paren > 0) t = t.left(paren);
+    return (t == QStringLiteral("авто")) ? QString() : t;
+}
+QString DPIControl::driverPreset() const { return driverPresetCombo_->currentData().toString(); }
+QString DPIControl::driverZapretProfile() const { return zapretCombo_->currentData().toString(); }
+QString DPIControl::driverZapretChains() const { return chainsEdit_->text().trimmed(); }
+bool DPIControl::driverCovert() const { return covertBox_->isChecked(); }
+
+void DPIControl::setDriverOptions(const QString& iface, const QString& preset,
+                                  const QString& zapret, bool covert,
+                                  const QString& chains) {
+    ifaceCombo_->setCurrentText(iface.isEmpty() ? QStringLiteral("авто") : iface);
+    int idx = driverPresetCombo_->findData(preset);
+    if (idx >= 0) driverPresetCombo_->setCurrentIndex(idx);
+    idx = zapretCombo_->findData(zapret);
+    zapretCombo_->setCurrentIndex(idx >= 0 ? idx : 0);
+    chainsEdit_->setText(chains);
+    covertBox_->setChecked(covert);
+}
+
+void DPIControl::setInterfaces(const QStringList& ifaces) {
+    const QString current = ifaceCombo_->currentText();
+    ifaceCombo_->clear();
+    ifaceCombo_->addItem(QStringLiteral("авто"), QString());
+    for (const QString& i : ifaces)
+        ifaceCombo_->addItem(i, i);
+    if (!current.isEmpty()) {
+        const int idx = ifaceCombo_->findText(current);
+        if (idx >= 0) ifaceCombo_->setCurrentIndex(idx);
+        else ifaceCombo_->setCurrentText(current);
+    }
+}

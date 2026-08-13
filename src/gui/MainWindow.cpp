@@ -8,6 +8,8 @@
 #include "widgets/SystemStats.hpp"
 #include "widgets/ActivityLog.hpp"
 #include "widgets/LicenseInfo.hpp"
+#include "widgets/ModulesPanel.hpp"
+#include "widgets/LeakTestPanel.hpp"
 
 #include "ncp_license.hpp"
 
@@ -26,7 +28,7 @@
 
 namespace ncp::GUI {
 
-static const char* kAppVersion = "1.9.1";
+static const char* kAppVersion = "1.9.2";
 
 static const char* kDarkQss = R"(
 QMainWindow, QWidget { background:#16161e; color:#d8d8e0; font-family:'Segoe UI',sans-serif; }
@@ -69,6 +71,7 @@ MainWindow::MainWindow(QWidget* parent)
         license_.reset();
     }
     controller_ = new ProxyController(this);
+    driver_ = new DriverController(this);
 
     setupUI();
     setupMenuBar();
@@ -100,6 +103,7 @@ MainWindow::MainWindow(QWidget* parent)
 }
 
 MainWindow::~MainWindow() {
+    if (driver_) driver_->stop();
     if (controller_) controller_->stop();
     saveSettings();
 }
@@ -133,9 +137,16 @@ void MainWindow::setupUI() {
     licenseInfo_ = new LicenseInfo(this);
     mainLayout->addWidget(licenseInfo_, 2, 2);
 
+    modulesPanel_ = new ModulesPanel(this);
+    mainLayout->addWidget(modulesPanel_, 3, 0, 1, 2);
+
+    leakTestPanel_ = new LeakTestPanel(this);
+    mainLayout->addWidget(leakTestPanel_, 3, 2);
+
     mainLayout->setRowStretch(0, 0);
     mainLayout->setRowStretch(1, 2);
     mainLayout->setRowStretch(2, 2);
+    mainLayout->setRowStretch(3, 2);
     mainLayout->setColumnStretch(0, 1);
     mainLayout->setColumnStretch(1, 1);
     mainLayout->setColumnStretch(2, 1);
@@ -151,8 +162,12 @@ void MainWindow::setupMenuBar() {
     });
 
     QMenu* connMenu = menuBar()->addMenu(tr("&Защита"));
-    connMenu->addAction(tr("&Запустить"), this, &MainWindow::onConnectClicked);
-    connMenu->addAction(tr("&Остановить"), this, &MainWindow::onDisconnectClicked);
+    connMenu->addAction(tr("&Запустить прокси"), this, &MainWindow::onConnectClicked);
+    connMenu->addAction(tr("&Остановить прокси"), this, &MainWindow::onDisconnectClicked);
+    connMenu->addSeparator();
+    connMenu->addAction(tr("Запустить &драйвер (ncp run)"),
+                        this, &MainWindow::onDriverStartClicked);
+    connMenu->addAction(tr("Остановить д&райвер"), this, &MainWindow::onDriverStopClicked);
 
     QMenu* uiMenu = menuBar()->addMenu(tr("&Интерфейс"));
     uiMenu->addAction(tr("Открыть &Web UI"), this, &MainWindow::onOpenWebUi);
@@ -164,7 +179,9 @@ void MainWindow::setupMenuBar() {
         QMessageBox::about(this, tr("О программе"),
             tr("NCP v%1 — Network Control Protocol (Qt6)\n\n"
                "Обход DPI, цепочки через Tor (мосты obfs4/Snowflake),\n"
-               "скрытие IP и метаданных. Нативный интерфейс на Qt6.")
+               "скрытие IP и метаданных. Нативный интерфейс на Qt6.\n\n"
+               "Режим драйвера (ncp run): пресеты операторов, zapret-профили,\n"
+               "Geneva/Covert/stealth-модули, проверка утечек.")
                .arg(QLatin1String(kAppVersion)));
     });
 }
@@ -175,6 +192,9 @@ void MainWindow::setupToolBar() {
     toolbar->setMovable(false);
     toolbar->addAction(tr("Запустить"), this, &MainWindow::onConnectClicked);
     toolbar->addAction(tr("Остановить"), this, &MainWindow::onDisconnectClicked);
+    toolbar->addSeparator();
+    toolbar->addAction(tr("Драйвер ▶"), this, &MainWindow::onDriverStartClicked);
+    toolbar->addAction(tr("Драйвер ■"), this, &MainWindow::onDriverStopClicked);
     toolbar->addSeparator();
     toolbar->addAction(tr("Настройки"), this, &MainWindow::onSettingsClicked);
     toolbar->addSeparator();
@@ -228,6 +248,19 @@ void MainWindow::setupConnections() {
             this, &MainWindow::onStartFinished);
     connect(controller_, &ProxyController::logLine,
             this, &MainWindow::appendLog);
+
+    connect(driver_, &DriverController::lineReceived,
+            this, &MainWindow::onDriverLine);
+    connect(driver_, &DriverController::moduleStatus,
+            this, &MainWindow::onDriverModuleStatus);
+    connect(driver_, &DriverController::failedToStart,
+            this, &MainWindow::onDriverFailed);
+    connect(driver_, &DriverController::finished,
+            this, &MainWindow::onDriverFinished);
+    connect(driver_, &DriverController::startedOk, this, [this]() {
+        modulesPanel_->setDriverState(QStringLiteral("запущен"), true);
+        statusBar()->showMessage(tr("Драйвер запущен"));
+    });
 }
 
 GuiProxyConfig MainWindow::collectConfig() const {
@@ -372,6 +405,54 @@ void MainWindow::onChooseUiNextTime() {
         tr("Выбор интерфейса будет предложен при следующем запуске."));
 }
 
+void MainWindow::onDriverStartClicked() {
+    if (driver_->running()) return;
+    DriverController::Options opt;
+    opt.interface = dpiControl_->driverInterface();
+    opt.preset = dpiControl_->driverPreset();
+    opt.covert = dpiControl_->driverCovert();
+    opt.zapretProfile = dpiControl_->driverZapretProfile();
+    opt.zapretChains = dpiControl_->driverZapretChains();
+
+    // persist driver options
+    QSettings s("NCP", "ncp-qt");
+    s.setValue("driver_iface", dpiControl_->driverInterface());
+    s.setValue("driver_preset", opt.preset);
+    s.setValue("driver_zapret", opt.zapretProfile);
+    s.setValue("driver_chains", opt.zapretChains);
+    s.setValue("driver_covert", opt.covert);
+
+    modulesPanel_->resetStatuses();
+    statusBar()->showMessage(tr("Запуск драйвера…"));
+    driver_->start(opt);
+}
+
+void MainWindow::onDriverStopClicked() {
+    if (!driver_->running()) return;
+    driver_->stop();  // finished() handler updates panels
+}
+
+void MainWindow::onDriverLine(const QString& line) {
+    appendLog(QStringLiteral("[driver] %1").arg(line));
+}
+
+void MainWindow::onDriverModuleStatus(const QString& module, int state) {
+    modulesPanel_->setModuleStatus(module, state);
+}
+
+void MainWindow::onDriverFailed(const QString& reason) {
+    modulesPanel_->setDriverState(QStringLiteral("ошибка запуска"), false);
+    statusBar()->showMessage(tr("Драйвер: ошибка запуска"));
+    appendLog(QStringLiteral("[driver] ошибка запуска: %1").arg(reason));
+    QMessageBox::warning(this, tr("NCP — режим драйвера"), reason);
+}
+
+void MainWindow::onDriverFinished(int exitCode) {
+    modulesPanel_->setDriverState(QStringLiteral("остановлен"), false);
+    statusBar()->showMessage(tr("Драйвер остановлен (код %1)").arg(exitCode));
+    appendLog(QStringLiteral("[driver] процесс завершён, код %1").arg(exitCode));
+}
+
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (!quitRequested_ && trayIcon_ && trayIcon_->isVisible()) {
         hide();
@@ -407,6 +488,18 @@ void MainWindow::loadSettings() {
     restoreState(settings.value("windowState").toByteArray());
     statusPanel_->setAddress(QStringLiteral("127.0.0.1:%1")
         .arg(settings.value("proxy_port", 1080).toInt()));
+    dpiControl_->setDriverOptions(
+        settings.value("driver_iface").toString(),
+        settings.value("driver_preset", "tspu").toString(),
+        settings.value("driver_zapret").toString(),
+        settings.value("driver_covert", false).toBool(),
+        settings.value("driver_chains").toString());
+    leakTestPanel_->setProxy(QStringLiteral("127.0.0.1"),
+        static_cast<quint16>(settings.value("proxy_port", 1080).toInt()));
+    // Enumerate interfaces asynchronously for the driver-mode dropdown.
+    DriverController::listInterfaces(this, [this](const QStringList& ifaces) {
+        if (!ifaces.isEmpty()) dpiControl_->setInterfaces(ifaces);
+    });
 }
 
 void MainWindow::saveSettings() {

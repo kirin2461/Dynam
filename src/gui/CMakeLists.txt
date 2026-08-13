@@ -4,6 +4,7 @@ set(NCP_QT_SOURCES
     main.cpp
     MainWindow.cpp
     ProxyController.cpp
+    DriverController.cpp
     Launcher.cpp
     LicenseVerifier.cpp
     SettingsDialog.cpp
@@ -14,11 +15,14 @@ set(NCP_QT_SOURCES
     widgets/SystemStats.cpp
     widgets/ActivityLog.cpp
     widgets/LicenseInfo.cpp
+    widgets/ModulesPanel.cpp
+    widgets/LeakTestPanel.cpp
 )
 
 set(NCP_QT_HEADERS
     MainWindow.hpp
     ProxyController.hpp
+    DriverController.hpp
     Launcher.hpp
     LicenseVerifier.hpp
     SettingsDialog.hpp
@@ -29,6 +33,8 @@ set(NCP_QT_HEADERS
     widgets/SystemStats.hpp
     widgets/ActivityLog.hpp
     widgets/LicenseInfo.hpp
+    widgets/ModulesPanel.hpp
+    widgets/LeakTestPanel.hpp
 )
 
 add_executable(ncp-qt ${NCP_QT_SOURCES} ${NCP_QT_HEADERS})

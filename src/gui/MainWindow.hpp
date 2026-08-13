@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "ProxyController.hpp"
+#include "DriverController.hpp"
 
 namespace ncp { class License; }
 
@@ -18,6 +19,8 @@ class SystemStats;
 class ActivityLog;
 class LicenseInfo;
 class SettingsDialog;
+class ModulesPanel;
+class LeakTestPanel;
 
 namespace ncp::GUI {
 
@@ -57,6 +60,8 @@ public slots:
     void onCheckForUpdates();
     void onOpenWebUi();
     void onChooseUiNextTime();
+    void onDriverStartClicked();
+    void onDriverStopClicked();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -66,6 +71,10 @@ private slots:
     void updateStats();
     void onStartFinished(bool ok, const QString& message);
     void appendLog(const QString& line);
+    void onDriverLine(const QString& line);
+    void onDriverModuleStatus(const QString& module, int state);
+    void onDriverFailed(const QString& reason);
+    void onDriverFinished(int exitCode);
 
 private:
     void setupUI();
@@ -83,6 +92,7 @@ private:
     // Core
     std::unique_ptr<ncp::License> license_;
     ProxyController* controller_ = nullptr;   // child of this
+    DriverController* driver_ = nullptr;      // ncp.exe run (driver mode)
 
     // UI Components
     StatusPanel* statusPanel_ = nullptr;
@@ -92,6 +102,8 @@ private:
     SystemStats* systemStats_ = nullptr;
     ActivityLog* activityLog_ = nullptr;
     LicenseInfo* licenseInfo_ = nullptr;
+    ModulesPanel* modulesPanel_ = nullptr;
+    LeakTestPanel* leakTestPanel_ = nullptr;
 
     // System tray (nullptr when tray unavailable — e.g. RDP session)
     QSystemTrayIcon* trayIcon_ = nullptr;
