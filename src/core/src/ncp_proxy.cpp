@@ -565,6 +565,21 @@ public:
             ncp_socket_t s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
             if (s == NCP_INVALID_SOCK) continue;
 
+#ifdef TCP_MAXSEG
+            if (cfg.upstream_mss > 0) {
+                int mss = cfg.upstream_mss;
+                ::setsockopt(s, IPPROTO_TCP, TCP_MAXSEG,
+                             reinterpret_cast<const char*>(&mss), sizeof(mss));
+            }
+#endif
+#ifdef TCP_FASTOPEN_CONNECT
+            if (cfg.tfo) {
+                int one = 1;
+                ::setsockopt(s, IPPROTO_TCP, TCP_FASTOPEN_CONNECT,
+                             reinterpret_cast<const char*>(&one), sizeof(one));
+            }
+#endif
+
             // non-blocking connect with timeout
 #ifdef _WIN32
             u_long nb = 1;

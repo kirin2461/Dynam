@@ -71,6 +71,16 @@ public:
         // Resolve target domains via DNS-over-HTTPS (bypasses DNS-level blocks)
         bool use_doh = false;
 
+        // TCP Fast Open on upstream connects (Linux 4.11+, opt-in).
+        // First client payload travels in the SYN (data-in-SYN); the kernel
+        // falls back to a normal handshake when TFO is unsupported.
+        bool tfo = false;
+
+        // Clamp upstream TCP MSS via TCP_MAXSEG (0 = kernel default).
+        // Affects the proxy upstream leg only; the client-facing leg is
+        // negotiated independently.
+        int upstream_mss = 0;
+
         // ── Upstream proxy chain (Tor / any SOCKS5 / HTTP CONNECT) ──
         // When upstream_port != 0, every target connection is established
         // through the upstream proxy instead of a direct connect:

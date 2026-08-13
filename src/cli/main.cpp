@@ -2618,6 +2618,9 @@ void handle_proxy(const std::vector<std::string>& args) {
     cfg.hostlist_dir = get_option(args, "--hostlist-dir", "");
     cfg.block_quic = has_flag(args, "--block-quic");
     cfg.use_doh = has_flag(args, "--doh");
+    cfg.tfo = has_flag(args, "--tfo");
+    cfg.upstream_mss = get_option_int(args, "--upstream-mss", 0);
+    if (has_flag(args, "--no-split")) cfg.base.enable_tcp_split = false;
 
     // Inline zapret chain spec: --chain "--filter-tcp=443 --dpi-desync=multisplit
     // --dpi-desync-split-pos=1,midsld" (same syntax as import-zapret)
