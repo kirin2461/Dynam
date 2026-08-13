@@ -898,6 +898,7 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
                                         const sockaddr_storage& client_addr,
                                         socklen_t client_len) {
     Impl* impl = this;
+        (void)client_len;
         ncp_socket_t udp = ::socket(client_addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
         if (udp == NCP_INVALID_SOCK) return;
         impl->track(udp);
@@ -930,29 +931,19 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
         impl->cnt.udp_sessions++;
         std::map<std::string, ncp_socket_t> upstreams;
         std::map<std::string, bool> fake_sent;
-        std::vector<uint8_t> buf(65536);
+        // 64 KiB for client datagrams + 64 KiB scratch for upstream replies
+        std::vector<uint8_t> buf(131072);
 
-        while (impl->running.load()) {
-            int wr = ncp_wait_readable(udp, 1000);
-            if (wr <= 0) {
-                // bail out when the TCP control connection dies
-                int cr = ncp_wait_readable(ctrl, 0);
-                if (cr > 0) {
-                    uint8_t t;
-                    if (::recv(ctrl, reinterpret_cast<char*>(&t), 1, MSG_PEEK) <= 0) break;
-                } else if (cr < 0) break;
-                continue;
-            }
-            sockaddr_storage from{};
-            socklen_t fl = sizeof(from);
-            int r = ::recvfrom(udp, reinterpret_cast<char*>(buf.data()),
-                               static_cast<int>(buf.size()), 0,
-                               reinterpret_cast<sockaddr*>(&from), &fl);
-            if (r <= 0) continue;
+        // Replies must go to the client's UDP source address as learned from
+        // its datagrams (RFC 1928): it differs from the TCP control port.
+        sockaddr_storage client_udp{};
+        socklen_t client_udp_len = 0;
+        bool have_client_udp = false;
 
-            // client → target
-            if (r < 10 || buf[0] != 0 || buf[1] != 0) continue;  // RSV
-            if (buf[2] != 0) continue;  // FRAG not supported
+        // forward one client datagram (in buf[0..r)) client → target
+        auto forward_client = [&](int r) {
+            if (r < 10 || buf[0] != 0 || buf[1] != 0) return;  // RSV
+            if (buf[2] != 0) return;  // FRAG not supported
             const uint8_t atyp = buf[3];
             size_t pos = 4;
             std::string host;
@@ -961,17 +952,17 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
                 pos = 8;
             } else if (atyp == 0x03) {
                 const uint8_t l = buf[4];
-                if (r < 7 + l) continue;
+                if (r < 7 + l) return;
                 host.assign(reinterpret_cast<char*>(buf.data() + 5), l);
                 pos = 5 + l;
             } else if (atyp == 0x04) {
-                if (r < 22) continue;
+                if (r < 22) return;
                 char ip[INET6_ADDRSTRLEN];
-                if (!inet_ntop(AF_INET6, buf.data() + 4, ip, sizeof(ip))) continue;
+                if (!inet_ntop(AF_INET6, buf.data() + 4, ip, sizeof(ip))) return;
                 host = ip;
                 pos = 20;
-            } else continue;
-            if (pos + 2 > static_cast<size_t>(r)) continue;
+            } else return;
+            if (pos + 2 > static_cast<size_t>(r)) return;
             const uint16_t port =
                 static_cast<uint16_t>((buf[pos] << 8) | buf[pos + 1]);
             pos += 2;
@@ -981,7 +972,7 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
 
             if (port == 443 && impl->cfg.block_quic) {
                 impl->cnt.quic_blocked++;
-                continue;
+                return;
             }
 
             ncp_socket_t up = NCP_INVALID_SOCK;
@@ -994,7 +985,7 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
                 hints.ai_socktype = SOCK_DGRAM;
                 addrinfo* res = nullptr;
                 if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(),
-                                  &hints, &res) != 0 || !res) continue;
+                                  &hints, &res) != 0 || !res) return;
                 up = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
                 if (up != NCP_INVALID_SOCK) {
                     if (::connect(up, res->ai_addr,
@@ -1007,7 +998,7 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
                     }
                 }
                 ::freeaddrinfo(res);
-                if (up == NCP_INVALID_SOCK) continue;
+                if (up == NCP_INVALID_SOCK) return;
             }
 
             // fake QUIC Initials before first real Initial to this target
@@ -1033,23 +1024,67 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
 #else
                    MSG_NOSIGNAL);
 #endif
+        };
 
-            // drain all pending upstream replies
+        while (impl->running.load()) {
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(udp, &rfds);
+            FD_SET(ctrl, &rfds);
+            ncp_socket_t maxfd = udp > ctrl ? udp : ctrl;
             for (auto& kv : upstreams) {
-                for (;;) {
-                    int ur = ncp_wait_readable(kv.second, 0);
-                    if (ur <= 0) break;
-                    int n = ::recv(kv.second,
-                                   reinterpret_cast<char*>(buf.data() + 32768),
-                                   static_cast<int>(buf.size() - 32768), 0);
-                    if (n <= 0) break;
+                FD_SET(kv.second, &rfds);
+                if (kv.second > maxfd) maxfd = kv.second;
+            }
+            timeval tv{};
+            tv.tv_sec = 1;
+            const int sel = ::select(static_cast<int>(maxfd) + 1, &rfds,
+                                     nullptr, nullptr, &tv);
+            if (sel < 0) {
+#ifndef _WIN32
+                if (errno == EINTR) continue;
+#endif
+                break;
+            }
+            if (sel == 0) continue;  // idle tick
+
+            // UDP association ends when the TCP control connection closes
+            if (FD_ISSET(ctrl, &rfds)) {
+                uint8_t t;
+                if (::recv(ctrl, reinterpret_cast<char*>(&t), 1, MSG_PEEK) <= 0)
+                    break;
+            }
+
+            // client → target
+            if (FD_ISSET(udp, &rfds)) {
+                sockaddr_storage from{};
+                socklen_t fl = sizeof(from);
+                const int r = ::recvfrom(udp, reinterpret_cast<char*>(buf.data()),
+                                         65536, 0,
+                                         reinterpret_cast<sockaddr*>(&from), &fl);
+                if (r > 0) {
+                    client_udp = from;
+                    client_udp_len = fl;
+                    have_client_udp = true;
+                    forward_client(r);
+                }
+            }
+
+            // upstream → client: drain every readable upstream socket
+            if (have_client_udp) {
+                for (auto& kv : upstreams) {
+                    if (!FD_ISSET(kv.second, &rfds)) continue;
+                    const int n = ::recv(kv.second,
+                                         reinterpret_cast<char*>(buf.data() + 65536),
+                                         65536, 0);
+                    if (n <= 0) continue;
                     std::vector<uint8_t> out = {0, 0, 0};
                     const size_t colon = kv.first.rfind(':');
                     const std::string h = kv.first.substr(0, colon);
                     uint16_t p = 0;
                     try { p = static_cast<uint16_t>(
                               std::stoi(kv.first.substr(colon + 1))); }
-                    catch (...) { break; }
+                    catch (...) { continue; }
                     in_addr a4{};
                     if (::inet_pton(AF_INET, h.c_str(), &a4) == 1) {
                         out.push_back(0x01);
@@ -1062,12 +1097,12 @@ void DesyncProxy::Impl::run_udp_session(ncp_socket_t ctrl,
                     }
                     out.push_back(static_cast<uint8_t>(p >> 8));
                     out.push_back(static_cast<uint8_t>(p & 0xFF));
-                    out.insert(out.end(), buf.data() + 32768,
-                               buf.data() + 32768 + n);
+                    out.insert(out.end(), buf.data() + 65536,
+                               buf.data() + 65536 + n);
                     ::sendto(udp, reinterpret_cast<const char*>(out.data()),
                              static_cast<int>(out.size()), 0,
-                             reinterpret_cast<const sockaddr*>(&client_addr),
-                             client_len);
+                             reinterpret_cast<const sockaddr*>(&client_udp),
+                             client_udp_len);
                 }
             }
         }
