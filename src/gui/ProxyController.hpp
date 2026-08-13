@@ -3,6 +3,13 @@
 // In-process controller: owns DesyncProxy (+ optional managed Tor) and
 // exposes it to Qt via queued signals. No subprocess, no web backend —
 // the Qt6 GUI drives ncp_core directly.
+//
+// Threading contract (v1.9.1 hardening):
+//  - requestStart() spawns a worker thread; startInternal() runs ONLY there.
+//  - startInternal() never calls stop() (a thread must never join itself).
+//  - proxy_/tor_/chain_label_ are guarded by state_mtx_; readers from the
+//    GUI thread (stats(), boundPort(), chainLabel()) take the same lock.
+//  - stop() may be called from any thread EXCEPT the worker itself.
 
 #include <QObject>
 #include <QString>
@@ -45,6 +52,7 @@ public:
     void stop();
 
     bool running() const { return running_.load(); }
+    bool starting() const { return starting_.load(); }
     uint16_t boundPort() const;
     ncp::ProxyStats stats() const;
     QString chainLabel() const;
@@ -58,12 +66,20 @@ signals:
 
 private:
     bool startInternal(const GuiProxyConfig& cfg, QString* err);
+    // Joins the worker if it is joinable and we are NOT the worker thread.
+    // A thread joining itself throws std::system_error -> terminate (was the
+    // v1.9.0 crash-on-start bug).
+    void joinWorker();
 
+    // Guarded by state_mtx_ (GUI thread reads stats while worker commits).
+    mutable std::mutex state_mtx_;
     std::unique_ptr<ncp::DesyncProxy> proxy_;
     std::unique_ptr<ncp::TorManager> tor_;
-    GuiProxyConfig cfg_;
     QString chain_label_;
+
+    GuiProxyConfig cfg_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> starting_{false};
     std::thread worker_;
 
     mutable std::mutex log_mtx_;

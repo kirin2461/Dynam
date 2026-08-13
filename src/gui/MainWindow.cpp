@@ -1,5 +1,6 @@
 #include "MainWindow.hpp"
 #include "SettingsDialog.hpp"
+#include "Launcher.hpp"
 #include "widgets/StatusPanel.hpp"
 #include "widgets/NetworkMonitor.hpp"
 #include "widgets/DPIControl.hpp"
@@ -17,12 +18,15 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPainter>
 #include <QPixmap>
 #include <QSettings>
 #include <QStatusBar>
 #include <QToolBar>
 
 namespace ncp::GUI {
+
+static const char* kAppVersion = "1.9.1";
 
 static const char* kDarkQss = R"(
 QMainWindow, QWidget { background:#16161e; color:#d8d8e0; font-family:'Segoe UI',sans-serif; }
@@ -39,12 +43,31 @@ QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {
     background:#101018; border:1px solid #2a2a3a; border-radius:3px; padding:4px; }
 QStatusBar { background:#101018; border-top:1px solid #2a2a3a; }
 QToolTip { background:#22222e; color:#d8d8e0; border:1px solid #34344a; }
+QCheckBox { spacing:6px; }
+QDialog { background:#16161e; }
 )";
+
+static QIcon makeAppIcon() {
+    QPixmap pm(64, 64);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setBrush(QColor("#4caf50"));
+    p.setPen(Qt::NoPen);
+    p.drawEllipse(8, 8, 48, 48);
+    p.end();
+    return QIcon(pm);
+}
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
     , currentTheme_("dark_pro") {
-    license_ = std::make_unique<ncp::License>();
+    // License is best-effort: never let a core exception kill the UI.
+    try {
+        license_ = std::make_unique<ncp::License>();
+    } catch (...) {
+        license_.reset();
+    }
     controller_ = new ProxyController(this);
 
     setupUI();
@@ -60,20 +83,24 @@ MainWindow::MainWindow(QWidget* parent)
     connect(statsTimer_, &QTimer::timeout, this, &MainWindow::updateStats);
     statsTimer_->start(1000);
 
-    setWindowTitle(QStringLiteral("NCP — Network Control Protocol (Qt6)"));
+    setWindowTitle(QStringLiteral("NCP v%1 — Network Control Protocol (Qt6)")
+                       .arg(QLatin1String(kAppVersion)));
+    setWindowIcon(makeAppIcon());
     setMinimumSize(1100, 700);
     resize(1280, 820);
 
     // Show HWID in the license panel (best-effort)
     try {
-        licenseInfo_->setHWID(QString::fromStdString(license_->get_hwid()));
+        licenseInfo_->setHWID(license_
+            ? QString::fromStdString(license_->get_hwid())
+            : QStringLiteral("недоступен"));
     } catch (...) {
         licenseInfo_->setHWID(QStringLiteral("недоступен"));
     }
 }
 
 MainWindow::~MainWindow() {
-    controller_->stop();
+    if (controller_) controller_->stop();
     saveSettings();
 }
 
@@ -127,22 +154,31 @@ void MainWindow::setupMenuBar() {
     connMenu->addAction(tr("&Запустить"), this, &MainWindow::onConnectClicked);
     connMenu->addAction(tr("&Остановить"), this, &MainWindow::onDisconnectClicked);
 
+    QMenu* uiMenu = menuBar()->addMenu(tr("&Интерфейс"));
+    uiMenu->addAction(tr("Открыть &Web UI"), this, &MainWindow::onOpenWebUi);
+    uiMenu->addAction(tr("Выбирать интерфейс при запуске…"),
+                      this, &MainWindow::onChooseUiNextTime);
+
     QMenu* helpMenu = menuBar()->addMenu(tr("&Справка"));
     helpMenu->addAction(tr("&О программе"), [this]() {
         QMessageBox::about(this, tr("О программе"),
-            tr("NCP — Network Control Protocol (Qt6)\n\n"
+            tr("NCP v%1 — Network Control Protocol (Qt6)\n\n"
                "Обход DPI, цепочки через Tor (мосты obfs4/Snowflake),\n"
-               "скрытие IP и метаданных. Нативный интерфейс на Qt6."));
+               "скрытие IP и метаданных. Нативный интерфейс на Qt6.")
+               .arg(QLatin1String(kAppVersion)));
     });
 }
 
 void MainWindow::setupToolBar() {
     QToolBar* toolbar = addToolBar(tr("Main"));
+    toolbar->setObjectName(QStringLiteral("mainToolBar"));  // for saveState()
     toolbar->setMovable(false);
     toolbar->addAction(tr("Запустить"), this, &MainWindow::onConnectClicked);
     toolbar->addAction(tr("Остановить"), this, &MainWindow::onDisconnectClicked);
     toolbar->addSeparator();
     toolbar->addAction(tr("Настройки"), this, &MainWindow::onSettingsClicked);
+    toolbar->addSeparator();
+    toolbar->addAction(tr("Web UI"), this, &MainWindow::onOpenWebUi);
 }
 
 void MainWindow::setupStatusBar() {
@@ -152,15 +188,15 @@ void MainWindow::setupStatusBar() {
 void MainWindow::setupSystemTray() {
     if (qEnvironmentVariableIsSet("NCP_QT_NO_TRAY") || !QSystemTrayIcon::isSystemTrayAvailable())
         return;
-    QPixmap pm(32, 32);
-    pm.fill(QColor("#4caf50"));
-    trayIcon_ = new QSystemTrayIcon(QIcon(pm), this);
+    trayIcon_ = new QSystemTrayIcon(makeAppIcon(), this);
     trayIcon_->setToolTip("NCP — Network Control Protocol");
 
     trayMenu_ = new QMenu(this);
     trayMenu_->addAction(tr("Показать"), this, &QMainWindow::show);
     trayMenu_->addAction(tr("Запустить"), this, &MainWindow::onConnectClicked);
     trayMenu_->addAction(tr("Остановить"), this, &MainWindow::onDisconnectClicked);
+    trayMenu_->addSeparator();
+    trayMenu_->addAction(tr("Web UI"), this, &MainWindow::onOpenWebUi);
     trayMenu_->addSeparator();
     trayMenu_->addAction(tr("Выход"), this, [this]() {
         quitRequested_ = true;
@@ -223,7 +259,7 @@ void MainWindow::persistConfig(const GuiProxyConfig& cfg) {
 }
 
 void MainWindow::onConnectClicked() {
-    if (controller_->running()) return;
+    if (controller_->running() || controller_->starting()) return;
     GuiProxyConfig cfg = collectConfig();
     persistConfig(cfg);
     statusPanel_->setBusy(true);
@@ -238,6 +274,7 @@ void MainWindow::onConnectClicked() {
 }
 
 void MainWindow::onStartFinished(bool ok, const QString& message) {
+    statusPanel_->setBusy(false);
     if (ok) {
         isConnected_ = true;
         statusPanel_->setConnected(true);
@@ -306,6 +343,7 @@ void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
 }
 
 void MainWindow::onMinimizeToTray() {
+    if (!trayIcon_) return;  // tray may be unavailable (RDP etc.)
     hide();
     trayIcon_->showMessage("NCP", tr("Приложение свёрнуто в трей"));
 }
@@ -323,8 +361,19 @@ void MainWindow::onCheckForUpdates() {
         tr("У вас последняя версия."));
 }
 
+void MainWindow::onOpenWebUi() {
+    if (Launcher::launchWebUi(this))
+        appendLog(QStringLiteral("[ui] запущен Web UI (ncp-gui.exe)"));
+}
+
+void MainWindow::onChooseUiNextTime() {
+    Launcher::resetChoice();
+    QMessageBox::information(this, tr("NCP"),
+        tr("Выбор интерфейса будет предложен при следующем запуске."));
+}
+
 void MainWindow::closeEvent(QCloseEvent* event) {
-    if (!quitRequested_ && trayIcon_->isVisible()) {
+    if (!quitRequested_ && trayIcon_ && trayIcon_->isVisible()) {
         hide();
         event->ignore();
     } else {
@@ -333,7 +382,8 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::changeEvent(QEvent* event) {
-    if (event->type() == QEvent::WindowStateChange && isMinimized() && !quitRequested_)
+    if (event->type() == QEvent::WindowStateChange && isMinimized() &&
+        !quitRequested_ && trayIcon_)
         onMinimizeToTray();
     QMainWindow::changeEvent(event);
 }

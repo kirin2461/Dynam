@@ -30,6 +30,7 @@ namespace ncp::GUI {
  *  - Live network monitor + traffic chart
  *  - System stats, activity log, license panel
  *  - Managed Tor (obfs4/Snowflake bridges) via SettingsDialog
+ *  - Interface menu: switch to Web UI (ncp-gui.exe) / reset launcher choice
  */
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -54,6 +55,8 @@ public slots:
     void onLicenseActivate();
     void onLicenseDeactivate();
     void onCheckForUpdates();
+    void onOpenWebUi();
+    void onChooseUiNextTime();
 
 protected:
     void closeEvent(QCloseEvent* event) override;
@@ -79,23 +82,23 @@ private:
 
     // Core
     std::unique_ptr<ncp::License> license_;
-    ProxyController* controller_;   // child of this
+    ProxyController* controller_ = nullptr;   // child of this
 
     // UI Components
-    StatusPanel* statusPanel_;
-    NetworkMonitor* networkMonitor_;
-    DPIControl* dpiControl_;
-    TrafficAnalytics* trafficAnalytics_;
-    SystemStats* systemStats_;
-    ActivityLog* activityLog_;
-    LicenseInfo* licenseInfo_;
+    StatusPanel* statusPanel_ = nullptr;
+    NetworkMonitor* networkMonitor_ = nullptr;
+    DPIControl* dpiControl_ = nullptr;
+    TrafficAnalytics* trafficAnalytics_ = nullptr;
+    SystemStats* systemStats_ = nullptr;
+    ActivityLog* activityLog_ = nullptr;
+    LicenseInfo* licenseInfo_ = nullptr;
 
-    // System tray
-    QSystemTrayIcon* trayIcon_;
-    QMenu* trayMenu_;
+    // System tray (nullptr when tray unavailable — e.g. RDP session)
+    QSystemTrayIcon* trayIcon_ = nullptr;
+    QMenu* trayMenu_ = nullptr;
 
     // Timers
-    QTimer* statsTimer_;
+    QTimer* statsTimer_ = nullptr;
 
     // State
     bool isConnected_ = false;

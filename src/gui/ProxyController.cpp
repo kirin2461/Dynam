@@ -27,12 +27,26 @@ std::deque<QString> ProxyController::drainLogs() {
     return out;
 }
 
+void ProxyController::joinWorker() {
+    if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id())
+        worker_.join();
+}
+
 void ProxyController::requestStart(const GuiProxyConfig& cfg) {
-    if (running_.load() || worker_.joinable()) return;
+    if (running_.load() || starting_.exchange(true)) return;
+    joinWorker();  // previous worker has finished by now — safe to reap
     cfg_ = cfg;
     worker_ = std::thread([this, cfg]() {
         QString err;
-        bool ok = startInternal(cfg, &err);
+        bool ok = false;
+        try {
+            ok = startInternal(cfg, &err);
+        } catch (const std::exception& e) {
+            err = QStringLiteral("Внутренняя ошибка: %1").arg(e.what());
+        } catch (...) {
+            err = QStringLiteral("Внутренняя ошибка (неизвестная)");
+        }
+        starting_.store(false);
         QMetaObject::invokeMethod(this, [this, ok, err]() {
             emit startFinished(ok, ok ? QString() : err);
         }, Qt::QueuedConnection);
@@ -40,17 +54,23 @@ void ProxyController::requestStart(const GuiProxyConfig& cfg) {
 }
 
 uint16_t ProxyController::boundPort() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
     return proxy_ ? proxy_->bound_port() : 0;
 }
 
 ncp::ProxyStats ProxyController::stats() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
     return proxy_ ? proxy_->stats() : ncp::ProxyStats{};
 }
 
-QString ProxyController::chainLabel() const { return chain_label_; }
+QString ProxyController::chainLabel() const {
+    std::lock_guard<std::mutex> lk(state_mtx_);
+    return chain_label_;
+}
 
 bool ProxyController::startInternal(const GuiProxyConfig& cfg, QString* err) {
-    stop();
+    // NOTE: no stop() here — this runs on the worker thread and must never
+    // join itself. requestStart()/stop() handle teardown from other threads.
 
     ncp::DesyncProxy::Config pc;
     pc.port = cfg.port;
@@ -66,11 +86,12 @@ bool ProxyController::startInternal(const GuiProxyConfig& cfg, QString* err) {
     pc.base.enable_disorder = false;
     pc.log_cb = [this](const std::string& m) { pushLog(m); };
 
-    chain_label_.clear();
+    QString chainLabel;
+    std::unique_ptr<ncp::TorManager> newTor;
 
     // Managed Tor (bridges hide Tor usage itself)
     if (!cfg.tor_binary.trimmed().isEmpty()) {
-        tor_ = std::make_unique<ncp::TorManager>();
+        newTor = std::make_unique<ncp::TorManager>();
         ncp::TorLaunchConfig tc;
         tc.tor_binary = cfg.tor_binary.toStdString();
         tc.obfs4_binary = cfg.pt_obfs4.toStdString();
@@ -81,17 +102,16 @@ bool ProxyController::startInternal(const GuiProxyConfig& cfg, QString* err) {
         pushLog("[tor] запуск управляемого Tor (" +
                 std::to_string(tc.bridges.size()) + " мостов)...");
         std::string terr;
-        if (!tor_->start(tc, &terr)) {
+        if (!newTor->start(tc, &terr)) {
             if (err) *err = QStringLiteral("Управляемый Tor не запустился: %1")
                                 .arg(QString::fromStdString(terr));
-            tor_.reset();
             return false;
         }
         pc.upstream_type = "socks5";
         pc.upstream_host = "127.0.0.1";
-        pc.upstream_port = tor_->socks_port();
-        chain_label_ = QStringLiteral("управляемый Tor + мосты (Tor скрыт), SOCKS5 127.0.0.1:%1")
-                           .arg(tor_->socks_port());
+        pc.upstream_port = newTor->socks_port();
+        chainLabel = QStringLiteral("управляемый Tor + мосты (Tor скрыт), SOCKS5 127.0.0.1:%1")
+                         .arg(newTor->socks_port());
         pushLog("[tor] Bootstrapped 100% — цепочка активна");
     } else if (!cfg.upstream.trimmed().isEmpty()) {
         // socks5://host:port | http://host:port
@@ -111,35 +131,47 @@ bool ProxyController::startInternal(const GuiProxyConfig& cfg, QString* err) {
         pc.upstream_type = type.toStdString();
         pc.upstream_host = rest.left(colon).toStdString();
         pc.upstream_port = static_cast<uint16_t>(pnum);
-        chain_label_ = QStringLiteral("%1 — IP назначения скрыт от провайдера").arg(u);
+        chainLabel = QStringLiteral("%1 — IP назначения скрыт от провайдера").arg(u);
     }
 
-    proxy_ = std::make_unique<ncp::DesyncProxy>();
-    if (!proxy_->start(pc)) {
+    auto newProxy = std::make_unique<ncp::DesyncProxy>();
+    if (!newProxy->start(pc)) {
         if (err) *err = QStringLiteral("Не удалось запустить прокси на 127.0.0.1:%1").arg(cfg.port);
-        proxy_.reset();
-        if (tor_) { tor_->stop(); tor_.reset(); }
+        if (newTor) newTor->stop();
         return false;
     }
+
+    // Commit phase — atomic wrt GUI-thread readers.
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        proxy_ = std::move(newProxy);
+        tor_ = std::move(newTor);
+        chain_label_ = chainLabel;
+    }
     running_.store(true);
-    pushLog("[proxy] запущен на 127.0.0.1:" + std::to_string(proxy_->bound_port()));
+    pushLog("[proxy] запущен на 127.0.0.1:" + std::to_string(boundPort()));
     return true;
 }
 
 void ProxyController::stop() {
-    if (worker_.joinable()) worker_.join();
+    joinWorker();
     running_.store(false);
-    if (proxy_) {
-        proxy_->stop();
-        proxy_.reset();
+    std::unique_ptr<ncp::DesyncProxy> oldProxy;
+    std::unique_ptr<ncp::TorManager> oldTor;
+    {
+        std::lock_guard<std::mutex> lk(state_mtx_);
+        oldProxy = std::move(proxy_);
+        oldTor = std::move(tor_);
+        chain_label_.clear();
+    }
+    if (oldProxy) {
+        oldProxy->stop();
         pushLog("[proxy] остановлен");
     }
-    if (tor_) {
-        tor_->stop();
-        tor_.reset();
+    if (oldTor) {
+        oldTor->stop();
         pushLog("[tor] остановлен");
     }
-    chain_label_.clear();
 }
 
 } // namespace ncp::GUI

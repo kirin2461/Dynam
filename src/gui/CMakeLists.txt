@@ -4,6 +4,7 @@ set(NCP_QT_SOURCES
     main.cpp
     MainWindow.cpp
     ProxyController.cpp
+    Launcher.cpp
     LicenseVerifier.cpp
     SettingsDialog.cpp
     widgets/StatusPanel.cpp
@@ -18,6 +19,7 @@ set(NCP_QT_SOURCES
 set(NCP_QT_HEADERS
     MainWindow.hpp
     ProxyController.hpp
+    Launcher.hpp
     LicenseVerifier.hpp
     SettingsDialog.hpp
     widgets/StatusPanel.hpp
