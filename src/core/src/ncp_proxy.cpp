@@ -28,6 +28,10 @@
     #endif
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <mswsock.h>
+    #ifndef TCP_FASTOPEN
+        #define TCP_FASTOPEN 15  // Windows 10 1607+: enable client TFO
+    #endif
     using ncp_socket_t = SOCKET;
     #define NCP_INVALID_SOCK INVALID_SOCKET
     #define NCP_CLOSE_SOCKET(s) closesocket(s)
@@ -259,6 +263,16 @@ public:
 
     std::mutex socks_mu;
     std::set<ncp_socket_t> open_socks;
+#ifdef _WIN32
+    // Deferred TFO connects (Windows): socket -> destination address.
+    // The actual ConnectEx (first payload as lpSendBuffer -> data-in-SYN
+    // when a TFO cookie is cached) happens on the first client->upstream
+    // write, mirroring Linux TCP_FASTOPEN_CONNECT semantics.
+    std::mutex tfo_mu_;
+    std::map<ncp_socket_t, std::pair<sockaddr_storage, int>> tfo_deferred_;
+    LPFN_CONNECTEX connectex_ = nullptr;
+    bool connectex_resolved_ = false;
+#endif
 
     // ── Live monitoring (file-based IPC) ──
     std::mutex events_mu;
@@ -388,6 +402,12 @@ public:
     }
     void close_sock(ncp_socket_t s) {
         if (s == NCP_INVALID_SOCK) return;
+#ifdef _WIN32
+        {
+            std::lock_guard<std::mutex> lk(tfo_mu_);
+            tfo_deferred_.erase(s);
+        }
+#endif
 #ifdef _WIN32
         ::shutdown(s, SD_BOTH);
 #else
@@ -579,7 +599,28 @@ public:
                              reinterpret_cast<const char*>(&one), sizeof(one));
             }
 #endif
-
+#ifdef _WIN32
+            // Windows TFO: defer the connect. ConnectEx with the first
+            // payload as lpSendBuffer performs data-in-SYN on first write.
+            bool win_tfo_deferred = false;
+            if (cfg.tfo) {
+                int one = 1;
+                if (::setsockopt(s, IPPROTO_TCP, TCP_FASTOPEN,
+                                 reinterpret_cast<const char*>(&one),
+                                 sizeof(one)) == 0) {
+                    sockaddr_storage ss{};
+                    std::memcpy(&ss, ai->ai_addr, ai->ai_addrlen);
+                    {
+                        std::lock_guard<std::mutex> lk(tfo_mu_);
+                        tfo_deferred_[s] = std::make_pair(
+                            ss, static_cast<int>(ai->ai_addrlen));
+                    }
+                    win_tfo_deferred = true;
+                }
+                // OS without TFO support: fall through to plain connect
+            }
+            if (!win_tfo_deferred) {
+#endif
             // non-blocking connect with timeout
 #ifdef _WIN32
             u_long nb = 1;
@@ -634,6 +675,9 @@ public:
 #else
             fcntl(s, F_SETFL, flags);
 #endif
+#ifdef _WIN32
+            }
+#endif
             int nodelay = 1;
             ::setsockopt(s, IPPROTO_TCP, TCP_NODELAY,
                          reinterpret_cast<const char*>(&nodelay), sizeof(nodelay));
@@ -660,9 +704,63 @@ public:
         return NCP_INVALID_SOCK;
     }
 
+#ifdef _WIN32
+    // Complete a deferred TFO connect (Windows): ConnectEx with the first
+    // payload as lpSendBuffer. With a cached TFO cookie the data rides in
+    // the SYN; without one Windows sends a cookie request and ConnectEx
+    // still completes as a normal connect + send.
+    // Returns bytes consumed by ConnectEx (0 = caller sends data normally).
+    size_t tfo_connect_send(ncp_socket_t s, const uint8_t* data, size_t len) {
+        sockaddr_storage ss{};
+        int slen = 0;
+        {
+            std::lock_guard<std::mutex> lk(tfo_mu_);
+            auto it = tfo_deferred_.find(s);
+            if (it == tfo_deferred_.end()) return 0;  // not a TFO socket
+            ss = it->second.first;
+            slen = it->second.second;
+            tfo_deferred_.erase(it);
+        }
+        if (!connectex_resolved_) {
+            GUID guid = WSAID_CONNECTEX;
+            DWORD cb = 0;
+            LPFN_CONNECTEX fn = nullptr;
+            if (::WSAIoctl(s, SIO_GET_EXTENSION_FUNCTION_POINTER,
+                           &guid, sizeof(guid), &fn, sizeof(fn), &cb,
+                           nullptr, nullptr) == 0)
+                connectex_ = fn;
+            connectex_resolved_ = true;
+        }
+        if (connectex_) {
+            DWORD sent = 0;
+            if (connectex_(s, reinterpret_cast<SOCKADDR*>(&ss), slen,
+                           const_cast<uint8_t*>(data),
+                           static_cast<DWORD>(len), &sent, nullptr)) {
+                ::setsockopt(s, SOL_SOCKET, SO_UPDATE_CONNECT_CONTEXT,
+                             nullptr, 0);
+                return static_cast<size_t>(sent);
+            }
+        }
+        // Fallback: plain blocking connect; caller sends data normally.
+        ::connect(s, reinterpret_cast<SOCKADDR*>(&ss), slen);
+        return 0;
+    }
+#endif
+
     // send first payload with desync splitting
     bool send_first_payload(ncp_socket_t up, const uint8_t* data, size_t len,
                             const DesyncPlan& plan) {
+#ifdef _WIN32
+        if (cfg.tfo) {
+            size_t used = tfo_connect_send(up, data, len);
+            if (used > 0) {
+                // First chunk already left (in the SYN with a cached
+                // cookie). TFO replaces the first-write split.
+                if (used >= len) return true;
+                return ncp_send_all(up, data + used, len - used);
+            }
+        }
+#endif
         std::vector<size_t> cuts =
             resolve_split_positions(plan.positions, data, len);
         if (cuts.empty()) return ncp_send_all(up, data, len);
