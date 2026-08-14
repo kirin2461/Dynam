@@ -1,0 +1,2883 @@
+
+---
+events:
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake:12 (find_program)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_UNAME"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "uname"
+    candidate_directories:
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    searched_directories:
+      - "/usr/local/sbin/uname"
+      - "/usr/local/bin/uname"
+      - "/usr/sbin/uname"
+    found: "/usr/bin/uname"
+    search_context:
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineSystem.cmake:213 (message)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      The target system is: Windows -  - x86_64
+      The host system is: Linux - 5.4.0-216-generic - x86_64
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeNinjaFindMake.cmake:5 (find_program)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_MAKE_PROGRAM"
+    description: "Program used to build from build.ninja files."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ninja-build"
+      - "ninja"
+      - "samu"
+    candidate_directories:
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    searched_directories:
+      - "/opt/win-deps/bin/ninja-build"
+      - "/opt/win-deps/bin/ninja"
+      - "/opt/win-deps/bin/samu"
+      - "/opt/win-deps/sbin/ninja-build"
+      - "/opt/win-deps/sbin/ninja"
+      - "/opt/win-deps/sbin/samu"
+      - "/opt/win-deps/ninja-build"
+      - "/opt/win-deps/ninja"
+      - "/opt/win-deps/samu"
+      - "/usr/local/sbin/ninja-build"
+      - "/usr/local/sbin/ninja"
+      - "/usr/local/sbin/samu"
+      - "/usr/local/bin/ninja-build"
+      - "/usr/local/bin/ninja"
+      - "/usr/local/bin/samu"
+      - "/usr/sbin/ninja-build"
+      - "/usr/sbin/ninja"
+      - "/usr/sbin/samu"
+      - "/usr/bin/ninja-build"
+    found: "/usr/bin/ninja"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake:115 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:71 (_cmake_find_compiler_path)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_CXX_COMPILER_WITH_PATH"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-g++-posix"
+    candidate_directories:
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    searched_directories:
+      - "/opt/win-deps/bin/x86_64-w64-mingw32-g++-posix"
+      - "/opt/win-deps/sbin/x86_64-w64-mingw32-g++-posix"
+      - "/opt/win-deps/x86_64-w64-mingw32-g++-posix"
+      - "/usr/local/sbin/x86_64-w64-mingw32-g++-posix"
+      - "/usr/local/bin/x86_64-w64-mingw32-g++-posix"
+      - "/usr/sbin/x86_64-w64-mingw32-g++-posix"
+    found: "/usr/bin/x86_64-w64-mingw32-g++-posix"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:501 (find_file)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:538 (CMAKE_DETERMINE_COMPILER_ID_WRITE)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:8 (CMAKE_DETERMINE_COMPILER_ID_BUILD)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:125 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "file"
+    variable: "src_in"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "CMakeCXXCompilerId.cpp.in"
+    candidate_directories:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/"
+    found: "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerId.cpp.in"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:125 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Compiling the CXX compiler identification source file "CMakeCXXCompilerId.cpp" succeeded.
+      Compiler: /usr/bin/x86_64-w64-mingw32-g++-posix 
+      Build flags: 
+      Id flags:  
+      
+      The output was:
+      0
+      
+      
+      Compilation of the CXX compiler identification source "CMakeCXXCompilerId.cpp" produced "a.exe"
+      
+      The CXX compiler identification is GNU, found in:
+        /root/work/Dynam/build-win-nonpcap/CMakeFiles/4.4.0/CompilerIdCXX/a.exe
+      
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_AR"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-ar"
+      - "ar"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-ar"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_RANLIB"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-ranlib"
+      - "ranlib"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-ranlib"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_STRIP"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-strip"
+      - "strip"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-strip"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_LINKER"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-ld"
+      - "ld"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-ld"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_NM"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-nm"
+      - "nm"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-nm"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_OBJDUMP"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-objdump"
+      - "objdump"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-objdump"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_OBJCOPY"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-objcopy"
+      - "objcopy"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-objcopy"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_READELF"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-readelf"
+      - "readelf"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-readelf"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_DLLTOOL"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-dlltool"
+      - "dlltool"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-dlltool"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_ADDR2LINE"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-addr2line"
+      - "addr2line"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    found: "/usr/bin/x86_64-w64-mingw32-addr2line"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeFindBinUtils.cmake:247 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:206 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_TAPI"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-tapi"
+      - "tapi"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    searched_directories:
+      - "/usr/bin/x86_64-w64-mingw32-tapi"
+      - "/usr/local/sbin/x86_64-w64-mingw32-tapi"
+      - "/usr/local/bin/x86_64-w64-mingw32-tapi"
+      - "/usr/sbin/x86_64-w64-mingw32-tapi"
+      - "/sbin/x86_64-w64-mingw32-tapi"
+      - "/bin/x86_64-w64-mingw32-tapi"
+      - "/usr/games/x86_64-w64-mingw32-tapi"
+      - "/usr/local/games/x86_64-w64-mingw32-tapi"
+      - "/snap/bin/x86_64-w64-mingw32-tapi"
+      - "/usr/bin/tapi"
+      - "/usr/local/sbin/tapi"
+      - "/usr/local/bin/tapi"
+      - "/usr/sbin/tapi"
+      - "/sbin/tapi"
+      - "/bin/tapi"
+      - "/usr/games/tapi"
+      - "/usr/local/games/tapi"
+      - "/snap/bin/tapi"
+    found: false
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake:18 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:207 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_CXX_COMPILER_AR"
+    description: "A wrapper around 'ar' adding the appropriate '--plugin' option for the GCC compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-gcc-ar-9.3"
+      - "x86_64-w64-mingw32-gcc-ar-9"
+      - "x86_64-w64-mingw32-gcc-ar9"
+      - "x86_64-w64-mingw32-gcc-ar-posix"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    searched_directories:
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ar-9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ar9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ar9"
+    found: "/usr/bin/x86_64-w64-mingw32-gcc-ar-posix"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake:30 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCXXCompiler.cmake:207 (include)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "program"
+    variable: "CMAKE_CXX_COMPILER_RANLIB"
+    description: "A wrapper around 'ranlib' adding the appropriate '--plugin' option for the GCC compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "x86_64-w64-mingw32-gcc-ranlib-9"
+      - "x86_64-w64-mingw32-gcc-ranlib9"
+      - "x86_64-w64-mingw32-gcc-ranlib-posix"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+    searched_directories:
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ranlib9"
+    found: "/usr/bin/x86_64-w64-mingw32-gcc-ranlib-posix"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:123 (try_compile)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    checks:
+      - "Detecting CXX compiler ABI info"
+    directories:
+      source: "/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-2nqspj"
+      binary: "/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-2nqspj"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_CXX_SCAN_FOR_MODULES: "OFF"
+      CMAKE_CXX_STDLIB_MODULES_JSON: ""
+      CMAKE_EXE_LINKER_FLAGS: "-static -static-libgcc -static-libstdc++"
+    buildResult:
+      variable: "CMAKE_CXX_ABI_COMPILED"
+      cached: false
+      stdout: |
+        Change Dir: '/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-2nqspj'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_0ed4a
+        [1/2] /usr/bin/x86_64-w64-mingw32-g++-posix   -v -o CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj -c /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-g++-posix
+        Target: x86_64-w64-mingw32
+        Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking
+        Thread model: posix
+        gcc version 9.3-posix 20200320 (GCC) 
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64'
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/cc1plus -quiet -v -D_REENTRANT /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpbase CMakeCXXCompilerABI.cpp -mtune=generic -march=x86-64 -auxbase-strip CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj -version -o /tmp/ccVQL2ka.s
+        GNU C++14 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)
+        	compiled by GNU C version 9.3.0, GMP version 6.2.0, MPFR version 4.0.2, MPC version 1.1.0, isl version isl-0.22.1-GMP
+        
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        ignoring nonexistent directory "/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/sys-include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/x86_64-w64-mingw32
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/backward
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include
+        End of search list.
+        GNU C++14 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)
+        	compiled by GNU C version 9.3.0, GMP version 6.2.0, MPFR version 4.0.2, MPC version 1.1.0, isl version isl-0.22.1-GMP
+        
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        Compiler executable checksum: 1fc21a67ecb9c8821b15a2c77da80454
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64'
+         /usr/bin/x86_64-w64-mingw32-as -v -o CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj /tmp/ccVQL2ka.s
+        GNU assembler version 2.34 (x86_64-w64-mingw32) using BFD version (GNU Binutils) 2.34
+        COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/
+        LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64'
+        [2/2] : && /usr/bin/x86_64-w64-mingw32-g++-posix  -static -static-libgcc -static-libstdc++ -v -Wl,-v CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj -o cmTC_0ed4a.exe -Wl,--out-implib,libcmTC_0ed4a.dll.a -Wl,--major-image-version,0,--minor-image-version,0   && :
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-g++-posix
+        COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper
+        Target: x86_64-w64-mingw32
+        Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking
+        Thread model: posix
+        gcc version 9.3-posix 20200320 (GCC) 
+        COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/
+        LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/
+        COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-v' '-o' 'cmTC_0ed4a.exe' '-mtune=generic' '-march=x86-64'
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/collect2 -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoJPSht.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_0ed4a.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj --out-implib libcmTC_0ed4a.dll.a --major-image-version 0 --minor-image-version 0 -lstdc++ -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o
+        collect2 version 9.3-posix 20200320
+        /usr/bin/x86_64-w64-mingw32-ld -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoJPSht.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_0ed4a.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj --out-implib libcmTC_0ed4a.dll.a --major-image-version 0 --minor-image-version 0 -lstdc++ -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o
+        GNU ld (GNU Binutils) 2.34
+        COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-v' '-o' 'cmTC_0ed4a.exe' '-mtune=generic' '-march=x86-64'
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:255 (message)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed CXX implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++]
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/x86_64-w64-mingw32]
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/backward]
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include]
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed]
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include]
+        end of search list found
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++]
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/x86_64-w64-mingw32] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/x86_64-w64-mingw32]
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/backward] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/backward]
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include]
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed]
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include] ==> [/usr/x86_64-w64-mingw32/include]
+        implicit include dirs: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/x86_64-w64-mingw32;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/backward;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed;/usr/x86_64-w64-mingw32/include]
+      
+      
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeParseImplicitLinkInfo.cmake:355 (find_library)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:289 (cmake_parse_implicit_link_info2)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    mode: "library"
+    variable: "CMAKE_CXX_IMPLICIT_LINK_LIBRARY_stdc++"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "libstdc++.a"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/opt/win-deps/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/"
+      - "/opt/win-deps/usr/x86_64-w64-mingw32/lib/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/"
+      - "/usr/x86_64-w64-mingw32/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/opt/win-deps/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/"
+      - "/opt/win-deps/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/"
+      - "/opt/win-deps/usr/x86_64-w64-mingw32/lib/"
+      - "/opt/win-deps/usr/x86_64-w64-mingw32/lib/"
+    found: false
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/local/bin"
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin"
+        - "/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:291 (message)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCXXCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "CMakeLists.txt:2 (project)"
+    message: |
+      Parsed CXX implicit link information:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        linker tool regex: [^[ 	]*(->|"|[0-9]+>[ 	-]*Build:[ 	0-9]+ ms[ 	]*)?[ 	]*(([^"]*[/\\])?(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild))("|,| |$)]
+        ignore line: [Change Dir: '/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-2nqspj']
+        ignore line: []
+        ignore line: [Run Build Command(s): /usr/bin/ninja -v cmTC_0ed4a]
+        ignore line: [[1/2] /usr/bin/x86_64-w64-mingw32-g++-posix   -v -o CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj -c /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-g++-posix]
+        ignore line: [Target: x86_64-w64-mingw32]
+        ignore line: [Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking]
+        ignore line: [Thread model: posix]
+        ignore line: [gcc version 9.3-posix 20200320 (GCC) ]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64']
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/cc1plus -quiet -v -D_REENTRANT /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCXXCompilerABI.cpp -quiet -dumpbase CMakeCXXCompilerABI.cpp -mtune=generic -march=x86-64 -auxbase-strip CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj -version -o /tmp/ccVQL2ka.s]
+        ignore line: [GNU C++14 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)]
+        ignore line: [	compiled by GNU C version 9.3.0  GMP version 6.2.0  MPFR version 4.0.2  MPC version 1.1.0  isl version isl-0.22.1-GMP]
+        ignore line: []
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [ignoring nonexistent directory "/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/sys-include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/x86_64-w64-mingw32]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include/c++/backward]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include]
+        ignore line: [End of search list.]
+        ignore line: [GNU C++14 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)]
+        ignore line: [	compiled by GNU C version 9.3.0  GMP version 6.2.0  MPFR version 4.0.2  MPC version 1.1.0  isl version isl-0.22.1-GMP]
+        ignore line: []
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [Compiler executable checksum: 1fc21a67ecb9c8821b15a2c77da80454]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64']
+        ignore line: [ /usr/bin/x86_64-w64-mingw32-as -v -o CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj /tmp/ccVQL2ka.s]
+        ignore line: [GNU assembler version 2.34 (x86_64-w64-mingw32) using BFD version (GNU Binutils) 2.34]
+        ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/]
+        ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj' '-c' '-shared-libgcc' '-mtune=generic' '-march=x86-64']
+        ignore line: [[2/2] : && /usr/bin/x86_64-w64-mingw32-g++-posix  -static -static-libgcc -static-libstdc++ -v -Wl -v CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj -o cmTC_0ed4a.exe -Wl --out-implib libcmTC_0ed4a.dll.a -Wl --major-image-version 0 --minor-image-version 0   && :]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-g++-posix]
+        ignore line: [COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper]
+        ignore line: [Target: x86_64-w64-mingw32]
+        ignore line: [Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking]
+        ignore line: [Thread model: posix]
+        ignore line: [gcc version 9.3-posix 20200320 (GCC) ]
+        ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/]
+        ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-v' '-o' 'cmTC_0ed4a.exe' '-mtune=generic' '-march=x86-64']
+        link line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/collect2 -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoJPSht.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_0ed4a.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj --out-implib libcmTC_0ed4a.dll.a --major-image-version 0 --minor-image-version 0 -lstdc++ -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/collect2] ==> ignore
+          arg [-plugin] ==> ignore
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so] ==> ignore
+          arg [-plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/ccoJPSht.res] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingw32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_eh] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmoldname] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingwex] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmsvcrt] ==> ignore
+          arg [-plugin-opt=-pass-through=-lpthread] ==> ignore
+          arg [-plugin-opt=-pass-through=-ladvapi32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lshell32] ==> ignore
+          arg [-plugin-opt=-pass-through=-luser32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lkernel32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingw32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_eh] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmoldname] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingwex] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmsvcrt] ==> ignore
+          arg [-m] ==> ignore
+          arg [i386pep] ==> ignore
+          arg [-Bstatic] ==> search static
+          arg [-o] ==> ignore
+          arg [cmTC_0ed4a.exe] ==> ignore
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o] ==> obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o]
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o] ==> obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o]
+          arg [-L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix] ==> dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix]
+          arg [-L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib] ==> dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib]
+          arg [-v] ==> ignore
+          arg [CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj] ==> ignore
+          arg [--out-implib] ==> ignore
+          arg [libcmTC_0ed4a.dll.a] ==> ignore
+          arg [--major-image-version] ==> ignore
+          arg [0] ==> ignore
+          arg [--minor-image-version] ==> ignore
+          arg [0] ==> ignore
+          arg [-lstdc++] ==> lib [SEARCH_STATIC:stdc++]
+          arg [-lmingw32] ==> lib [mingw32]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lgcc_eh] ==> lib [gcc_eh]
+          arg [-lmoldname] ==> lib [moldname]
+          arg [-lmingwex] ==> lib [mingwex]
+          arg [-lmsvcrt] ==> lib [msvcrt]
+          arg [-lpthread] ==> lib [pthread]
+          arg [-ladvapi32] ==> lib [advapi32]
+          arg [-lshell32] ==> lib [shell32]
+          arg [-luser32] ==> lib [user32]
+          arg [-lkernel32] ==> lib [kernel32]
+          arg [-lmingw32] ==> lib [mingw32]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lgcc_eh] ==> lib [gcc_eh]
+          arg [-lmoldname] ==> lib [moldname]
+          arg [-lmingwex] ==> lib [mingwex]
+          arg [-lmsvcrt] ==> lib [msvcrt]
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o] ==> obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+        ignore line: [collect2 version 9.3-posix 20200320]
+        ignore line: [/usr/bin/x86_64-w64-mingw32-ld -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccoJPSht.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_0ed4a.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_0ed4a.dir/CMakeCXXCompilerABI.cpp.obj --out-implib libcmTC_0ed4a.dll.a --major-image-version 0 --minor-image-version 0 -lstdc++ -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+        ignore line: [GNU ld (GNU Binutils) 2.34]
+        ignore line: [COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-v' '-o' 'cmTC_0ed4a.exe' '-mtune=generic' '-march=x86-64']
+        ignore line: []
+        ignore line: []
+        search lib [SEARCH_STATIC:stdc++] ==> [stdc++]
+        remove lib [gcc_eh]
+        remove lib [msvcrt]
+        remove lib [gcc_eh]
+        remove lib [msvcrt]
+        collapse obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o] ==> [/usr/x86_64-w64-mingw32/lib/crt2.o]
+        collapse library dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix]
+        collapse library dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib] ==> [/usr/x86_64-w64-mingw32/lib]
+        implicit libs: [stdc++;mingw32;gcc;moldname;mingwex;pthread;advapi32;shell32;user32;kernel32;mingw32;gcc;moldname;mingwex]
+        implicit objs: [/usr/x86_64-w64-mingw32/lib/crt2.o;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+        implicit dirs: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix;/usr/x86_64-w64-mingw32/lib]
+        implicit fwks: []
+      
+      
+  -
+    kind: "find_package-v1"
+    backtrace:
+      - "CMakeLists.txt:209 (find_package)"
+    name: "unofficial-sodium"
+    configs:
+      -
+        filename: "unofficial-sodium.cps"
+        kind: "cps"
+      -
+        filename: "unofficial-sodiumConfig.cmake"
+        kind: "cmake"
+      -
+        filename: "unofficial-sodium-config.cmake"
+        kind: "cmake"
+    version_request:
+      exact: false
+    settings:
+      required: "optional"
+      quiet: true
+      global: false
+      policy_scope: true
+      bypass_provider: false
+      names:
+        - "unofficial-sodium"
+      path_suffixes:
+        - ""
+      paths:
+        CMAKE_FIND_USE_CMAKE_PATH: true
+        CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+        CMAKE_FIND_USE_INSTALL_PREFIX: true
+        CMAKE_FIND_USE_PACKAGE_ROOT_PATH: true
+        CMAKE_FIND_USE_CMAKE_PACKAGE_REGISTRY: true
+        CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY: true
+        CMAKE_FIND_ROOT_PATH_MODE: "ONLY"
+    candidates:
+      -
+        path: "/usr/x86_64-w64-mingw32/unofficial-sodiumConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/x86_64-w64-mingw32/unofficial-sodium-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/x86_64-w64-mingw32/lib/cps/unofficial-sodium.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/x86_64-w64-mingw32/share/cps/unofficial-sodium.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/unofficial-sodiumConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/unofficial-sodium-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/cmake/unofficial-sodiumConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/cmake/unofficial-sodium-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/lib/cps/unofficial-sodium.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/share/cps/unofficial-sodium.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/unofficial-sodiumConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/unofficial-sodium-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/cmake/unofficial-sodiumConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/cmake/unofficial-sodium-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/lib/cps/unofficial-sodium.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/share/cps/unofficial-sodium.cps"
+        mode: "cps"
+        reason: "no_exist"
+    found: null
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:517 (find_program)"
+      - "CMakeLists.txt:214 (find_package)"
+    mode: "program"
+    variable: "PKG_CONFIG_EXECUTABLE"
+    description: "pkg-config executable"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "pkg-config"
+      - "pkgconf"
+    candidate_directories:
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/local/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/"
+      - "/bin/"
+      - "/sbin/"
+    searched_directories:
+      - "/opt/win-deps/bin/pkg-config"
+      - "/opt/win-deps/bin/pkgconf"
+      - "/opt/win-deps/sbin/pkg-config"
+      - "/opt/win-deps/sbin/pkgconf"
+      - "/opt/win-deps/pkg-config"
+      - "/opt/win-deps/pkgconf"
+      - "/usr/local/sbin/pkg-config"
+      - "/usr/local/sbin/pkgconf"
+      - "/usr/local/bin/pkg-config"
+      - "/usr/local/bin/pkgconf"
+      - "/usr/sbin/pkg-config"
+      - "/usr/sbin/pkgconf"
+    found: "/usr/bin/pkg-config"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:761 (find_library)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:811 (_pkg_find_libs)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:1149 (_pkg_recalculate)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:1166 (_pkg_check_modules_internal)"
+      - "CMakeLists.txt:216 (pkg_check_modules)"
+    mode: "library"
+    variable: "pkgcfg_lib_SODIUM_sodium"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "sodium"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/opt/win-deps/lib/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+    found: "/opt/win-deps/lib/libsodium.a"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/local/bin"
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin"
+        - "/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindOpenSSL.cmake:370 (find_path)"
+      - "CMakeLists.txt:240 (find_package)"
+    mode: "path"
+    variable: "OPENSSL_INCLUDE_DIR"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "openssl/ssl.h"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/include/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/opt/win-deps/include/"
+      - "/opt/win-deps/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/include/openssl/ssl.h"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/openssl/ssl.h"
+    found: "/opt/win-deps/include/"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindOpenSSL.cmake:569 (find_library)"
+      - "CMakeLists.txt:240 (find_package)"
+    mode: "library"
+    variable: "LIB_EAY"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "crypto"
+      - "libeay32"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/MinGW/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib64/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/opt/win-deps/lib/MinGW/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/lib64/"
+      - "/opt/win-deps/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/MinGW/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/MinGW/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib64/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib64/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/opt/win-deps/lib/MinGW/"
+      - "/opt/win-deps/lib/MinGW/"
+    found: "/opt/win-deps/lib/libcrypto.a"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/local/bin"
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin"
+        - "/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindOpenSSL.cmake:580 (find_library)"
+      - "CMakeLists.txt:240 (find_package)"
+    mode: "library"
+    variable: "SSL_EAY"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "ssl"
+      - "ssleay32"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/MinGW/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib64/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/opt/win-deps/lib/MinGW/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/lib64/"
+      - "/opt/win-deps/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/MinGW/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/MinGW/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib64/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib64/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/opt/win-deps/lib/MinGW/"
+      - "/opt/win-deps/lib/MinGW/"
+    found: "/opt/win-deps/lib/libssl.a"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/local/bin"
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin"
+        - "/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find_package-v1"
+    backtrace:
+      - "CMakeLists.txt:267 (find_package)"
+    name: "libwebsockets"
+    configs:
+      -
+        filename: "libwebsockets.cps"
+        kind: "cps"
+      -
+        filename: "libwebsocketsConfig.cmake"
+        kind: "cmake"
+      -
+        filename: "libwebsockets-config.cmake"
+        kind: "cmake"
+    version_request:
+      exact: false
+    settings:
+      required: "optional"
+      quiet: true
+      global: false
+      policy_scope: true
+      bypass_provider: false
+      names:
+        - "libwebsockets"
+      path_suffixes:
+        - ""
+      paths:
+        CMAKE_FIND_USE_CMAKE_PATH: true
+        CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+        CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+        CMAKE_FIND_USE_INSTALL_PREFIX: true
+        CMAKE_FIND_USE_PACKAGE_ROOT_PATH: true
+        CMAKE_FIND_USE_CMAKE_PACKAGE_REGISTRY: true
+        CMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY: true
+        CMAKE_FIND_ROOT_PATH_MODE: "ONLY"
+    candidates:
+      -
+        path: "/usr/x86_64-w64-mingw32/libwebsocketsConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/x86_64-w64-mingw32/libwebsockets-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/usr/x86_64-w64-mingw32/lib/cps/libwebsockets.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/usr/x86_64-w64-mingw32/share/cps/libwebsockets.cps"
+        mode: "cps"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/libwebsocketsConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/libwebsockets-config.cmake"
+        mode: "config"
+        reason: "no_exist"
+      -
+        path: "/opt/win-deps/cmake/libwebsocketsConfig.cmake"
+        mode: "config"
+        reason: "no_exist"
+    found:
+      path: "/opt/win-deps/cmake/libwebsockets-config.cmake"
+      mode: "config"
+      version: "4.3.3-unknown"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:761 (find_library)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:811 (_pkg_find_libs)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:1149 (_pkg_recalculate)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindPkgConfig.cmake:1166 (_pkg_check_modules_internal)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindSQLite3.cmake:80 (pkg_check_modules)"
+      - "src/core/CMakeLists.txt:254 (find_package)"
+    mode: "library"
+    variable: "pkgcfg_lib_PC_SQLite3_sqlite3"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "sqlite3"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/usr/lib/x86_64-linux-gnu/"
+      - "/opt/win-deps/usr/lib/x86_64-linux-gnu/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/usr/lib/x86_64-linux-gnu/"
+      - "/opt/win-deps/usr/lib/x86_64-linux-gnu/"
+    found: false
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/local/bin"
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin"
+        - "/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindSQLite3.cmake:84 (find_path)"
+      - "src/core/CMakeLists.txt:254 (find_package)"
+    mode: "path"
+    variable: "SQLite3_INCLUDE_DIR"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "sqlite3.h"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/include/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/usr/include/"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/bin/"
+      - "/usr/x86_64-w64-mingw32/sbin/"
+      - "/usr/x86_64-w64-mingw32/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/games/"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/"
+      - "/usr/x86_64-w64-mingw32/snap/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/include/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/x86_64-w64-mingw32/usr/local/include/"
+      - "/usr/x86_64-w64-mingw32/usr/local/"
+      - "/usr/x86_64-w64-mingw32/include/"
+      - "/opt/win-deps/include/"
+      - "/opt/win-deps/"
+      - "/opt/win-deps/usr/include/"
+      - "/opt/win-deps/usr/local/sbin/"
+      - "/opt/win-deps/usr/local/bin/"
+      - "/opt/win-deps/usr/sbin/"
+      - "/opt/win-deps/usr/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/usr/games/"
+      - "/opt/win-deps/usr/local/games/"
+      - "/opt/win-deps/snap/bin/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/include/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/opt/win-deps/usr/local/include/"
+      - "/opt/win-deps/usr/local/"
+      - "/opt/win-deps/include/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/include/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/include/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/bin/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/sbin/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/bin/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/games/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/snap/bin/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/include/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/include/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/sqlite3.h"
+      - "/usr/x86_64-w64-mingw32/include/sqlite3.h"
+      - "/opt/win-deps/include/sqlite3.h"
+      - "/opt/win-deps/sqlite3.h"
+      - "/opt/win-deps/usr/include/sqlite3.h"
+      - "/opt/win-deps/usr/local/sbin/sqlite3.h"
+      - "/opt/win-deps/usr/local/bin/sqlite3.h"
+      - "/opt/win-deps/usr/sbin/sqlite3.h"
+      - "/opt/win-deps/usr/bin/sqlite3.h"
+      - "/opt/win-deps/sbin/sqlite3.h"
+      - "/opt/win-deps/bin/sqlite3.h"
+      - "/opt/win-deps/usr/games/sqlite3.h"
+      - "/opt/win-deps/usr/local/games/sqlite3.h"
+      - "/opt/win-deps/snap/bin/sqlite3.h"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/include/sqlite3.h"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/sqlite3.h"
+      - "/opt/win-deps/usr/local/include/sqlite3.h"
+      - "/opt/win-deps/usr/local/sqlite3.h"
+      - "/opt/win-deps/include/sqlite3.h"
+    found: false
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindSQLite3.cmake:91 (find_library)"
+      - "src/core/CMakeLists.txt:254 (find_package)"
+    mode: "library"
+    variable: "SQLite3_LIBRARY"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "sqlite3"
+      - "sqlite"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/usr/lib/x86_64-linux-gnu/"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/bin/"
+      - "/usr/x86_64-w64-mingw32/sbin/"
+      - "/usr/x86_64-w64-mingw32/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/games/"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/"
+      - "/usr/x86_64-w64-mingw32/snap/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/"
+      - "/opt/win-deps/usr/lib/x86_64-linux-gnu/"
+      - "/opt/win-deps/usr/local/sbin/"
+      - "/opt/win-deps/usr/local/bin/"
+      - "/opt/win-deps/usr/sbin/"
+      - "/opt/win-deps/usr/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/usr/games/"
+      - "/opt/win-deps/usr/local/games/"
+      - "/opt/win-deps/snap/bin/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/opt/win-deps/usr/local/lib/"
+      - "/opt/win-deps/usr/local/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/usr/lib/x86_64-linux-gnu/"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/bin/"
+      - "/usr/x86_64-w64-mingw32/sbin/"
+      - "/usr/x86_64-w64-mingw32/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/games/"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/"
+      - "/usr/x86_64-w64-mingw32/snap/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/"
+      - "/opt/win-deps/usr/lib/x86_64-linux-gnu/"
+      - "/opt/win-deps/usr/local/sbin/"
+      - "/opt/win-deps/usr/local/bin/"
+      - "/opt/win-deps/usr/sbin/"
+      - "/opt/win-deps/usr/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/usr/games/"
+      - "/opt/win-deps/usr/local/games/"
+      - "/opt/win-deps/snap/bin/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/opt/win-deps/usr/local/lib/"
+      - "/opt/win-deps/usr/local/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/usr/lib/x86_64-linux-gnu/"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/bin/"
+      - "/usr/x86_64-w64-mingw32/sbin/"
+      - "/usr/x86_64-w64-mingw32/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/games/"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/"
+      - "/usr/x86_64-w64-mingw32/snap/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/"
+      - "/opt/win-deps/usr/lib/x86_64-linux-gnu/"
+      - "/opt/win-deps/usr/local/sbin/"
+      - "/opt/win-deps/usr/local/bin/"
+      - "/opt/win-deps/usr/sbin/"
+      - "/opt/win-deps/usr/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/usr/games/"
+      - "/opt/win-deps/usr/local/games/"
+      - "/opt/win-deps/snap/bin/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/opt/win-deps/usr/local/lib/"
+      - "/opt/win-deps/usr/local/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+    found: false
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/local/bin"
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin"
+        - "/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "src/core/CMakeLists.txt:267 (find_library)"
+    mode: "library"
+    variable: "SODIUM_LIBRARY"
+    description: "Path to a library."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "sodium"
+      - "libsodium"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/bin/"
+      - "/usr/x86_64-w64-mingw32/sbin/"
+      - "/usr/x86_64-w64-mingw32/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/games/"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/"
+      - "/usr/x86_64-w64-mingw32/snap/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/"
+      - "/opt/win-deps/usr/local/sbin/"
+      - "/opt/win-deps/usr/local/bin/"
+      - "/opt/win-deps/usr/sbin/"
+      - "/opt/win-deps/usr/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/usr/games/"
+      - "/opt/win-deps/usr/local/games/"
+      - "/opt/win-deps/snap/bin/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/opt/win-deps/usr/local/lib/"
+      - "/opt/win-deps/usr/local/"
+      - "/opt/win-deps/lib/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/lib/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/bin/"
+      - "/usr/x86_64-w64-mingw32/sbin/"
+      - "/usr/x86_64-w64-mingw32/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/games/"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/"
+      - "/usr/x86_64-w64-mingw32/snap/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/"
+      - "/usr/x86_64-w64-mingw32/lib/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+    found: "/opt/win-deps/lib/libsodium.a"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_SYSTEM_LIBRARY_PATH:
+        - "/usr/local/bin"
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin"
+        - "/bin"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "src/core/CMakeLists.txt:268 (find_path)"
+    mode: "path"
+    variable: "SODIUM_INCLUDE_DIR"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "sodium.h"
+    candidate_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/include/"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/"
+      - "/usr/x86_64-w64-mingw32/usr/bin/"
+      - "/usr/x86_64-w64-mingw32/sbin/"
+      - "/usr/x86_64-w64-mingw32/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/games/"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/"
+      - "/usr/x86_64-w64-mingw32/snap/bin/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/include/"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/x86_64-w64-mingw32/usr/local/include/"
+      - "/usr/x86_64-w64-mingw32/usr/local/"
+      - "/usr/x86_64-w64-mingw32/include/"
+      - "/opt/win-deps/include/"
+      - "/opt/win-deps/"
+      - "/opt/win-deps/usr/local/sbin/"
+      - "/opt/win-deps/usr/local/bin/"
+      - "/opt/win-deps/usr/sbin/"
+      - "/opt/win-deps/usr/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/usr/games/"
+      - "/opt/win-deps/usr/local/games/"
+      - "/opt/win-deps/snap/bin/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/include/"
+      - "/opt/win-deps/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/opt/win-deps/usr/local/include/"
+      - "/opt/win-deps/usr/local/"
+      - "/opt/win-deps/include/"
+    searched_directories:
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/include/sodium.h"
+      - "/usr/x86_64-w64-mingw32/opt/win-deps/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/sbin/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/bin/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/sbin/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/bin/sodium.h"
+      - "/usr/x86_64-w64-mingw32/sbin/sodium.h"
+      - "/usr/x86_64-w64-mingw32/bin/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/games/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/games/sodium.h"
+      - "/usr/x86_64-w64-mingw32/snap/bin/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/include/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/lib/python3.8/dist-packages/cmake/data/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/include/sodium.h"
+      - "/usr/x86_64-w64-mingw32/usr/local/sodium.h"
+      - "/usr/x86_64-w64-mingw32/include/sodium.h"
+    found: "/opt/win-deps/include/"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/Internal/CheckSourceCompiles.cmake:138 (try_compile)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CheckCXXSourceCompiles.cmake:103 (cmake_check_source_compiles)"
+      - "src/core/CMakeLists.txt:374 (check_cxx_source_compiles)"
+    checks:
+      - "Performing Test HAVE_WFP_SDK"
+    directories:
+      source: "/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-XMxEvm"
+      binary: "/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-XMxEvm"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: ""
+      CMAKE_CXX_FLAGS_DEBUG: "-g"
+      CMAKE_CXX_STDLIB_MODULES_JSON: ""
+      CMAKE_EXE_LINKER_FLAGS: "-static -static-libgcc -static-libstdc++"
+      CMAKE_MODULE_PATH: "/opt/win-deps/cmake"
+    buildResult:
+      variable: "HAVE_WFP_SDK"
+      cached: true
+      stdout: |
+        Change Dir: '/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-XMxEvm'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_34d2e
+        [1/2] /usr/bin/x86_64-w64-mingw32-g++-posix -DHAVE_WFP_SDK -I/root/work/Dynam/deps/wfp-sdk-headers -std=c++17 -o CMakeFiles/cmTC_34d2e.dir/src.cxx.obj -c /root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-XMxEvm/src.cxx
+        [2/2] : && /usr/bin/x86_64-w64-mingw32-g++-posix  -static -static-libgcc -static-libstdc++ CMakeFiles/cmTC_34d2e.dir/src.cxx.obj -o cmTC_34d2e.exe -Wl,--out-implib,libcmTC_34d2e.dll.a -Wl,--major-image-version,0,--minor-image-version,0  -lkernel32 -luser32 -lgdi32 -lwinspool -lshell32 -lole32 -loleaut32 -luuid -lcomdlg32 -ladvapi32 && :
+        
+      exitCode: 0
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FindGit.cmake:111 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FetchContent.cmake:1889 (find_package)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FetchContent.cmake:1622 (__FetchContent_populateSubbuild)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FetchContent.cmake:2160:EVAL:2 (__FetchContent_doPopulation)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FetchContent.cmake:2160 (cmake_language)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/FetchContent.cmake:2401 (__FetchContent_Populate)"
+      - "tests/CMakeLists.txt:13 (FetchContent_MakeAvailable)"
+    mode: "program"
+    variable: "GIT_EXECUTABLE"
+    description: "Git command line client"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "git"
+    candidate_directories:
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/local/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/"
+      - "/bin/"
+      - "/sbin/"
+    searched_directories:
+      - "/opt/win-deps/bin/git"
+      - "/opt/win-deps/sbin/git"
+      - "/opt/win-deps/git"
+      - "/usr/local/sbin/git"
+      - "/usr/local/bin/git"
+      - "/usr/sbin/git"
+    found: "/usr/bin/git"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompiler.cmake:115 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake:67 (_cmake_find_compiler_path)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    mode: "program"
+    variable: "CMAKE_C_COMPILER_WITH_PATH"
+    description: "Path to a program."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-gcc-posix"
+    candidate_directories:
+      - "/opt/win-deps/bin/"
+      - "/opt/win-deps/sbin/"
+      - "/opt/win-deps/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/usr/bin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/local/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/"
+      - "/bin/"
+      - "/sbin/"
+    searched_directories:
+      - "/opt/win-deps/bin/x86_64-w64-mingw32-gcc-posix"
+      - "/opt/win-deps/sbin/x86_64-w64-mingw32-gcc-posix"
+      - "/opt/win-deps/x86_64-w64-mingw32-gcc-posix"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-posix"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-posix"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-posix"
+    found: "/usr/bin/x86_64-w64-mingw32-gcc-posix"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:501 (find_file)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:538 (CMAKE_DETERMINE_COMPILER_ID_WRITE)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:8 (CMAKE_DETERMINE_COMPILER_ID_BUILD)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake:122 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    mode: "file"
+    variable: "src_in"
+    description: "Path to a file."
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: true
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "CMakeCCompilerId.c.in"
+    candidate_directories:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/"
+      - "/opt/win-deps/cmake/"
+    found: "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompilerId.c.in"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:17 (message)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerId.cmake:64 (__determine_compiler_id_test)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake:122 (CMAKE_DETERMINE_COMPILER_ID)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    message: |
+      Compiling the C compiler identification source file "CMakeCCompilerId.c" succeeded.
+      Compiler: /usr/bin/x86_64-w64-mingw32-gcc-posix 
+      Build flags: 
+      Id flags:  
+      
+      The output was:
+      0
+      
+      
+      Compilation of the C compiler identification source "CMakeCCompilerId.c" produced "a.exe"
+      
+      The C compiler identification is GNU, found in:
+        /root/work/Dynam/build-win-nonpcap/CMakeFiles/4.4.0/CompilerIdC/a.exe
+      
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake:18 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake:201 (include)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    mode: "program"
+    variable: "CMAKE_C_COMPILER_AR"
+    description: "A wrapper around 'ar' adding the appropriate '--plugin' option for the GCC compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-gcc-ar-9.3"
+      - "x86_64-w64-mingw32-gcc-ar-9"
+      - "x86_64-w64-mingw32-gcc-ar9"
+      - "x86_64-w64-mingw32-gcc-ar-posix"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/local/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/"
+      - "/bin/"
+      - "/sbin/"
+    searched_directories:
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/local/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/bin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar-9.3"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ar-9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/local/x86_64-w64-mingw32-gcc-ar-9"
+      - "/bin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar-9"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ar9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ar9"
+      - "/usr/local/x86_64-w64-mingw32-gcc-ar9"
+      - "/bin/x86_64-w64-mingw32-gcc-ar9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ar9"
+    found: "/usr/bin/x86_64-w64-mingw32-gcc-ar-posix"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "find-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/Compiler/GNU-FindBinUtils.cmake:30 (find_program)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCCompiler.cmake:201 (include)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    mode: "program"
+    variable: "CMAKE_C_COMPILER_RANLIB"
+    description: "A wrapper around 'ranlib' adding the appropriate '--plugin' option for the GCC compiler"
+    settings:
+      SearchFramework: "NEVER"
+      SearchAppBundle: "NEVER"
+      CMAKE_FIND_USE_CMAKE_PATH: false
+      CMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH: false
+      CMAKE_FIND_USE_SYSTEM_ENVIRONMENT_PATH: true
+      CMAKE_FIND_USE_CMAKE_SYSTEM_PATH: true
+      CMAKE_FIND_USE_INSTALL_PREFIX: true
+    names:
+      - "x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "x86_64-w64-mingw32-gcc-ranlib-9"
+      - "x86_64-w64-mingw32-gcc-ranlib9"
+      - "x86_64-w64-mingw32-gcc-ranlib-posix"
+    candidate_directories:
+      - "/usr/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/bin/"
+      - "/usr/sbin/"
+      - "/sbin/"
+      - "/bin/"
+      - "/usr/games/"
+      - "/usr/local/games/"
+      - "/snap/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/"
+      - "/usr/local/bin/"
+      - "/usr/local/sbin/"
+      - "/usr/local/"
+      - "/bin/"
+      - "/sbin/"
+    searched_directories:
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/local/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib-9.3"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/local/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib-9"
+      - "/usr/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/games/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/games/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/snap/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/usr/local/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/bin/x86_64-w64-mingw32-gcc-ranlib9"
+      - "/sbin/x86_64-w64-mingw32-gcc-ranlib9"
+    found: "/usr/bin/x86_64-w64-mingw32-gcc-ranlib-posix"
+    search_context:
+      CMAKE_PREFIX_PATH:
+        - "/opt/win-deps"
+      ENV{PATH}:
+        - "/usr/local/sbin"
+        - "/usr/local/bin"
+        - "/usr/sbin"
+        - "/usr/bin"
+        - "/sbin"
+        - "/bin"
+        - "/usr/games"
+        - "/usr/local/games"
+        - "/snap/bin"
+      CMAKE_INSTALL_PREFIX: "/usr/local"
+      CMAKE_SYSTEM_PREFIX_PATH:
+        - "/usr/local/lib/python3.8/dist-packages/cmake/data"
+        - "/usr/local"
+        - "/"
+      CMAKE_FIND_ROOT_PATH: "/usr/x86_64-w64-mingw32;/opt/win-deps"
+  -
+    kind: "try_compile-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:123 (try_compile)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    checks:
+      - "Detecting C compiler ABI info"
+    directories:
+      source: "/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-irn67l"
+      binary: "/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-irn67l"
+    cmakeVariables:
+      CMAKE_CXX_STDLIB_MODULES_JSON: ""
+      CMAKE_C_FLAGS: ""
+      CMAKE_C_FLAGS_DEBUG: "-g"
+      CMAKE_EXE_LINKER_FLAGS: "-static -static-libgcc -static-libstdc++"
+      CMAKE_MODULE_PATH: "/opt/win-deps/cmake"
+    buildResult:
+      variable: "CMAKE_C_ABI_COMPILED"
+      cached: false
+      stdout: |
+        Change Dir: '/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-irn67l'
+        
+        Run Build Command(s): /usr/bin/ninja -v cmTC_1fc1b
+        [1/2] /usr/bin/x86_64-w64-mingw32-gcc-posix   -v -o CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj -c /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompilerABI.c
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-gcc-posix
+        Target: x86_64-w64-mingw32
+        Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking
+        Thread model: posix
+        gcc version 9.3-posix 20200320 (GCC) 
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj' '-c' '-mtune=generic' '-march=x86-64'
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/cc1 -quiet -v -D_REENTRANT /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompilerABI.c -quiet -dumpbase CMakeCCompilerABI.c -mtune=generic -march=x86-64 -auxbase-strip CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj -version -o /tmp/ccI9S2x9.s
+        GNU C17 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)
+        	compiled by GNU C version 9.3.0, GMP version 6.2.0, MPFR version 4.0.2, MPC version 1.1.0, isl version isl-0.22.1-GMP
+        
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        ignoring nonexistent directory "/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/sys-include"
+        #include "..." search starts here:
+        #include <...> search starts here:
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include
+        End of search list.
+        GNU C17 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)
+        	compiled by GNU C version 9.3.0, GMP version 6.2.0, MPFR version 4.0.2, MPC version 1.1.0, isl version isl-0.22.1-GMP
+        
+        GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072
+        Compiler executable checksum: 110da3d152e5b38166b7dbf2153dd2aa
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj' '-c' '-mtune=generic' '-march=x86-64'
+         /usr/bin/x86_64-w64-mingw32-as -v -o CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj /tmp/ccI9S2x9.s
+        GNU assembler version 2.34 (x86_64-w64-mingw32) using BFD version (GNU Binutils) 2.34
+        COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/
+        LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/
+        COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj' '-c' '-mtune=generic' '-march=x86-64'
+        [2/2] : && /usr/bin/x86_64-w64-mingw32-gcc-posix  -static -static-libgcc -static-libstdc++ -v -Wl,-v CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj -o cmTC_1fc1b.exe -Wl,--out-implib,libcmTC_1fc1b.dll.a -Wl,--major-image-version,0,--minor-image-version,0   && :
+        Using built-in specs.
+        COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-gcc-posix
+        COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper
+        Target: x86_64-w64-mingw32
+        Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking
+        Thread model: posix
+        gcc version 9.3-posix 20200320 (GCC) 
+        COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/
+        LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/
+        COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-static-libstdc++' '-v' '-o' 'cmTC_1fc1b.exe' '-mtune=generic' '-march=x86-64'
+         /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/collect2 -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccJiptEv.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_1fc1b.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj --out-implib libcmTC_1fc1b.dll.a --major-image-version 0 --minor-image-version 0 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o
+        collect2 version 9.3-posix 20200320
+        /usr/bin/x86_64-w64-mingw32-ld -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccJiptEv.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_1fc1b.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj --out-implib libcmTC_1fc1b.dll.a --major-image-version 0 --minor-image-version 0 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o
+        GNU ld (GNU Binutils) 2.34
+        COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-static-libstdc++' '-v' '-o' 'cmTC_1fc1b.exe' '-mtune=generic' '-march=x86-64'
+        
+      exitCode: 0
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:255 (message)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    message: |
+      Parsed C implicit include dir info: rv=done
+        found start of include info
+        found start of implicit include info
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include]
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed]
+          add: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include]
+        end of search list found
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include]
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed]
+        collapse include dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include] ==> [/usr/x86_64-w64-mingw32/include]
+        implicit include dirs: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed;/usr/x86_64-w64-mingw32/include]
+      
+      
+  -
+    kind: "message-v1"
+    backtrace:
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeDetermineCompilerABI.cmake:291 (message)"
+      - "/usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeTestCCompiler.cmake:26 (CMAKE_DETERMINE_COMPILER_ABI)"
+      - "build-win-nonpcap/_deps/googletest-src/CMakeLists.txt:6 (project)"
+    message: |
+      Parsed C implicit link information:
+        link line regex: [^( *|.*[/\\])(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild|CMAKE_LINK_STARTFILE-NOTFOUND|([^/\\]+-)?ld|collect2)[^/\\]*( |$)]
+        linker tool regex: [^[ 	]*(->|"|[0-9]+>[ 	-]*Build:[ 	0-9]+ ms[ 	]*)?[ 	]*(([^"]*[/\\])?(ld[0-9]*(|\\.[a-rt-z][a-z]*|\\.s[a-np-z][a-z]*|\\.so[a-z]+)|wild))("|,| |$)]
+        ignore line: [Change Dir: '/root/work/Dynam/build-win-nonpcap/CMakeFiles/CMakeScratch/TryCompile-irn67l']
+        ignore line: []
+        ignore line: [Run Build Command(s): /usr/bin/ninja -v cmTC_1fc1b]
+        ignore line: [[1/2] /usr/bin/x86_64-w64-mingw32-gcc-posix   -v -o CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj -c /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompilerABI.c]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-gcc-posix]
+        ignore line: [Target: x86_64-w64-mingw32]
+        ignore line: [Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking]
+        ignore line: [Thread model: posix]
+        ignore line: [gcc version 9.3-posix 20200320 (GCC) ]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj' '-c' '-mtune=generic' '-march=x86-64']
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/cc1 -quiet -v -D_REENTRANT /usr/local/lib/python3.8/dist-packages/cmake/data/share/cmake-4.4/Modules/CMakeCCompilerABI.c -quiet -dumpbase CMakeCCompilerABI.c -mtune=generic -march=x86-64 -auxbase-strip CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj -version -o /tmp/ccI9S2x9.s]
+        ignore line: [GNU C17 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)]
+        ignore line: [	compiled by GNU C version 9.3.0  GMP version 6.2.0  MPFR version 4.0.2  MPC version 1.1.0  isl version isl-0.22.1-GMP]
+        ignore line: []
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [ignoring nonexistent directory "/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/sys-include"]
+        ignore line: [#include "..." search starts here:]
+        ignore line: [#include <...> search starts here:]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/include-fixed]
+        ignore line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/include]
+        ignore line: [End of search list.]
+        ignore line: [GNU C17 (GCC) version 9.3-posix 20200320 (x86_64-w64-mingw32)]
+        ignore line: [	compiled by GNU C version 9.3.0  GMP version 6.2.0  MPFR version 4.0.2  MPC version 1.1.0  isl version isl-0.22.1-GMP]
+        ignore line: []
+        ignore line: [GGC heuristics: --param ggc-min-expand=100 --param ggc-min-heapsize=131072]
+        ignore line: [Compiler executable checksum: 110da3d152e5b38166b7dbf2153dd2aa]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj' '-c' '-mtune=generic' '-march=x86-64']
+        ignore line: [ /usr/bin/x86_64-w64-mingw32-as -v -o CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj /tmp/ccI9S2x9.s]
+        ignore line: [GNU assembler version 2.34 (x86_64-w64-mingw32) using BFD version (GNU Binutils) 2.34]
+        ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/]
+        ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-v' '-o' 'CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj' '-c' '-mtune=generic' '-march=x86-64']
+        ignore line: [[2/2] : && /usr/bin/x86_64-w64-mingw32-gcc-posix  -static -static-libgcc -static-libstdc++ -v -Wl -v CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj -o cmTC_1fc1b.exe -Wl --out-implib libcmTC_1fc1b.dll.a -Wl --major-image-version 0 --minor-image-version 0   && :]
+        ignore line: [Using built-in specs.]
+        ignore line: [COLLECT_GCC=/usr/bin/x86_64-w64-mingw32-gcc-posix]
+        ignore line: [COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper]
+        ignore line: [Target: x86_64-w64-mingw32]
+        ignore line: [Configured with: ../../src/configure --build=x86_64-linux-gnu --prefix=/usr --includedir='/usr/include' --mandir='/usr/share/man' --infodir='/usr/share/info' --sysconfdir=/etc --localstatedir=/var --disable-silent-rules --libdir='/usr/lib/x86_64-linux-gnu' --libexecdir='/usr/lib/x86_64-linux-gnu' --disable-maintainer-mode --disable-dependency-tracking --prefix=/usr --enable-shared --enable-static --disable-multilib --with-system-zlib --libexecdir=/usr/lib --without-included-gettext --libdir=/usr/lib --enable-libstdcxx-time=yes --with-tune=generic --with-headers=/usr/x86_64-w64-mingw32/include --enable-version-specific-runtime-libs --enable-fully-dynamic-string --enable-libgomp --enable-languages=c,c++,fortran,objc,obj-c++,ada --enable-lto --enable-threads=posix --program-suffix=-posix --program-prefix=x86_64-w64-mingw32- --target=x86_64-w64-mingw32 --with-as=/usr/bin/x86_64-w64-mingw32-as --with-ld=/usr/bin/x86_64-w64-mingw32-ld --enable-libatomic --enable-libstdcxx-filesystem-ts=yes --enable-dependency-tracking]
+        ignore line: [Thread model: posix]
+        ignore line: [gcc version 9.3-posix 20200320 (GCC) ]
+        ignore line: [COMPILER_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/bin/]
+        ignore line: [LIBRARY_PATH=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/:/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/]
+        ignore line: [COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-static-libstdc++' '-v' '-o' 'cmTC_1fc1b.exe' '-mtune=generic' '-march=x86-64']
+        link line: [ /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/collect2 -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccJiptEv.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_1fc1b.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj --out-implib libcmTC_1fc1b.dll.a --major-image-version 0 --minor-image-version 0 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/collect2] ==> ignore
+          arg [-plugin] ==> ignore
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so] ==> ignore
+          arg [-plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper] ==> ignore
+          arg [-plugin-opt=-fresolution=/tmp/ccJiptEv.res] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingw32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_eh] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmoldname] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingwex] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmsvcrt] ==> ignore
+          arg [-plugin-opt=-pass-through=-lpthread] ==> ignore
+          arg [-plugin-opt=-pass-through=-ladvapi32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lshell32] ==> ignore
+          arg [-plugin-opt=-pass-through=-luser32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lkernel32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingw32] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc] ==> ignore
+          arg [-plugin-opt=-pass-through=-lgcc_eh] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmoldname] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmingwex] ==> ignore
+          arg [-plugin-opt=-pass-through=-lmsvcrt] ==> ignore
+          arg [-m] ==> ignore
+          arg [i386pep] ==> ignore
+          arg [-Bstatic] ==> search static
+          arg [-o] ==> ignore
+          arg [cmTC_1fc1b.exe] ==> ignore
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o] ==> obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o]
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o] ==> obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o]
+          arg [-L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix] ==> dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix]
+          arg [-L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib] ==> dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib]
+          arg [-v] ==> ignore
+          arg [CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj] ==> ignore
+          arg [--out-implib] ==> ignore
+          arg [libcmTC_1fc1b.dll.a] ==> ignore
+          arg [--major-image-version] ==> ignore
+          arg [0] ==> ignore
+          arg [--minor-image-version] ==> ignore
+          arg [0] ==> ignore
+          arg [-lmingw32] ==> lib [mingw32]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lgcc_eh] ==> lib [gcc_eh]
+          arg [-lmoldname] ==> lib [moldname]
+          arg [-lmingwex] ==> lib [mingwex]
+          arg [-lmsvcrt] ==> lib [msvcrt]
+          arg [-lpthread] ==> lib [pthread]
+          arg [-ladvapi32] ==> lib [advapi32]
+          arg [-lshell32] ==> lib [shell32]
+          arg [-luser32] ==> lib [user32]
+          arg [-lkernel32] ==> lib [kernel32]
+          arg [-lmingw32] ==> lib [mingw32]
+          arg [-lgcc] ==> lib [gcc]
+          arg [-lgcc_eh] ==> lib [gcc_eh]
+          arg [-lmoldname] ==> lib [moldname]
+          arg [-lmingwex] ==> lib [mingwex]
+          arg [-lmsvcrt] ==> lib [msvcrt]
+          arg [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o] ==> obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+        ignore line: [collect2 version 9.3-posix 20200320]
+        ignore line: [/usr/bin/x86_64-w64-mingw32-ld -plugin /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/liblto_plugin.so -plugin-opt=/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/lto-wrapper -plugin-opt=-fresolution=/tmp/ccJiptEv.res -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -plugin-opt=-pass-through=-lpthread -plugin-opt=-pass-through=-ladvapi32 -plugin-opt=-pass-through=-lshell32 -plugin-opt=-pass-through=-luser32 -plugin-opt=-pass-through=-lkernel32 -plugin-opt=-pass-through=-lmingw32 -plugin-opt=-pass-through=-lgcc -plugin-opt=-pass-through=-lgcc_eh -plugin-opt=-pass-through=-lmoldname -plugin-opt=-pass-through=-lmingwex -plugin-opt=-pass-through=-lmsvcrt -m i386pep -Bstatic -o cmTC_1fc1b.exe /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix -L/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib -v CMakeFiles/cmTC_1fc1b.dir/CMakeCCompilerABI.c.obj --out-implib libcmTC_1fc1b.dll.a --major-image-version 0 --minor-image-version 0 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt -lpthread -ladvapi32 -lshell32 -luser32 -lkernel32 -lmingw32 -lgcc -lgcc_eh -lmoldname -lmingwex -lmsvcrt /usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+        ignore line: [GNU ld (GNU Binutils) 2.34]
+        ignore line: [COLLECT_GCC_OPTIONS='-static' '-static-libgcc' '-static-libstdc++' '-v' '-o' 'cmTC_1fc1b.exe' '-mtune=generic' '-march=x86-64']
+        ignore line: []
+        ignore line: []
+        remove lib [gcc_eh]
+        remove lib [msvcrt]
+        remove lib [gcc_eh]
+        remove lib [msvcrt]
+        collapse obj [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib/crt2.o] ==> [/usr/x86_64-w64-mingw32/lib/crt2.o]
+        collapse library dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix] ==> [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix]
+        collapse library dir [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/../../../../x86_64-w64-mingw32/lib] ==> [/usr/x86_64-w64-mingw32/lib]
+        implicit libs: [mingw32;gcc;moldname;mingwex;pthread;advapi32;shell32;user32;kernel32;mingw32;gcc;moldname;mingwex]
+        implicit objs: [/usr/x86_64-w64-mingw32/lib/crt2.o;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtbegin.o;/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix/crtend.o]
+        implicit dirs: [/usr/lib/gcc/x86_64-w64-mingw32/9.3-posix;/usr/x86_64-w64-mingw32/lib]
+        implicit fwks: []
+      
+      
+...

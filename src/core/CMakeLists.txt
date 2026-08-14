@@ -140,6 +140,7 @@ list(APPEND NCP_CORE_SRC_SOURCES
     src/mimicry.cpp
     src/i2p.cpp
     src/security.cpp
+    src/ncp_pcap_dyn.cpp
 )
 
 # Header files in include/ subdirectory
@@ -313,7 +314,9 @@ elseif(WIN32)
         else()
             target_link_directories(ncp_core PUBLIC "${NPCAP_SDK_DIR}/Lib")
         endif()
-        target_link_libraries(ncp_core PUBLIC wpcap Packet ws2_32)
+        # wpcap.dll is soft-loaded at runtime (ncp_pcap_dyn.cpp) — no import
+        # library: ncp.exe must start on systems without WinPcap/Npcap-compat.
+        target_link_libraries(ncp_core PUBLIC ws2_32)
         target_compile_definitions(ncp_core PUBLIC HAVE_PCAP)
         message(STATUS "Found Npcap SDK at ${NPCAP_SDK_DIR}")
     else()

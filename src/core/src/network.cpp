@@ -23,6 +23,7 @@
 #endif
 #ifdef HAVE_PCAP
 #include <pcap.h>
+#include "ncp_pcap_dyn.hpp"  // soft-load wpcap.dll at runtime (no import lib)
 #endif
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")

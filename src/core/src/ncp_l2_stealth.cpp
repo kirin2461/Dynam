@@ -20,6 +20,7 @@
 #include <pcap/pcap.h>
 #elif defined(_WIN32)
 #include <pcap.h>
+#include "ncp_pcap_dyn.hpp"  // soft-load wpcap.dll at runtime (no import lib)
 #endif
 #endif
 
@@ -580,7 +581,9 @@ bool L2Stealth::is_ebtables_available() {
 }
 
 bool L2Stealth::is_pcap_available() {
-#ifdef HAVE_PCAP
+#if defined(_WIN32) && defined(HAVE_PCAP)
+    return pcapdyn::available();  // runtime: wpcap.dll may be absent
+#elif defined(HAVE_PCAP)
     return true;
 #else
     return false;

@@ -1,0 +1,13 @@
+{
+	"InstallScripts" : 
+	[
+		"/root/work/Dynam/build-win-nonpcap/cmake_install.cmake",
+		"/root/work/Dynam/build-win-nonpcap/src/core/cmake_install.cmake",
+		"/root/work/Dynam/build-win-nonpcap/src/cli/cmake_install.cmake",
+		"/root/work/Dynam/build-win-nonpcap/tests/cmake_install.cmake",
+		"/root/work/Dynam/build-win-nonpcap/_deps/googletest-build/cmake_install.cmake",
+		"/root/work/Dynam/build-win-nonpcap/_deps/googletest-build/googlemock/cmake_install.cmake",
+		"/root/work/Dynam/build-win-nonpcap/_deps/googletest-build/googletest/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

@@ -32,7 +32,7 @@
 // Download: https://npcap.com/#download  (SDK + runtime installer)
 #ifdef HAVE_NPCAP
 #include <pcap.h>
-#pragma comment(lib, "wpcap.lib")
+#include "ncp_pcap_dyn.hpp"  // soft-load wpcap.dll at runtime (no import lib)
 #endif // HAVE_NPCAP
 
 #else
