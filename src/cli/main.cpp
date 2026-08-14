@@ -1,5 +1,6 @@
 #include "ncp_crypto.hpp"
 #include "ncp_license.hpp"
+#include "ncp_crypto.hpp"
 #include "ncp_network.hpp"
 #include "ncp_spoofer.hpp"
 #include "ncp_dpi.hpp"
@@ -1009,6 +1010,150 @@ static void write_module_stats_json(const std::string& path) {
     }
 }
 
+
+// ── Trial license (7 days, auto-issued on first run) ─────────────────────────
+// MAC string (must match web/server.py exactly):
+//   sha256_hex(TRIAL_SECRET + "|" + first_run + "|" + expires + "|" + machine_lower)
+static const char* NCP_TRIAL_SECRET = "ncp7d-tr14l-5ecr3t-k3y";
+static const int NCP_TRIAL_DAYS = 7;
+
+static std::string trial_machine_id() {
+#ifdef _WIN32
+    const char* cn = std::getenv("COMPUTERNAME");
+    std::string m = (cn && *cn) ? cn : "unknown-host";
+#else
+    char hn[256];
+    std::string m = "unknown-host";
+    if (gethostname(hn, sizeof(hn)) == 0) { hn[sizeof(hn) - 1] = 0; if (*hn) m = hn; }
+#endif
+    for (auto& ch : m) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return m;
+}
+
+static std::string trial_today() {
+    std::time_t t = std::time(nullptr);
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    char b[16];
+    std::snprintf(b, sizeof(b), "%04d-%02d-%02d", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+    return b;
+}
+
+static std::string trial_date_plus(int days) {
+    std::time_t t = std::time(nullptr) + static_cast<std::time_t>(days) * 86400;
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    char b[16];
+    std::snprintf(b, sizeof(b), "%04d-%02d-%02d", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+    return b;
+}
+
+static std::string trial_sig(const std::string& fr, const std::string& exp, const std::string& mach) {
+    std::string in = std::string(NCP_TRIAL_SECRET) + "|" + fr + "|" + exp + "|" + mach;
+    Crypto crypto;
+    SecureMemory sm(reinterpret_cast<const uint8_t*>(in.data()), in.size());
+    SecureMemory h = crypto.hash_sha256(sm);
+    static const char* hexd = "0123456789abcdef";
+    std::string out;
+    const uint8_t* p = h.data();
+    for (size_t i = 0; i < h.size(); ++i) {
+        out += hexd[p[i] >> 4];
+        out += hexd[p[i] & 0x0F];
+    }
+    return out;
+}
+
+static std::string trial_json_field(const std::string& js, const std::string& key) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = js.find(pat);
+    if (p == std::string::npos) return "";
+    p = js.find(':', p + pat.size());
+    if (p == std::string::npos) return "";
+    p = js.find('"', p + 1);
+    if (p == std::string::npos) return "";
+    size_t e = js.find('"', p + 1);
+    if (e == std::string::npos) return "";
+    return js.substr(p + 1, e - p - 1);
+}
+
+// Recursive mkdir -p (best-effort). Needed because the config dir
+// (e.g. ~/ncp or %APPDATA%\\ncp) may not exist on first launch.
+static void trial_mkdir_p(const std::string& dir) {
+    if (dir.empty()) return;
+    std::string cur;
+    for (size_t i = 0; i < dir.size(); ++i) {
+        char c = dir[i];
+        cur += c;
+        if ((c == '/' || c == '\\') && cur.size() > 1) {
+            std::string part = cur.substr(0, cur.size() - 1);
+            if (part.empty() || part == "/" ) continue;
+#ifdef _WIN32
+            _mkdir(part.c_str());
+#else
+            mkdir(part.c_str(), 0700);
+#endif
+        }
+    }
+#ifdef _WIN32
+    _mkdir(dir.c_str());
+#else
+    mkdir(dir.c_str(), 0700);
+#endif
+}
+
+// Returns true if a valid (non-expired) trial exists; issues a new 7-day trial
+// if the file is absent. Prints user-facing status lines.
+static bool trial_check_or_issue(const std::string& path) {
+    const std::string today = trial_today();
+    const std::string mach = trial_machine_id();
+    std::string content;
+    {
+        std::ifstream ifs(path);
+        if (ifs.good()) { std::stringstream b; b << ifs.rdbuf(); content = b.str(); }
+    }
+    if (!content.empty()) {
+        std::string fr  = trial_json_field(content, "first_run");
+        std::string exp = trial_json_field(content, "expires");
+        std::string m0  = trial_json_field(content, "machine");
+        std::string sig = trial_json_field(content, "sig");
+        for (auto& ch : m0) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (!fr.empty() && !exp.empty() && m0 == mach && sig == trial_sig(fr, exp, m0)) {
+            if (exp >= today) {  // ISO dates compare lexicographically
+                std::cout << "[+] Trial license active (expires " << exp << ")\n";
+                return true;
+            }
+            std::cerr << "[!] Trial period expired on " << exp << "\n";
+            return false;
+        }
+        std::cerr << "[!] Trial file invalid or tampered\n";
+        return false;
+    }
+    // First run: auto-issue trial
+    std::string fr = today;
+    std::string exp = trial_date_plus(NCP_TRIAL_DAYS);
+    std::string dir = path.substr(0, path.find_last_of("/\\"));
+    if (!dir.empty()) trial_mkdir_p(dir);
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) {
+        std::cerr << "[!] Cannot write trial file: " << path << "\n";
+        return false;
+    }
+    f << "{\"first_run\": \"" << fr << "\", \"expires\": \"" << exp
+      << "\", \"machine\": \"" << mach << "\", \"sig\": \"" << trial_sig(fr, exp, mach)
+      << "\"}\n";
+    f.flush();
+    std::cout << "[+] Trial period activated: " << NCP_TRIAL_DAYS << " days (expires " << exp << ")\n";
+    return true;
+}
+
 void handle_run(const std::vector<std::string>& args) {
     try {
         // ── License gate ──────────────────────────────────────────────────────
@@ -1043,13 +1188,22 @@ void handle_run(const std::vector<std::string>& args) {
             }
         }
 
+        // Trial: trial.json next to license.json (auto-issued on first run)
+        if (!license_ok && !lic_path.empty()) {
+            size_t sep = lic_path.find_last_of("/\\");
+            std::string trial_path =
+                (sep != std::string::npos ? lic_path.substr(0, sep + 1) : lic_path) + "trial.json";
+            license_ok = trial_check_or_issue(trial_path);
+        } else if (license_ok) {
+            std::cout << "[+] License verified\n";
+        }
+
         if (!license_ok) {
             std::cerr << "[!] License not found or invalid.\n";
             std::cerr << "[!] Activate a license via the web interface (http://localhost:8085)\n";
             std::cerr << "[!] or provide a valid license key first.\n";
             return;
         }
-        std::cout << "[+] License verified\n";
 
         std::cout << "[*] Starting NCP protection...\n";
         

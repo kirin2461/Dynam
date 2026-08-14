@@ -10,6 +10,7 @@ import sys
 import json
 import time
 import uuid
+import hashlib
 import platform
 import subprocess
 import threading
@@ -42,13 +43,95 @@ NCP_LICENSE_PUBLIC_KEY_B64 = "FT2FWdlm6rGldWix5fDJBuZmrHIR+73CuRpWszs/Hog="
 # Файл для сохранения активированной лицензии
 LICENSE_FILE = Path(os.environ.get("APPDATA", str(Path.home()))) / "ncp" / "license.json"
 
+# ── Пробный период (7 дней, автовыдача при первом запуске) ──────────────────
+TRIAL_DAYS = 7
+TRIAL_FILE = Path(os.environ.get("APPDATA", str(Path.home()))) / "ncp" / "trial.json"
+TRIAL_SECRET = "ncp7d-tr14l-5ecr3t-k3y"  # anti-casual MAC key (same literal in C++)
+TRIAL_MODULES = [
+    "dpi_bypass", "e2e_encryption", "i2p", "geneva_basic", "geneva_full",
+    "self_test", "pipeline", "dns_leak", "session_frag", "cross_layer",
+    "rtt_equalizer", "volume_norm", "behavioral_cloak", "time_breaker",
+    "covert_channel", "wf_defense", "protocol_rotation", "as_router",
+    "geo_obfuscator",
+]
+
+
+def _machine_id() -> str:
+    """Стабильный идентификатор машины (hostname, lowercase) — тот же, что в C++."""
+    return (platform.node() or "unknown-host").strip().lower()
+
+
+def _trial_sig(first_run: str, expires: str, machine: str) -> str:
+    s = f"{TRIAL_SECRET}|{first_run}|{expires}|{machine}"
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _set_trial_state(expires: str, days_left: int):
+    state["license"].update({
+        "status": "trial",
+        "key": "",
+        "plan": "trial",
+        "plan_label": PLAN_LABELS.get("trial", "Trial"),
+        "expires": expires,
+        "days_remaining": days_left,
+        "modules": list(TRIAL_MODULES),
+        "features": list(TRIAL_MODULES),
+    })
+
+
+def _ensure_trial():
+    """При первом запуске выдаёт 7-дневный триал; при повторных — восстанавливает.
+
+    Настоящая лицензия (status=active) имеет приоритет. Триал хранится в
+    trial.json с MAC (sha256) и привязкой к hostname; подделка/перенос на
+    другую машину → отказ.
+    """
+    from datetime import date
+    if _is_license_active():
+        return
+    try:
+        today = date.today()
+        mach = _machine_id()
+        if TRIAL_FILE.exists():
+            d = json.loads(TRIAL_FILE.read_text(encoding="utf-8"))
+            fr = str(d.get("first_run", ""))
+            exp = str(d.get("expires", ""))
+            m0 = str(d.get("machine", "")).strip().lower()
+            sig = str(d.get("sig", ""))
+            if not fr or not exp or m0 != mach or sig != _trial_sig(fr, exp, m0):
+                state["license"]["status"] = "inactive"
+                push_log("WARN", "Trial state invalid or tampered — license required")
+                return
+            exp_d = datetime.strptime(exp, "%Y-%m-%d").date()
+            if today > exp_d:
+                state["license"]["status"] = "expired"
+                state["license"]["plan_label"] = "Триал истёк"
+                state["license"]["expires"] = exp
+                push_log("WARN", f"Trial period expired on {exp} — enter a license key")
+                return
+        else:
+            fr = today.strftime("%Y-%m-%d")
+            exp_d = today + timedelta(days=TRIAL_DAYS)
+            exp = exp_d.strftime("%Y-%m-%d")
+            TRIAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            TRIAL_FILE.write_text(json.dumps({
+                "first_run": fr, "expires": exp, "machine": mach,
+                "sig": _trial_sig(fr, exp, mach),
+            }), encoding="utf-8")
+            push_log("INFO", f"Trial period activated: {TRIAL_DAYS} days (until {exp})")
+        _set_trial_state(exp, max(0, (exp_d - today).days))
+    except Exception as e:
+        logger.warning(f"Trial init failed: {e}")
+
+
+
 
 # ─── License gate helpers ────────────────────────────────────────────────────
 
 def _is_license_active() -> bool:
     """Return True if a valid, non-expired license is loaded in state."""
     lic = state.get("license", {})
-    return lic.get("status") == "active"
+    return lic.get("status") in ("active", "trial")
 
 
 def _license_has_module(module_name: str) -> bool:
@@ -686,7 +769,7 @@ def _build_ncp_args() -> list:
     """Build NCP binary command-line arguments from current config state."""
     binary_path = str(NCP_BINARY)
     cfg = state["config"]
-    args = [binary_path, "run", "--no-license-check", "--no-kill-switch",
+    args = [binary_path, "run", "--no-kill-switch",
             "--interface", cfg.get("interface", "auto"),
             "--preset", cfg.get("dpi_preset", "tspu")]
     # Live per-module stats export (read back by stats_update_loop)
@@ -1326,7 +1409,7 @@ def api_license():
 
 # Маппинг планов для UI
 PLAN_LABELS = {
-    "trial": "Trial (14 days)",
+    "trial": "Пробный период (7 дней)",
     "basic": "Basic",
     "pro": "Pro",
     "ultimate": "Ultimate (Lifetime)",
@@ -1867,6 +1950,9 @@ except Exception as _bypass_err:
 if __name__ == "__main__":
     # Restore saved license
     _try_restore_license()
+
+    # Auto-issue 7-day trial on first run (if no full license)
+    _ensure_trial()
 
     # Start background stats thread (collects REAL network stats, no simulation)
     stats_thread = threading.Thread(target=stats_update_loop, daemon=True)
