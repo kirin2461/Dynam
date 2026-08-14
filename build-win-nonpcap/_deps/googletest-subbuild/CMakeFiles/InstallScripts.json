@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/root/work/Dynam/build-win-nonpcap/_deps/googletest-subbuild/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
