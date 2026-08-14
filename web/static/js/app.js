@@ -1009,6 +1009,18 @@ async function refreshGenevaStatus() {
     setEl('gen-generation', g.generation);
     setEl('gen-fitness', (g.best_fitness * 100).toFixed(1) + '%');
     setEl('gen-status', g.running ? 'Эволюция...' : 'Остановлена');
+    if (g.engine) {
+      setEl('gen-eng-pkts', formatNumber(g.engine.packets_processed));
+      setEl('gen-eng-tampered', formatNumber(g.engine.packets_tampered));
+      setEl('gen-eng-frag', formatNumber(g.engine.packets_fragmented));
+      setEl('gen-eng-overhead', formatBytes(g.engine.total_overhead_bytes));
+    }
+    const dpiBadge = document.getElementById('gen-status-dpi');
+    if (dpiBadge && g.engine) {
+      const on = !!g.engine_interception;
+      dpiBadge.textContent = on ? 'Вкл' : 'Пассивен';
+      dpiBadge.className = 'badge ' + (on ? 'badge--active' : 'badge--inactive');
+    }
     document.getElementById('btn-gen-start')?.classList.toggle('hidden', g.running);
     document.getElementById('btn-gen-stop')?.classList.toggle('hidden', !g.running);
     updateGenevaChart(g.fitness_history || []);

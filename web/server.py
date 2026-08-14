@@ -124,6 +124,9 @@ def _find_ncp_binary() -> Path:
 
 NCP_BINARY = _find_ncp_binary().resolve()
 
+# JSON со статистикой модулей, экспортируемой движком (--stats-file)
+ENGINE_STATS_FILE = Path(os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp") / "ncp_engine_stats.json"
+
 if platform.system() == "Windows":
     CONFIG_PATH = Path(os.environ.get("APPDATA", "")) / "ncp" / "config.json"
 else:
@@ -466,6 +469,93 @@ def _get_active_connections() -> int:
         return 0
 
 
+_engine_stats_prev = {"dpi_pkts": None, "ts": 0}
+
+
+def _read_engine_stats():
+    """Читает JSON со счётчиками, который ncp.exe пишет по --stats-file."""
+    try:
+        if not ENGINE_STATS_FILE.exists():
+            return None
+        data = json.loads(ENGINE_STATS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        # Движок переписывает файл каждые ~2 с; протухший файл = движок остановлен
+        if abs(time.time() - int(data.get("ts", 0))) > 20:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _apply_engine_stats(data):
+    """Раскладывает реальные счётчики движка по state['modules']."""
+    m = state["modules"]
+    now = time.time()
+
+    dpi = data.get("dpi") or {}
+    pkts = int(dpi.get("packets_total", 0))
+    prev = _engine_stats_prev
+    pps = 0
+    if prev.get("dpi_pkts") is not None and prev.get("ts"):
+        dt = now - prev["ts"]
+        if 0 < dt < 30 and pkts >= prev["dpi_pkts"]:
+            pps = int((pkts - prev["dpi_pkts"]) / dt)
+    prev["dpi_pkts"] = pkts
+    prev["ts"] = now
+    # Секция «Пайплайн и Ядро» = ядро DPI-движка (реальный путь трафика в run-режиме)
+    m["pipeline"]["throughput_pps"] = pps
+    m["pipeline"]["drops"] = int(dpi.get("packets_dropped", 0))
+
+    dl = data.get("dns_leak") or {}
+    if dl.get("active"):
+        m["dns_leak"]["queries_intercepted"] = (int(dl.get("dns_queries_blocked", 0))
+                                                + int(dl.get("stun_packets_blocked", 0)))
+        m["dns_leak"]["leaks_blocked"] = int(dl.get("leaks_detected", 0))
+
+    sf = data.get("session_frag") or {}
+    m["session_frag"]["sessions_fragmented"] = int(sf.get("sessions_reset", 0))
+    m["session_frag"]["fragments_created"] = int(sf.get("total_resets", 0))
+
+    cl = data.get("cross_layer") or {}
+    m["cross_layer"]["correlations_checked"] = int(cl.get("checks_performed", 0))
+    m["cross_layer"]["anomalies_fixed"] = int(cl.get("auto_fixes_applied", 0))
+
+    rt = data.get("rtt_equalizer") or {}
+    m["rtt_equalizer"]["packets_delayed"] = int(rt.get("acks_delayed", 0))
+
+    vn = data.get("volume_normalizer") or {}
+    m["volume_norm"]["padding_bytes"] = int(vn.get("bytes_padded", 0))
+    m["volume_norm"]["normalized_flows"] = int(vn.get("requests_normalized", 0))
+
+    bc = data.get("behavioral_cloak") or {}
+    m["behavioral_cloak"]["actions_emulated"] = int(bc.get("packets_shaped", 0))
+    m["behavioral_cloak"]["patterns_matched"] = int(bc.get("bursts_generated", 0))
+
+    tb = data.get("time_breaker") or {}
+    m["time_breaker"]["correlations_broken"] = int(tb.get("jitters_applied", 0))
+
+    cc = data.get("covert_channel") or {}
+    m["covert_channel"]["bytes_sent"] = int(cc.get("bytes_hidden", 0))
+    m["covert_channel"]["bytes_recv"] = int(cc.get("bytes_extracted", 0))
+    m["covert_channel"]["channels_active"] = (
+        1 if (int(cc.get("messages_sent", 0)) + int(cc.get("messages_received", 0))) > 0 else 0)
+
+    wf = data.get("wf_defense") or {}
+    m["wf_defense"]["packets_padded"] = int(wf.get("real_packets_processed", 0))
+    m["wf_defense"]["overhead_bytes"] = int(wf.get("overhead_bytes", 0))
+
+    pr = data.get("protocol_rotation") or {}
+    m["protocol_rotation"]["rotations_completed"] = int(pr.get("rotations", 0))
+    if pr.get("current_protocol"):
+        m["protocol_rotation"]["current_protocol"] = pr["current_protocol"]
+
+    ar = data.get("as_router") or {}
+    m["as_router"]["routes_diverted"] = int(ar.get("as_switches", 0))
+    if int(ar.get("as_switches", 0)) > 0:
+        m["as_router"]["current_path"] = "multi-AS"
+
+
 def stats_update_loop():
     """Background thread: collect REAL network stats from OS when NCP is running.
     Module-level stats remain at zero — they are not implemented in the backend.
@@ -509,6 +599,12 @@ def stats_update_loop():
                              f"issues: {result['issues']}")
                 except Exception as e:
                     push_log("ERROR", f"Self-test error: {e}")
+
+            # Merge real per-module counters exported by the engine
+            eng = _read_engine_stats()
+            if eng:
+                with stats_lock:
+                    _apply_engine_stats(eng)
 
             # Emit real stats via WebSocket
             payload = {**state["stats"], "uptime": get_uptime()}
@@ -593,6 +689,8 @@ def _build_ncp_args() -> list:
     args = [binary_path, "run", "--no-license-check", "--no-kill-switch",
             "--interface", cfg.get("interface", "auto"),
             "--preset", cfg.get("dpi_preset", "tspu")]
+    # Live per-module stats export (read back by stats_update_loop)
+    args.extend(["--stats-file", str(ENGINE_STATS_FILE)])
 
     # Module disable flags -- when config toggle is False, pass --no-* to disable
     MODULE_FLAGS = {
@@ -652,6 +750,12 @@ def api_start():
     binary_ok = binary_exists if platform.system() == "Windows" else (binary_exists and os.access(binary_path, os.X_OK))
     if binary_ok:
         try:
+            # Drop stale engine stats from a previous run
+            try:
+                ENGINE_STATS_FILE.unlink(missing_ok=True)
+                _engine_stats_prev.update({"dpi_pkts": None, "ts": 0})
+            except Exception:
+                pass
             args = _build_ncp_args()
             # Set cwd to binary's directory so it finds DLLs (WinDivert.dll, wpcap.dll)
             binary_dir = str(Path(binary_path).parent)
@@ -816,6 +920,12 @@ def _restart_ncp_process():
     binary_ok = binary_exists if platform.system() == "Windows" else (binary_exists and os.access(binary_path, os.X_OK))
     if binary_ok:
         try:
+            # Drop stale engine stats from a previous run
+            try:
+                ENGINE_STATS_FILE.unlink(missing_ok=True)
+                _engine_stats_prev.update({"dpi_pkts": None, "ts": 0})
+            except Exception:
+                pass
             args = _build_ncp_args()
             binary_dir = str(Path(binary_path).parent)
             push_log("INFO", f"Launching: {' '.join(args)}")
@@ -1531,7 +1641,14 @@ def api_geneva_stop():
 
 @app.route("/api/geneva/status")
 def api_geneva_status():
-    return jsonify(state["geneva"])
+    g = dict(state["geneva"])
+    eng = _read_engine_stats()
+    if eng:
+        if isinstance(eng.get("geneva"), dict):
+            g["engine"] = eng["geneva"]
+        if isinstance(eng.get("dpi"), dict):
+            g["engine_interception"] = bool(eng["dpi"].get("interception_active"))
+    return jsonify(g)
 
 
 @app.route("/api/version")

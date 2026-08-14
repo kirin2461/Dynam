@@ -854,6 +854,161 @@ int main(int argc, char* argv[]) {
 // Handler implementations
 // ============================================================================
 
+
+// ── Live module stats export (consumed by web GUI via --stats-file) ──────────
+static const char* ncp_protocol_name(TransportProtocol p) {
+    switch (p) {
+        case TransportProtocol::OBFS4:           return "obfs4";
+        case TransportProtocol::WEBSOCKET_TLS:   return "websocket";
+        case TransportProtocol::QUIC_LIKE:       return "quic";
+        case TransportProtocol::RAW_TLS_1_3:     return "tls13";
+        case TransportProtocol::MEEK_FRONTING:   return "meek";
+        case TransportProtocol::SHADOWSOCKS_AEAD: return "shadowsocks";
+    }
+    return "unknown";
+}
+
+static void write_module_stats_json(const std::string& path) {
+    std::ostringstream j;
+    j << "{\"ts\":" << static_cast<long long>(std::time(nullptr));
+    if (g_app.dpi_bypass) {
+        auto v = g_app.dpi_bypass->get_stats();
+        j << ",\"dpi\":{\"packets_total\":" << v.packets_total.load()
+          << ",\"packets_modified\":" << v.packets_modified.load()
+          << ",\"packets_fragmented\":" << v.packets_fragmented.load()
+          << ",\"fake_packets_sent\":" << v.fake_packets_sent.load()
+          << ",\"packets_dropped\":" << v.packets_dropped.load()
+          << ",\"send_errors\":" << v.send_errors.load()
+          << ",\"connections_handled\":" << v.connections_handled.load()
+          << ",\"interception_active\":" << (g_app.dpi_bypass->interception_active() ? 1 : 0)
+          << "}";
+    }
+    if (g_app.l3_stealth) {
+        auto v = g_app.l3_stealth->get_stats();
+        j << ",\"l3_stealth\":{\"packets_processed\":" << v.packets_processed.load()
+          << ",\"ttl_normalized\":" << v.ttl_normalized.load()
+          << ",\"ipid_rewritten\":" << v.ipid_rewritten.load()
+          << ",\"mss_clamped\":" << v.mss_clamped.load() << "}";
+    }
+    if (g_app.self_test) {
+        auto v = g_app.self_test->get_stats();
+        j << ",\"self_test\":{\"packets_fed\":" << v.packets_fed.load()
+          << ",\"tests_run\":" << v.tests_run.load()
+          << ",\"tests_failed\":" << v.tests_failed.load()
+          << ",\"countermeasures_applied\":" << v.countermeasures_applied.load() << "}";
+    }
+    if (g_app.wf_defense) {
+        auto v = g_app.wf_defense->get_stats();
+        j << ",\"wf_defense\":{\"real_packets_processed\":" << v.real_packets_processed.load()
+          << ",\"dummy_packets_sent\":" << v.dummy_packets_sent.load()
+          << ",\"dummy_bytes_sent\":" << v.dummy_bytes_sent.load()
+          << ",\"pages_defended\":" << v.pages_defended.load()
+          << ",\"overhead_bytes\":" << v.overhead_bytes.load() << "}";
+    }
+    if (g_app.volume_normalizer) {
+        auto v = g_app.volume_normalizer->get_stats();
+        j << ",\"volume_normalizer\":{\"requests_normalized\":" << v.requests_normalized.load()
+          << ",\"bytes_original\":" << v.bytes_original.load()
+          << ",\"bytes_padded\":" << v.bytes_padded.load()
+          << ",\"cover_bytes_sent\":" << v.cover_bytes_sent.load() << "}";
+    }
+    if (g_app.behavioral_cloak) {
+        auto v = g_app.behavioral_cloak->get_stats();
+        j << ",\"behavioral_cloak\":{\"packets_shaped\":" << v.packets_shaped.load()
+          << ",\"bursts_generated\":" << v.bursts_generated.load()
+          << ",\"idle_periods_injected\":" << v.idle_periods_injected.load() << "}";
+    }
+    if (g_app.time_breaker) {
+        auto v = g_app.time_breaker->get_stats();
+        j << ",\"time_breaker\":{\"jitters_applied\":" << v.jitters_applied.load()
+          << ",\"total_jitter_us\":" << v.total_jitter_us.load() << "}";
+    }
+    if (g_app.rtt_equalizer) {
+        auto v = g_app.rtt_equalizer->get_stats();
+        j << ",\"rtt_equalizer\":{\"acks_delayed\":" << v.acks_delayed.load()
+          << ",\"total_delay_us\":" << v.total_delay_us.load()
+          << ",\"samples_collected\":" << v.samples_collected.load()
+          << ",\"adaptive_adjustments\":" << v.adaptive_adjustments.load() << "}";
+    }
+    if (g_app.geneva) {
+        const auto& v = g_app.geneva->get_stats();
+        j << ",\"geneva\":{\"packets_processed\":" << v.packets_processed
+          << ",\"packets_duplicated\":" << v.packets_duplicated
+          << ",\"packets_fragmented\":" << v.packets_fragmented
+          << ",\"packets_tampered\":" << v.packets_tampered
+          << ",\"packets_dropped\":" << v.packets_dropped
+          << ",\"total_overhead_bytes\":" << v.total_overhead_bytes << "}";
+    }
+    if (g_app.dns_leak) {
+        bool act = g_app.dns_leak->is_active();
+        j << ",\"dns_leak\":{\"active\":" << (act ? 1 : 0);
+        if (act) {
+            auto v = g_app.dns_leak->get_stats();
+            j << ",\"dns_queries_blocked\":" << v.dns_queries_blocked.load()
+              << ",\"stun_packets_blocked\":" << v.stun_packets_blocked.load()
+              << ",\"leaks_detected\":" << v.leaks_detected.load();
+        }
+        j << "}";
+    }
+    if (g_app.session_frag) {
+        auto v = g_app.session_frag->get_stats();
+        j << ",\"session_frag\":{\"sessions_tracked\":" << v.sessions_tracked.load()
+          << ",\"sessions_reset\":" << v.sessions_reset.load()
+          << ",\"sessions_reopened\":" << v.sessions_reopened.load()
+          << ",\"total_resets\":" << v.total_resets.load() << "}";
+    }
+    if (g_app.cross_layer) {
+        auto v = g_app.cross_layer->get_stats();
+        j << ",\"cross_layer\":{\"checks_performed\":" << v.checks_performed.load()
+          << ",\"mismatches_detected\":" << v.mismatches_detected.load()
+          << ",\"auto_fixes_applied\":" << v.auto_fixes_applied.load() << "}";
+    }
+    if (g_app.covert_channel) {
+        auto v = g_app.covert_channel->get_stats();
+        j << ",\"covert_channel\":{\"messages_sent\":" << v.messages_sent.load()
+          << ",\"messages_received\":" << v.messages_received.load()
+          << ",\"bytes_hidden\":" << v.bytes_hidden.load()
+          << ",\"bytes_extracted\":" << v.bytes_extracted.load()
+          << ",\"channel_switches\":" << v.channel_switches.load() << "}";
+    }
+    if (g_app.protocol_rotation) {
+        auto v = g_app.protocol_rotation->get_stats();
+        j << ",\"protocol_rotation\":{\"rotations\":" << v.rotations.load()
+          << ",\"forced_rotations\":" << v.forced_rotations.load()
+          << ",\"slot_transitions\":" << v.slot_transitions.load()
+          << ",\"current_protocol\":\"" << ncp_protocol_name(g_app.protocol_rotation->get_current_protocol())
+          << "\"}";
+    }
+    if (g_app.as_router) {
+        auto v = g_app.as_router->get_stats();
+        j << ",\"as_router\":{\"connections_routed\":" << v.connections_routed.load()
+          << ",\"rebalances\":" << v.rebalances.load()
+          << ",\"as_switches\":" << v.as_switches.load()
+          << ",\"cdn_connections\":" << v.cdn_connections.load() << "}";
+    }
+    if (g_app.geo_obfuscator) {
+        auto v = g_app.geo_obfuscator->get_stats();
+        j << ",\"geo_obfuscator\":{\"connections_routed\":" << v.connections_routed.load()
+          << ",\"region_switches\":" << v.region_switches.load()
+          << ",\"health_checks\":" << v.health_checks.load()
+          << ",\"dead_nodes_detected\":" << v.dead_nodes_detected.load() << "}";
+    }
+    j << "}\n";
+    // Atomic replace: write tmp, then rename (Windows-safe: remove target first)
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) return;
+        f << j.str();
+        if (!f) { std::remove(tmp.c_str()); return; }
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(path.c_str());
+        if (std::rename(tmp.c_str(), path.c_str()) != 0)
+            std::remove(tmp.c_str());
+    }
+}
+
 void handle_run(const std::vector<std::string>& args) {
     try {
         // ── License gate ──────────────────────────────────────────────────────
@@ -1452,10 +1607,18 @@ void handle_run(const std::vector<std::string>& args) {
         int dpi_zero_streak = 0;
         bool hooks_zero_warned = false;
         int tick = 0;
+        std::string stats_file = get_option(args, "--stats-file");
+        int stats_tick = 0;
+        if (!stats_file.empty())
+            std::cout << "[*] Module stats JSON -> " << stats_file << " (every 2s)\n" << std::flush;
 
         // Wait loop
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (!stats_file.empty() && ++stats_tick >= 2) {
+                stats_tick = 0;
+                write_module_stats_json(stats_file);
+            }
             if (status_interval <= 0) continue;
             if (++tick < status_interval) continue;
             tick = 0;
@@ -1529,7 +1692,7 @@ void handle_run(const std::vector<std::string>& args) {
             }
             if (!bg.str().empty()) hb << " |" << bg.str();
 
-            std::cout << hb.str() << "\n";
+            std::cout << hb.str() << "\n" << std::flush;
 
             // ── Zero-activity alarms ──
             if (intercept) {
@@ -1551,6 +1714,7 @@ void handle_run(const std::vector<std::string>& args) {
         }
 
         // Cleanup after loop exit (RAII compliance)
+        if (!stats_file.empty()) write_module_stats_json(stats_file);  // final flush
         std::cout << "\n[*] Shutting down services...\n";
 
         // ── Final module statistics: proof of work for the whole session ──
