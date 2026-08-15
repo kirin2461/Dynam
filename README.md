@@ -10,7 +10,9 @@
 - ✅ **Build**: Linux (GCC 9+) and Windows (mingw-w64 cross-build verified — statically linked `ncp.exe`; MSVC also supported) via CMake + Ninja.
 - ✅ **Tests**: 604 tests — 596 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
 - ✅ **MASTER_ORCHESTRATOR 100% COMPLETE**: Full 7-stage pipeline with anti-ML, steganography, and behavioral cloaking implemented.
-- ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop).
+- ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop, live per-module engine stats).
+- ✅ **Licensing**: automatic 7-day trial on first launch (all 19 modules), Ed25519-signed keys issued by the standalone `ncp-keygen` tool.
+- ✅ **Desktop GUI**: Qt6 app (`ncp-qt.exe`) with charts, license panel and tray integration.
 
 ### Implementation Progress
 
@@ -141,14 +143,37 @@ pip install -r requirements.txt
 python3 server.py    # http://127.0.0.1:8085
 ```
 
-Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core. The **Bypass** section adds: one-click desync proxy start/stop, automatic strategy selection (blockcheck) with per-strategy apply, availability checker for popular sites, auto-hostlist management, zapret strategy import with preview, DPI detector event feed, signed auto-update and autostart toggle. GUI-launched instances always run with `--no-kill-switch`.
+Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core, **live per-module engine statistics** (the engine exports real counters via `ncp run --stats-file` every 2 s — DPI pipeline, Geneva GA, WF Defense, Volume Normalizer, Behavioral Cloak, Time Breaker, RTT Equalizer, Session Fragmenter, Cross-Layer, Covert Channel, Protocol Rotation, AS Router). The **Bypass** section adds: one-click desync proxy start/stop, automatic strategy selection (blockcheck) with per-strategy apply, availability checker for popular sites, auto-hostlist management, zapret strategy import with preview, DPI detector event feed, signed auto-update and autostart toggle. GUI-launched instances always run with `--no-kill-switch`.
 
-License keys are issued with `web/ncp_keygen.py` (Ed25519):
+## Licensing (trial + keys)
+
+**7-day trial, zero setup.** On first launch, both the CLI (`ncp run`) and the
+web GUI automatically issue a trial license covering **all 19 modules**
+(including the full Geneva engine). The trial file lives at
+`%APPDATA%\ncp\trial.json` (Windows) / `~/ncp/trial.json` (Linux), is bound
+to the machine hostname and integrity-protected with a keyed SHA-256 MAC.
+After 7 days the protection modules stop until a key is entered. The Qt GUI
+never hard-blocks: its license panel is informational.
+
+**Issuing keys (owner-only).** Keys are Ed25519-signed (`NCP-XXXXX-...`
+format) and are minted by the key generator — `web/ncp_keygen.py` or the
+frozen `ncp-keygen.exe`:
 
 ```bash
-python3 web/ncp_keygen.py generate-keypair --out private_key.b64
-python3 web/ncp_keygen.py issue --key private_key.b64 --plan ultimate --days 0 --modules all
+# one-time: generate a key pair (prints the public key to embed in builds)
+ncp-keygen.exe generate-keypair --out ncp_private_key.b64
+
+# issue a key valid for N days (0 = lifetime)
+ncp-keygen.exe issue --plan ultimate --modules all --days 365
+ncp-keygen.exe issue --plan pro --modules dpi_bypass,pipeline --days 30
 ```
+
+The generator reads the Ed25519 **private key from `ncp_private_key.b64`
+placed next to the executable** (or `--key <path>`) — it is never embedded in
+the binary. **Never distribute `ncp-keygen.exe` or `ncp_private_key.b64` to
+end users**; send customers only the key text. Users activate it in the web
+GUI (License section); the key is stored in `%APPDATA%\ncp\license.json`
+and is honored by all three apps (CLI, web GUI, Qt GUI).
 
 ## Bypass Features (no admin required)
 
@@ -266,5 +291,5 @@ quit) and can register itself in autostart (HKCU `Run` on Windows,
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: August 11, 2026
-**Version**: 1.5.0-dev
+**Last Updated**: August 14, 2026
+**Version**: 1.5.0-dev (suite builds v1.9.4)
