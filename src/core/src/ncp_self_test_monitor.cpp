@@ -30,6 +30,7 @@ void SelfTestMonitorStats::reset() noexcept {
     tests_failed.store(0);
     countermeasures_applied.store(0);
     consecutive_failures.store(0);
+    packets_fed.store(0);
 }
 
 // =====================================================================
@@ -285,6 +286,7 @@ SelfTestResult SelfTestMonitor::run_test(SelfTestType type) {
 void SelfTestMonitor::feed_packet(const std::vector<uint8_t>& data,
                                    double inter_arrival_ms)
 {
+    stats_.packets_fed.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Compute and store Shannon entropy of this packet

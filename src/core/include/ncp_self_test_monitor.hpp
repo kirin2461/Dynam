@@ -82,6 +82,9 @@ struct SelfTestMonitorStats {
     std::atomic<uint64_t> tests_failed{0};
     std::atomic<uint64_t> countermeasures_applied{0};
     std::atomic<uint64_t> consecutive_failures{0};
+    /// Packets fed via feed_packet() from the interception pipeline.
+    /// Zero means the monitor has never seen real traffic.
+    std::atomic<uint64_t> packets_fed{0};
 
     void reset() noexcept;
 
@@ -92,6 +95,7 @@ struct SelfTestMonitorStats {
         , tests_failed(o.tests_failed.load())
         , countermeasures_applied(o.countermeasures_applied.load())
         , consecutive_failures(o.consecutive_failures.load())
+        , packets_fed(o.packets_fed.load())
     {}
     SelfTestMonitorStats& operator=(const SelfTestMonitorStats& o) noexcept {
         if (this != &o) {
@@ -100,6 +104,7 @@ struct SelfTestMonitorStats {
             tests_failed.store(o.tests_failed.load());
             countermeasures_applied.store(o.countermeasures_applied.load());
             consecutive_failures.store(o.consecutive_failures.load());
+            packets_fed.store(o.packets_fed.load());
         }
         return *this;
     }

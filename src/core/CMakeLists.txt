@@ -25,12 +25,23 @@ set(NCP_CORE_SRC_SOURCES
     src/spoofer.cpp
     src/ncp_dpi.cpp
     src/ncp_dpi_zapret.cpp
+    # Bypass feature set (hostlists, proxy mode, blockcheck, detectors)
+    src/ncp_hostlist.cpp
+    src/ncp_zapret_import.cpp
+    src/ncp_proxy.cpp
+    src/ncp_tor_manager.cpp       # Managed Tor + pluggable transports (obfs4/Snowflake)
+    src/ncp_blockcheck.cpp
+    src/autopilot.cpp
+    src/ncp_dpi_detector.cpp
+    src/ncp_quic.cpp
+    src/ncp_ipfrag.cpp
     src/tls_fingerprint.cpp
     src/dpi_advanced.cpp
     src/secure_buffer.cpp
     src/ncp_arp.cpp
     src/ncp_thread_pool.cpp
     src/ncp_dummy.cpp
+    src/ncp_wfp_guids.cpp        # WFP GUID definitions missing from mingw-w64
     src/ncp_timing.cpp
     src/ncp_identity.cpp
     src/ncp_entropy_masking.cpp
@@ -129,6 +140,7 @@ list(APPEND NCP_CORE_SRC_SOURCES
     src/mimicry.cpp
     src/i2p.cpp
     src/security.cpp
+    src/ncp_pcap_dyn.cpp
 )
 
 # Header files in include/ subdirectory
@@ -302,7 +314,9 @@ elseif(WIN32)
         else()
             target_link_directories(ncp_core PUBLIC "${NPCAP_SDK_DIR}/Lib")
         endif()
-        target_link_libraries(ncp_core PUBLIC wpcap Packet ws2_32)
+        # wpcap.dll is soft-loaded at runtime (ncp_pcap_dyn.cpp) — no import
+        # library: ncp.exe must start on systems without WinPcap/Npcap-compat.
+        target_link_libraries(ncp_core PUBLIC ws2_32)
         target_compile_definitions(ncp_core PUBLIC HAVE_PCAP)
         message(STATUS "Found Npcap SDK at ${NPCAP_SDK_DIR}")
     else()
@@ -349,18 +363,28 @@ if(WIN32)
     endif()
 
     # WFP (Windows Filtering Platform) SDK detection.
-    # mingw-w64 (at least < v10) ships an incomplete fwpmu.h (no FWPM_*
-    # constants) and no fwpuclnt import library. Disable WFP code there;
-    # WinDivert is the real interception backend on Windows anyway.
+    # mingw-w64 (< v10) ships an incomplete fwpmu.h: no FWPM session/filter
+    # flags, no FWP_E_* codes and no built-in layer/condition GUIDs. We vendor
+    # complete mingw-w64 master headers plus an NCP compat block (verified
+    # Windows-SDK values) under deps/wfp-sdk-headers; GUID definitions live
+    # in src/ncp_wfp_guids.cpp because libfwpuclnt.a exports no GUID symbols.
+    set(NCP_WFP_HEADERS_DIR "${CMAKE_SOURCE_DIR}/deps/wfp-sdk-headers")
     include(CheckCXXSourceCompiles)
+    set(_CMAKE_REQUIRED_INCLUDES_SAVE "${CMAKE_REQUIRED_INCLUDES}")
+    if(EXISTS "${NCP_WFP_HEADERS_DIR}/fwpmu.h")
+        set(CMAKE_REQUIRED_INCLUDES "${NCP_WFP_HEADERS_DIR}")
+    endif()
     check_cxx_source_compiles("
 #include <winsock2.h>
 #include <windows.h>
 #include <fwpmu.h>
-int main() { return (int)FWPM_SESSION_FLAG_DYNAMIC; }
+int main() { return (int)FWPM_SESSION_FLAG_DYNAMIC + (int)FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT + (int)FWP_E_ALREADY_EXISTS; }
 " HAVE_WFP_SDK)
+    set(CMAKE_REQUIRED_INCLUDES "${_CMAKE_REQUIRED_INCLUDES_SAVE}")
     if(HAVE_WFP_SDK)
+        target_include_directories(ncp_core PUBLIC "${NCP_WFP_HEADERS_DIR}")
         target_link_libraries(ncp_core PUBLIC fwpuclnt)
+        message(STATUS "WFP enabled (vendored headers: ${NCP_WFP_HEADERS_DIR})")
     else()
         target_compile_definitions(ncp_core PRIVATE NCP_NO_WFP)
         message(STATUS "WFP SDK unavailable - WFP code disabled (WinDivert backend only)")

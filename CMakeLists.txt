@@ -187,7 +187,12 @@ if(ENABLE_GUI)
     set(CMAKE_AUTOMOC ON)
     set(CMAKE_AUTORCC ON)
     set(CMAKE_AUTOUIC ON)
-    find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Charts)
+    # QT_MINGW_ROOT: prefix of the Qt6 installation (e.g. /opt/Qt/6.5.3/mingw_64).
+    # PATHS is used explicitly because the MinGW toolchain re-roots
+    # CMAKE_PREFIX_PATH, which breaks the normal config-package search.
+    set(QT_MINGW_ROOT "" CACHE PATH "Qt6 installation prefix")
+    find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Charts
+                 PATHS ${QT_MINGW_ROOT})
 endif()
 
 # ==================== Output Directories ====================
@@ -322,7 +327,6 @@ endif()
 
 if(ENABLE_GUI)
     add_subdirectory(src/gui)
-    add_subdirectory(src)
 endif()
 
 if(ENABLE_TESTS)
@@ -374,7 +378,7 @@ if(ENABLE_CLI)
 endif()
 
 if(ENABLE_GUI)
-    install(TARGETS ncp
+    install(TARGETS ncp-qt
         RUNTIME DESTINATION bin
     )
 endif()

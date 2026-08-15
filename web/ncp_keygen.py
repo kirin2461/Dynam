@@ -25,6 +25,7 @@ import base64
 import json
 import os
 import sys
+from pathlib import Path
 from datetime import date
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -82,7 +83,19 @@ def cmd_generate_keypair(args):
     print(base64.b64encode(pub_raw).decode("ascii"))
 
 
+def _default_key_file() -> str:
+    """ncp_private_key.b64 рядом с exe (frozen) или со скриптом."""
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).parent / "ncp_private_key.b64")
+    return str(Path(__file__).parent / "ncp_private_key.b64")
+
+
 def _load_private_key(path: str) -> Ed25519PrivateKey:
+    if not os.path.isfile(path):
+        print(f"ОШИБКА: файл приватного ключа не найден: {path}", file=sys.stderr)
+        print("Положите ncp_private_key.b64 рядом с ncp-keygen.exe "
+              "или укажите --key <путь>.", file=sys.stderr)
+        sys.exit(2)
     with open(path) as f:
         b64 = f.read().strip()
     raw = base64.b64decode(b64)
@@ -90,7 +103,7 @@ def _load_private_key(path: str) -> Ed25519PrivateKey:
 
 
 def cmd_issue(args):
-    priv = _load_private_key(args.key)
+    priv = _load_private_key(args.key or _default_key_file())
 
     if args.modules == "all":
         modules = list(ALL_MODULES)
@@ -135,7 +148,17 @@ def cmd_issue(args):
     print(base64.b64encode(pub_raw).decode("ascii"))
 
 
+def _fix_console_encoding():
+    # Windows console may be cp1251/cp1252 - switch stdout/stderr to UTF-8
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main():
+    _fix_console_encoding()
     ap = argparse.ArgumentParser(description="NCP license key generator")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
@@ -145,7 +168,8 @@ def main():
     g.set_defaults(func=cmd_generate_keypair)
 
     i = sub.add_parser("issue", help="Выпустить лицензионный ключ")
-    i.add_argument("--key", required=True, help="Файл приватного ключа (Base64)")
+    i.add_argument("--key", default=None,
+                   help="Файл приватного ключа (Base64); по умолч. ncp_private_key.b64 рядом с exe")
     i.add_argument("--plan", default="ultimate", choices=VALID_PLANS)
     i.add_argument("--days", type=int, default=0,
                    help="Срок действия в днях (0 = пожизненная)")

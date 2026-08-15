@@ -6,6 +6,11 @@ target_link_libraries(ncp-cli PRIVATE
     ncp_core
 )
 
+# WinINET for system-proxy notify (InternetSetOptionW)
+if(WIN32)
+    target_link_libraries(ncp-cli PRIVATE wininet)
+endif()
+
 target_include_directories(ncp-cli PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core/include
 )

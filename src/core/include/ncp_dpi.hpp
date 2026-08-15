@@ -114,6 +114,16 @@ struct DPIConfig {
     bool enable_adaptive_fragmentation = true;  // Adapt fragmentation based on detection
     int max_fragment_retries = 3;  // Max retries before changing strategy
 
+    // Kill switch (DRIVER/WinDivert mode only): drop ALL direct outbound
+    // TCP/UDP that bypasses NCP — if the proxy/Tor chain goes down, traffic
+    // cannot silently leak direct. NEVER enabled by default; requires an
+    // explicit opt-in flag (--kill-switch). Exemptions are loopback (local
+    // proxy/Tor), DNS udp/53 (owned by the DNS leak prevention hooks) and
+    // DHCP; an optional allow endpoint can be configured for the upstream.
+    bool kill_switch = false;
+    std::string kill_switch_allow_host;    // e.g. upstream proxy IP (optional)
+    uint16_t kill_switch_allow_port = 0;   // e.g. 9050
+
     // Reverse fragment order (send second fragment first, then first)
     // Mimics GoodbyeDPI --reverse-frag; effective on Beeline and some TSPU
     bool enable_reverse_frag = false;
@@ -131,6 +141,10 @@ struct DPIConfig {
     int autottl_delta = 1;       // delta added to estimated path hops (can be negative)
     int autottl_min = 3;         // minimum auto-detected TTL
     int autottl_max = 20;        // maximum auto-detected TTL
+
+    // QUIC/HTTP3 handling (UDP 443) — packet-level backends (WinDivert).
+    bool quic_force_tcp = false;   // drop outbound QUIC → clients fall back to TCP/TLS
+    int quic_ipfrag_offset = 0;    // >0: IP-fragment QUIC Initial at this payload offset
 
     // Auto-probe: sequentially try preset strategies until one works
     bool enable_autoprobe = false;
@@ -459,6 +473,11 @@ using ConfigChangeCallback = std::function<void(const DPIConfig&, const DPIConfi
 using TransformCallback = std::function<std::vector<uint8_t>(
     const std::vector<uint8_t>& payload)>;
 
+// Builds the WinDivert filter string used by the kill switch. Pure string
+// logic, compiled on all platforms so unit tests can verify it.
+std::string build_kill_switch_filter(const std::string& allow_host,
+                                     uint16_t allow_port);
+
 struct DPIStats {
     std::atomic<uint64_t> packets_total{0};
     std::atomic<uint64_t> packets_modified{0};
@@ -469,6 +488,8 @@ struct DPIStats {
     std::atomic<uint64_t> connections_handled{0};
     // CRIT-1: count WinDivertSend failures
     std::atomic<uint64_t> send_errors{0};
+    // QUIC force-TCP: outbound QUIC datagrams intentionally dropped
+    std::atomic<uint64_t> packets_dropped{0};
 
         DPIStats() = default;
     DPIStats(const DPIStats& other)
@@ -479,7 +500,8 @@ struct DPIStats {
           bytes_sent(other.bytes_sent.load()),
           bytes_received(other.bytes_received.load()),
           connections_handled(other.connections_handled.load()),
-          send_errors(other.send_errors.load()) {}
+          send_errors(other.send_errors.load()),
+          packets_dropped(other.packets_dropped.load()) {}
     DPIStats& operator=(const DPIStats& other) {
         if (this != &other) {
             packets_total.store(other.packets_total.load());
@@ -490,6 +512,7 @@ struct DPIStats {
             bytes_received.store(other.bytes_received.load());
             connections_handled.store(other.connections_handled.load());
             send_errors.store(other.send_errors.load());
+            packets_dropped.store(other.packets_dropped.load());
         }
         return *this;
     }
@@ -503,6 +526,7 @@ struct DPIStats {
         bytes_received.store(0);
         connections_handled.store(0);
         send_errors.store(0);
+        packets_dropped.store(0);
     }
 
     DPIStats snapshot() const noexcept {
@@ -515,6 +539,7 @@ struct DPIStats {
         s.bytes_received.store(bytes_received.load());
         s.connections_handled.store(connections_handled.load());
         s.send_errors.store(send_errors.load());
+        s.packets_dropped.store(packets_dropped.load());
         return s;
     }
 };
@@ -550,6 +575,10 @@ public:
     void stop();
     void shutdown();
     bool is_running() const;
+    /// True only when a real interception backend is processing packets
+    /// (nfqueue / WinDivert / TCP proxy / WS tunnel). False in passive mode,
+    /// where start() succeeds but NO traffic is touched.
+    bool interception_active() const;
 
     DPIConfig get_config() const;
     bool update_config(const DPIConfig& config);

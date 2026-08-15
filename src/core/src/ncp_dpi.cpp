@@ -1,4 +1,6 @@
 #include "ncp_dpi.hpp"
+#include "ncp_ipfrag.hpp"
+#include "ncp_quic.hpp"
 #include "ncp_dpi_advanced.hpp"
 #include "ncp_dpi_zapret.hpp"
 #include "ncp_tls_fingerprint.hpp"
@@ -191,6 +193,9 @@ int find_sni_hostname_offset(const uint8_t* data, size_t len) {
 class DPIBypass::Impl {
 public:
     std::atomic<bool> running{false};
+    // Set only when a real packet-interception backend started (nfqueue,
+    // WinDivert, TCP proxy, WS tunnel). Passive mode leaves this false.
+    std::atomic<bool> intercept_active{false};
     DPIConfig config;
 
     // When true, initialize() will NOT create an AdvancedDPIBypass child.
@@ -1375,6 +1380,8 @@ public:
 
 #if defined(HAVE_WINDIVERT) && defined(_WIN32)
     HANDLE wd_handle_ = nullptr;
+    HANDLE wd_ks_handle_ = nullptr;   // kill switch drop handle (opt-in)
+    std::thread ks_thread_;
 
     // Clean up a stale WinDivert driver service from the Windows SCM.
     // Error 1058 is almost always caused by a leftover registry entry
@@ -1565,6 +1572,39 @@ public:
     // our own fragments and must be passed through without re-processing.
     static constexpr uint16_t MAGIC_IP_ID = 0x4E43; // "NC" in hex
 
+    bool init_kill_switch() {
+        DPIConfig c = snapshot_config();
+        std::string f = build_kill_switch_filter(c.kill_switch_allow_host,
+                                                 c.kill_switch_allow_port);
+        // Priority 1000: the drop handle sees packets BEFORE the divert
+        // handle (priority 0), so direct traffic is discarded first.
+        wd_ks_handle_ = WinDivertOpen(f.c_str(), WINDIVERT_LAYER_NETWORK, 1000, 0);
+        if (wd_ks_handle_ == INVALID_HANDLE_VALUE) {
+            wd_ks_handle_ = nullptr;
+            log("kill switch: WinDivertOpen failed, error=" +
+                std::to_string(GetLastError()));
+            return false;
+        }
+        log("kill switch ARMED - all direct outbound traffic is dropped "
+            "(exempt: loopback proxy/Tor, DNS hook, DHCP" +
+            std::string(c.kill_switch_allow_host.empty()
+                ? "" : ", allow " + c.kill_switch_allow_host + ":" +
+                       std::to_string(c.kill_switch_allow_port)) + ")");
+        return true;
+    }
+
+    void kill_switch_loop() {
+        uint8_t packet[65535];
+        UINT packet_len;
+        WINDIVERT_ADDRESS addr;
+        while (running) {
+            if (!WinDivertRecv(wd_ks_handle_, packet, sizeof(packet),
+                               &packet_len, &addr))
+                break;  // handle closed -> stop requested
+            // Deliberately NOT reinjected: the packet is dropped.
+        }
+    }
+
     void windivert_loop() {
         uint8_t packet[65535];
         UINT packet_len;
@@ -1624,6 +1664,46 @@ public:
 
                 uint16_t udp_dst = ntohs(udp_header->DstPort);
 
+                // === QUIC force-TCP: drop outbound QUIC (UDP/443) so clients
+                // fall back to TCP/TLS where TCP desync strategies apply ===
+                if (udp_dst == 443 && cfg.quic_force_tcp) {
+                    {
+                        std::lock_guard<std::mutex> lock(stats_mutex);
+                        stats.packets_dropped++;
+                    }
+                    continue;
+                }
+
+                // === QUIC Initial IP fragmentation (config-level) ===
+                if (udp_dst == 443 && cfg.quic_ipfrag_offset > 0 &&
+                    tcp_payload && payload_len > 20 &&
+                    is_quic_initial(tcp_payload, payload_len)) {
+                    std::vector<uint8_t> f1, f2;
+                    if (build_ip_fragments(packet, packet_len,
+                            static_cast<size_t>(cfg.quic_ipfrag_offset), f1, f2)) {
+                        // Mark fragments as self-injected to skip reprocessing
+                        if (f1.size() >= 6) {
+                            f1[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                            f1[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                        }
+                        if (f2.size() >= 6) {
+                            f2[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                            f2[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                        }
+                        if (!WinDivertSend(wd_handle_, f1.data(),
+                                static_cast<UINT>(f1.size()), nullptr, &addr) ||
+                            !WinDivertSend(wd_handle_, f2.data(),
+                                static_cast<UINT>(f2.size()), nullptr, &addr)) {
+                            log("WinDivertSend (QUIC ipfrag) failed");
+                            stats.send_errors++;
+                        } else {
+                            std::lock_guard<std::mutex> lock(stats_mutex);
+                            stats.packets_modified++;
+                        }
+                        continue;  // original datagram replaced by fragments
+                    }
+                }
+
                 // === QUIC DPI bypass (UDP 443) ===
                 // When zapret chains are active and match QUIC traffic,
                 // send fake QUIC packets before the real one to confuse DPI.
@@ -1632,6 +1712,33 @@ public:
                     const ZapretChain* match = find_matching_chain(ZProto::UDP, udp_dst, "");
                     if (match) {
                         auto ov = chain_to_overrides(*match);
+
+                        // Chain-level IP fragmentation (ipfrag2 for QUIC)
+                        if (match->ipfrag_offset > 0 && tcp_payload && payload_len > 20 &&
+                            is_quic_initial(tcp_payload, payload_len)) {
+                            std::vector<uint8_t> f1, f2;
+                            if (build_ip_fragments(packet, packet_len,
+                                    static_cast<size_t>(match->ipfrag_offset), f1, f2)) {
+                                if (f1.size() >= 6) {
+                                    f1[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                                    f1[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                                }
+                                if (f2.size() >= 6) {
+                                    f2[4] = static_cast<uint8_t>(MAGIC_IP_ID >> 8);
+                                    f2[5] = static_cast<uint8_t>(MAGIC_IP_ID & 0xFF);
+                                }
+                                WinDivertSend(wd_handle_, f1.data(),
+                                    static_cast<UINT>(f1.size()), nullptr, &addr);
+                                WinDivertSend(wd_handle_, f2.data(),
+                                    static_cast<UINT>(f2.size()), nullptr, &addr);
+                                {
+                                    std::lock_guard<std::mutex> lock(stats_mutex);
+                                    stats.packets_modified++;
+                                }
+                                continue;
+                            }
+                        }
+
                         int repeats = std::max(ov.fake_repeats, 1);
                         UINT ip_hdr_len = ip_header->HdrLength * 4;
 
@@ -2279,6 +2386,11 @@ public:
     }
 
     void cleanup_windivert() {
+        if (wd_ks_handle_ && wd_ks_handle_ != INVALID_HANDLE_VALUE) {
+            WinDivertClose(wd_ks_handle_);  // unblocks kill_switch_loop Recv
+            wd_ks_handle_ = nullptr;
+        }
+        if (ks_thread_.joinable()) ks_thread_.join();
         if (wd_handle_ && wd_handle_ != INVALID_HANDLE_VALUE) {
             WinDivertClose(wd_handle_);
             wd_handle_ = nullptr;
@@ -2707,6 +2819,7 @@ bool DPIBypass::start() {
     if (impl_->snapshot_config().mode == DPIMode::DRIVER) {
         if (!impl_->init_nfqueue()) return false;
         impl_->running = true;
+        impl_->intercept_active = true;
         impl_->worker_thread = std::thread(&Impl::nfqueue_loop, impl_.get());
         impl_->log("DPI bypass started (driver mode via nfqueue, queue=" +
                   std::to_string(impl_->snapshot_config().nfqueue_num) + ")");
@@ -2720,7 +2833,16 @@ bool DPIBypass::start() {
     if (cfg_snap.mode == DPIMode::DRIVER) {
         if (!impl_->init_windivert()) return false;
         impl_->running = true;
+        impl_->intercept_active = true;
         impl_->worker_thread = std::thread(&Impl::windivert_loop, impl_.get());
+        if (cfg_snap.kill_switch) {
+            if (impl_->init_kill_switch()) {
+                impl_->ks_thread_ = std::thread(&Impl::kill_switch_loop, impl_.get());
+            } else {
+                impl_->log("[!] kill switch was explicitly requested but FAILED "
+                           "to arm - continuing WITHOUT it (traffic can go direct)");
+            }
+        }
         impl_->log("DPI bypass started (WinDivert driver mode)" +
                   std::string(impl_->advanced_enabled_.load(std::memory_order_acquire) ? " + Advanced" : ""));
         return true;
@@ -2729,6 +2851,7 @@ bool DPIBypass::start() {
 
     if (cfg_snap.mode == DPIMode::PROXY) {
         impl_->running = true;
+        impl_->intercept_active = true;
         impl_->worker_thread = std::thread(&Impl::proxy_listen_loop, impl_.get());
         impl_->log("DPI bypass started (TCP proxy mode" +
                   std::string(impl_->advanced_enabled_.load(std::memory_order_acquire) ? " + Advanced" : "") + ")");
@@ -2744,6 +2867,7 @@ bool DPIBypass::start() {
         if (!impl_->start_ws_tunnel()) {
             return false;
         }
+        impl_->intercept_active = true;
         impl_->log("DPI bypass started (WebSocket tunnel mode -> " +
                    cfg_snap.ws_server_url + ")");
         return true;
@@ -2751,8 +2875,36 @@ bool DPIBypass::start() {
 #endif
 
     impl_->running = true;
-    impl_->log("DPI bypass started (passive mode - nfqueue/proxy not active)");
+    impl_->intercept_active = false;
+#ifdef _WIN32
+    impl_->log("!!! DPI bypass started in PASSIVE mode - NO packets are being intercepted !!!");
+    impl_->log("!!! Reason: mode=DRIVER was requested, but this build has no WinDivert");
+    impl_->log("!!! backend (SDK not present at build time). Desync techniques will NOT");
+    impl_->log("!!! touch your traffic, and all hook-based modules (L3 stealth, WF defense,");
+    impl_->log("!!! behavioral cloak, time breaker, volume normalizer, self-test feed) will");
+    impl_->log("!!! report ZERO activity. Remedies: run `ncp proxy --system-proxy` (works");
+    impl_->log("!!! without admin), or use a build with the WinDivert SDK (needs admin).");
+#elif defined(__linux__)
+    impl_->log("!!! DPI bypass started in PASSIVE mode - NO packets are being intercepted !!!");
+    impl_->log("!!! Reason: no nfqueue/libnetfilter_queue backend in this build or mode.");
+    impl_->log("!!! Desync techniques will NOT touch your traffic. Remedies: use PROXY");
+    impl_->log("!!! mode (`ncp proxy`) or build with nfqueue support + iptables rules.");
+#else
+    impl_->log("!!! DPI bypass started in PASSIVE mode - NO packets are being intercepted !!!");
+#endif
     return true;
+}
+
+std::string build_kill_switch_filter(const std::string& allow_host,
+                                     uint16_t allow_port) {
+    std::string f =
+        "outbound and !loopback and (tcp or udp) and "
+        "udp.DstPort != 53 and udp.DstPort != 67 and udp.DstPort != 68";
+    if (!allow_host.empty() && allow_port != 0) {
+        f += " and not (ip.DstAddr == " + allow_host +
+             " and tcp.DstPort == " + std::to_string(allow_port) + ")";
+    }
+    return f;
 }
 
 void DPIBypass::stop() {
@@ -2805,6 +2957,8 @@ void DPIBypass::stop() {
 
 void DPIBypass::shutdown() { stop(); }
 bool DPIBypass::is_running() const { return impl_->running; }
+
+bool DPIBypass::interception_active() const { return impl_->intercept_active.load(); }
 
 DPIStats DPIBypass::get_stats() const {
     std::lock_guard<std::mutex> lock(impl_->stats_mutex);

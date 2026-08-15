@@ -1,5 +1,6 @@
 #include "ncp_crypto.hpp"
 #include "ncp_license.hpp"
+#include "ncp_crypto.hpp"
 #include "ncp_network.hpp"
 #include "ncp_spoofer.hpp"
 #include "ncp_dpi.hpp"
@@ -20,6 +21,13 @@
 #include "ncp_geneva_engine.hpp"
 #include "ncp_covert_channel.hpp"
 #include "ncp_transport_manager.hpp"
+#include "ncp_proxy.hpp"
+#include "ncp_tor_manager.hpp"
+#include "ncp_blockcheck.hpp"
+#include "ncp_zapret_import.hpp"
+#include "ncp_hostlist.hpp"
+#include "ncp_dpi_detector.hpp"
+#include "ncp_autopilot.hpp"
 
 #include <iostream>
 #include <string>
@@ -32,8 +40,17 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <iphlpapi.h>
+#include <wininet.h>
+#include <direct.h>
 #pragma comment(lib, "iphlpapi.lib")
+#else
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #endif
+#include <cstdlib>
+#include <cstdio>
+#include <ctime>
 #include <csignal>
 #include <atomic>
 #include <thread>
@@ -273,6 +290,416 @@ static bool force_set_dns(const std::string& iface_utf8,
 }
 #endif
 
+static std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
+    std::vector<uint8_t> out;
+    out.reserve(hex.size() / 2);
+    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
+        auto hv = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        int hi = hv(hex[i]), lo = hv(hex[i + 1]);
+        if (hi < 0 || lo < 0) { out.clear(); return out; }
+        out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    return out;
+}
+
+// ── Cross-process run state ─────────────────────────────────────────────
+// `ncp run` writes a small JSON state file on startup and removes it during
+// graceful shutdown, so `ncp status` / `ncp stop` invoked from a separate
+// process can see and control the running instance.
+static std::string ncp_state_dir() {
+#ifdef _WIN32
+    const char* appdata = std::getenv("APPDATA");
+    if (appdata) return std::string(appdata) + "\\ncp";
+    return ".";
+#else
+    const char* home = std::getenv("HOME");
+    if (home) return std::string(home) + "/ncp";
+    return "/tmp";
+#endif
+}
+
+static std::string ncp_state_file() {
+#ifdef _WIN32
+    return ncp_state_dir() + "\\run_state.json";
+#else
+    return ncp_state_dir() + "/run_state.json";
+#endif
+}
+
+static long ncp_current_pid() {
+#ifdef _WIN32
+    return static_cast<long>(GetCurrentProcessId());
+#else
+    return static_cast<long>(::getpid());
+#endif
+}
+
+// forward decls (defined below, used by sysproxy/autopilot handlers)
+static bool has_flag(const std::vector<std::string>& args, const std::string& flag);
+static std::string get_option(const std::vector<std::string>& args, const std::string& option, const std::string& default_val = "");
+static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val = 0);
+
+// ============================================================================
+// System-wide proxy (application mode) — routes ALL proxy-aware applications
+// (Discord, browsers, Electron/Chromium apps) through the local NCP proxy.
+//
+// Windows: per-user WinINET settings (HKCU — no admin needed), live-notified
+// via InternetSetOptionW. Linux: GNOME gsettings when available, otherwise
+// prints shell env instructions.
+//
+// SAFETY CONTRACT: previous settings are always saved to
+// <state_dir>/sysproxy_state.json BEFORE changing anything; `off` restores
+// exactly what was there (including "proxy was disabled"). If ncp crashes,
+// `ncp sysproxy off` recovers from the state file.
+// ============================================================================
+static std::string ncp_sysproxy_state_file() {
+#ifdef _WIN32
+    return ncp_state_dir() + "\\sysproxy_state.json";
+#else
+    return ncp_state_dir() + "/sysproxy_state.json";
+#endif
+}
+
+// minimal flat-JSON field extractors (our own written format)
+static std::string sp_json_get_str(const std::string& j, const std::string& key) {
+    std::string pat = "\"" + key + "\": \"";
+    size_t p = j.find(pat);
+    if (p == std::string::npos) return "";
+    p += pat.size();
+    size_t e = j.find('"', p);
+    if (e == std::string::npos) return "";
+    return j.substr(p, e - p);
+}
+static long sp_json_get_num(const std::string& j, const std::string& key, long dflt = -1) {
+    std::string pat = "\"" + key + "\": ";
+    size_t p = j.find(pat);
+    if (p == std::string::npos) return dflt;
+    p += pat.size();
+    try { return std::stol(j.substr(p, 16)); } catch (...) { return dflt; }
+}
+
+struct SysproxySaved {
+    bool valid = false;
+    long enable = 0;                 // Windows ProxyEnable
+    std::string server;              // Windows ProxyServer ("" = was unset)
+    std::string override_list;       // Windows ProxyOverride
+    std::string gnome_mode;          // Linux gsettings mode ("none"/"manual"/"auto")
+};
+
+static bool sysproxy_load_saved(SysproxySaved& out) {
+    std::ifstream f(ncp_sysproxy_state_file());
+    if (!f) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string j = ss.str();
+    out.enable = sp_json_get_num(j, "enable", 0);
+    out.server = sp_json_get_str(j, "server");
+    out.override_list = sp_json_get_str(j, "override");
+    out.gnome_mode = sp_json_get_str(j, "gnome_mode");
+    out.valid = true;
+    return true;
+}
+
+static void sysproxy_write_state(bool active, long port, const SysproxySaved& sv) {
+    std::string path = ncp_sysproxy_state_file();
+    // ensure dir exists
+    size_t slash = path.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        std::string dir = path.substr(0, slash);
+#ifdef _WIN32
+        _mkdir(dir.c_str());
+#else
+        mkdir(dir.c_str(), 0700);
+#endif
+    }
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) return;
+    f << "{\"active\": " << (active ? "true" : "false")
+      << ", \"port\": " << port
+      << ", \"enable\": " << sv.enable
+      << ", \"server\": \"" << sv.server << "\""
+      << ", \"override\": \"" << sv.override_list << "\""
+      << ", \"gnome_mode\": \"" << sv.gnome_mode << "\"}\n";
+}
+
+static bool sysproxy_is_active() {
+    std::ifstream f(ncp_sysproxy_state_file());
+    if (!f) return false;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str().find("\"active\": true") != std::string::npos;
+}
+
+#ifdef _WIN32
+static const char* WIN_INET_KEY =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
+
+static bool win_reg_read_dword(HKEY root, const char* sub, const char* name, DWORD& out) {
+    HKEY h;
+    if (RegOpenKeyExA(root, sub, 0, KEY_READ, &h) != ERROR_SUCCESS) return false;
+    DWORD val = 0, sz = sizeof(val), type = 0;
+    bool ok = RegQueryValueExA(h, name, nullptr, &type,
+                               reinterpret_cast<LPBYTE>(&val), &sz) == ERROR_SUCCESS;
+    RegCloseKey(h);
+    if (ok) out = val;
+    return ok;
+}
+static std::string win_reg_read_str(HKEY root, const char* sub, const char* name) {
+    HKEY h;
+    if (RegOpenKeyExA(root, sub, 0, KEY_READ, &h) != ERROR_SUCCESS) return "";
+    char buf[1024] = {0};
+    DWORD sz = sizeof(buf), type = 0;
+    std::string out;
+    if (RegQueryValueExA(h, name, nullptr, &type,
+                         reinterpret_cast<LPBYTE>(buf), &sz) == ERROR_SUCCESS)
+        out = buf;
+    RegCloseKey(h);
+    return out;
+}
+static void win_inet_notify() {
+    InternetSetOptionA(nullptr, INTERNET_OPTION_SETTINGS_CHANGED, nullptr, 0);
+    InternetSetOptionA(nullptr, INTERNET_OPTION_REFRESH, nullptr, 0);
+}
+#endif
+
+// Apply system proxy to 127.0.0.1:port. Saves previous settings first.
+static bool sysproxy_apply(uint16_t port, std::string* err) {
+    SysproxySaved sv;
+#ifdef _WIN32
+    DWORD en = 0;
+    sv.enable = win_reg_read_dword(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyEnable", en)
+                    ? static_cast<long>(en) : 0;
+    sv.server = win_reg_read_str(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyServer");
+    sv.override_list = win_reg_read_str(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyOverride");
+    sv.valid = true;
+    sysproxy_write_state(true, port, sv);  // save BEFORE changing
+
+    HKEY h;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, WIN_INET_KEY, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &h, nullptr) != ERROR_SUCCESS) {
+        if (err) *err = "cannot open Internet Settings key";
+        return false;
+    }
+    DWORD one = 1;
+    RegSetValueExA(h, "ProxyEnable", 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&one), sizeof(one));
+    std::string server = "127.0.0.1:" + std::to_string(port);
+    RegSetValueExA(h, "ProxyServer", 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(server.c_str()),
+                   static_cast<DWORD>(server.size() + 1));
+    std::string ovr = "localhost;127.*;10.*;172.16.*;192.168.*;<local>";
+    RegSetValueExA(h, "ProxyOverride", 0, REG_SZ,
+                   reinterpret_cast<const BYTE*>(ovr.c_str()),
+                   static_cast<DWORD>(ovr.size() + 1));
+    RegCloseKey(h);
+    win_inet_notify();
+    return true;
+#else
+    // Linux: GNOME gsettings if available
+    sv.valid = true;
+    if (std::system("which gsettings >/dev/null 2>&1") == 0) {
+        char mode[64] = {0};
+        FILE* p = popen("gsettings get org.gnome.system.proxy mode 2>/dev/null", "r");
+        if (p) {
+            if (fgets(mode, sizeof(mode), p)) {
+                std::string m = mode;
+                while (!m.empty() && (m.back() == '\n' || m.back() == '\'' || m.back() == ' '))
+                    m.pop_back();
+                while (!m.empty() && m.front() == '\'') m.erase(m.begin());
+                sv.gnome_mode = m;
+            }
+            pclose(p);
+        }
+        sysproxy_write_state(true, port, sv);
+        std::string base = "gsettings set org.gnome.system.proxy";
+        std::system((base + " mode 'manual'").c_str());
+        std::system((base + ".socks host '127.0.0.1'").c_str());
+        std::system((base + ".socks port " + std::to_string(port)).c_str());
+        std::system((base + ".http host '127.0.0.1'").c_str());
+        std::system((base + ".http port " + std::to_string(port)).c_str());
+        std::system((base + ".https host '127.0.0.1'").c_str());
+        std::system((base + ".https port " + std::to_string(port)).c_str());
+        std::system((base + " ignore-hosts \"['localhost', '127.0.0.0/8', '10.0.0.0/8', '192.168.0.0/16', '172.16.0.0/12']\"").c_str());
+        return true;
+    }
+    // No gsettings: record state anyway and give manual instructions
+    sysproxy_write_state(true, port, sv);
+    std::cout << "[i] gsettings not found — set these env vars for your apps:\n"
+              << "    export http_proxy=http://127.0.0.1:" << port << "\n"
+              << "    export https_proxy=http://127.0.0.1:" << port << "\n"
+              << "    export all_proxy=socks5h://127.0.0.1:" << port << "\n";
+    return true;
+#endif
+}
+
+// Restore previous settings from the state file.
+static bool sysproxy_restore(std::string* err) {
+    SysproxySaved sv;
+    if (!sysproxy_load_saved(sv)) {
+        if (err) *err = "no saved state (system proxy was not applied by ncp)";
+        return false;
+    }
+#ifdef _WIN32
+    HKEY h;
+    if (RegCreateKeyExA(HKEY_CURRENT_USER, WIN_INET_KEY, 0, nullptr, 0,
+                        KEY_SET_VALUE, nullptr, &h, nullptr) != ERROR_SUCCESS) {
+        if (err) *err = "cannot open Internet Settings key";
+        return false;
+    }
+    DWORD en = static_cast<DWORD>(sv.enable);
+    RegSetValueExA(h, "ProxyEnable", 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&en), sizeof(en));
+    if (!sv.server.empty())
+        RegSetValueExA(h, "ProxyServer", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(sv.server.c_str()),
+                       static_cast<DWORD>(sv.server.size() + 1));
+    else
+        RegDeleteValueA(h, "ProxyServer");
+    if (!sv.override_list.empty())
+        RegSetValueExA(h, "ProxyOverride", 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(sv.override_list.c_str()),
+                       static_cast<DWORD>(sv.override_list.size() + 1));
+    else
+        RegDeleteValueA(h, "ProxyOverride");
+    RegCloseKey(h);
+    win_inet_notify();
+#else
+    if (!sv.gnome_mode.empty() &&
+        std::system("which gsettings >/dev/null 2>&1") == 0) {
+        std::string cmd = "gsettings set org.gnome.system.proxy mode '" +
+                          sv.gnome_mode + "'";
+        std::system(cmd.c_str());
+    }
+#endif
+    sysproxy_write_state(false, 0, sv);
+    return true;
+}
+
+void handle_sysproxy(const std::vector<std::string>& args) {
+    std::string action;
+    for (const auto& a : args) {
+        if (!a.empty() && a[0] != '-') { action = a; break; }
+    }
+    if (action.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp sysproxy <action>\n"
+                  << "  on [--port N]   Route all proxy-aware applications through 127.0.0.1:N\n"
+                  << "                  (Discord, browsers, Electron apps — no admin needed)\n"
+                  << "  off             Restore previous system proxy settings\n"
+                  << "  status          Show whether ncp system proxy is active\n"
+                  << "\n"
+                  << "Start the desync proxy first: ncp proxy --doh --autopilot\n"
+                  << "(or use `ncp proxy --system-proxy` to do both in one command)\n";
+        return;
+    }
+    if (action == "on") {
+        int port = get_option_int(args, "--port", 1080);
+        std::string err;
+        if (!sysproxy_apply(static_cast<uint16_t>(port), &err)) {
+            std::cerr << "[!] sysproxy on failed: " << err << "\n";
+            return;
+        }
+        std::cout << "[+] System proxy set to 127.0.0.1:" << port << "\n"
+                  << "    Applications (Discord etc.) now route through the NCP proxy.\n"
+                  << "    Restore with: ncp sysproxy off\n";
+        return;
+    }
+    if (action == "off") {
+        std::string err;
+        if (!sysproxy_restore(&err)) {
+            std::cerr << "[!] " << err << "\n";
+            return;
+        }
+        std::cout << "[+] System proxy settings restored\n";
+        return;
+    }
+    if (action == "status") {
+        std::cout << "System proxy (ncp): "
+                  << (sysproxy_is_active() ? "ACTIVE" : "inactive") << "\n";
+#ifdef _WIN32
+        DWORD en = 0;
+        bool have = win_reg_read_dword(HKEY_CURRENT_USER, WIN_INET_KEY,
+                                       "ProxyEnable", en);
+        std::cout << "Windows WinINET: ProxyEnable="
+                  << (have ? std::to_string(en) : std::string("?"))
+                  << " ProxyServer="
+                  << win_reg_read_str(HKEY_CURRENT_USER, WIN_INET_KEY, "ProxyServer")
+                  << "\n";
+#endif
+        return;
+    }
+    std::cerr << "[!] Unknown sysproxy action: " << action << "\n";
+}
+
+static bool ncp_pid_alive(long pid) {
+    if (pid <= 0) return false;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                           static_cast<DWORD>(pid));
+    if (h) { CloseHandle(h); return true; }
+    return false;
+#else
+    return ::kill(static_cast<pid_t>(pid), 0) == 0;
+#endif
+}
+
+static void ncp_write_state(const std::string& modules_csv) {
+#ifdef _WIN32
+    CreateDirectoryA(ncp_state_dir().c_str(), nullptr);
+#else
+    ::mkdir(ncp_state_dir().c_str(), 0700);
+#endif
+    std::ofstream f(ncp_state_file(), std::ios::trunc);
+    if (!f.is_open()) return;
+    f << "{\"pid\":" << ncp_current_pid()
+      << ",\"started\":" << static_cast<long>(std::time(nullptr))
+      << ",\"modules\":\"" << modules_csv << "\"}\n";
+}
+
+static void ncp_clear_state() {
+    std::remove(ncp_state_file().c_str());
+}
+
+struct NcpRunState {
+    bool present = false;
+    long pid = -1;
+    long started = 0;
+    std::string modules;
+};
+
+static NcpRunState ncp_read_state() {
+    NcpRunState st;
+    std::ifstream f(ncp_state_file());
+    if (!f.is_open()) return st;
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    auto extract_long = [&](const char* key) -> long {
+        std::string k = std::string("\"") + key + "\":";
+        auto i = content.find(k);
+        if (i == std::string::npos) return -1;
+        i += k.size();
+        try { return std::stol(content.substr(i)); } catch (...) { return -1; }
+    };
+    auto extract_str = [&](const char* key) -> std::string {
+        std::string k = std::string("\"") + key + "\":\"";
+        auto i = content.find(k);
+        if (i == std::string::npos) return "";
+        i += k.size();
+        auto j = content.find('"', i);
+        if (j == std::string::npos) return "";
+        return content.substr(i, j - i);
+    };
+    st.pid = extract_long("pid");
+    st.started = extract_long("started");
+    st.modules = extract_str("modules");
+    st.present = (st.pid > 0);
+    return st;
+}
+
 static std::string get_arg(const std::vector<std::string>& args, size_t index, const std::string& default_val = "") {
     return index < args.size() ? args[index] : default_val;
 }
@@ -281,13 +708,19 @@ static bool has_flag(const std::vector<std::string>& args, const std::string& fl
     return std::find(args.begin(), args.end(), flag) != args.end();
 }
 
-static std::string get_option(const std::vector<std::string>& args, const std::string& option, const std::string& default_val = "") {
+static std::string get_option(const std::vector<std::string>& args, const std::string& option, const std::string& default_val) {
     auto it = std::find(args.begin(), args.end(), option);
     if (it != args.end() && ++it != args.end()) return *it;
     return default_val;
 }
 
-static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val = 0) {
+static std::vector<std::string> get_options_all(const std::vector<std::string>& args, const std::string& option) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i + 1 < args.size(); ++i)
+        if (args[i] == option) out.push_back(args[i + 1]);
+    return out;
+}
+static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val) {
     std::string val = get_option(args, option);
     if (val.empty()) return default_val;
     try {
@@ -381,6 +814,11 @@ void handle_license(const std::vector<std::string>& args);
 void handle_dpi(const std::vector<std::string>& args);
 void handle_i2p(const std::vector<std::string>& args);
 void handle_mimic(const std::vector<std::string>& args);
+void handle_proxy(const std::vector<std::string>& args);
+void handle_blockcheck(const std::vector<std::string>& args);
+void handle_autopilot(const std::vector<std::string>& args);
+void handle_sysproxy(const std::vector<std::string>& args);
+void handle_import_zapret(const std::vector<std::string>& args);
 
 // ============================================================================
 // main()
@@ -390,7 +828,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.2.0");
+    ArgumentParser parser("ncp", "v1.5.0");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch)", handle_run, {"[<interface>]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
@@ -402,6 +840,11 @@ int main(int argc, char* argv[]) {
     parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
+    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]", "[--upstream socks5://127.0.0.1:9050]", "[--tor]", "[--tor-exec /path/tor --tor-bridge \"obfs4 ...\" --pt-obfs4 /path/lyrebird]"});
+    parser.add_command("blockcheck", "Auto-select best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--json]", "[--out file]", "[--apply profile.json]"});
+    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable|learn-preset>", "[domain|preset]", "[--json]", "[--timeout ms]"});
+    parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
+    parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
 
     parser.parse_and_execute(argc, argv);
 
@@ -411,6 +854,305 @@ int main(int argc, char* argv[]) {
 // ============================================================================
 // Handler implementations
 // ============================================================================
+
+
+// ── Live module stats export (consumed by web GUI via --stats-file) ──────────
+static const char* ncp_protocol_name(TransportProtocol p) {
+    switch (p) {
+        case TransportProtocol::OBFS4:           return "obfs4";
+        case TransportProtocol::WEBSOCKET_TLS:   return "websocket";
+        case TransportProtocol::QUIC_LIKE:       return "quic";
+        case TransportProtocol::RAW_TLS_1_3:     return "tls13";
+        case TransportProtocol::MEEK_FRONTING:   return "meek";
+        case TransportProtocol::SHADOWSOCKS_AEAD: return "shadowsocks";
+    }
+    return "unknown";
+}
+
+static void write_module_stats_json(const std::string& path) {
+    std::ostringstream j;
+    j << "{\"ts\":" << static_cast<long long>(std::time(nullptr));
+    if (g_app.dpi_bypass) {
+        auto v = g_app.dpi_bypass->get_stats();
+        j << ",\"dpi\":{\"packets_total\":" << v.packets_total.load()
+          << ",\"packets_modified\":" << v.packets_modified.load()
+          << ",\"packets_fragmented\":" << v.packets_fragmented.load()
+          << ",\"fake_packets_sent\":" << v.fake_packets_sent.load()
+          << ",\"packets_dropped\":" << v.packets_dropped.load()
+          << ",\"send_errors\":" << v.send_errors.load()
+          << ",\"connections_handled\":" << v.connections_handled.load()
+          << ",\"interception_active\":" << (g_app.dpi_bypass->interception_active() ? 1 : 0)
+          << "}";
+    }
+    if (g_app.l3_stealth) {
+        auto v = g_app.l3_stealth->get_stats();
+        j << ",\"l3_stealth\":{\"packets_processed\":" << v.packets_processed.load()
+          << ",\"ttl_normalized\":" << v.ttl_normalized.load()
+          << ",\"ipid_rewritten\":" << v.ipid_rewritten.load()
+          << ",\"mss_clamped\":" << v.mss_clamped.load() << "}";
+    }
+    if (g_app.self_test) {
+        auto v = g_app.self_test->get_stats();
+        j << ",\"self_test\":{\"packets_fed\":" << v.packets_fed.load()
+          << ",\"tests_run\":" << v.tests_run.load()
+          << ",\"tests_failed\":" << v.tests_failed.load()
+          << ",\"countermeasures_applied\":" << v.countermeasures_applied.load() << "}";
+    }
+    if (g_app.wf_defense) {
+        auto v = g_app.wf_defense->get_stats();
+        j << ",\"wf_defense\":{\"real_packets_processed\":" << v.real_packets_processed.load()
+          << ",\"dummy_packets_sent\":" << v.dummy_packets_sent.load()
+          << ",\"dummy_bytes_sent\":" << v.dummy_bytes_sent.load()
+          << ",\"pages_defended\":" << v.pages_defended.load()
+          << ",\"overhead_bytes\":" << v.overhead_bytes.load() << "}";
+    }
+    if (g_app.volume_normalizer) {
+        auto v = g_app.volume_normalizer->get_stats();
+        j << ",\"volume_normalizer\":{\"requests_normalized\":" << v.requests_normalized.load()
+          << ",\"bytes_original\":" << v.bytes_original.load()
+          << ",\"bytes_padded\":" << v.bytes_padded.load()
+          << ",\"cover_bytes_sent\":" << v.cover_bytes_sent.load() << "}";
+    }
+    if (g_app.behavioral_cloak) {
+        auto v = g_app.behavioral_cloak->get_stats();
+        j << ",\"behavioral_cloak\":{\"packets_shaped\":" << v.packets_shaped.load()
+          << ",\"bursts_generated\":" << v.bursts_generated.load()
+          << ",\"idle_periods_injected\":" << v.idle_periods_injected.load() << "}";
+    }
+    if (g_app.time_breaker) {
+        auto v = g_app.time_breaker->get_stats();
+        j << ",\"time_breaker\":{\"jitters_applied\":" << v.jitters_applied.load()
+          << ",\"total_jitter_us\":" << v.total_jitter_us.load() << "}";
+    }
+    if (g_app.rtt_equalizer) {
+        auto v = g_app.rtt_equalizer->get_stats();
+        j << ",\"rtt_equalizer\":{\"acks_delayed\":" << v.acks_delayed.load()
+          << ",\"total_delay_us\":" << v.total_delay_us.load()
+          << ",\"samples_collected\":" << v.samples_collected.load()
+          << ",\"adaptive_adjustments\":" << v.adaptive_adjustments.load() << "}";
+    }
+    if (g_app.geneva) {
+        const auto& v = g_app.geneva->get_stats();
+        j << ",\"geneva\":{\"packets_processed\":" << v.packets_processed
+          << ",\"packets_duplicated\":" << v.packets_duplicated
+          << ",\"packets_fragmented\":" << v.packets_fragmented
+          << ",\"packets_tampered\":" << v.packets_tampered
+          << ",\"packets_dropped\":" << v.packets_dropped
+          << ",\"total_overhead_bytes\":" << v.total_overhead_bytes << "}";
+    }
+    if (g_app.dns_leak) {
+        bool act = g_app.dns_leak->is_active();
+        j << ",\"dns_leak\":{\"active\":" << (act ? 1 : 0);
+        if (act) {
+            auto v = g_app.dns_leak->get_stats();
+            j << ",\"dns_queries_blocked\":" << v.dns_queries_blocked.load()
+              << ",\"stun_packets_blocked\":" << v.stun_packets_blocked.load()
+              << ",\"leaks_detected\":" << v.leaks_detected.load();
+        }
+        j << "}";
+    }
+    if (g_app.session_frag) {
+        auto v = g_app.session_frag->get_stats();
+        j << ",\"session_frag\":{\"sessions_tracked\":" << v.sessions_tracked.load()
+          << ",\"sessions_reset\":" << v.sessions_reset.load()
+          << ",\"sessions_reopened\":" << v.sessions_reopened.load()
+          << ",\"total_resets\":" << v.total_resets.load() << "}";
+    }
+    if (g_app.cross_layer) {
+        auto v = g_app.cross_layer->get_stats();
+        j << ",\"cross_layer\":{\"checks_performed\":" << v.checks_performed.load()
+          << ",\"mismatches_detected\":" << v.mismatches_detected.load()
+          << ",\"auto_fixes_applied\":" << v.auto_fixes_applied.load() << "}";
+    }
+    if (g_app.covert_channel) {
+        auto v = g_app.covert_channel->get_stats();
+        j << ",\"covert_channel\":{\"messages_sent\":" << v.messages_sent.load()
+          << ",\"messages_received\":" << v.messages_received.load()
+          << ",\"bytes_hidden\":" << v.bytes_hidden.load()
+          << ",\"bytes_extracted\":" << v.bytes_extracted.load()
+          << ",\"channel_switches\":" << v.channel_switches.load() << "}";
+    }
+    if (g_app.protocol_rotation) {
+        auto v = g_app.protocol_rotation->get_stats();
+        j << ",\"protocol_rotation\":{\"rotations\":" << v.rotations.load()
+          << ",\"forced_rotations\":" << v.forced_rotations.load()
+          << ",\"slot_transitions\":" << v.slot_transitions.load()
+          << ",\"current_protocol\":\"" << ncp_protocol_name(g_app.protocol_rotation->get_current_protocol())
+          << "\"}";
+    }
+    if (g_app.as_router) {
+        auto v = g_app.as_router->get_stats();
+        j << ",\"as_router\":{\"connections_routed\":" << v.connections_routed.load()
+          << ",\"rebalances\":" << v.rebalances.load()
+          << ",\"as_switches\":" << v.as_switches.load()
+          << ",\"cdn_connections\":" << v.cdn_connections.load() << "}";
+    }
+    if (g_app.geo_obfuscator) {
+        auto v = g_app.geo_obfuscator->get_stats();
+        j << ",\"geo_obfuscator\":{\"connections_routed\":" << v.connections_routed.load()
+          << ",\"region_switches\":" << v.region_switches.load()
+          << ",\"health_checks\":" << v.health_checks.load()
+          << ",\"dead_nodes_detected\":" << v.dead_nodes_detected.load() << "}";
+    }
+    j << "}\n";
+    // Atomic replace: write tmp, then rename (Windows-safe: remove target first)
+    std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::trunc);
+        if (!f) return;
+        f << j.str();
+        if (!f) { std::remove(tmp.c_str()); return; }
+    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
+        std::remove(path.c_str());
+        if (std::rename(tmp.c_str(), path.c_str()) != 0)
+            std::remove(tmp.c_str());
+    }
+}
+
+
+// ── Trial license (7 days, auto-issued on first run) ─────────────────────────
+// MAC string (must match web/server.py exactly):
+//   sha256_hex(TRIAL_SECRET + "|" + first_run + "|" + expires + "|" + machine_lower)
+static const char* NCP_TRIAL_SECRET = "ncp7d-tr14l-5ecr3t-k3y";
+static const int NCP_TRIAL_DAYS = 7;
+
+static std::string trial_machine_id() {
+#ifdef _WIN32
+    const char* cn = std::getenv("COMPUTERNAME");
+    std::string m = (cn && *cn) ? cn : "unknown-host";
+#else
+    char hn[256];
+    std::string m = "unknown-host";
+    if (gethostname(hn, sizeof(hn)) == 0) { hn[sizeof(hn) - 1] = 0; if (*hn) m = hn; }
+#endif
+    for (auto& ch : m) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return m;
+}
+
+static std::string trial_today() {
+    std::time_t t = std::time(nullptr);
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    char b[16];
+    std::snprintf(b, sizeof(b), "%04d-%02d-%02d", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+    return b;
+}
+
+static std::string trial_date_plus(int days) {
+    std::time_t t = std::time(nullptr) + static_cast<std::time_t>(days) * 86400;
+    std::tm tmv{};
+#ifdef _WIN32
+    localtime_s(&tmv, &t);
+#else
+    localtime_r(&t, &tmv);
+#endif
+    char b[16];
+    std::snprintf(b, sizeof(b), "%04d-%02d-%02d", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+    return b;
+}
+
+static std::string trial_sig(const std::string& fr, const std::string& exp, const std::string& mach) {
+    std::string in = std::string(NCP_TRIAL_SECRET) + "|" + fr + "|" + exp + "|" + mach;
+    Crypto crypto;
+    SecureMemory sm(reinterpret_cast<const uint8_t*>(in.data()), in.size());
+    SecureMemory h = crypto.hash_sha256(sm);
+    static const char* hexd = "0123456789abcdef";
+    std::string out;
+    const uint8_t* p = h.data();
+    for (size_t i = 0; i < h.size(); ++i) {
+        out += hexd[p[i] >> 4];
+        out += hexd[p[i] & 0x0F];
+    }
+    return out;
+}
+
+static std::string trial_json_field(const std::string& js, const std::string& key) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = js.find(pat);
+    if (p == std::string::npos) return "";
+    p = js.find(':', p + pat.size());
+    if (p == std::string::npos) return "";
+    p = js.find('"', p + 1);
+    if (p == std::string::npos) return "";
+    size_t e = js.find('"', p + 1);
+    if (e == std::string::npos) return "";
+    return js.substr(p + 1, e - p - 1);
+}
+
+// Recursive mkdir -p (best-effort). Needed because the config dir
+// (e.g. ~/ncp or %APPDATA%\\ncp) may not exist on first launch.
+static void trial_mkdir_p(const std::string& dir) {
+    if (dir.empty()) return;
+    std::string cur;
+    for (size_t i = 0; i < dir.size(); ++i) {
+        char c = dir[i];
+        cur += c;
+        if ((c == '/' || c == '\\') && cur.size() > 1) {
+            std::string part = cur.substr(0, cur.size() - 1);
+            if (part.empty() || part == "/" ) continue;
+#ifdef _WIN32
+            _mkdir(part.c_str());
+#else
+            mkdir(part.c_str(), 0700);
+#endif
+        }
+    }
+#ifdef _WIN32
+    _mkdir(dir.c_str());
+#else
+    mkdir(dir.c_str(), 0700);
+#endif
+}
+
+// Returns true if a valid (non-expired) trial exists; issues a new 7-day trial
+// if the file is absent. Prints user-facing status lines.
+static bool trial_check_or_issue(const std::string& path) {
+    const std::string today = trial_today();
+    const std::string mach = trial_machine_id();
+    std::string content;
+    {
+        std::ifstream ifs(path);
+        if (ifs.good()) { std::stringstream b; b << ifs.rdbuf(); content = b.str(); }
+    }
+    if (!content.empty()) {
+        std::string fr  = trial_json_field(content, "first_run");
+        std::string exp = trial_json_field(content, "expires");
+        std::string m0  = trial_json_field(content, "machine");
+        std::string sig = trial_json_field(content, "sig");
+        for (auto& ch : m0) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        if (!fr.empty() && !exp.empty() && m0 == mach && sig == trial_sig(fr, exp, m0)) {
+            if (exp >= today) {  // ISO dates compare lexicographically
+                std::cout << "[+] Trial license active (expires " << exp << ")\n";
+                return true;
+            }
+            std::cerr << "[!] Trial period expired on " << exp << "\n";
+            return false;
+        }
+        std::cerr << "[!] Trial file invalid or tampered\n";
+        return false;
+    }
+    // First run: auto-issue trial
+    std::string fr = today;
+    std::string exp = trial_date_plus(NCP_TRIAL_DAYS);
+    std::string dir = path.substr(0, path.find_last_of("/\\"));
+    if (!dir.empty()) trial_mkdir_p(dir);
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) {
+        std::cerr << "[!] Cannot write trial file: " << path << "\n";
+        return false;
+    }
+    f << "{\"first_run\": \"" << fr << "\", \"expires\": \"" << exp
+      << "\", \"machine\": \"" << mach << "\", \"sig\": \"" << trial_sig(fr, exp, mach)
+      << "\"}\n";
+    f.flush();
+    std::cout << "[+] Trial period activated: " << NCP_TRIAL_DAYS << " days (expires " << exp << ")\n";
+    return true;
+}
 
 void handle_run(const std::vector<std::string>& args) {
     try {
@@ -446,13 +1188,22 @@ void handle_run(const std::vector<std::string>& args) {
             }
         }
 
+        // Trial: trial.json next to license.json (auto-issued on first run)
+        if (!license_ok && !lic_path.empty()) {
+            size_t sep = lic_path.find_last_of("/\\");
+            std::string trial_path =
+                (sep != std::string::npos ? lic_path.substr(0, sep + 1) : lic_path) + "trial.json";
+            license_ok = trial_check_or_issue(trial_path);
+        } else if (license_ok) {
+            std::cout << "[+] License verified\n";
+        }
+
         if (!license_ok) {
             std::cerr << "[!] License not found or invalid.\n";
             std::cerr << "[!] Activate a license via the web interface (http://localhost:8085)\n";
             std::cerr << "[!] or provide a valid license key first.\n";
             return;
         }
-        std::cout << "[+] License verified\n";
 
         std::cout << "[*] Starting NCP protection...\n";
         
@@ -559,18 +1310,34 @@ void handle_run(const std::vector<std::string>& args) {
 
         DPI::DPIConfig dpi_cfg;
         DPI::apply_preset(chosen_preset, dpi_cfg);
+        if (has_flag(args, "--quic-block")) {
+            dpi_cfg.quic_force_tcp = true;
+            std::cout << "[*] QUIC blocked — clients will fall back to TCP/TLS\n";
+        }
+        {
+            int qf = get_option_int(args, "--quic-frag", 0);
+            if (qf > 0) {
+                dpi_cfg.quic_ipfrag_offset = qf;
+                std::cout << "[*] QUIC Initial IP fragmentation at offset " << qf << "\n";
+            }
+        }
         std::cout << "[*] DPI preset: " << DPI::preset_to_string(chosen_preset) << "\n";
         
         if (!g_app.dpi_bypass->initialize(dpi_cfg) || !g_app.dpi_bypass->start()) {
             std::cerr << "[!] Warning: DPI bypass failed to start (continuing without it)\n";
             g_app.dpi_bypass.reset();
         } else {
-            std::cout << "[+] DPI bypass active (" << DPI::preset_to_string(chosen_preset)
-                      << ": fake+" << (dpi_cfg.enable_disorder ? "disorder" :
-                                        dpi_cfg.enable_reverse_frag ? "reverse-frag" : "split")
-                      << ", ttl=" << dpi_cfg.fake_ttl
-                      << (dpi_cfg.enable_autottl ? " autottl" : "")
-                      << ")\n";
+            if (g_app.dpi_bypass->interception_active()) {
+                std::cout << "[+] DPI bypass active (" << DPI::preset_to_string(chosen_preset)
+                          << ": fake+" << (dpi_cfg.enable_disorder ? "disorder" :
+                                            dpi_cfg.enable_reverse_frag ? "reverse-frag" : "split")
+                          << ", ttl=" << dpi_cfg.fake_ttl
+                          << (dpi_cfg.enable_autottl ? " autottl" : "")
+                          << ") — intercepting traffic\n";
+            } else {
+                std::cout << "[!] DPI bypass configured (" << DPI::preset_to_string(chosen_preset)
+                          << ") but running PASSIVE — no traffic interception, see warnings above\n";
+            }
 
             // --- Zapret chain-based DPI ---
             std::string zapret_profile_name = get_option(args, "--zapret-profile", "");
@@ -901,7 +1668,35 @@ void handle_run(const std::vector<std::string>& args) {
             };
             
             g_app.dpi_bypass->set_module_hooks(hooks);
-            std::cout << "[+] Module hooks wired into DPI pipeline\n";
+            if (g_app.dpi_bypass->interception_active()) {
+                std::cout << "[+] Module hooks wired into DPI pipeline (live traffic)\n";
+            } else {
+                std::cout << "[!] Module hooks wired, but DPI is PASSIVE — hook modules will see\n"
+                             "[!] ZERO packets and are effectively INACTIVE: l3-stealth, self-test\n"
+                             "[!] packet feed, wf-defense, volume-normalizer, behavioral-cloak,\n"
+                             "[!] time-correlation-breaker. Use `ncp proxy --system-proxy` for real\n"
+                             "[!] coverage without admin rights.\n";
+            }
+        }
+
+        // ── Honest wiring report: modules that never touch the packet path ──
+        {
+            std::vector<std::string> config_only;
+            if (g_app.rtt_equalizer)     config_only.push_back("rtt-equalizer");
+            if (g_app.geneva)            config_only.push_back("geneva");
+            if (g_app.session_frag)      config_only.push_back("session-fragmenter");
+            if (g_app.cross_layer)       config_only.push_back("cross-layer-correlator");
+            if (g_app.covert_channel)    config_only.push_back("covert-channel");
+            if (g_app.protocol_rotation) config_only.push_back("protocol-rotation");
+            if (g_app.as_router)         config_only.push_back("as-router");
+            if (g_app.geo_obfuscator)    config_only.push_back("geo-obfuscator");
+            if (!config_only.empty()) {
+                std::cout << "[i] Modules loaded but NOT in the packet path in run mode\n"
+                             "[i] (config/schedulers only — they do not modify your traffic):\n[i]   ";
+                for (size_t i = 0; i < config_only.size(); ++i)
+                    std::cout << (i ? ", " : "") << config_only[i];
+                std::cout << "\n";
+            }
         }
 
         // Check if at least one layer is active
@@ -930,15 +1725,224 @@ void handle_run(const std::vector<std::string>& args) {
 
         std::cout << "[+] Protection layers running. Press Ctrl+C to stop.\n";
 
+        // Publish cross-process state for `ncp status` / `ncp stop`
+        {
+            std::string mods;
+            auto add_mod = [&](const char* n) { if (!mods.empty()) mods += ","; mods += n; };
+            if (g_app.spoofer && g_app.spoofer->is_enabled()) add_mod("spoofing");
+            if (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) add_mod("dpi-bypass");
+            if (g_app.paranoid && g_app.paranoid->is_active()) add_mod("paranoid");
+            if (g_app.dns_leak && g_app.dns_leak->is_active()) add_mod("dns-leak");
+            if (g_app.l3_stealth) add_mod("l3-stealth");
+            if (g_app.rtt_equalizer) add_mod("rtt-equalizer");
+            if (g_app.volume_normalizer) add_mod("volume-normalizer");
+            if (g_app.wf_defense) add_mod("wf-defense");
+            if (g_app.behavioral_cloak) add_mod("behavioral-cloak");
+            if (g_app.time_breaker) add_mod("time-correlation-breaker");
+            if (g_app.self_test) add_mod("self-test");
+            if (g_app.session_frag) add_mod("session-fragmenter");
+            if (g_app.cross_layer) add_mod("cross-layer-correlator");
+            if (g_app.geneva) add_mod("geneva");
+            if (g_app.protocol_rotation) add_mod("protocol-rotation");
+            if (g_app.as_router) add_mod("as-router");
+            if (g_app.geo_obfuscator) add_mod("geo-obfuscator");
+            ncp_write_state(mods);
+        }
+
         g_running = true;
+
+        // ── Runtime heartbeat: live counters prove modules actually work ──
+        int status_interval = get_option_int(args, "--status-interval", 30);
+        if (status_interval > 0)
+            std::cout << "[*] Runtime status heartbeat every " << status_interval
+                      << "s (--status-interval 0 to disable)\n";
+        auto hb_start = std::chrono::steady_clock::now();
+        uint64_t prev_dpi_pkts = 0;
+        int dpi_zero_streak = 0;
+        bool hooks_zero_warned = false;
+        int tick = 0;
+        std::string stats_file = get_option(args, "--stats-file");
+        int stats_tick = 0;
+        if (!stats_file.empty())
+            std::cout << "[*] Module stats JSON -> " << stats_file << " (every 2s)\n" << std::flush;
 
         // Wait loop
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+            if (!stats_file.empty() && ++stats_tick >= 2) {
+                stats_tick = 0;
+                write_module_stats_json(stats_file);
+            }
+            if (status_interval <= 0) continue;
+            if (++tick < status_interval) continue;
+            tick = 0;
+
+            long elapsed = static_cast<long>(std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - hb_start).count());
+            std::ostringstream hb;
+            hb << "[hb " << elapsed << "s]";
+
+            uint64_t dpi_pkts = 0;
+            bool intercept = false;
+            if (g_app.dpi_bypass) {
+                auto ds = g_app.dpi_bypass->get_stats();
+                dpi_pkts = ds.packets_total.load();
+                intercept = g_app.dpi_bypass->interception_active();
+                hb << " dpi[pkts=" << dpi_pkts << " +" << (dpi_pkts - prev_dpi_pkts)
+                   << " mod=" << ds.packets_modified.load()
+                   << " frag=" << ds.packets_fragmented.load()
+                   << " fake=" << ds.fake_packets_sent.load()
+                   << " drop=" << ds.packets_dropped.load()
+                   << " err=" << ds.send_errors.load()
+                   << " conn=" << ds.connections_handled.load() << "]";
+                if (!intercept) hb << " PASSIVE";
+            }
+
+            uint64_t hook_sum = 0;
+            bool any_hook = false;
+            std::ostringstream hk;
+            if (g_app.l3_stealth) {
+                auto v = g_app.l3_stealth->get_stats();
+                hook_sum += v.packets_processed.load(); any_hook = true;
+                hk << " l3=" << v.packets_processed.load()
+                   << "(ttl:" << v.ttl_normalized.load() << ",ipid:" << v.ipid_rewritten.load() << ")";
+            }
+            if (g_app.self_test) {
+                auto v = g_app.self_test->get_stats();
+                hook_sum += v.packets_fed.load(); any_hook = true;
+                hk << " selftest-fed=" << v.packets_fed.load()
+                   << "(tests:" << v.tests_run.load() << ",fail:" << v.tests_failed.load() << ")";
+            }
+            if (g_app.wf_defense) {
+                auto v = g_app.wf_defense->get_stats();
+                hook_sum += v.real_packets_processed.load(); any_hook = true;
+                hk << " wf=" << v.real_packets_processed.load()
+                   << "(dummy:" << v.dummy_packets_sent.load() << ")";
+            }
+            if (g_app.volume_normalizer) {
+                auto v = g_app.volume_normalizer->get_stats();
+                hook_sum += v.requests_normalized.load(); any_hook = true;
+                hk << " volnorm=" << v.requests_normalized.load()
+                   << "(pad:" << v.bytes_padded.load() << "B)";
+            }
+            if (g_app.behavioral_cloak) {
+                auto v = g_app.behavioral_cloak->get_stats();
+                hook_sum += v.packets_shaped.load(); any_hook = true;
+                hk << " cloak=" << v.packets_shaped.load();
+            }
+            if (g_app.time_breaker) {
+                auto v = g_app.time_breaker->get_stats();
+                hook_sum += v.jitters_applied.load(); any_hook = true;
+                hk << " timebreak=" << v.jitters_applied.load();
+            }
+            if (any_hook) hb << " hooks[" << hk.str() << " ]";
+
+            // Background/own-channel modules with real counters
+            std::ostringstream bg;
+            if (g_app.dns_leak && g_app.dns_leak->is_active()) {
+                auto v = g_app.dns_leak->get_stats();
+                bg << " dns-block=" << v.dns_queries_blocked.load()
+                   << " stun-block=" << v.stun_packets_blocked.load();
+            }
+            if (!bg.str().empty()) hb << " |" << bg.str();
+
+            std::cout << hb.str() << "\n" << std::flush;
+
+            // ── Zero-activity alarms ──
+            if (intercept) {
+                if (dpi_pkts == 0) {
+                    if (++dpi_zero_streak >= 2)
+                        std::cout << "[!] ALARM: interception backend is running but captured 0 packets"
+                                     " in " << (dpi_zero_streak * status_interval) <<
+                                     "s — interception is NOT working (check admin rights / driver)\n";
+                } else {
+                    dpi_zero_streak = 0;
+                }
+                if (dpi_pkts > 0 && any_hook && hook_sum == 0 && !hooks_zero_warned) {
+                    hooks_zero_warned = true;
+                    std::cout << "[!] ALARM: DPI captured " << dpi_pkts <<
+                                 " packets but ALL hook modules report 0 — module pipeline not wired\n";
+                }
+            }
+            prev_dpi_pkts = dpi_pkts;
         }
 
         // Cleanup after loop exit (RAII compliance)
+        if (!stats_file.empty()) write_module_stats_json(stats_file);  // final flush
         std::cout << "\n[*] Shutting down services...\n";
+
+        // ── Final module statistics: proof of work for the whole session ──
+        std::cout << "\n=== Final module statistics ===\n";
+        if (g_app.dpi_bypass) {
+            auto ds = g_app.dpi_bypass->get_stats();
+            std::cout << "  DPI bypass: interception="
+                      << (g_app.dpi_bypass->interception_active() ? "ACTIVE" : "PASSIVE (no traffic processed)")
+                      << " pkts=" << ds.packets_total.load()
+                      << " modified=" << ds.packets_modified.load()
+                      << " fragmented=" << ds.packets_fragmented.load()
+                      << " fakes=" << ds.fake_packets_sent.load()
+                      << " dropped=" << ds.packets_dropped.load()
+                      << " send_errors=" << ds.send_errors.load()
+                      << " conns=" << ds.connections_handled.load() << "\n";
+        }
+        if (g_app.l3_stealth) {
+            auto v = g_app.l3_stealth->get_stats();
+            std::cout << "  L3 Stealth: packets=" << v.packets_processed.load()
+                      << " ttl_norm=" << v.ttl_normalized.load()
+                      << " ipid=" << v.ipid_rewritten.load()
+                      << " mss_clamped=" << v.mss_clamped.load() << "\n";
+        }
+        if (g_app.self_test) {
+            auto v = g_app.self_test->get_stats();
+            std::cout << "  Self-Test: packets_fed=" << v.packets_fed.load()
+                      << " tests=" << v.tests_run.load()
+                      << " failed=" << v.tests_failed.load()
+                      << " countermeasures=" << v.countermeasures_applied.load() << "\n";
+        }
+        if (g_app.wf_defense) {
+            auto v = g_app.wf_defense->get_stats();
+            std::cout << "  WF Defense: real=" << v.real_packets_processed.load()
+                      << " dummy=" << v.dummy_packets_sent.load()
+                      << " pages=" << v.pages_defended.load() << "\n";
+        }
+        if (g_app.volume_normalizer) {
+            auto v = g_app.volume_normalizer->get_stats();
+            std::cout << "  Volume Normalizer: requests=" << v.requests_normalized.load()
+                      << " orig=" << v.bytes_original.load() << "B"
+                      << " padded=" << v.bytes_padded.load() << "B"
+                      << " cover=" << v.cover_bytes_sent.load() << "B\n";
+        }
+        if (g_app.behavioral_cloak) {
+            auto v = g_app.behavioral_cloak->get_stats();
+            std::cout << "  Behavioral Cloak: shaped=" << v.packets_shaped.load()
+                      << " bursts=" << v.bursts_generated.load()
+                      << " idles=" << v.idle_periods_injected.load() << "\n";
+        }
+        if (g_app.time_breaker) {
+            auto v = g_app.time_breaker->get_stats();
+            std::cout << "  Time Breaker: jitters=" << v.jitters_applied.load()
+                      << " total=" << v.total_jitter_us.load() << "us\n";
+        }
+        if (g_app.rtt_equalizer) {
+            auto v = g_app.rtt_equalizer->get_stats();
+            std::cout << "  RTT Equalizer: acks_delayed=" << v.acks_delayed.load()
+                      << " samples=" << v.samples_collected.load()
+                      << " (not in packet path in run mode)\n";
+        }
+        if (g_app.geneva) {
+            const auto& v = g_app.geneva->get_stats();
+            std::cout << "  Geneva: packets_processed=" << v.packets_processed
+                      << " tampered=" << v.packets_tampered
+                      << " (not in packet path in run mode)\n";
+        }
+        if (g_app.dns_leak && g_app.dns_leak->is_active()) {
+            auto v = g_app.dns_leak->get_stats();
+            std::cout << "  DNS Leak Prevention: dns_blocked=" << v.dns_queries_blocked.load()
+                      << " stun_blocked=" << v.stun_packets_blocked.load()
+                      << " leaks=" << v.leaks_detected.load() << "\n";
+        }
+        std::cout << "=== end of statistics ===\n\n";
+        ncp_clear_state();
 
         // Stop modules in reverse initialization order
         if (g_app.geo_obfuscator) {
@@ -1033,6 +2037,59 @@ void handle_stop(const std::vector<std::string>& args) {
     // FIX C4100: Mark unreferenced parameter
     (void)args;
 
+    // Cross-process path: another `ncp run` instance owns the services.
+    // Detect it via the state file and ask it to shut down gracefully.
+    {
+        NcpRunState st = ncp_read_state();
+        bool any_local =
+            (g_app.spoofer && g_app.spoofer->is_enabled()) ||
+            (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) ||
+            (g_app.paranoid && g_app.paranoid->is_active()) ||
+            (g_app.dns_leak && g_app.dns_leak->is_active());
+        if (!any_local && st.present) {
+            if (!ncp_pid_alive(st.pid)) {
+                std::cout << "[*] Stale state file (pid " << st.pid
+                          << " not running) - removing\n";
+                ncp_clear_state();
+                std::cout << "[+] Nothing to stop\n";
+                return;
+            }
+            std::cout << "[*] Sending shutdown signal to ncp run (pid "
+                      << st.pid << ")...\n";
+#ifdef _WIN32
+            // CTRL_BREAK works only within the same console group; fall back
+            // to TerminateProcess (graceful cleanup may be skipped).
+            if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
+                                          static_cast<DWORD>(st.pid))) {
+                HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
+                                       static_cast<DWORD>(st.pid));
+                if (h) {
+                    std::cerr << "[!] Graceful signal unavailable; terminating process\n";
+                    TerminateProcess(h, 0);
+                    CloseHandle(h);
+                }
+            }
+#else
+            ::kill(static_cast<pid_t>(st.pid), SIGINT);
+#endif
+            // Wait for the process to actually exit, up to 90 s.
+            // (The state file is removed at the START of the run cleanup,
+            // long before the slow iptables/spoofer restore completes, so
+            // only process liveness is a reliable completion signal.)
+            // Full cleanup (16 iptables rules + spoofer restore) takes ~25 s.
+            for (int i = 0; i < 900 && ncp_pid_alive(st.pid); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (ncp_pid_alive(st.pid)) {
+                std::cerr << "[!] Process still running after 90 s\n";
+                return;
+            }
+            ncp_clear_state();
+            std::cout << "[+] ncp run stopped, settings restored\n";
+            return;
+        }
+    }
+
     std::cout << "[*] Stopping all services and restoring settings...\n";
 
     g_running = false;
@@ -1125,7 +2182,38 @@ void handle_stop(const std::vector<std::string>& args) {
 void handle_status(const std::vector<std::string>& args) {
     // FIX C4100: Mark unreferenced parameter
     (void)args;
-    
+
+    // Cross-process path: report the running `ncp run` instance, if any.
+    {
+        bool any_local =
+            (g_app.spoofer && g_app.spoofer->is_enabled()) ||
+            (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) ||
+            (g_app.paranoid && g_app.paranoid->is_active()) ||
+            (g_app.dns_leak && g_app.dns_leak->is_active());
+        if (!any_local) {
+            NcpRunState st = ncp_read_state();
+            std::cout << "=== NCP Status ===\n\n";
+            if (st.present && ncp_pid_alive(st.pid)) {
+                std::cout << "[Core] RUNNING (pid " << st.pid;
+                if (st.started > 0) {
+                    long up = static_cast<long>(std::time(nullptr)) - st.started;
+                    std::cout << ", uptime " << (up / 60) << "m" << (up % 60) << "s";
+                }
+                std::cout << ")\n";
+                std::cout << "  Active modules: "
+                          << (st.modules.empty() ? "(unknown)" : st.modules) << "\n";
+            } else {
+                if (st.present) {
+                    std::cout << "[*] Removing stale state file (pid " << st.pid
+                              << " not running)\n";
+                    ncp_clear_state();
+                }
+                std::cout << "[Core] Not running\n";
+            }
+            return;
+        }
+    }
+
     std::cout << "=== NCP Status ===\n\n";
     
     // Spoofing status
@@ -1373,7 +2461,8 @@ void handle_crypto(const std::vector<std::string>& args) {
         auto keypair = crypto.generate_keypair();
         std::cout << "[+] Keypair generated (Ed25519)\n";
         std::cout << "Public key: " << Crypto::bytes_to_hex(keypair.public_key) << "\n";
-        std::cout << "Secret key: [REDACTED - store securely]\n";
+        std::cout << "Secret key: " << Crypto::bytes_to_hex(keypair.secret_key) << "\n";
+        std::cout << "[!] Store the secret key securely; anyone with it can sign as you.\n";
     }
     else if (action == "random") {
         size_t size = static_cast<size_t>(get_option_int(args, "-n", 32));
@@ -1405,8 +2494,51 @@ void handle_crypto(const std::vector<std::string>& args) {
         
         std::cout << "Hash (" << algo << "): " << Crypto::bytes_to_hex(hash) << "\n";
     }
-    else if (action == "sign" || action == "verify") {
-        std::cerr << "[!] " << action << " not yet implemented\n";
+    else if (action == "sign") {
+        std::string data = get_arg(args, 1);
+        std::string sk_hex = get_arg(args, 2);
+        if (data.empty() || sk_hex.empty()) {
+            std::cerr << "Usage: ncp crypto sign <message> <secret_key_hex>\n";
+            return;
+        }
+        auto sk_bytes = hex_to_bytes(sk_hex);
+        if (sk_bytes.size() != 64 && sk_bytes.size() != 32) {
+            std::cerr << "[!] Invalid secret key length: " << sk_bytes.size()
+                      << " bytes (expected 64 or 32)\n";
+            return;
+        }
+        SecureMemory msg(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+        SecureMemory sk(sk_bytes.data(), sk_bytes.size());
+        auto sig = crypto.sign_ed25519(msg, sk);
+        if (sig.empty()) {
+            std::cerr << "[!] Signing failed\n";
+            return;
+        }
+        std::cout << "Signature (Ed25519): " << Crypto::bytes_to_hex(sig) << "\n";
+    }
+    else if (action == "verify") {
+        std::string data = get_arg(args, 1);
+        std::string sig_hex = get_arg(args, 2);
+        std::string pk_hex = get_arg(args, 3);
+        if (data.empty() || sig_hex.empty() || pk_hex.empty()) {
+            std::cerr << "Usage: ncp crypto verify <message> <signature_hex> <public_key_hex>\n";
+            return;
+        }
+        auto sig_bytes = hex_to_bytes(sig_hex);
+        auto pk_bytes = hex_to_bytes(pk_hex);
+        if (sig_bytes.size() != 64) {
+            std::cerr << "[!] Invalid signature length: " << sig_bytes.size() << " bytes (expected 64)\n";
+            return;
+        }
+        if (pk_bytes.size() != 32) {
+            std::cerr << "[!] Invalid public key length: " << pk_bytes.size() << " bytes (expected 32)\n";
+            return;
+        }
+        SecureMemory msg(reinterpret_cast<const uint8_t*>(data.data()), data.size());
+        SecureMemory sig(sig_bytes.data(), sig_bytes.size());
+        SecureMemory pk(pk_bytes.data(), pk_bytes.size());
+        bool ok = crypto.verify_ed25519(msg, sig, pk);
+        std::cout << "Verification: " << (ok ? "VALID" : "INVALID") << "\n";
     }
     else {
         std::cerr << "[!] Unknown crypto action: " << action << "\n";
@@ -1517,7 +2649,29 @@ void handle_dpi(const std::vector<std::string>& args) {
     config.enable_fake_packet = !has_flag(args, "--no-fake");
     config.fake_ttl = get_option_int(args, "--fake-ttl", 1);
     config.enable_disorder = !has_flag(args, "--no-disorder");
-    
+
+    // Kill switch: EXPLICIT opt-in only, never default. Drops all direct
+    // outbound traffic (WinDivert driver mode) so nothing leaks if the
+    // chain goes down. --no-kill-switch always wins.
+    config.kill_switch = has_flag(args, "--kill-switch") &&
+                         !has_flag(args, "--no-kill-switch");
+    if (config.kill_switch) {
+        std::string ksa = get_option(args, "--ks-allow", "");
+        if (!ksa.empty()) {
+            auto colon = ksa.rfind(':');
+            if (colon != std::string::npos) {
+                config.kill_switch_allow_host = ksa.substr(0, colon);
+                config.kill_switch_allow_port =
+                    static_cast<uint16_t>(std::atoi(ksa.substr(colon + 1).c_str()));
+            }
+        }
+#ifndef _WIN32
+        std::cerr << "[!] --kill-switch requires the WinDivert driver mode "
+                     "(Windows). On Linux use 'ncp run' (iptables-based). "
+                     "Ignoring for this session.\n";
+#endif
+    }
+
     std::string preset = get_option(args, "--preset");
     if (!preset.empty()) {
         DPI::DPIPreset p = DPI::preset_from_string(preset);
@@ -1680,4 +2834,577 @@ void handle_mimic(const std::vector<std::string>& args) {
     std::cout << "[+] Size mimicry: enabled\n";
     std::cout << "[+] Pattern mimicry: enabled\n";
     std::cout << "\nTraffic will be disguised as " << type << " protocol\n";
+}
+// ============================================================================
+// ncp proxy — local SOCKS5/HTTP desync proxy (no admin required)
+// ============================================================================
+void handle_proxy(const std::vector<std::string>& args) {
+    if (has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp proxy [options]\n"
+                  << "  --port N              Listen port (default 1080, 0 = ephemeral)\n"
+                  << "  --bind ADDR           Listen address (default 127.0.0.1)\n"
+                  << "  --preset NAME         Base DPI preset for desync strategy\n"
+                  << "  --split-pos N         TCP split at byte N\n"
+                  << "  --split-sni           Split at SNI/Host position\n"
+                  << "  --multisplit a,b,c    Multi-layer split positions\n"
+                  << "  --chain \"<zapret args>\"  Attach zapret chain (import syntax)\n"
+                  << "  --block-quic          Drop UDP/443 (force TCP fallback)\n"
+                  << "  --fake-quic N         Send N fake QUIC Initials per target\n"
+                  << "  --doh                 Resolve targets via DNS-over-HTTPS\n"
+                  << "  --autohostlist FILE   Auto-record blocked hosts to FILE\n"
+                  << "  --detector-log FILE   Append DPI detector events (JSONL)\n"
+                  << "  --autopilot           Enable adaptive engine (learned per-host strategies,\n"
+                  << "                        live degradation feedback, background re-learning)\n"
+                  << "  --events-log FILE     Append live connection events (JSONL) to FILE\n"
+                  << "  --stats-file FILE     Rewrite full stats JSON to FILE every 2s (atomic)\n"
+                  << "  --system-proxy        Route ALL proxy-aware apps (Discord etc.) through\n"
+                  << "                        this proxy; previous settings restored on exit\n"
+                  << "  --upstream URL        Chain through upstream proxy (hides your IP):\n"
+                  << "                        socks5://127.0.0.1:9050 or http://127.0.0.1:8080\n"
+                  << "  --tor                 Shortcut for --upstream socks5://127.0.0.1:9050\n"
+                  << "                        (Tor Browser uses port 9150 instead)\n"
+                  << "  --tor-exec PATH       Managed Tor: spawn tor binary, auto-chain through it\n"
+                  << "  --tor-bridge \"LINE\"  Bridge line (repeatable) — hides Tor usage itself:\n"
+                  << "                        obfs4 IP:PORT FINGERPRINT cert=... iat-mode=0\n"
+                  << "  --pt-obfs4 PATH       lyrebird/obfs4proxy binary (for obfs4 bridges)\n"
+                  << "  --pt-snowflake PATH   snowflake-client binary (for Snowflake bridges)\n";
+        return;
+    }
+    ncp::DesyncProxy::Config cfg;
+    cfg.port = static_cast<uint16_t>(get_option_int(args, "--port", 1080));
+    cfg.listen_host = get_option(args, "--bind", "127.0.0.1");
+
+    // Base strategy: preset or safe default (split-2 + split-at-SNI)
+    std::string preset_name = get_option(args, "--preset", "");
+    if (!preset_name.empty()) {
+        DPI::DPIPreset preset = DPI::preset_from_string(preset_name);
+        if (preset == DPI::DPIPreset::NONE) {
+            std::cerr << "[!] Unknown preset: " << preset_name << "\n";
+            return;
+        }
+        DPI::apply_preset(preset, cfg.base);
+    } else {
+        cfg.base.enable_tcp_split = true;
+        cfg.base.split_position = 2;
+        cfg.base.split_at_sni = true;
+        cfg.base.enable_noise = false;
+        cfg.base.enable_fake_packet = false;
+        cfg.base.enable_disorder = false;
+    }
+
+    // Explicit strategy flags override preset/default
+    if (has_flag(args, "--split-sni")) {
+        cfg.base.enable_tcp_split = false;
+        cfg.base.enable_multi_layer_split = false;
+        cfg.base.split_positions.clear();
+        cfg.base.split_at_sni = true;
+    }
+    {
+        int sp = get_option_int(args, "--split-pos", -1);
+        if (sp > 0) {
+            cfg.base.enable_tcp_split = true;
+            cfg.base.split_position = sp;
+            cfg.base.enable_multi_layer_split = false;
+            cfg.base.split_positions.clear();
+        }
+    }
+    {
+        std::string ms = get_option(args, "--multisplit", "");
+        if (!ms.empty()) {
+            cfg.base.enable_tcp_split = false;
+            cfg.base.enable_multi_layer_split = true;
+            cfg.base.split_positions.clear();
+            std::istringstream ss(ms);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+                try { cfg.base.split_positions.push_back(std::stoi(tok)); }
+                catch (...) {}
+            }
+        }
+    }
+
+    // Optional zapret chains (per-host strategies with hostlists)
+    std::string zprof = get_option(args, "--zapret-profile", "");
+    if (!zprof.empty()) {
+        auto p = DPI::get_zapret_profile_by_name(zprof);
+        if (p.chains.empty()) {
+            std::cerr << "[!] Unknown zapret profile: " << zprof << "\n";
+            return;
+        }
+        cfg.chains = p.chains;
+    }
+    cfg.hostlist_dir = get_option(args, "--hostlist-dir", "");
+    cfg.block_quic = has_flag(args, "--block-quic");
+    cfg.use_doh = has_flag(args, "--doh");
+    cfg.tfo = has_flag(args, "--tfo");
+    cfg.upstream_mss = get_option_int(args, "--upstream-mss", 0);
+    if (has_flag(args, "--no-split")) cfg.base.enable_tcp_split = false;
+
+    // Inline zapret chain spec: --chain "--filter-tcp=443 --dpi-desync=multisplit
+    // --dpi-desync-split-pos=1,midsld" (same syntax as import-zapret)
+    {
+        std::string chain_spec = get_option(args, "--chain", "");
+        if (!chain_spec.empty()) {
+            auto imported = DPI::parse_zapret_cmdline(chain_spec);
+            if (imported.ok()) {
+                cfg.chains = imported.profile.chains;
+                std::cout << "[+] Strategy chain: "
+                          << DPI::chain_to_cmdline(cfg.chains[0]) << "\n";
+            } else {
+                std::cerr << "[!] Bad --chain spec: "
+                          << (imported.errors.empty() ? "?" : imported.errors[0]) << "\n";
+                return;
+            }
+        }
+    }
+    cfg.fake_quic_repeats = get_option_int(args, "--fake-quic", 0);
+
+    ncp::DpiDetector detector(512, 2);
+    ncp::AutoHostlist autohl;
+    std::string ahl_path = get_option(args, "--autohostlist", "");
+    if (!ahl_path.empty()) {
+        autohl.set_path(ahl_path);
+        autohl.load();
+        cfg.auto_hostlist = &autohl;
+        std::cout << "[+] Auto-hostlist: " << ahl_path
+                  << " (" << autohl.size() << " entries)\n";
+    }
+    std::string detlog = get_option(args, "--detector-log", "");
+    if (!detlog.empty()) detector.set_log_file(detlog);
+    cfg.detector = &detector;
+    cfg.log_cb = [](const std::string& m) { std::cout << "[proxy] " << m << "\n"; };
+    cfg.events_log = get_option(args, "--events-log", "");
+    cfg.stats_file = get_option(args, "--stats-file", "");
+
+    // AutoPilot: adaptive per-host strategies. Active when --autopilot is
+    // passed OR the DB was enabled via `ncp autopilot enable`.
+    ncp::AutoPilot autopilot;
+    bool autopilot_active = false;
+    {
+        ncp::AutoPilot::Config apcfg;
+        apcfg.use_doh = cfg.use_doh;  // learn in the same DNS reality the proxy runs in
+        autopilot.load(apcfg);
+        if (has_flag(args, "--autopilot") || autopilot.enabled()) {
+            cfg.autopilot = &autopilot;
+            autopilot.start();  // background re-learn janitor
+            autopilot_active = true;
+        }
+    }
+
+    ncp::DesyncProxy proxy;
+    // ── Managed Tor with pluggable transports (obfs4 / Snowflake) ──
+    ncp::TorManager tor_mgr;
+    {
+        std::string tor_bin = get_option(args, "--tor-exec", "");
+        if (!tor_bin.empty()) {
+            ncp::TorLaunchConfig tcfg;
+            tcfg.tor_binary = tor_bin;
+            tcfg.obfs4_binary = get_option(args, "--pt-obfs4", "");
+            tcfg.snowflake_binary = get_option(args, "--pt-snowflake", "");
+            tcfg.bridges = get_options_all(args, "--tor-bridge");
+            std::cerr << "[*] Starting managed Tor"
+                      << (tcfg.bridges.empty()
+                              ? " (no bridges — Tor usage visible to ISP!)"
+                              : " with " + std::to_string(tcfg.bridges.size()) +
+                                    " bridge(s) — Tor usage hidden")
+                      << "...\n";
+            std::string err;
+            if (!tor_mgr.start(tcfg, &err)) {
+                std::cerr << "[!] Managed Tor failed: " << err << "\n";
+                return;
+            }
+            std::cerr << "[+] Tor bootstrapped 100% — SOCKS5 on 127.0.0.1:"
+                      << tor_mgr.socks_port() << "\n";
+            cfg.upstream_type = "socks5";
+            cfg.upstream_host = "127.0.0.1";
+            cfg.upstream_port = tor_mgr.socks_port();
+        }
+    }
+    // ── Upstream chain (Tor / SOCKS5 / HTTP CONNECT) ──
+    if (!tor_mgr.running()) {
+        std::string ups = get_option(args, "--upstream", "");
+        if (has_flag(args, "--tor")) ups = "socks5://127.0.0.1:9050";
+        if (!ups.empty()) {
+            std::string rest = ups;
+            auto scheme = rest.find("://");
+            if (scheme != std::string::npos) {
+                cfg.upstream_type = rest.substr(0, scheme);
+                rest = rest.substr(scheme + 3);
+            } else {
+                cfg.upstream_type = "socks5";
+            }
+            if (cfg.upstream_type == "socks") cfg.upstream_type = "socks5";
+            auto colon = rest.rfind(':');
+            if (colon == std::string::npos ||
+                (cfg.upstream_type != "socks5" && cfg.upstream_type != "http")) {
+                std::cerr << "[!] Invalid --upstream: " << ups
+                          << " (expected socks5://host:port or http://host:port)\n";
+                return;
+            }
+            cfg.upstream_host = rest.substr(0, colon);
+            int pnum = std::atoi(rest.substr(colon + 1).c_str());
+            if (pnum <= 0 || pnum > 65535) {
+                std::cerr << "[!] Invalid --upstream port in: " << ups << "\n";
+                return;
+            }
+            cfg.upstream_port = static_cast<uint16_t>(pnum);
+        }
+    }
+
+    if (!proxy.start(cfg)) {
+        std::cerr << "[!] Failed to start proxy on " << cfg.listen_host << ":"
+                  << cfg.port << "\n";
+        return;
+    }
+
+    // Application mode: point the OS system proxy at us (restored on exit)
+    bool sysproxy_on = false;
+    if (has_flag(args, "--system-proxy")) {
+        std::string sp_err;
+        if (sysproxy_apply(proxy.bound_port(), &sp_err)) {
+            sysproxy_on = true;
+            std::cout << "[+] System proxy enabled — applications (Discord etc.) "
+                         "now route through NCP. Restored automatically on exit.\n";
+        } else {
+            std::cerr << "[!] --system-proxy failed: " << sp_err << "\n";
+        }
+    }
+
+    std::cout << "[+] NCP desync proxy active\n"
+              << "    SOCKS5:        " << cfg.listen_host << ":" << proxy.bound_port() << "\n"
+              << "    HTTP CONNECT:  " << cfg.listen_host << ":" << proxy.bound_port() << "\n"
+              << "    QUIC block:    " << (cfg.block_quic ? "on (forces TCP fallback)" : "off") << "\n"
+              << "    Fake QUIC:     " << cfg.fake_quic_repeats << " per target\n"
+              << "    DoH upstream:  " << (cfg.use_doh ? "on (1.1.1.1)" : "off") << "\n"
+              << (cfg.upstream_port
+                      ? ("    Chain:         " + cfg.upstream_type + "://" +
+                         cfg.upstream_host + ":" + std::to_string(cfg.upstream_port) +
+                         (tor_mgr.running()
+                              ? " (managed Tor + bridges — destination AND Tor usage hidden)"
+                              : (cfg.upstream_port == 9050 || cfg.upstream_port == 9150
+                                     ? " (Tor — destination IP hidden from ISP)"
+                                     : " (upstream — destination IP hidden from ISP)")) +
+                         "\n")
+                      : "")
+              << "    Chains:        " << cfg.chains.size() << "\n"
+              << (cfg.events_log.empty() ? "" : ("    Events log:    " + cfg.events_log + "\n"))
+              << (cfg.stats_file.empty() ? "" : ("    Stats file:    " + cfg.stats_file + "\n"))
+              << "    AutoPilot:     " << (autopilot_active
+                        ? ("on (" + std::to_string(autopilot.records().size()) +
+                           " learned hosts, DB: " + ncp::AutoPilot::default_db_path() + ")")
+                        : std::string("off")) << "\n"
+              << "    System proxy:  " << (sysproxy_on ? "on (all applications)" : "off") << "\n"
+              << "Point your browser/system proxy at this address. Ctrl+C to stop.\n";
+
+    g_running = 1;
+    while (g_running) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    proxy.stop();
+    if (sysproxy_on) {
+        std::string sp_err;
+        if (sysproxy_restore(&sp_err))
+            std::cout << "[+] System proxy settings restored\n";
+        else
+            std::cerr << "[!] System proxy restore failed: " << sp_err
+                      << " (run: ncp sysproxy off)\n";
+    }
+    if (autopilot_active) {
+        autopilot.stop();
+        autopilot.save();
+    }
+    auto st = proxy.stats();
+    std::cout << "[+] Proxy stopped. Connections: " << st.connections_total
+              << ", splits applied: " << st.desync_splits_applied
+              << ", fake QUIC sent: " << st.fake_quic_sent
+              << ", QUIC blocked: " << st.quic_datagrams_blocked
+              << ", RST blocks: " << st.rst_blocks_detected
+              << ", timeout blocks: " << st.timeout_blocks_detected;
+    if (autopilot_active)
+        std::cout << ", AutoPilot learned-strategy hits: " << st.autopilot_hits;
+    std::cout << "\n";
+}
+
+// ============================================================================
+// ncp blockcheck — automatic strategy selection
+// ============================================================================
+void handle_blockcheck(const std::vector<std::string>& args) {
+    if (has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp blockcheck [options]\n"
+                  << "  --domains a,b,c       Domains to probe (default: built-in list)\n"
+                  << "  --timeout MS          Per-probe timeout (default 5000)\n"
+                  << "  --json                Print report as JSON\n"
+                  << "  --out FILE            Save report JSON to FILE\n"
+                  << "  --apply               Print best strategy as DPIConfig/profile JSON\n";
+        return;
+    }
+    ncp::BlockChecker::Config cfg;
+    cfg.timeout_ms = get_option_int(args, "--timeout", 5000);
+
+    std::string domains_opt = get_option(args, "--domains", "");
+    if (!domains_opt.empty()) {
+        std::istringstream ss(domains_opt);
+        std::string tok;
+        while (std::getline(ss, tok, ',')) {
+            size_t b = tok.find_first_not_of(" \t");
+            size_t e = tok.find_last_not_of(" \t");
+            if (b != std::string::npos) cfg.domains.push_back(tok.substr(b, e - b + 1));
+        }
+    }
+
+    const bool quiet = has_flag(args, "--json") || !get_option(args, "--out", "").empty();
+    if (!quiet) {
+        cfg.progress_cb = [](const std::string& strat, const std::string& domain, bool ok) {
+            std::cout << "  [" << (ok ? "OK" : "FAIL") << "] " << strat
+                      << " -> " << domain << "\n";
+        };
+    }
+
+    std::cout << "[*] Running blockcheck (" 
+              << (cfg.domains.empty() ? 6 : cfg.domains.size()) << " domains, "
+              << "timeout " << cfg.timeout_ms << "ms)...\n";
+
+    ncp::BlockChecker checker;
+    auto report = checker.run(cfg);
+
+    std::string out_path = get_option(args, "--out", "");
+    if (!out_path.empty()) {
+        std::ofstream f(out_path, std::ios::trunc);
+        f << ncp::BlockChecker::report_to_json(report);
+        std::cout << "[+] Report written to " << out_path << "\n";
+    }
+    if (has_flag(args, "--json")) {
+        std::cout << ncp::BlockChecker::report_to_json(report);
+    } else {
+        std::cout << "\n═══ Blockcheck results ═══\n";
+        for (const auto& r : report.results) {
+            std::cout << "  " << r.strategy << ": " << r.success_count << "/" << r.total
+                      << " ok";
+            if (r.success_count > 0)
+                std::cout << ", avg " << r.avg_latency_ms << " ms";
+            if (r.strategy == report.best_strategy) std::cout << "   <-- BEST";
+            std::cout << "\n";
+        }
+        std::cout << "\n[+] Best strategy: " << report.best_strategy
+                  << " (" << report.best_description << ")\n";
+    }
+
+    std::string apply_path = get_option(args, "--apply", "");
+    if (!apply_path.empty()) {
+        std::ofstream f(apply_path, std::ios::trunc);
+        f << ncp::BlockChecker::best_strategy_to_profile_json(report);
+        std::cout << "[+] Best strategy profile written to " << apply_path << "\n";
+    }
+}
+
+// ============================================================================
+// ncp autopilot — adaptive self-learning DPI bypass engine
+// ============================================================================
+
+// Application domain presets: learning these covers the whole app, not just
+// its main website (e.g. Discord uses separate domains for gateway/CDN/media).
+static const std::map<std::string, std::vector<std::string>>& autopilot_presets() {
+    static const std::map<std::string, std::vector<std::string>> presets = {
+        {"discord", {"discord.com", "www.discord.com", "discord.gg",
+                     "gateway.discord.gg", "cdn.discordapp.com",
+                     "media.discordapp.net", "images-ext-1.discordapp.net",
+                     "discord.media", "discordapp.com", "discordapp.net",
+                     "status.discord.com", "ptb.discord.com"}},
+        {"youtube", {"youtube.com", "www.youtube.com", "m.youtube.com",
+                     "googlevideo.com", "i.ytimg.com", "yt3.ggpht.com",
+                     "youtu.be"}},
+        {"x", {"x.com", "www.x.com", "twitter.com", "api.x.com",
+               "abs.twimg.com", "pbs.twimg.com", "video.twimg.com"}},
+    };
+    return presets;
+}
+
+void handle_autopilot(const std::vector<std::string>& args) {
+    // first non-flag token = action
+    std::string action;
+    std::string positional;
+    for (const auto& a : args) {
+        if (!a.empty() && a[0] == '-') continue;
+        if (action.empty()) { action = a; continue; }
+        if (positional.empty()) { positional = a; continue; }
+    }
+    if (action.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp autopilot <action> [options]\n"
+                  << "  status [--json]        Show learned per-host strategies\n"
+                  << "  learn <domain>         Probe all strategies for domain, store the best\n"
+                  << "                         (--doh: resolve probe targets via DNS-over-HTTPS)\n"
+                  << "  learn-preset <name>    Learn all domains of an app: discord|youtube|x\n"
+                  << "  reset [domain]         Drop one record (or all, if omitted)\n"
+                  << "  enable                 Persistently enable AutoPilot (proxy picks it up)\n"
+                  << "  disable                Persistently disable AutoPilot\n"
+                  << "\n"
+                  << "AutoPilot learns which desync strategy works for each host by live\n"
+                  << "probing (TLS ClientHello over TCP/443 through a temporary local proxy),\n"
+                  << "applies it inside `ncp proxy`, watches live traffic for degradation\n"
+                  << "(RST/timeout) and re-learns automatically in the background.\n"
+                  << "DB: " << ncp::AutoPilot::default_db_path() << "\n";
+        return;
+    }
+
+    ncp::AutoPilot ap;
+    ncp::AutoPilot::Config cfg;
+    cfg.probe_timeout_ms = get_option_int(args, "--timeout", 5000);
+    cfg.use_doh = has_flag(args, "--doh");
+    ap.load(cfg);
+
+    if (action == "status") {
+        if (has_flag(args, "--json")) {
+            std::cout << ap.to_json();
+            return;
+        }
+        auto recs = ap.records();
+        std::cout << "═══ AutoPilot status ═══\n"
+                  << "  Enabled:   " << (ap.enabled() ? "yes" : "no") << "\n"
+                  << "  DB:        " << ncp::AutoPilot::default_db_path() << "\n"
+                  << "  Records:   " << recs.size() << "\n";
+        if (recs.empty()) {
+            std::cout << "  (no learned hosts yet — use `ncp autopilot learn <domain>`)\n";
+            return;
+        }
+        std::cout << "  ────────────────────────────────────────────────────────────\n";
+        for (const auto& r : recs) {
+            std::cout << "  " << r.host << "\n"
+                      << "      strategy: " << r.strategy.name
+                      << (r.degraded ? "  [DEGRADED — will re-learn]" : "") << "\n"
+                      << "      ok/fail:  " << r.successes << "/" << r.failures
+                      << " (streak " << r.consec_failures << ")";
+            if (r.ewma_latency_ms > 0.0)
+                std::cout << ", ewma " << r.ewma_latency_ms << " ms";
+            std::cout << "\n";
+        }
+        return;
+    }
+
+    if (action == "learn") {
+        if (positional.empty()) {
+            std::cerr << "[!] Usage: ncp autopilot learn <domain> [--timeout ms]\n";
+            return;
+        }
+        std::cout << "[*] AutoPilot learning " << positional
+                  << " (probing strategies, timeout " << cfg.probe_timeout_ms << "ms)...\n";
+        std::string learned;
+        bool ok = ap.learn(positional, &learned);
+        if (ok) {
+            std::cout << "[+] Learned " << ncp::AutoPilot::normalize_host(positional)
+                      << ": best strategy = " << learned << "\n";
+        } else {
+            std::cout << "[-] No working strategy found for " << positional
+                      << " (host unreachable or IP-level blocked). "
+                      << "Marked degraded; background re-learn will retry with backoff.\n";
+        }
+        return;
+    }
+
+    if (action == "reset") {
+        ap.reset(positional);
+        std::cout << "[+] AutoPilot DB "
+                  << (positional.empty() ? "wiped" : ("record dropped: " + positional))
+                  << "\n";
+        return;
+    }
+
+    if (action == "learn-preset") {
+        if (positional.empty()) {
+            std::cerr << "[!] Usage: ncp autopilot learn-preset <";
+            bool first = true;
+            for (const auto& kv : autopilot_presets()) {
+                std::cerr << (first ? "" : "|") << kv.first;
+                first = false;
+            }
+            std::cerr << "> [--doh] [--timeout ms]\n";
+            return;
+        }
+        auto it = autopilot_presets().find(positional);
+        if (it == autopilot_presets().end()) {
+            std::cerr << "[!] Unknown preset: " << positional << "\n";
+            return;
+        }
+        std::cout << "[*] AutoPilot learning preset '" << positional << "' ("
+                  << it->second.size() << " domains)...\n";
+        int ok_count = 0;
+        int idx = 0;
+        for (const auto& domain : it->second) {
+            ++idx;
+            std::cout << "  [" << idx << "/" << it->second.size() << "] " << domain
+                      << " ... " << std::flush;
+            std::string learned;
+            if (ap.learn(domain, &learned)) {
+                std::cout << learned << "\n";
+                ++ok_count;
+            } else {
+                std::cout << "no working strategy (marked degraded)\n";
+            }
+        }
+        std::cout << "[+] Preset '" << positional << "': " << ok_count << "/"
+                  << it->second.size() << " domains learned\n";
+        return;
+    }
+
+    if (action == "enable") {
+        ap.set_enabled(true);
+        std::cout << "[+] AutoPilot enabled. `ncp proxy` will now use learned "
+                     "per-host strategies automatically.\n";
+        return;
+    }
+    if (action == "disable") {
+        ap.set_enabled(false);
+        std::cout << "[+] AutoPilot disabled.\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown autopilot action: " << action
+              << " (try: ncp autopilot --help)\n";
+}
+
+// ============================================================================
+// ncp import-zapret — import zapret CLI strategy
+// ============================================================================
+void handle_import_zapret(const std::vector<std::string>& args) {
+    if (has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp import-zapret (--args \"<zapret flags>\" | --file LIST.TXT)\n"
+                  << "  Parses zapret CLI flags and prints the resulting strategy profile as JSON.\n";
+        return;
+    }
+    std::string cmdline = get_option(args, "--args", "");
+    std::string file = get_option(args, "--file", "");
+    if (cmdline.empty() && file.empty()) {
+        std::cerr << "[!] Usage: ncp import-zapret --args \"<zapret args>\" | --file <args.txt> [--out profile.json]\n";
+        return;
+    }
+    if (!file.empty()) {
+        std::ifstream f(file);
+        if (!f.is_open()) {
+            std::cerr << "[!] Cannot read " << file << "\n";
+            return;
+        }
+        std::stringstream buf;
+        buf << f.rdbuf();
+        cmdline = buf.str();
+    }
+
+    auto result = DPI::parse_zapret_cmdline(cmdline);
+    std::string json = DPI::zapret_profile_to_json(result);
+
+    std::string out_path = get_option(args, "--out", "");
+    if (!out_path.empty()) {
+        std::ofstream f(out_path, std::ios::trunc);
+        f << json;
+        std::cout << "[+] Profile written to " << out_path << "\n";
+    } else {
+        std::cout << json;
+    }
+
+    if (!result.errors.empty()) {
+        std::cerr << "[!] " << result.errors.size() << " parse error(s)\n";
+        return;
+    }
+    std::cout << "[+] Imported " << result.profile.chains.size() << " chain(s)";
+    if (!result.warnings.empty())
+        std::cout << ", " << result.warnings.size() << " warning(s)";
+    std::cout << "\n";
 }

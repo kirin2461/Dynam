@@ -10,6 +10,7 @@ import sys
 import json
 import time
 import uuid
+import hashlib
 import platform
 import subprocess
 import threading
@@ -42,13 +43,95 @@ NCP_LICENSE_PUBLIC_KEY_B64 = "FT2FWdlm6rGldWix5fDJBuZmrHIR+73CuRpWszs/Hog="
 # Файл для сохранения активированной лицензии
 LICENSE_FILE = Path(os.environ.get("APPDATA", str(Path.home()))) / "ncp" / "license.json"
 
+# ── Пробный период (7 дней, автовыдача при первом запуске) ──────────────────
+TRIAL_DAYS = 7
+TRIAL_FILE = Path(os.environ.get("APPDATA", str(Path.home()))) / "ncp" / "trial.json"
+TRIAL_SECRET = "ncp7d-tr14l-5ecr3t-k3y"  # anti-casual MAC key (same literal in C++)
+TRIAL_MODULES = [
+    "dpi_bypass", "e2e_encryption", "i2p", "geneva_basic", "geneva_full",
+    "self_test", "pipeline", "dns_leak", "session_frag", "cross_layer",
+    "rtt_equalizer", "volume_norm", "behavioral_cloak", "time_breaker",
+    "covert_channel", "wf_defense", "protocol_rotation", "as_router",
+    "geo_obfuscator",
+]
+
+
+def _machine_id() -> str:
+    """Стабильный идентификатор машины (hostname, lowercase) — тот же, что в C++."""
+    return (platform.node() or "unknown-host").strip().lower()
+
+
+def _trial_sig(first_run: str, expires: str, machine: str) -> str:
+    s = f"{TRIAL_SECRET}|{first_run}|{expires}|{machine}"
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+
+def _set_trial_state(expires: str, days_left: int):
+    state["license"].update({
+        "status": "trial",
+        "key": "",
+        "plan": "trial",
+        "plan_label": PLAN_LABELS.get("trial", "Trial"),
+        "expires": expires,
+        "days_remaining": days_left,
+        "modules": list(TRIAL_MODULES),
+        "features": list(TRIAL_MODULES),
+    })
+
+
+def _ensure_trial():
+    """При первом запуске выдаёт 7-дневный триал; при повторных — восстанавливает.
+
+    Настоящая лицензия (status=active) имеет приоритет. Триал хранится в
+    trial.json с MAC (sha256) и привязкой к hostname; подделка/перенос на
+    другую машину → отказ.
+    """
+    from datetime import date
+    if _is_license_active():
+        return
+    try:
+        today = date.today()
+        mach = _machine_id()
+        if TRIAL_FILE.exists():
+            d = json.loads(TRIAL_FILE.read_text(encoding="utf-8"))
+            fr = str(d.get("first_run", ""))
+            exp = str(d.get("expires", ""))
+            m0 = str(d.get("machine", "")).strip().lower()
+            sig = str(d.get("sig", ""))
+            if not fr or not exp or m0 != mach or sig != _trial_sig(fr, exp, m0):
+                state["license"]["status"] = "inactive"
+                push_log("WARN", "Trial state invalid or tampered — license required")
+                return
+            exp_d = datetime.strptime(exp, "%Y-%m-%d").date()
+            if today > exp_d:
+                state["license"]["status"] = "expired"
+                state["license"]["plan_label"] = "Триал истёк"
+                state["license"]["expires"] = exp
+                push_log("WARN", f"Trial period expired on {exp} — enter a license key")
+                return
+        else:
+            fr = today.strftime("%Y-%m-%d")
+            exp_d = today + timedelta(days=TRIAL_DAYS)
+            exp = exp_d.strftime("%Y-%m-%d")
+            TRIAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            TRIAL_FILE.write_text(json.dumps({
+                "first_run": fr, "expires": exp, "machine": mach,
+                "sig": _trial_sig(fr, exp, mach),
+            }), encoding="utf-8")
+            push_log("INFO", f"Trial period activated: {TRIAL_DAYS} days (until {exp})")
+        _set_trial_state(exp, max(0, (exp_d - today).days))
+    except Exception as e:
+        logger.warning(f"Trial init failed: {e}")
+
+
+
 
 # ─── License gate helpers ────────────────────────────────────────────────────
 
 def _is_license_active() -> bool:
     """Return True if a valid, non-expired license is loaded in state."""
     lic = state.get("license", {})
-    return lic.get("status") == "active"
+    return lic.get("status") in ("active", "trial")
 
 
 def _license_has_module(module_name: str) -> bool:
@@ -87,7 +170,14 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("ncp-web")
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).parent
+# PyInstaller frozen support: bundled data (static/, ncp.exe) is extracted to
+# sys._MEIPASS at runtime; the launcher exe dir is where the user keeps
+# WinDivert.dll / WinDivert64.sys.
+FROZEN = getattr(sys, "frozen", False)
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+EXE_DIR = Path(sys.executable).parent if FROZEN else Path(__file__).parent
+
+BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 BUILD_DIR = PROJECT_DIR / "build"
 
@@ -95,6 +185,8 @@ def _find_ncp_binary() -> Path:
     """Search for ncp binary in common build output locations."""
     if platform.system() == "Windows":
         candidates = [
+            RESOURCE_DIR / "ncp.exe",   # bundled inside frozen app
+            EXE_DIR / "ncp.exe",        # next to the launcher
             BUILD_DIR / "ncp.exe",
             BUILD_DIR / "bin" / "Release" / "ncp.exe",
             BUILD_DIR / "bin" / "Debug" / "ncp.exe",
@@ -113,18 +205,57 @@ def _find_ncp_binary() -> Path:
     # Return default path even if not found yet
     return candidates[0]
 
-NCP_BINARY = _find_ncp_binary()
+NCP_BINARY = _find_ncp_binary().resolve()
+
+# JSON со статистикой модулей, экспортируемой движком (--stats-file)
+ENGINE_STATS_FILE = Path(os.environ.get("TEMP") or os.environ.get("TMP") or "/tmp") / "ncp_engine_stats.json"
 
 if platform.system() == "Windows":
     CONFIG_PATH = Path(os.environ.get("APPDATA", "")) / "ncp" / "config.json"
 else:
     CONFIG_PATH = Path("/etc/ncp/config.json")
 
-STATIC_DIR = BASE_DIR / "static"
+# Ensure the config directory exists from the start (health check reads it)
+try:
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+
+STATIC_DIR = (RESOURCE_DIR / "static") if FROZEN else (BASE_DIR / "static")
 LOG_BUFFER_SIZE = 500
 
 # ─── App & SocketIO ──────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
+
+# ── Local API protection ─────────────────────────────────────────────
+# Threat model: a website open in the user's browser can blind-POST to
+# http://127.0.0.1:<port>/api/* (CSRF) or use DNS rebinding to read
+# responses. Countermeasures:
+#   1. Per-start random token injected into the served page only — a
+#      cross-site page cannot read it (SOP) and cannot call the API.
+#   2. Host header must be loopback — defeats DNS-rebinding (the Host
+#      would be the attacker's domain).
+#   3. Cross-site Origin/Referer rejected.
+import secrets as _secrets
+_API_TOKEN = _secrets.token_hex(16)
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+@app.before_request
+def _api_guard():
+    if not request.path.startswith("/api/"):
+        return None
+    host = (request.host or "").split(":")[0].lower().strip("[]")
+    if host not in _LOOPBACK_HOSTS:
+        return jsonify({"ok": False, "error": "forbidden_host"}), 403
+    if request.headers.get("X-NCP-Token", "") != _API_TOKEN:
+        return jsonify({"ok": False, "error": "forbidden_token"}), 403
+    origin = (request.headers.get("Origin") or request.headers.get("Referer") or "")
+    if origin:
+        ohost = origin.split("://", 1)[-1].split("/")[0].split(":")[0].lower().strip("[]")
+        if ohost and ohost not in _LOOPBACK_HOSTS:
+            return jsonify({"ok": False, "error": "forbidden_origin"}), 403
+    return None
 app.config["SECRET_KEY"] = os.urandom(24).hex()
 CORS(app, origins=["http://127.0.0.1:8085", "http://localhost:8085"])
 socketio = SocketIO(app, cors_allowed_origins=["http://127.0.0.1:8085", "http://localhost:8085"], async_mode="threading")
@@ -166,6 +297,18 @@ state = {
         "sni_spoof": False,
         "paranoid_mode": False,
         "auto_rotate": False,
+        # Bypass feature set (proxy mode / blockcheck / QUIC)
+        "proxy_doh": True,
+        "proxy_block_quic": False,
+        "proxy_fake_quic": 0,
+        "proxy_strategy": None,
+        "proxy_autopilot": True,
+        "proxy_system_wide": False,
+        "proxy_upstream": "",
+        "tor_binary": "",
+        "tor_bridges": "",
+        "pt_obfs4": "",
+        "pt_snowflake": "",
         "rotate_interval": 3600,
         "antiforensics": False,
         "autostart": False,
@@ -409,6 +552,93 @@ def _get_active_connections() -> int:
         return 0
 
 
+_engine_stats_prev = {"dpi_pkts": None, "ts": 0}
+
+
+def _read_engine_stats():
+    """Читает JSON со счётчиками, который ncp.exe пишет по --stats-file."""
+    try:
+        if not ENGINE_STATS_FILE.exists():
+            return None
+        data = json.loads(ENGINE_STATS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return None
+        # Движок переписывает файл каждые ~2 с; протухший файл = движок остановлен
+        if abs(time.time() - int(data.get("ts", 0))) > 20:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _apply_engine_stats(data):
+    """Раскладывает реальные счётчики движка по state['modules']."""
+    m = state["modules"]
+    now = time.time()
+
+    dpi = data.get("dpi") or {}
+    pkts = int(dpi.get("packets_total", 0))
+    prev = _engine_stats_prev
+    pps = 0
+    if prev.get("dpi_pkts") is not None and prev.get("ts"):
+        dt = now - prev["ts"]
+        if 0 < dt < 30 and pkts >= prev["dpi_pkts"]:
+            pps = int((pkts - prev["dpi_pkts"]) / dt)
+    prev["dpi_pkts"] = pkts
+    prev["ts"] = now
+    # Секция «Пайплайн и Ядро» = ядро DPI-движка (реальный путь трафика в run-режиме)
+    m["pipeline"]["throughput_pps"] = pps
+    m["pipeline"]["drops"] = int(dpi.get("packets_dropped", 0))
+
+    dl = data.get("dns_leak") or {}
+    if dl.get("active"):
+        m["dns_leak"]["queries_intercepted"] = (int(dl.get("dns_queries_blocked", 0))
+                                                + int(dl.get("stun_packets_blocked", 0)))
+        m["dns_leak"]["leaks_blocked"] = int(dl.get("leaks_detected", 0))
+
+    sf = data.get("session_frag") or {}
+    m["session_frag"]["sessions_fragmented"] = int(sf.get("sessions_reset", 0))
+    m["session_frag"]["fragments_created"] = int(sf.get("total_resets", 0))
+
+    cl = data.get("cross_layer") or {}
+    m["cross_layer"]["correlations_checked"] = int(cl.get("checks_performed", 0))
+    m["cross_layer"]["anomalies_fixed"] = int(cl.get("auto_fixes_applied", 0))
+
+    rt = data.get("rtt_equalizer") or {}
+    m["rtt_equalizer"]["packets_delayed"] = int(rt.get("acks_delayed", 0))
+
+    vn = data.get("volume_normalizer") or {}
+    m["volume_norm"]["padding_bytes"] = int(vn.get("bytes_padded", 0))
+    m["volume_norm"]["normalized_flows"] = int(vn.get("requests_normalized", 0))
+
+    bc = data.get("behavioral_cloak") or {}
+    m["behavioral_cloak"]["actions_emulated"] = int(bc.get("packets_shaped", 0))
+    m["behavioral_cloak"]["patterns_matched"] = int(bc.get("bursts_generated", 0))
+
+    tb = data.get("time_breaker") or {}
+    m["time_breaker"]["correlations_broken"] = int(tb.get("jitters_applied", 0))
+
+    cc = data.get("covert_channel") or {}
+    m["covert_channel"]["bytes_sent"] = int(cc.get("bytes_hidden", 0))
+    m["covert_channel"]["bytes_recv"] = int(cc.get("bytes_extracted", 0))
+    m["covert_channel"]["channels_active"] = (
+        1 if (int(cc.get("messages_sent", 0)) + int(cc.get("messages_received", 0))) > 0 else 0)
+
+    wf = data.get("wf_defense") or {}
+    m["wf_defense"]["packets_padded"] = int(wf.get("real_packets_processed", 0))
+    m["wf_defense"]["overhead_bytes"] = int(wf.get("overhead_bytes", 0))
+
+    pr = data.get("protocol_rotation") or {}
+    m["protocol_rotation"]["rotations_completed"] = int(pr.get("rotations", 0))
+    if pr.get("current_protocol"):
+        m["protocol_rotation"]["current_protocol"] = pr["current_protocol"]
+
+    ar = data.get("as_router") or {}
+    m["as_router"]["routes_diverted"] = int(ar.get("as_switches", 0))
+    if int(ar.get("as_switches", 0)) > 0:
+        m["as_router"]["current_path"] = "multi-AS"
+
+
 def stats_update_loop():
     """Background thread: collect REAL network stats from OS when NCP is running.
     Module-level stats remain at zero — they are not implemented in the backend.
@@ -452,6 +682,12 @@ def stats_update_loop():
                              f"issues: {result['issues']}")
                 except Exception as e:
                     push_log("ERROR", f"Self-test error: {e}")
+
+            # Merge real per-module counters exported by the engine
+            eng = _read_engine_stats()
+            if eng:
+                with stats_lock:
+                    _apply_engine_stats(eng)
 
             # Emit real stats via WebSocket
             payload = {**state["stats"], "uptime": get_uptime()}
@@ -501,7 +737,12 @@ def read_process_output(proc):
 
 @app.route("/")
 def index():
-    return send_from_directory(str(STATIC_DIR), "index.html")
+    # Inject the per-start API token — readable only by the same-origin page.
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    meta = '<meta name="ncp-token" content="%s">' % _API_TOKEN
+    if "</head>" in html:
+        html = html.replace("</head>", meta + "</head>", 1)
+    return app.response_class(html, mimetype="text/html")
 
 
 @app.route("/api/status")
@@ -528,9 +769,11 @@ def _build_ncp_args() -> list:
     """Build NCP binary command-line arguments from current config state."""
     binary_path = str(NCP_BINARY)
     cfg = state["config"]
-    args = [binary_path, "run", "--no-license-check", "--no-kill-switch",
+    args = [binary_path, "run", "--no-kill-switch",
             "--interface", cfg.get("interface", "auto"),
             "--preset", cfg.get("dpi_preset", "tspu")]
+    # Live per-module stats export (read back by stats_update_loop)
+    args.extend(["--stats-file", str(ENGINE_STATS_FILE)])
 
     # Module disable flags -- when config toggle is False, pass --no-* to disable
     MODULE_FLAGS = {
@@ -590,6 +833,12 @@ def api_start():
     binary_ok = binary_exists if platform.system() == "Windows" else (binary_exists and os.access(binary_path, os.X_OK))
     if binary_ok:
         try:
+            # Drop stale engine stats from a previous run
+            try:
+                ENGINE_STATS_FILE.unlink(missing_ok=True)
+                _engine_stats_prev.update({"dpi_pkts": None, "ts": 0})
+            except Exception:
+                pass
             args = _build_ncp_args()
             # Set cwd to binary's directory so it finds DLLs (WinDivert.dll, wpcap.dll)
             binary_dir = str(Path(binary_path).parent)
@@ -754,6 +1003,12 @@ def _restart_ncp_process():
     binary_ok = binary_exists if platform.system() == "Windows" else (binary_exists and os.access(binary_path, os.X_OK))
     if binary_ok:
         try:
+            # Drop stale engine stats from a previous run
+            try:
+                ENGINE_STATS_FILE.unlink(missing_ok=True)
+                _engine_stats_prev.update({"dpi_pkts": None, "ts": 0})
+            except Exception:
+                pass
             args = _build_ncp_args()
             binary_dir = str(Path(binary_path).parent)
             push_log("INFO", f"Launching: {' '.join(args)}")
@@ -1154,7 +1409,7 @@ def api_license():
 
 # Маппинг планов для UI
 PLAN_LABELS = {
-    "trial": "Trial (14 days)",
+    "trial": "Пробный период (7 дней)",
     "basic": "Basic",
     "pro": "Pro",
     "ultimate": "Ultimate (Lifetime)",
@@ -1469,7 +1724,14 @@ def api_geneva_stop():
 
 @app.route("/api/geneva/status")
 def api_geneva_status():
-    return jsonify(state["geneva"])
+    g = dict(state["geneva"])
+    eng = _read_engine_stats()
+    if eng:
+        if isinstance(eng.get("geneva"), dict):
+            g["engine"] = eng["geneva"]
+        if isinstance(eng.get("dpi"), dict):
+            g["engine_interception"] = bool(eng["dpi"].get("interception_active"))
+    return jsonify(g)
 
 
 @app.route("/api/version")
@@ -1638,6 +1900,7 @@ def _initial_logs():
         # Check for required DLLs next to binary, auto-copy from SDK if missing
         bin_dir = NCP_BINARY.parent
         _windivert_sdk_dirs = [
+            EXE_DIR,  # user drops WinDivert.dll/.sys next to the launcher
             Path(r"C:\WinDivert-2.2.2-A\x64"),
             Path(r"C:\WinDivert-2.2.2-A"),
             Path(r"C:\WinDivert\x64"),
@@ -1667,9 +1930,29 @@ def _initial_logs():
     push_log("INFO", "Ready")
 
 
+# ── Bypass feature routes (proxy / blockcheck / hostlists / zapret import /
+#    detector / availability / autostart / auto-update) ──
+try:
+    import bypass_routes
+    bypass_routes.register_bypass_routes(app, {
+        "state": state,
+        "push_log": push_log,
+        "save_config": save_config,
+        "ncp_binary": str(NCP_BINARY),
+        "config_dir": CONFIG_PATH.parent,
+        "exe_dir": EXE_DIR,
+    })
+    logger.info("Bypass routes registered")
+except Exception as _bypass_err:
+    logger.warning(f"Bypass routes not available: {_bypass_err}")
+
+
 if __name__ == "__main__":
     # Restore saved license
     _try_restore_license()
+
+    # Auto-issue 7-day trial on first run (if no full license)
+    _ensure_trial()
 
     # Start background stats thread (collects REAL network stats, no simulation)
     stats_thread = threading.Thread(target=stats_update_loop, daemon=True)
@@ -1678,5 +1961,35 @@ if __name__ == "__main__":
     _initial_logs()
 
     port = int(os.environ.get("NCP_WEB_PORT", 8085))
+
+    # Windows tray icon (frozen builds only, best-effort)
+    if FROZEN and platform.system() == "Windows":
+        try:
+            import ncp_tray
+            def _tray_open():
+                try:
+                    import webbrowser
+                    webbrowser.open(f"http://127.0.0.1:{port}")
+                except Exception:
+                    pass
+            def _tray_quit():
+                os._exit(0)
+            if ncp_tray.start_tray("NCP — защита активна", _tray_open, _tray_quit):
+                push_log("INFO", "Tray icon active")
+        except Exception as _tray_err:
+            push_log("WARN", f"Tray icon failed: {_tray_err}")
     logger.info(f"Starting NCP Web Interface on 127.0.0.1:{port}")
+
+    # Frozen app: open the control panel in the default browser automatically
+    if (FROZEN or os.environ.get("NCP_OPEN_BROWSER") == "1") \
+            and os.environ.get("NCP_NO_BROWSER") != "1":
+        def _open_browser():
+            time.sleep(1.5)
+            try:
+                import webbrowser
+                webbrowser.open(f"http://127.0.0.1:{port}")
+            except Exception:
+                pass
+        threading.Thread(target=_open_browser, daemon=True).start()
+
     socketio.run(app, host="127.0.0.1", port=port, debug=False, allow_unsafe_werkzeug=True)

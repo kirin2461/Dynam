@@ -7,10 +7,12 @@
 **Version**: 1.5.0-dev (Active Development)
 **CMake Version**: 1.5.0 (synced)
 
-- ✅ **Build**: Linux (GCC 9+) and Windows (MSVC, WinDivert) via CMake + Ninja.
+- ✅ **Build**: Linux (GCC 9+) and Windows (mingw-w64 cross-build verified — statically linked `ncp.exe`; MSVC also supported) via CMake + Ninja.
 - ✅ **Tests**: 604 tests — 596 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
 - ✅ **MASTER_ORCHESTRATOR 100% COMPLETE**: Full 7-stage pipeline with anti-ML, steganography, and behavioral cloaking implemented.
-- ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop).
+- ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop, live per-module engine stats).
+- ✅ **Licensing**: automatic 7-day trial on first launch (all 19 modules), Ed25519-signed keys issued by the standalone `ncp-keygen` tool.
+- ✅ **Desktop GUI**: Qt6 app (`ncp-qt.exe`) with charts, license panel and tray integration.
 
 ### Implementation Progress
 
@@ -40,21 +42,72 @@
 ### Linux
 
 ```bash
-sudo apt install build-essential cmake ninja-build libssl-dev libsodium-dev libsqlite3-dev
+sudo apt install build-essential cmake ninja-build \
+    libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev \
+    libpcap-dev libnetfilter-queue-dev
 cmake -B build -G Ninja -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
 cmake --build build
 ```
+
+> `libwebsockets-dev` is **required** (secure tunneling). `libpcap-dev` and
+> `libnetfilter-queue-dev` are optional but enable L2 features and the NFQUEUE
+> DPI-bypass backend respectively.
 
 Binaries: `build/bin/ncp` (CLI), `build/bin/ncp_tests` (test suite).
 
 ### Windows
 
-Requirements: MSVC (Visual Studio 2019+), CMake, [WinDivert](https://reqrypt.org/windivert.html) 2.x (`WinDivert.dll` next to `ncp.exe` for DPI bypass / packet interception), vcpkg or manual installs of OpenSSL and libsodium.
+#### Option A — cross-compile from Linux (verified)
+
+Tested on Ubuntu 20.04 with mingw-w64 (produces a statically linked `ncp.exe`
+with ECH/HPKE support):
+
+```bash
+sudo apt install mingw-w64
+# Use the POSIX-threaded variant (std::thread/std::mutex support):
+sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+```
+
+Build the dependencies for mingw (versions verified to work):
+
+- **libsodium 1.0.20** — `./configure --host=x86_64-w64-mingw32 --prefix=/opt/win-deps`
+- **OpenSSL 3.5.1** — `./Configure mingw64 --prefix=/opt/win-deps --cross-compile-prefix=x86_64-w64-mingw32- no-shared no-tests no-apps`
+- **libwebsockets 4.3.3** — CMake with the toolchain file below, `-DLWS_WITH_SHARED=OFF -DLWS_WITH_ZLIB=OFF`
+
+Then configure and build:
+
+```bash
+cmake -B build-win -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+    -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=OFF -DENABLE_CLI=ON
+cmake --build build-win     # -> build-win/bin/ncp.exe
+```
+
+#### Option B — MSVC (native)
+
+Requirements: Visual Studio 2019+, CMake, and vcpkg:
 
 ```powershell
-cmake -B build -DENABLE_TESTS=ON -DENABLE_CLI=ON
+vcpkg install libsodium:x64-windows openssl:x64-windows libwebsockets:x64-windows
+cmake -B build -DENABLE_CLI=ON -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
 cmake --build build --config Release
 ```
+
+#### Runtime requirement (both options)
+
+Packet interception on Windows uses **WinDivert**: download
+[WinDivert 2.x](https://reqrypt.org/windivert.html) and place `WinDivert.dll`
+and `WinDivert64.sys` next to `ncp.exe`, then run as Administrator:
+
+```powershell
+ncp.exe run --preset tspu
+```
+
+> The legacy WFP (Windows Filtering Platform) backend is compiled only when a
+> full WFP SDK is available (`HAVE_WFP_SDK` CMake check). mingw-w64 < v10 ships
+> an incomplete `fwpmu.h`, so WFP code is disabled there automatically
+> (`NCP_NO_WFP`) — WinDivert is the real interception backend regardless.
 
 ## Testing
 
@@ -90,14 +143,144 @@ pip install -r requirements.txt
 python3 server.py    # http://127.0.0.1:8085
 ```
 
-Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core. GUI-launched instances always run with `--no-kill-switch`.
+Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core, **live per-module engine statistics** (the engine exports real counters via `ncp run --stats-file` every 2 s — DPI pipeline, Geneva GA, WF Defense, Volume Normalizer, Behavioral Cloak, Time Breaker, RTT Equalizer, Session Fragmenter, Cross-Layer, Covert Channel, Protocol Rotation, AS Router). The **Bypass** section adds: one-click desync proxy start/stop, automatic strategy selection (blockcheck) with per-strategy apply, availability checker for popular sites, auto-hostlist management, zapret strategy import with preview, DPI detector event feed, signed auto-update and autostart toggle. GUI-launched instances always run with `--no-kill-switch`.
 
-License keys are issued with `web/ncp_keygen.py` (Ed25519):
+## Licensing (trial + keys)
+
+**7-day trial, zero setup.** On first launch, both the CLI (`ncp run`) and the
+web GUI automatically issue a trial license covering **all 19 modules**
+(including the full Geneva engine). The trial file lives at
+`%APPDATA%\ncp\trial.json` (Windows) / `~/ncp/trial.json` (Linux), is bound
+to the machine hostname and integrity-protected with a keyed SHA-256 MAC.
+After 7 days the protection modules stop until a key is entered. The Qt GUI
+never hard-blocks: its license panel is informational.
+
+**Issuing keys (owner-only).** Keys are Ed25519-signed (`NCP-XXXXX-...`
+format) and are minted by the key generator — `web/ncp_keygen.py` or the
+frozen `ncp-keygen.exe`:
 
 ```bash
-python3 web/ncp_keygen.py generate-keypair --out private_key.b64
-python3 web/ncp_keygen.py issue --key private_key.b64 --plan ultimate --days 0 --modules all
+# one-time: generate a key pair (prints the public key to embed in builds)
+ncp-keygen.exe generate-keypair --out ncp_private_key.b64
+
+# issue a key valid for N days (0 = lifetime)
+ncp-keygen.exe issue --plan ultimate --modules all --days 365
+ncp-keygen.exe issue --plan pro --modules dpi_bypass,pipeline --days 30
 ```
+
+The generator reads the Ed25519 **private key from `ncp_private_key.b64`
+placed next to the executable** (or `--key <path>`) — it is never embedded in
+the binary. **Never distribute `ncp-keygen.exe` or `ncp_private_key.b64` to
+end users**; send customers only the key text. Users activate it in the web
+GUI (License section); the key is stored in `%APPDATA%\ncp\license.json`
+and is honored by all three apps (CLI, web GUI, Qt GUI).
+
+## Bypass Features (no admin required)
+
+### Local desync proxy — `ncp proxy`
+
+SOCKS5/HTTP proxy on localhost that applies DPI-desync (TCP split at
+byte/SNI/midSLD positions, zapret chains, fake QUIC, DoH resolution) to
+relay traffic. Works without root/admin rights — point your browser or app
+at `127.0.0.1:1080` (SOCKS5 with UDP ASSOCIATE, or HTTP CONNECT).
+
+```bash
+ncp proxy --port 1080 --doh                      # default: split-2 + split-at-SNI
+ncp proxy --split-pos 5                          # split ClientHello at byte 5
+ncp proxy --multisplit 1,2,5 --split-sni         # multi-layer split
+ncp proxy --chain "--dpi-desync=fake,multisplit --dpi-desync-split-pos=midsld"
+ncp proxy --block-quic                           # drop UDP/443 (force TCP fallback)
+ncp proxy --fake-quic 3                          # 3 fake QUIC Initials per target
+ncp proxy --autohostlist /etc/ncp/autohostlist.txt --detector-log /etc/ncp/detector_events.jsonl
+```
+
+### Automatic strategy selection — `ncp blockcheck`
+
+zapret `blockcheck` equivalent: probes a set of domains through every
+built-in strategy (split-1/2/3/5, split-SNI, multisplit variants, midSLD /
+SNI-extension / end-SLD chain splits), scores them, and reports the winner:
+
+```bash
+ncp blockcheck                                   # built-in domain list
+ncp blockcheck --domains example.com,foo.org --json --out report.json
+ncp blockcheck --apply                           # best strategy as profile JSON
+```
+
+### AutoPilot — adaptive self-learning engine (`ncp autopilot`)
+
+AutoPilot turns one-shot blockcheck into a continuous, per-host learning loop:
+
+- **Learns** the best desync strategy for each host by live probing (TLS
+  ClientHello over TCP/443 through a temporary local proxy — no admin, no
+  firewall changes) and persists it to `~/.ncp/autopilot.json`
+  (`%APPDATA%\ncp\autopilot.json` on Windows).
+- **Applies** learned strategies inside `ncp proxy --autopilot` (or whenever
+  the DB is enabled): a learned record takes precedence over chains and the
+  base strategy; longest-suffix matching covers subdomains automatically.
+- **Watches** live traffic: RST-after-ClientHello and server-hello timeouts
+  are reported back per host. Three consecutive failures mark the record
+  *degraded* — connections instantly fall back to chains/base while a
+  background janitor re-learns the host (rate-limited, exponential backoff).
+- **Self-extends**: repeated failures on an unknown host create a placeholder
+  that the janitor learns automatically.
+
+```bash
+ncp autopilot learn www.youtube.com --doh   # probe & store best strategy
+ncp autopilot status                        # human-readable DB view
+ncp autopilot status --json                 # machine-readable (GUI-ready)
+ncp autopilot enable                        # proxy picks it up automatically
+ncp proxy --doh --autopilot                 # learned strategies + live feedback
+ncp autopilot reset [domain]                # drop one record / all
+```
+
+Probing is plain TCP/443 only — no TUN, no VPN, no packet injection. Use
+`--doh` (both in `learn` and `proxy`) on networks with poisoned DNS so that
+learning happens in the same DNS reality the proxy runs in.
+
+### zapret strategy import — `ncp import-zapret`
+
+Parses zapret CLI flags (`--dpi-desync`, `--dpi-desync-split-pos`,
+`--dpi-desync-fooling`, `--dpi-desync-ttl/-autottl`, `--dpi-desync-fake-*`,
+`--hostlist*`, `--new`, `--filter-tcp/udp/l3/l7`, ...) into an NCP
+`ZapretChain` profile and prints it as JSON:
+
+```bash
+ncp import-zapret --args "--filter-tcp=443 --dpi-desync=split2 --dpi-desync-split-pos=midsld"
+ncp import-zapret --file strategies.txt
+```
+
+### Hostlists
+
+Exact + suffix domain matching (`*.example.com`, bare `example.com`,
+two-level TLD aware). Auto-hostlist records hosts where DPI blocking was
+detected (timeout / RST injection) and feeds them back into chain
+selection (`--hostlist` rules).
+
+### Passive DPI detector
+
+Counts RST injections, post-ClientHello resets and connect timeouts per
+host; emits JSONL events (`rst_injection`, `timeout_block`,
+`tcp_reset_pre`, `block_cleared`) consumable by the GUI.
+
+### QUIC / HTTP3 handling
+
+* fake QUIC Initial packets (WinDivert path and proxy UDP ASSOCIATE),
+* force-TCP: `--quic-block` / proxy `--block-quic` drops UDP/443,
+* IP-level fragmentation of QUIC Initials: `--quic-frag <offset>`
+  (IPv4, 8-byte aligned, checksums recomputed).
+
+### Auto-update
+
+Signed releases: the GUI checks GitHub Releases for a `manifest.json`
+asset, verifies SHA-256 and an **Ed25519 signature** (same key pair as
+license issuance) before installing. Compromised or tampered binaries are
+rejected.
+
+### Windows tray & autostart
+
+Frozen GUI build (`ncp-gui.exe`) shows a system-tray icon (open panel /
+quit) and can register itself in autostart (HKCU `Run` on Windows,
+`~/.config/autostart/ncp.desktop` on Linux) — toggled from the GUI.
 
 ## Architecture
 - Modern C++17 with `constexpr`/`noexcept` optimization.
@@ -108,5 +291,5 @@ python3 web/ncp_keygen.py issue --key private_key.b64 --plan ultimate --days 0 -
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: August 1, 2026
-**Version**: 1.5.0-dev
+**Last Updated**: August 14, 2026
+**Version**: 1.5.0-dev (suite builds v1.9.4)

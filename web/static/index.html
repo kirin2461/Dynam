@@ -73,7 +73,7 @@
     <div class="header__spacer"></div>
 
     <div class="header__connection">
-      <span class="header__version">v1.4.0-dev</span>
+      <span class="header__version">v1.5.0-dev</span>
       <span id="header-dot" class="status-dot"></span>
       <button id="btn-connect" class="btn-connect">
         <span class="status-dot"></span> Подключить
@@ -103,6 +103,14 @@
           </svg>
           DPI Обход
         </li>
+          <li class="sidebar__item" data-nav="bypass">
+            <span class="sidebar__icon">⬆️</span>
+            <span class="sidebar__label">Обход блокировок</span>
+          </li>
+          <li class="sidebar__item" data-nav="monitor">
+            <span class="sidebar__icon">📡</span>
+            <span class="sidebar__label">Мониторинг</span>
+          </li>
 
         <li class="sidebar__item" data-nav="network">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -503,7 +511,277 @@
       </div>
     </section>
 
-    <!-- ══ СЕТЬ ══════════════════════════════════════════════════════════ -->
+        <!-- ══ ОБХОД БЛОКИРОВОК ═══════════════════════════════════════════════ -->
+    <section id="sec-bypass" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>
+        Обход блокировок
+      </h2>
+
+      <div class="grid-2col">
+        <!-- ── Прокси-режим ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Прокси-режим (SOCKS5 / HTTP)
+            <span id="bypass-proxy-badge" class="badge badge--inactive">Выкл</span>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Локальный прокси с обходом DPI — не требует прав администратора.
+            Настройте браузер или систему на <code>SOCKS5 127.0.0.1:<span id="bypass-port-echo">1080</span></code>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Порт</label>
+            <input type="number" class="form-input" id="bypass-proxy-port" value="1080" min="1" max="65535" style="max-width:120px">
+          </div>
+          <div style="display:flex;flex-direction:column;gap:var(--sp-2);margin:var(--sp-3) 0">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="text-sm">DoH-резолв (обход DNS-блокировок)</span>
+              <label class="toggle"><input type="checkbox" id="bypass-toggle-doh" checked><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="text-sm">Блокировать QUIC (принудительно TCP)</span>
+              <label class="toggle"><input type="checkbox" id="bypass-toggle-quic-block"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="text-sm" title="Пропускает через обход все приложения, использующие системный прокси (Discord, браузеры и др.). Без прав администратора.">Все приложения (системный прокси)</span>
+              <label class="toggle"><input type="checkbox" id="bypass-toggle-sysproxy"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+            </div>
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <span class="text-sm">Фейковые QUIC Initial (шт.)</span>
+              <input type="number" class="form-input" id="bypass-fake-quic" value="0" min="0" max="10" style="max-width:80px">
+            </div>
+            <div style="margin-top:var(--sp-2)">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:var(--sp-2)">
+                <span class="text-sm" title="Трафик прокси дополнительно заворачивается в Tor или другой вышестоящий прокси: сайты не видят ваш IP, провайдер не видит адресов назначения. Требует запущенного Tor.">Цепочка через Tor / вышестоящий прокси</span>
+                <select class="form-input" id="bypass-upstream-preset" style="max-width:210px" onchange="bypassUpstreamPreset()">
+                  <option value="">Выключено</option>
+                  <option value="socks5://127.0.0.1:9050">Tor (служба, :9050)</option>
+                  <option value="socks5://127.0.0.1:9150">Tor Browser (:9150)</option>
+                  <option value="custom">Свой адрес…</option>
+                </select>
+              </div>
+              <div style="display:flex;gap:var(--sp-2);align-items:center">
+                <input type="text" class="form-input" id="bypass-upstream-custom" placeholder="socks5://127.0.0.1:9050" style="flex:1;display:none">
+                <button class="btn" id="bypass-btn-upstream-probe" onclick="bypassUpstreamProbe()" style="display:none">Проверить</button>
+                <span id="bypass-upstream-status" class="text-sm" style="color:var(--text-secondary)"></span>
+              </div>
+            </div>
+            <div style="margin-top:var(--sp-2)">
+              <div class="text-sm" title="NCP сам запускает tor с мостами obfs4/Snowflake: провайдер не видит ни адресов сайтов, ни самого факта использования Tor. Нужен tor.exe (Tor Expert Bundle); для obfs4-мостов — lyrebird.exe. Если поле tor.exe заполнено, обычная цепочка выше игнорируется." style="margin-bottom:var(--sp-2)">Управляемый Tor (мосты — скрывает сам факт Tor)</div>
+              <input type="text" class="form-input" id="bypass-tor-binary" placeholder="Путь к tor.exe (пусто = выкл)" style="margin-bottom:var(--sp-1)">
+              <input type="text" class="form-input" id="bypass-pt-obfs4" placeholder="Путь к lyrebird.exe (obfs4, опционально)" style="margin-bottom:var(--sp-1)">
+              <input type="text" class="form-input" id="bypass-pt-snowflake" placeholder="Путь к snowflake-client.exe (опционально)" style="margin-bottom:var(--sp-1)">
+              <textarea class="form-input" id="bypass-tor-bridges" rows="2" placeholder="obfs4 IP:PORT FINGERPRINT cert=... iat-mode=0 (каждый мост с новой строки)"></textarea>
+            </div>
+            <div style="margin-top:var(--sp-2)">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <span class="text-sm" title="Сравнивает ваш IP напрямую и через прокси — видимое доказательство, что маскировка реально работает, а не 'типо работает'">Проверка утечек</span>
+                <button class="btn" id="bypass-btn-leaktest" onclick="bypassLeakTest()">Проверить</button>
+              </div>
+              <div id="bypass-leaktest-result" class="text-sm" style="margin-top:var(--sp-2);color:var(--text-secondary)"></div>
+            </div>
+            <div class="text-sm" style="margin-top:var(--sp-2);color:var(--text-secondary)" title="Блокирует ВЕСЬ прямой исходящий трафик: если Tor/прокси упал, ничего не утечёт напрямую. Работает только в driver-режиме (нужны права администратора). По умолчанию выключен.">Kill switch: <code>ncp dpi --kill-switch</code> (driver-режим, по умолчанию ВЫКЛ)</div>
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <button class="btn btn--primary" id="bypass-btn-proxy-start" onclick="bypassProxyStart()">Запустить прокси</button>
+            <button class="btn" id="bypass-btn-proxy-stop" onclick="bypassProxyStop()" disabled>Остановить</button>
+          </div>
+          <div class="text-sm mt-3" style="color:var(--text-secondary)">
+            Стратегия: <span id="bypass-strategy-label" style="color:var(--text-primary)">split-2 + SNI (по умолчанию)</span>
+          </div>
+        </div>
+
+        <!-- ── Автоподбор стратегии ── -->
+        <div class="card">
+          <div class="card__title">Автоподбор стратегии</div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Проверяет ~15 стратегий обхода на реальных сайтах и выбирает лучшую (аналог blockcheck из zapret).
+          </div>
+          <button class="btn btn--primary" id="bypass-btn-blockcheck" onclick="bypassBlockcheckStart()">Подобрать автоматически</button>
+          <span id="bypass-blockcheck-status" class="text-sm" style="margin-left:var(--sp-2);color:var(--text-secondary)"></span>
+          <div id="bypass-blockcheck-results" class="mt-3" style="display:none;max-height:320px;overflow-y:auto">
+            <table style="width:100%;font-size:var(--text-sm);border-collapse:collapse">
+              <thead>
+                <tr style="color:var(--text-muted);text-align:left">
+                  <th style="padding:4px">Стратегия</th>
+                  <th style="padding:4px">Успех</th>
+                  <th style="padding:4px">Задержка</th>
+                  <th style="padding:4px"></th>
+                </tr>
+              </thead>
+              <tbody id="bypass-blockcheck-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid-2col mt-4">
+        <!-- ── Проверка доступности ── -->
+        <div class="card">
+          <div class="card__title">Проверка доступности</div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Доступность ключевых сайтов напрямую и через прокси (TLS-проба).
+          </div>
+          <button class="btn" id="bypass-btn-avail" onclick="bypassAvailabilityCheck()">Проверить доступ</button>
+          <div id="bypass-avail-results" class="mt-3" style="display:flex;flex-direction:column;gap:var(--sp-2)"></div>
+        </div>
+
+        <!-- ── Авто-хостлист ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Авто-хостлист
+            <span id="bypass-hostlist-count" class="badge badge--info">0</span>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Домены, для которых обнаружена блокировка (RST/таймаут), попадают сюда автоматически.
+          </div>
+          <div style="display:flex;gap:var(--sp-2);margin-bottom:var(--sp-3)">
+            <input type="text" class="form-input" id="bypass-hostlist-input" placeholder="example.com" style="flex:1">
+            <button class="btn btn--sm" onclick="bypassHostlistAdd()">Добавить</button>
+            <button class="btn btn--sm" onclick="bypassHostlistClear()">Очистить</button>
+          </div>
+          <div id="bypass-hostlist-entries" style="max-height:180px;overflow-y:auto;font-size:var(--text-sm);display:flex;flex-direction:column;gap:2px"></div>
+        </div>
+      </div>
+
+      <div class="grid-2col mt-4">
+        <!-- ── Импорт zapret ── -->
+        <div class="card">
+          <div class="card__title">Импорт стратегии zapret</div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Вставьте аргументы zapret (nfqws/winws) — они будут преобразованы в профиль NCP.
+          </div>
+          <textarea class="form-input" id="bypass-zapret-args" rows="3"
+            placeholder="--filter-tcp=443 --dpi-desync=fake,multisplit --dpi-desync-split-pos=2,midsld --dpi-desync-fooling=badsum --new --filter-udp=443 ..."></textarea>
+          <div style="display:flex;gap:var(--sp-2);margin-top:var(--sp-2)">
+            <button class="btn" onclick="bypassZapretParse()">Разобрать</button>
+            <button class="btn btn--primary" id="bypass-zapret-apply" onclick="bypassZapretApply()" disabled>Применить</button>
+          </div>
+          <div id="bypass-zapret-preview" class="mt-3" style="display:none;font-size:var(--text-xs);background:var(--bg-raised);padding:var(--sp-3);border-radius:var(--r-md);border:1px solid var(--border);max-height:200px;overflow-y:auto;white-space:pre-wrap;font-family:monospace"></div>
+        </div>
+
+        <!-- ── Детектор DPI ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Детектор DPI
+            <button class="btn btn--sm" onclick="bypassDetectorLoad()">Обновить</button>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            События блокировок, замеченные прокси: RST-инъекции и таймаут-блоки.
+          </div>
+          <div id="bypass-detector-events" style="max-height:200px;overflow-y:auto;font-size:var(--text-sm);display:flex;flex-direction:column;gap:2px"></div>
+        </div>
+      </div>
+
+      <div class="grid-2col mt-4">
+        <!-- ── Обновление ── -->
+        <div class="card">
+          <div class="card__title">Обновление</div>
+          <div class="text-sm" style="margin-bottom:var(--sp-3);color:var(--text-secondary)">
+            Текущая версия: <span id="bypass-ver-current" style="color:var(--text-primary)">1.5.0</span>
+            <span id="bypass-ver-latest"></span>
+          </div>
+          <div style="display:flex;gap:var(--sp-2)">
+            <button class="btn" id="bypass-btn-update-check" onclick="bypassUpdateCheck()">Проверить обновления</button>
+            <button class="btn btn--primary" id="bypass-btn-update-install" onclick="bypassUpdateInstall()" disabled>Установить</button>
+          </div>
+          <div id="bypass-update-status" class="text-sm mt-3" style="color:var(--text-secondary)"></div>
+        </div>
+
+        <!-- ── Автозапуск ── -->
+        <div class="card">
+          <div class="card__title">Автозапуск</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:var(--sp-2)">
+            <span class="text-sm">Запускать NCP при входе в систему</span>
+            <label class="toggle"><input type="checkbox" id="bypass-toggle-autostart" onchange="bypassAutostartToggle(this.checked)"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+<!-- ══ МОНИТОРИНГ (live) ══════════════════════════════════════════════ -->
+    <section id="sec-monitor" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>
+        Мониторинг трафика
+        <span id="monitor-live-badge" class="badge badge--inactive" style="margin-left:8px">Прокси выкл</span>
+      </h2>
+
+      <!-- Счётчики -->
+      <div class="grid-4col" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--sp-3);margin-bottom:var(--sp-4)">
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">Соединения</div><div id="mon-conn" style="font-size:1.5rem;font-weight:600">0</div><div class="text-sm" style="color:var(--text-secondary)">активных: <span id="mon-conn-active">0</span></div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">Трафик</div><div id="mon-bytes" style="font-size:1.5rem;font-weight:600">0 B</div><div class="text-sm" style="color:var(--text-secondary)">↑ <span id="mon-bytes-up">0 B</span></div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">Сплиты</div><div id="mon-splits" style="font-size:1.5rem;font-weight:600">0</div><div class="text-sm" style="color:var(--text-secondary)">desync</div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">AutoPilot hits</div><div id="mon-ap-hits" style="font-size:1.5rem;font-weight:600">0</div><div class="text-sm" style="color:var(--text-secondary)">выученных стратегий</div></div>
+        <div class="card" style="text-align:center"><div class="text-sm" style="color:var(--text-secondary)">RST-блоки</div><div id="mon-rst" style="font-size:1.5rem;font-weight:600;color:var(--danger,#e5534b)">0</div><div class="text-sm" style="color:var(--text-secondary)">timeout: <span id="mon-timeout">0</span></div></div>
+      </div>
+
+      <div class="grid-2col">
+        <!-- Живой поток событий -->
+        <div class="card">
+          <div class="card__title">Живой поток соединений</div>
+          <div id="mon-events" class="text-sm" style="max-height:340px;overflow-y:auto;font-family:monospace">
+            <div style="color:var(--text-secondary)">Запустите прокси — события появятся здесь в реальном времени.</div>
+          </div>
+        </div>
+
+        <!-- Стратегии по хостам -->
+        <div class="card">
+          <div class="card__title">Стратегии по хостам</div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Хост</th><th>Стратегия</th><th>Исход</th><th>Данные</th></tr></thead>
+              <tbody id="mon-hosts"><tr><td colspan="4" style="color:var(--text-secondary)">Нет данных</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- AutoPilot -->
+      <div class="card" style="margin-top:var(--sp-4)">
+        <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+          AutoPilot — адаптивный движок
+          <span id="mon-ap-badge" class="badge badge--inactive">Выкл</span>
+        </div>
+        <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+          Самообучающийся обход: запоминает рабочую стратегию для каждого хоста,
+          следит за деградацией и переобучается автоматически.
+          БД: <code id="mon-ap-dbpath">~/.ncp/autopilot.json</code>
+        </div>
+        <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center;margin-bottom:var(--sp-3)">
+          <input type="text" class="form-input" id="mon-ap-domain" placeholder="example.com" style="max-width:220px">
+          <button class="btn btn--primary" id="mon-ap-btn-learn" onclick="monitorAutopilotLearn()">Обучить</button>
+          <button class="btn" onclick="monitorAutopilotReset()">Сбросить БД</button>
+          <div style="display:flex;align-items:center;gap:var(--sp-2);margin-left:auto">
+            <span class="text-sm">AutoPilot</span>
+            <label class="toggle"><input type="checkbox" id="mon-ap-toggle" onchange="monitorAutopilotEnabled(this.checked)"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+        </div>
+        <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center;margin-bottom:var(--sp-3)">
+          <span class="text-sm" style="color:var(--text-secondary)">Пресеты приложений:</span>
+          <button class="btn" id="mon-ap-preset-discord" onclick="monitorAutopilotPreset('discord')">Discord</button>
+          <button class="btn" id="mon-ap-preset-youtube" onclick="monitorAutopilotPreset('youtube')">YouTube</button>
+          <button class="btn" id="mon-ap-preset-x" onclick="monitorAutopilotPreset('x')">X / Twitter</button>
+          <span id="mon-ap-preset-status" class="text-sm" style="color:var(--text-secondary)"></span>
+        </div>
+        <div id="mon-ap-learn-status" class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-2)"></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Хост</th><th>Стратегия</th><th>Ок/Сбой</th><th>Статус</th></tr></thead>
+            <tbody id="mon-ap-records"><tr><td colspan="4" style="color:var(--text-secondary)">Нет выученных хостов</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+
+
+<!-- ══ СЕТЬ ══════════════════════════════════════════════════════════ -->
     <section id="sec-network" class="section">
       <h2 class="section-title">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -668,6 +946,26 @@
         <div class="kpi-card">
           <div class="kpi-card__label">Популяция</div>
           <div id="val-pop-display" class="kpi-card__value">50</div>
+        </div>
+      </div>
+
+      <div class="card__title mt-2">Geneva Engine — обработка пакетов (live)</div>
+      <div class="grid-4 mb-6">
+        <div class="kpi-card">
+          <div class="kpi-card__label">Пакетов обработано</div>
+          <div id="gen-eng-pkts" class="kpi-card__value">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Изменено (tamper)</div>
+          <div id="gen-eng-tampered" class="kpi-card__value">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Фрагментировано</div>
+          <div id="gen-eng-frag" class="kpi-card__value">0</div>
+        </div>
+        <div class="kpi-card">
+          <div class="kpi-card__label">Оверхед</div>
+          <div id="gen-eng-overhead" class="kpi-card__value">0 Б</div>
         </div>
       </div>
 
@@ -1638,7 +1936,7 @@
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);font-size:var(--text-sm)">
           <div>
             <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Версия</div>
-            <div class="text-accent">NCP v1.4.0-dev</div>
+            <div class="text-accent">NCP v1.5.0-dev</div>
           </div>
           <div>
             <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Сборка</div>

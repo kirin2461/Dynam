@@ -28,3 +28,5 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+build-win/
+build-win-nonpcap/
