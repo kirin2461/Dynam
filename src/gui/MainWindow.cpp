@@ -11,10 +11,35 @@
 #include "widgets/ModulesPanel.hpp"
 #include "widgets/LeakTestPanel.hpp"
 
+// PR #118 (upstream Qt GUI) tool panels — header-only widgets.
+#include "widgets/UiSettingsDialog.hpp"
+#include "widgets/CryptoPanel.hpp"
+#include "widgets/IdentityPanel.hpp"
+#include "widgets/DPIMetricsPanel.hpp"
+#include "widgets/DPIStrategyEditor.hpp"
+#include "widgets/DnsLookupPanel.hpp"
+#include "widgets/UrlProbePanel.hpp"
+#include "widgets/SiteScraperPanel.hpp"
+#include "widgets/PollerEngine.hpp"
+#include "widgets/PollerPanel.hpp"
+#include "widgets/Themes.hpp"
+#include "widgets/OnboardingWizard.hpp"
+#include "widgets/Profiles.hpp"
+#include "widgets/DiagnosticsDialog.hpp"
+
 #include "ncp_license.hpp"
+#include "ncp_crypto.hpp"
+#include "ncp_db.hpp"
+#include "ncp_identity.hpp"
+#include "ncp_dpi_advanced.hpp"
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QDateTime>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFile>
+#include <QFileDialog>
 #include <QGridLayout>
 #include <QLabel>
 #include <QMenu>
@@ -24,30 +49,15 @@
 #include <QPixmap>
 #include <QSettings>
 #include <QStatusBar>
+#include <QTabWidget>
+#include <QTextStream>
 #include <QToolBar>
+#include <QUrl>
+#include <QVBoxLayout>
 
 namespace ncp::GUI {
 
-static const char* kAppVersion = "1.9.2";
-
-static const char* kDarkQss = R"(
-QMainWindow, QWidget { background:#16161e; color:#d8d8e0; font-family:'Segoe UI',sans-serif; }
-QMenuBar { background:#101018; border-bottom:1px solid #2a2a3a; }
-QMenuBar::item:selected, QMenu::item:selected { background:#2a2a4a; }
-QMenu { background:#101018; border:1px solid #2a2a3a; }
-QToolBar { background:#101018; border:none; spacing:6px; padding:4px; }
-QToolButton { background:#22222e; color:#d8d8e0; border-radius:4px; padding:5px 10px; }
-QToolButton:hover { background:#2e2e44; }
-QPushButton { background:#22222e; border:1px solid #34344a; border-radius:4px; padding:5px 12px; }
-QPushButton:hover { background:#2e2e44; }
-QPushButton:disabled { color:#666; background:#1b1b24; }
-QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {
-    background:#101018; border:1px solid #2a2a3a; border-radius:3px; padding:4px; }
-QStatusBar { background:#101018; border-top:1px solid #2a2a3a; }
-QToolTip { background:#22222e; color:#d8d8e0; border:1px solid #34344a; }
-QCheckBox { spacing:6px; }
-QDialog { background:#16161e; }
-)";
+static const char* kAppVersion = "1.9.4";
 
 static QIcon makeAppIcon() {
     QPixmap pm(64, 64);
@@ -63,13 +73,33 @@ static QIcon makeAppIcon() {
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
-    , currentTheme_("dark_pro") {
-    // License is best-effort: never let a core exception kill the UI.
+    , currentTheme_(QStringLiteral("dark")) {
+    // Core modules are best-effort: never let a core exception kill the UI.
     try {
         license_ = std::make_unique<ncp::License>();
     } catch (...) {
         license_.reset();
     }
+
+    // PR #118: in-process core objects backing the advanced tool panels.
+    // They are NOT started for packet processing — the privacy-critical
+    // packet path stays in the external ncp.exe process (ProxyController /
+    // DriverController), so nothing here touches the firewall.
+    try { crypto_   = std::make_unique<ncp::Crypto>(); }   catch (...) { crypto_.reset(); }
+    try { database_ = std::make_unique<ncp::Database>(); } catch (...) { database_.reset(); }
+    try {
+        identityRotation_ = std::make_unique<ncp::DPI::IdentityRotation>();
+        // Seed an 8-identity pool so "rotate now" has options.
+        identityRotation_->generate_pool(8);
+    } catch (...) { identityRotation_.reset(); }
+    try { advancedDpi_ = std::make_unique<ncp::DPI::AdvancedDPIBypass>(); }
+    catch (...) { advancedDpi_.reset(); }
+
+    // Poller engine: independent of Connect state. It owns its timers and
+    // runs probes when due; persisted targets reload from ~/.dynam/poller.json.
+    try { pollerEngine_ = std::make_unique<PollerEngine>(); }
+    catch (...) { pollerEngine_.reset(); }
+
     controller_ = new ProxyController(this);
     driver_ = new DriverController(this);
 
@@ -100,6 +130,29 @@ MainWindow::MainWindow(QWidget* parent)
     } catch (...) {
         licenseInfo_->setHWID(QStringLiteral("недоступен"));
     }
+
+    // First-launch onboarding (PR #118). Deferred via singleShot so the main
+    // window is fully visible before the modal wizard appears.
+    if (OnboardingWizard::shouldRun()) {
+        QTimer::singleShot(150, this, [this]{
+            auto* wiz = new OnboardingWizard(this);
+            wiz->setAttribute(Qt::WA_DeleteOnClose);
+            connect(wiz, &QDialog::finished, this, [this](int){
+                // Re-apply theme + maybe auto-connect now that the wizard
+                // has persisted the user's choices.
+                Themes::apply();
+                if (QSettings().value("ui/auto_connect", true).toBool()) {
+                    QTimer::singleShot(0, this, &MainWindow::onConnectClicked);
+                }
+            });
+            wiz->show();
+        });
+    } else if (QSettings().value("ui/auto_connect", true).toBool()) {
+        // No wizard, but auto-connect is set — fire after first paint.
+        // Connect here starts the local SOCKS5 proxy (ncp.exe proxy,
+        // --no-kill-switch) — it never touches the firewall.
+        QTimer::singleShot(0, this, &MainWindow::onConnectClicked);
+    }
 }
 
 MainWindow::~MainWindow() {
@@ -109,52 +162,122 @@ MainWindow::~MainWindow() {
 }
 
 void MainWindow::setupUI() {
+    // Tab layout (PR #118): StatusPanel sits on top as an always-visible
+    // header; the QTabWidget below hosts the original dashboard grid
+    // ("Обзор") plus the upstream tool tabs.
     QWidget* central = new QWidget(this);
     setCentralWidget(central);
-
-    QGridLayout* mainLayout = new QGridLayout(central);
-    mainLayout->setSpacing(10);
-    mainLayout->setContentsMargins(10, 10, 10, 10);
+    auto* root = new QVBoxLayout(central);
+    root->setSpacing(6);
+    root->setContentsMargins(8, 8, 8, 8);
 
     statusPanel_ = new StatusPanel(this);
-    mainLayout->addWidget(statusPanel_, 0, 0, 1, 3);
+    root->addWidget(statusPanel_);
+
+    auto* tabs = new QTabWidget(this);
+    root->addWidget(tabs, 1);
+
+    // ─── Обзор: the original dashboard grid ─────────────────────────────
+    auto* overview = new QWidget(tabs);
+    QGridLayout* mainLayout = new QGridLayout(overview);
+    mainLayout->setSpacing(10);
+    mainLayout->setContentsMargins(4, 4, 4, 4);
 
     networkMonitor_ = new NetworkMonitor(this);
-    mainLayout->addWidget(networkMonitor_, 1, 0);
+    mainLayout->addWidget(networkMonitor_, 0, 0);
 
     dpiControl_ = new DPIControl(this);
-    mainLayout->addWidget(dpiControl_, 1, 1);
+    mainLayout->addWidget(dpiControl_, 0, 1);
 
     trafficAnalytics_ = new TrafficAnalytics(this);
-    mainLayout->addWidget(trafficAnalytics_, 1, 2);
+    mainLayout->addWidget(trafficAnalytics_, 0, 2);
 
     systemStats_ = new SystemStats(this);
-    mainLayout->addWidget(systemStats_, 2, 0);
+    mainLayout->addWidget(systemStats_, 1, 0);
 
     activityLog_ = new ActivityLog(this);
-    mainLayout->addWidget(activityLog_, 2, 1);
+    mainLayout->addWidget(activityLog_, 1, 1);
 
     licenseInfo_ = new LicenseInfo(this);
-    mainLayout->addWidget(licenseInfo_, 2, 2);
+    mainLayout->addWidget(licenseInfo_, 1, 2);
 
     modulesPanel_ = new ModulesPanel(this);
-    mainLayout->addWidget(modulesPanel_, 3, 0, 1, 2);
+    mainLayout->addWidget(modulesPanel_, 2, 0, 1, 2);
 
     leakTestPanel_ = new LeakTestPanel(this);
-    mainLayout->addWidget(leakTestPanel_, 3, 2);
+    mainLayout->addWidget(leakTestPanel_, 2, 2);
 
-    mainLayout->setRowStretch(0, 0);
+    mainLayout->setRowStretch(0, 2);
     mainLayout->setRowStretch(1, 2);
     mainLayout->setRowStretch(2, 2);
-    mainLayout->setRowStretch(3, 2);
     mainLayout->setColumnStretch(0, 1);
     mainLayout->setColumnStretch(1, 1);
     mainLayout->setColumnStretch(2, 1);
+    tabs->addTab(overview, tr("Обзор"));
+
+    // ─── DPI (расшир.): live metrics + strategy editor (PR #118) ───────
+    if (advancedDpi_) {
+        auto* dpiTab = new QWidget(tabs);
+        auto* dpiLayout = new QVBoxLayout(dpiTab);
+        auto* dpiInnerTabs = new QTabWidget(dpiTab);
+        dpiMetricsPanel_   = new DPIMetricsPanel(advancedDpi_.get(), this);
+        dpiStrategyEditor_ = new DPIStrategyEditor(advancedDpi_.get(), this);
+        dpiInnerTabs->addTab(dpiMetricsPanel_,   tr("Metrics"));
+        dpiInnerTabs->addTab(dpiStrategyEditor_, tr("Strategy"));
+        dpiLayout->addWidget(dpiInnerTabs, 1);
+        tabs->addTab(dpiTab, tr("DPI (расшир.)"));
+    }
+
+    // ─── Идентичность: identity rotation (PR #118) ──────────────────────
+    if (identityRotation_) {
+        identityPanel_ = new IdentityPanel(identityRotation_.get(), this);
+        tabs->addTab(identityPanel_, tr("Идентичность"));
+    }
+
+    // ─── Инструменты: DNS lookup + URL probe + site scraper (PR #118) ───
+    {
+        auto* toolsTab = new QWidget(tabs);
+        auto* toolsLayout = new QVBoxLayout(toolsTab);
+        auto* toolsInner = new QTabWidget(toolsTab);
+        dnsLookupPanel_   = new DnsLookupPanel(this);
+        urlProbePanel_    = new UrlProbePanel(this);
+        siteScraperPanel_ = new SiteScraperPanel(pollerEngine_.get(), this);
+        toolsInner->addTab(dnsLookupPanel_,   tr("DNS Lookup"));
+        toolsInner->addTab(urlProbePanel_,    tr("URL Probe"));
+        toolsInner->addTab(siteScraperPanel_, tr("Site Scraper"));
+        toolsLayout->addWidget(toolsInner);
+        tabs->addTab(toolsTab, tr("Инструменты"));
+    }
+
+    // ─── Поллер: scheduled probe engine (PR #118) ───────────────────────
+    if (pollerEngine_) {
+        pollerPanel_ = new PollerPanel(pollerEngine_.get(), this);
+        tabs->addTab(pollerPanel_, tr("Поллер"));
+    }
+
+    // ─── Крипто: crypto self-tests / info (PR #118) ─────────────────────
+    if (crypto_) {
+        cryptoPanel_ = new CryptoPanel(crypto_.get(), this);
+        tabs->addTab(cryptoPanel_, tr("Крипто"));
+    }
 }
 
 void MainWindow::setupMenuBar() {
     QMenu* fileMenu = menuBar()->addMenu(tr("&Файл"));
     fileMenu->addAction(tr("&Настройки"), this, &MainWindow::onSettingsClicked);
+    fileMenu->addAction(tr("Настройки &интерфейса…"), this, &MainWindow::onUiSettingsClicked);
+    fileMenu->addSeparator();
+    // Profiles (PR #118): snapshot/restore QSettings-backed preferences.
+    fileMenu->addAction(tr("Сохранить профиль…"), this, [this]{
+        Profiles::saveAs(this);
+        if (database_) database_->log_activity("profile", "Profile saved");
+    });
+    fileMenu->addAction(tr("Загрузить профиль…"), this, [this]{
+        if (Profiles::load(this)) {
+            Themes::apply();
+            if (database_) database_->log_activity("profile", "Profile loaded");
+        }
+    });
     fileMenu->addSeparator();
     fileMenu->addAction(tr("&Выход"), this, [this]() {
         quitRequested_ = true;
@@ -175,6 +298,23 @@ void MainWindow::setupMenuBar() {
                       this, &MainWindow::onChooseUiNextTime);
 
     QMenu* helpMenu = menuBar()->addMenu(tr("&Справка"));
+    if (crypto_ && license_ && advancedDpi_ && identityRotation_) {
+        helpMenu->addAction(tr("Диагностика…"), this, &MainWindow::onRunDiagnostics);
+    }
+    if (database_) {
+        helpMenu->addAction(tr("Экспорт журнала…"), this, &MainWindow::onExportLogs);
+    }
+    helpMenu->addAction(tr("Мастер первой настройки"), this, [this]{
+        // No first-launch gate when invoked explicitly — user can revisit anytime.
+        auto* wiz = new OnboardingWizard(this);
+        wiz->setAttribute(Qt::WA_DeleteOnClose);
+        connect(wiz, &QDialog::finished, this, [](int){ Themes::apply(); });
+        wiz->show();
+    });
+    helpMenu->addAction(tr("Проект на GitHub"), this, []{
+        QDesktopServices::openUrl(QUrl("https://github.com/kirin2461/Dynam"));
+    });
+    helpMenu->addSeparator();
     helpMenu->addAction(tr("&О программе"), [this]() {
         QMessageBox::about(this, tr("О программе"),
             tr("NCP v%1 — Network Control Protocol (Qt6)\n\n"
@@ -314,6 +454,8 @@ void MainWindow::onStartFinished(bool ok, const QString& message) {
         statusPanel_->setAddress(QStringLiteral("127.0.0.1:%1").arg(controller_->boundPort()));
         statusPanel_->setChain(controller_->chainLabel());
         statusBar()->showMessage(tr("Защита активна"));
+        if (database_) database_->log_activity("connection", "Proxy protection started");
+        notify(tr("NCP"), tr("Защита активна — трафик идёт через прокси."));
     } else {
         isConnected_ = false;
         statusPanel_->setConnected(false);
@@ -330,6 +472,7 @@ void MainWindow::onDisconnectClicked() {
     statusPanel_->setConnected(false);
     statusPanel_->setChain(QString());
     statusBar()->showMessage(tr("Остановлено"));
+    if (database_) database_->log_activity("connection", "Proxy protection stopped");
 }
 
 void MainWindow::onQuickConnectClicked() { onConnectClicked(); }
@@ -365,6 +508,16 @@ void MainWindow::onSettingsClicked() {
     }
 }
 
+void MainWindow::onUiSettingsClicked() {
+    // PR #118 UI settings (theme, auto-connect, Tor toggle, advanced tree).
+    // The dialog persists to QSettings on Accept; heap-allocate with
+    // WA_DeleteOnClose so it cleans itself up when dismissed.
+    auto* dlg = new UiSettingsDialog(this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowModality(Qt::ApplicationModal);
+    dlg->show();
+}
+
 void MainWindow::onThemeChanged(const QString& theme) { applyTheme(theme); }
 
 void MainWindow::onTrayIconActivated(QSystemTrayIcon::ActivationReason reason) {
@@ -383,10 +536,23 @@ void MainWindow::onMinimizeToTray() {
 
 void MainWindow::onLicenseActivate() {
     appendLog(QStringLiteral("[ui] лицензия обновлена"));
+    if (database_) database_->log_activity("license", "License updated via Qt GUI");
+    refreshLicenseStatus();
 }
 
 void MainWindow::onLicenseDeactivate() {
     QSettings("NCP", "ncp-qt").remove("license_key");
+}
+
+void MainWindow::refreshLicenseStatus() {
+    if (!license_ || !licenseInfo_) return;
+    try {
+        auto info = license_->get_license_info("license.dat");
+        licenseInfo_->updateInfo(info);
+    } catch (...) {
+        // No license.dat or core failure — the panel's own offline verifier
+        // (QSettings-backed) remains the source of truth in this build.
+    }
 }
 
 void MainWindow::onCheckForUpdates() {
@@ -453,6 +619,51 @@ void MainWindow::onDriverFinished(int exitCode) {
     appendLog(QStringLiteral("[driver] процесс завершён, код %1").arg(exitCode));
 }
 
+void MainWindow::onRunDiagnostics() {
+    if (!crypto_ || !license_ || !advancedDpi_ || !identityRotation_) return;
+    auto* dlg = new DiagnosticsDialog(
+        crypto_.get(), license_.get(),
+        advancedDpi_.get(), identityRotation_.get(), this);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->setWindowModality(Qt::ApplicationModal);
+    dlg->show();
+}
+
+void MainWindow::onExportLogs() {
+    if (!database_) return;
+    const QString suggested = QDir::homePath()
+        + "/ncp-activity-"
+        + QDateTime::currentDateTime().toString("yyyyMMdd-HHmmss")
+        + ".log";
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Экспорт журнала активности"), suggested,
+        tr("Log files (*.log);;Text files (*.txt);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    QFile out(path);
+    if (!out.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        QMessageBox::warning(this, tr("Экспорт не удался"),
+            tr("Не удалось открыть %1 для записи.").arg(path));
+        return;
+    }
+    QTextStream ts(&out);
+    for (const auto& line : database_->get_recent_activity(500)) {
+        ts << QString::fromStdString(line) << '\n';
+    }
+    statusBar()->showMessage(tr("Журнал экспортирован в %1").arg(path), 4000);
+    database_->log_activity("export", "Activity log exported");
+}
+
+// Helper: show a tray notification if the tray icon is visible; otherwise
+// fall back to a status-bar message.
+void MainWindow::notify(const QString& title, const QString& body) {
+    if (trayIcon_ && trayIcon_->isVisible()) {
+        trayIcon_->showMessage(title, body, QSystemTrayIcon::Information, 3000);
+    } else {
+        statusBar()->showMessage(title + " — " + body, 4000);
+    }
+}
+
 void MainWindow::closeEvent(QCloseEvent* event) {
     if (!quitRequested_ && trayIcon_ && trayIcon_->isVisible()) {
         hide();
@@ -475,6 +686,15 @@ void MainWindow::updateStats() {
     trafficAnalytics_->addSample(st.connections_total);
     systemStats_->updateStats(st.bytes_client_to_server, st.bytes_server_to_client,
                               st.desync_splits_applied, st.quic_datagrams_blocked);
+
+    // PR #118 panels: live counters (all zero until traffic flows through
+    // the in-process pipeline — the panels are informational here).
+    if (dpiMetricsPanel_ && advancedDpi_) {
+        try { dpiMetricsPanel_->update(advancedDpi_->get_stats()); } catch (...) {}
+    }
+    if (identityPanel_) {
+        try { identityPanel_->refresh(); } catch (...) {}
+    }
 }
 
 void MainWindow::appendLog(const QString& line) {
@@ -483,7 +703,7 @@ void MainWindow::appendLog(const QString& line) {
 
 void MainWindow::loadSettings() {
     QSettings settings("NCP", "ncp-qt");
-    currentTheme_ = settings.value("theme", "dark_pro").toString();
+    currentTheme_ = settings.value("theme", "dark").toString();
     restoreGeometry(settings.value("geometry").toByteArray());
     restoreState(settings.value("windowState").toByteArray());
     statusPanel_->setAddress(QStringLiteral("127.0.0.1:%1")
@@ -510,8 +730,16 @@ void MainWindow::saveSettings() {
 }
 
 void MainWindow::applyTheme(const QString& themeName) {
-    Q_UNUSED(themeName);
-    qApp->setStyleSheet(QString::fromUtf8(kDarkQss));
+    // Themes (PR #118) knows "system"/"dark"/"light". The historical id
+    // "dark_pro" maps to "dark". Persist under ui/theme so Themes::apply()
+    // picks it up consistently (it is also called from UiSettingsDialog and
+    // the onboarding wizard).
+    QString t = themeName;
+    if (t == QLatin1String("dark_pro")) t = QStringLiteral("dark");
+    if (t.isEmpty()) t = QStringLiteral("dark");
+    QSettings().setValue("ui/theme", t);
+    Themes::apply();
+    currentTheme_ = t;
 }
 
 } // namespace ncp::GUI

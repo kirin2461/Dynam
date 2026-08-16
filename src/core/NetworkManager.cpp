@@ -61,7 +61,7 @@ NetworkManager::NetworkManager() {
         }
         // WSAEFAULT - already initialized, ignore
         spdlog::debug("WSAStartup returned {} (likely already initialized)", err);
-    }
+    }    // Other errors may also indicate pre-existing initialization
 #endif
 }
 

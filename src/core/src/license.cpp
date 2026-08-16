@@ -44,6 +44,7 @@
 #  include <unistd.h>
 #  include <net/if.h>
 #  include <sys/ioctl.h>
+#  include <sys/stat.h>
 #  include <ifaddrs.h>
 #  include <sys/types.h>
 #  include <sys/stat.h>
@@ -1526,12 +1527,25 @@ bool License::detect_sandbox() {
         if (GetFileAttributesA(f) != INVALID_FILE_ATTRIBUTES) return true;
     return false;
 #else
-    // Linux: low RAM, low CPU count, known sandbox paths
-    struct sysinfo si{};
-    if (sysinfo(&si) == 0) {
-        uint64_t total = static_cast<uint64_t>(si.totalram) * si.mem_unit;
-        if (total < (512ULL << 20)) return true; // < 512 MB
+    // POSIX: low RAM, low CPU count, known sandbox paths
+#  ifdef __APPLE__
+    {
+        uint64_t memsize = 0;
+        size_t memsize_len = sizeof(memsize);
+        if (sysctlbyname("hw.memsize", &memsize, &memsize_len, nullptr, 0) == 0
+            && memsize > 0 && memsize < (512ULL << 20)) {
+            return true; // < 512 MB
+        }
     }
+#  else
+    {
+        struct sysinfo si{};
+        if (sysinfo(&si) == 0) {
+            uint64_t total = static_cast<uint64_t>(si.totalram) * si.mem_unit;
+            if (total < (512ULL << 20)) return true; // < 512 MB
+        }
+    }
+#  endif
     long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
     if (ncpu < 2) return true;
     for (const char* p : {"/tmp/.cuckoo", "/opt/cuckoo", "/home/analysis"}) {

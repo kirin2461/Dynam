@@ -249,6 +249,14 @@ else()
     )
 endif()
 
+# ==================== spdlog (optional logger) ====================
+find_package(spdlog CONFIG QUIET)
+if(spdlog_FOUND)
+    target_link_libraries(ncp_core PUBLIC spdlog::spdlog)
+    target_compile_definitions(ncp_core PUBLIC HAVE_SPDLOG)
+    message(STATUS "Found spdlog")
+endif()
+
 # ==================== Required: libsodium ====================
 # Try vcpkg first (unofficial-sodium)
 # SQLite3 (optional) — enables the real Database backend in db.cpp
@@ -303,6 +311,16 @@ if(UNIX)
     find_package(Threads QUIET)
     if(Threads_FOUND)
         target_link_libraries(ncp_core PUBLIC Threads::Threads)
+    endif()
+
+    if(APPLE)
+        # license.cpp queries IOKit/CoreFoundation for hardware fingerprints.
+        find_library(IOKIT_FRAMEWORK IOKit REQUIRED)
+        find_library(COREFOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+        target_link_libraries(ncp_core PUBLIC
+            ${IOKIT_FRAMEWORK}
+            ${COREFOUNDATION_FRAMEWORK}
+        )
     endif()
 
 elseif(WIN32)

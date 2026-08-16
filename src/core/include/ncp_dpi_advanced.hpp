@@ -151,26 +151,6 @@ struct AdvancedDPIStats {
     std::atomic<uint64_t> dpi_signatures_evaded{0};
     std::atomic<uint64_t> ech_applied{0};
 
-    AdvancedDPIStats() = default;
-    AdvancedDPIStats(const AdvancedDPIStats& o) { *this = o; }
-    AdvancedDPIStats& operator=(const AdvancedDPIStats& o) {
-        base_stats = o.base_stats;
-        tcp_segments_split.store(o.tcp_segments_split.load(std::memory_order_relaxed));
-        tcp_overlaps_sent.store(o.tcp_overlaps_sent.load(std::memory_order_relaxed));
-        tcp_oob_sent.store(o.tcp_oob_sent.load(std::memory_order_relaxed));
-        tls_records_split.store(o.tls_records_split.load(std::memory_order_relaxed));
-        grease_injected.store(o.grease_injected.load(std::memory_order_relaxed));
-        packets_padded.store(o.packets_padded.load(std::memory_order_relaxed));
-        bytes_padding.store(o.bytes_padding.load(std::memory_order_relaxed));
-        timing_delays_applied.store(o.timing_delays_applied.load(std::memory_order_relaxed));
-        fake_packets_injected.store(o.fake_packets_injected.load(std::memory_order_relaxed));
-        bytes_obfuscated.store(o.bytes_obfuscated.load(std::memory_order_relaxed));
-        bytes_deobfuscated.store(o.bytes_deobfuscated.load(std::memory_order_relaxed));
-        dpi_signatures_evaded.store(o.dpi_signatures_evaded.load(std::memory_order_relaxed));
-        ech_applied.store(o.ech_applied.load(std::memory_order_relaxed));
-        return *this;
-    }
-
     void reset() {
         tcp_segments_split.store(0);
         tcp_overlaps_sent.store(0);
@@ -185,6 +165,46 @@ struct AdvancedDPIStats {
         bytes_deobfuscated.store(0);
         dpi_signatures_evaded.store(0);
         ech_applied.store(0);
+    }
+
+    AdvancedDPIStats() = default;
+
+    // std::atomic is non-copyable; provide explicit snapshot copy so
+    // get_stats() can return by value (loads each counter atomically).
+    AdvancedDPIStats(const AdvancedDPIStats& o)
+        : base_stats(o.base_stats),
+          tcp_segments_split(o.tcp_segments_split.load()),
+          tcp_overlaps_sent(o.tcp_overlaps_sent.load()),
+          tcp_oob_sent(o.tcp_oob_sent.load()),
+          tls_records_split(o.tls_records_split.load()),
+          grease_injected(o.grease_injected.load()),
+          packets_padded(o.packets_padded.load()),
+          bytes_padding(o.bytes_padding.load()),
+          timing_delays_applied(o.timing_delays_applied.load()),
+          fake_packets_injected(o.fake_packets_injected.load()),
+          bytes_obfuscated(o.bytes_obfuscated.load()),
+          bytes_deobfuscated(o.bytes_deobfuscated.load()),
+          dpi_signatures_evaded(o.dpi_signatures_evaded.load()),
+          ech_applied(o.ech_applied.load()) {}
+
+    AdvancedDPIStats& operator=(const AdvancedDPIStats& o) {
+        if (this != &o) {
+            base_stats = o.base_stats;
+            tcp_segments_split.store(o.tcp_segments_split.load());
+            tcp_overlaps_sent.store(o.tcp_overlaps_sent.load());
+            tcp_oob_sent.store(o.tcp_oob_sent.load());
+            tls_records_split.store(o.tls_records_split.load());
+            grease_injected.store(o.grease_injected.load());
+            packets_padded.store(o.packets_padded.load());
+            bytes_padding.store(o.bytes_padding.load());
+            timing_delays_applied.store(o.timing_delays_applied.load());
+            fake_packets_injected.store(o.fake_packets_injected.load());
+            bytes_obfuscated.store(o.bytes_obfuscated.load());
+            bytes_deobfuscated.store(o.bytes_deobfuscated.load());
+            dpi_signatures_evaded.store(o.dpi_signatures_evaded.load());
+            ech_applied.store(o.ech_applied.load());
+        }
+        return *this;
     }
 };
 class PacketTransformer {
