@@ -4,6 +4,10 @@ name: Code Quality
 # you actually changed are flagged — reviewdog posts findings as PR review
 # comments (filter-mode: added). Nothing here blocks the build; treat findings
 # as review guidance. Tighten fail_level later if you want a hard gate.
+#
+# NB: the per-language reviewdog wrapper actions (action-clang-format,
+# action-cppcheck, ...) were removed from the reviewdog org, so tools are
+# installed via apt and piped into reviewdog (action-setup) manually.
 
 on:
   pull_request:
@@ -27,6 +31,7 @@ jobs:
     outputs:
       files: ${{ steps.list.outputs.files }}
       any: ${{ steps.list.outputs.any }}
+      base: ${{ steps.list.outputs.base }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,9 +46,11 @@ jobs:
           if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
             BASE=$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)
           fi
-          files=$(git diff --name-only --diff-filter=ACMR "$BASE...HEAD"             -- 'src/*.cpp' 'src/*.hpp' 'src/*.h' 'src/*.cc' | tr '\n' ' ')
+          files=$(git diff --name-only --diff-filter=ACMR "$BASE...HEAD" \
+            -- 'src/*.cpp' 'src/*.hpp' 'src/*.h' 'src/*.cc' | tr '\n' ' ')
           echo "Changed C++ files: $files"
           echo "files=$files" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
           if [ -n "$files" ]; then echo 'any=true' >> "$GITHUB_OUTPUT";
           else echo 'any=false' >> "$GITHUB_OUTPUT"; fi
 
@@ -54,15 +61,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: reviewdog/action-clang-format@v2
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          reporter: github-pr-review
-          filter_mode: added
-          fail_level: none
-          level: warning
-          workdir: ./src
-          clang_format_version: '18'
+          fetch-depth: 0
+      - uses: reviewdog/action-setup@v1
+      - name: Install clang-format 18
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format-18
+      - name: Review formatting of changed lines
+        env:
+          FILES: ${{ needs.changes.outputs.files }}
+          BASE: ${{ needs.changes.outputs.base }}
+        run: |
+          set +e
+          : > fmt.diff
+          for f in $FILES; do
+            git diff -U0 "$BASE...HEAD" -- "$f" | \
+              clang-format-diff-18 -p1 -binary clang-format-18 >> fmt.diff
+          done
+          cat fmt.diff
+          if [ -s fmt.diff ]; then
+            reviewdog -f=diff -name=clang-format \
+              -reporter=github-pr-review -fail-level=none -level=warning \
+              < fmt.diff || true
+          else
+            echo 'clang-format: changed lines are clean'
+          fi
+          exit 0
 
   cppcheck:
     name: cppcheck (changed files)
@@ -72,20 +97,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: reviewdog/action-setup@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install cppcheck
         run: sudo apt-get update && sudo apt-get install -y cppcheck
       - name: Run cppcheck
         env:
           FILES: ${{ needs.changes.outputs.files }}
         run: |
+          set +e
           srcs=''
           for f in $FILES; do case "$f" in *.cpp|*.cc) srcs="$srcs $f";; esac; done
-          [ -z "$srcs" ] && { echo 'No .cpp files changed'; exit 0; }
-          cppcheck --std=c++17 --quiet --inline-suppr             --enable=warning,performance,portability             -I src/core/include -I src             --template=gcc $srcs 2> cppcheck.txt || true
+          if [ -z "$srcs" ]; then echo 'No .cpp files changed'; exit 0; fi
+          cppcheck --std=c++17 --quiet --inline-suppr \
+            --enable=warning,performance,portability \
+            -I src/core/include -I src \
+            --template=gcc $srcs 2> cppcheck.txt
           cat cppcheck.txt
-          < cppcheck.txt reviewdog -efm='%f:%l:%c: %trror: %m' -efm='%f:%l:%c: %tarning: %m'             -efm='%f:%l: %trror: %m' -efm='%f:%l: %tarning: %m'             -name=cppcheck -reporter=github-pr-review -filter-mode=added             -fail-level=none -level=warning
+          if [ -s cppcheck.txt ]; then
+            reviewdog -efm='%f:%l:%c: %trror: %m' -efm='%f:%l:%c: %tarning: %m' \
+              -efm='%f:%l: %trror: %m' -efm='%f:%l: %tarning: %m' \
+              -name=cppcheck -reporter=github-pr-review -filter-mode=added \
+              -fail-level=none -level=warning < cppcheck.txt || true
+          fi
+          exit 0
 
   clang-tidy:
     name: clang-tidy (changed files)
@@ -95,28 +128,36 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: reviewdog/action-setup@v1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install clang-tidy + build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tidy cmake build-essential pkg-config             libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev libpcap-dev
+          sudo apt-get install -y clang-tidy cmake build-essential pkg-config \
+            libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev libpcap-dev
       - name: Generate compile_commands.json (core + CLI only)
         run: |
-          cmake -S . -B build-cq -DCMAKE_BUILD_TYPE=Release             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON             -DENABLE_GUI=OFF -DENABLE_TESTS=OFF
+          cmake -S . -B build-cq -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DENABLE_GUI=OFF -DENABLE_TESTS=OFF
       - name: Run clang-tidy
         env:
           FILES: ${{ needs.changes.outputs.files }}
         run: |
+          set +e
           : > tidy.txt
           for f in $FILES; do
             case "$f" in *.cpp|*.cc) ;; *) continue;; esac
-            grep -q "\"$f\"" build-cq/compile_commands.json ||               { echo "skip (not in compile DB): $f"; continue; }
+            grep -q "\"$f\"" build-cq/compile_commands.json || \
+              { echo "skip (not in compile DB): $f"; continue; }
             echo "== clang-tidy $f"
-            clang-tidy -p build-cq --quiet "$f" >> tidy.txt 2>&1 || true
+            clang-tidy -p build-cq --quiet "$f" >> tidy.txt 2>&1
           done
           cat tidy.txt
-          < tidy.txt reviewdog -f=clang-tidy -name=clang-tidy             -reporter=github-pr-review -filter-mode=added             -fail-level=none -level=warning
+          if grep -qE ':[0-9]+:[0-9]+: (warning|error):' tidy.txt; then
+            reviewdog -f=clang-tidy -name=clang-tidy \
+              -reporter=github-pr-review -filter-mode=added \
+              -fail-level=none -level=warning < tidy.txt || true
+          fi
+          exit 0
 
   lizard:
     name: Complexity metrics (lizard)
