@@ -19,6 +19,10 @@
 #include <cstring>
 #include <sodium.h>
 
+#ifndef _WIN32
+#include <unistd.h>  // _exit() in the smoke watchdog (POSIX; MSVC has it via <stdlib.h>)
+#endif
+
 #include "MainWindow.hpp"
 #include "Launcher.hpp"
 

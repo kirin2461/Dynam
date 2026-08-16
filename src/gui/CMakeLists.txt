@@ -1,4 +1,9 @@
 # NCP Qt6 GUI application (ncp-qt)
+#
+# Merged with PR #118 (upstream Qt GUI): the target stays the shipping
+# ncp-qt executable (controller backend driving external ncp.exe), with the
+# upstream header-only tool widgets added to the header list so AUTOMOC
+# processes their Q_OBJECT macros.
 
 set(NCP_QT_SOURCES
     main.cpp
@@ -35,6 +40,30 @@ set(NCP_QT_HEADERS
     widgets/LicenseInfo.hpp
     widgets/ModulesPanel.hpp
     widgets/LeakTestPanel.hpp
+    # PR #118 tool panels (header-only)
+    widgets/UiSettingsDialog.hpp
+    widgets/CryptoPanel.hpp
+    widgets/LicenseActivationDialog.hpp
+    widgets/AboutDialog.hpp
+    widgets/IdentityPanel.hpp
+    widgets/DPIMetricsPanel.hpp
+    widgets/Themes.hpp
+    widgets/OnboardingWizard.hpp
+    widgets/StatusSummary.hpp
+    widgets/DiagnosticsDialog.hpp
+    widgets/DnsLookupPanel.hpp
+    widgets/UrlProbePanel.hpp
+    widgets/DPIStrategyEditor.hpp
+    widgets/Profiles.hpp
+    widgets/PollerEngine.hpp
+    widgets/PollerPanel.hpp
+    widgets/AdvancedSettingsPanel.hpp
+    widgets/SiteScraperPanel.hpp
+    widgets/ScanCommon.hpp
+    widgets/BulkScanDialog.hpp
+    widgets/CrawlerDialog.hpp
+    widgets/SparklineWidget.hpp
+    widgets/BulkDiffDialog.hpp
 )
 
 add_executable(ncp-qt ${NCP_QT_SOURCES} ${NCP_QT_HEADERS})
@@ -69,4 +98,14 @@ set_target_properties(ncp-qt PROPERTIES
     OUTPUT_NAME "ncp-qt"
 )
 
-install(TARGETS ncp-qt RUNTIME DESTINATION bin)
+if(APPLE)
+    # macOS packaging (scripts/build_macos_gui_app.sh) expects the GUI as a
+    # bundle at build-gui/bin/ncp.app with the executable named "ncp"
+    # (CI smoke greps for dist/Dynam.app/Contents/MacOS/ncp).
+    set_target_properties(ncp-qt PROPERTIES
+        MACOSX_BUNDLE TRUE
+        OUTPUT_NAME "ncp"
+    )
+endif()
+
+install(TARGETS ncp-qt RUNTIME DESTINATION bin BUNDLE DESTINATION .)

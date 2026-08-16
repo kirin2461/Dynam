@@ -23,6 +23,11 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <sys/ioctl.h>
+#elif defined(__APPLE__)
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
 #elif defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -87,8 +92,12 @@ struct VXLANHeader {
 
 static_assert(sizeof(VXLANHeader) == 8, "VXLANHeader must be exactly 8 bytes per RFC 7348");
 
+#ifndef IPPROTO_GRE
 static constexpr uint8_t IPPROTO_GRE = 47;
+#endif
+#ifndef IPPROTO_IPIP
 static constexpr uint8_t IPPROTO_IPIP = 4;
+#endif
 static constexpr uint16_t VXLAN_PORT = 4789;
 static constexpr uint16_t GRE_PROTO_IPV4 = 0x0800;
 
@@ -841,6 +850,8 @@ private:
 
 PacketInterceptor::PacketInterceptor() = default;
 PacketInterceptor::~PacketInterceptor() { stop(); }
+
+bool PacketInterceptor::initialize() { return initialize(Config{}); }
 
 bool PacketInterceptor::initialize(const Config& config) {
     if (initialized_.load()) return false;

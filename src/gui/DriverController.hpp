@@ -43,7 +43,9 @@ public:
 
     bool running() const;
 
-    /// Path to ncp.exe next to ncp-qt.exe, or "" when not found.
+    /// Path to the CLI: ncp.exe next to ncp-qt.exe (Windows), ncp next to
+    /// the binary (Linux), or Contents/Resources/bin/ncp inside the .app
+    /// bundle (macOS). Returns "" when not found.
     static QString findNcpExe();
     /// Operator presets accepted by `ncp run --preset` (see src/cli/main.cpp).
     static QStringList availablePresets();
