@@ -1,0 +1,17 @@
+# NCP code style — enforced incrementally by .github/workflows/code-quality.yml
+# (only lines touched in a PR are checked).
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 100
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+BreakBeforeBraces: Attach
+NamespaceIndentation: None
+FixNamespaceComments: false
+SpaceAfterCStyleCast: false
+IncludeBlocks: Preserve
+SortIncludes: false
+...
