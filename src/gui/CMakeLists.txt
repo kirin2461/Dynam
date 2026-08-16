@@ -98,4 +98,14 @@ set_target_properties(ncp-qt PROPERTIES
     OUTPUT_NAME "ncp-qt"
 )
 
-install(TARGETS ncp-qt RUNTIME DESTINATION bin)
+if(APPLE)
+    # macOS packaging (scripts/build_macos_gui_app.sh) expects the GUI as a
+    # bundle at build-gui/bin/ncp.app with the executable named "ncp"
+    # (CI smoke greps for dist/Dynam.app/Contents/MacOS/ncp).
+    set_target_properties(ncp-qt PROPERTIES
+        MACOSX_BUNDLE TRUE
+        OUTPUT_NAME "ncp"
+    )
+endif()
+
+install(TARGETS ncp-qt RUNTIME DESTINATION bin BUNDLE DESTINATION .)
