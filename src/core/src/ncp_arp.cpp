@@ -35,11 +35,19 @@
 #include "ncp_pcap_dyn.hpp"  // soft-load wpcap.dll at runtime (no import lib)
 #endif // HAVE_NPCAP
 
-#else
+#elif defined(__linux__)
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <netinet/if_ether.h>
 #include <netpacket/packet.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#else
+// macOS / other POSIX: raw L2 ARP injection requires BPF on macOS;
+// not implemented in portable build. Functions below stub out gracefully.
+#include <arpa/inet.h>
+#include <net/if.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -216,9 +224,13 @@ struct ARPController::Impl {
                      "Runtime: install Npcap from https://npcap.com/";
         return false;
 #endif // HAVE_NPCAP
-#else
+#elif defined(__linux__)
         raw_socket = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ARP));
         return raw_socket >= 0;
+#else
+        // macOS portable build: L2 raw sockets unavailable; ARP injection inert.
+        raw_socket = -1;
+        return false;
 #endif
     }
 
@@ -267,7 +279,7 @@ struct ARPController::Impl {
         last_error = "ARPController: cannot send ARP -- compiled without Npcap support";
         return false;
 #endif // HAVE_NPCAP
-#else
+#elif defined(__linux__)
         if (raw_socket < 0) return false;
 
         struct sockaddr_ll addr{};
@@ -281,6 +293,9 @@ struct ARPController::Impl {
                               reinterpret_cast<struct sockaddr*>(&addr),
                               sizeof(addr));
         return sent == sizeof(pkt);
+#else
+        (void)pkt;
+        return false;
 #endif
     }
 

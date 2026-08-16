@@ -1,0 +1,44 @@
+name: CodeQL
+
+# GitHub-native static security analysis for C++ (security-and-quality suite).
+# Builds core + CLI only (GUI/Qt/tests skipped to keep the job fast).
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+  schedule:
+    - cron: '0 6 * * 1'   # weekly Monday 06:00 UTC
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze C++
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential pkg-config             libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev libpcap-dev
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: cpp
+          build-mode: manual
+          queries: security-and-quality
+
+      - name: Build core + CLI
+        run: |
+          cmake -S . -B build-codeql -DCMAKE_BUILD_TYPE=Release             -DENABLE_GUI=OFF -DENABLE_TESTS=OFF
+          cmake --build build-codeql -j$(nproc)
+
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: '/language:cpp'

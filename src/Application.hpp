@@ -46,7 +46,7 @@ public:
     Logger& logger() { return ncp::Logger::instance(); }
 
 #ifdef ENABLE_GUI
-    MainWindow* mainWindow() const { return main_window_.get(); }
+    GUI::MainWindow* mainWindow() const { return main_window_.get(); }
 #endif
 
     // Lifecycle management
@@ -63,7 +63,7 @@ private:
 
 #ifdef ENABLE_GUI
     std::unique_ptr<QApplication> qt_app_;
-    std::unique_ptr<MainWindow> main_window_;
+    std::unique_ptr<GUI::MainWindow> main_window_;
     void initializeGui();
     void connectSignals();
 #endif

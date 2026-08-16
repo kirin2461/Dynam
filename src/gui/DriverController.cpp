@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <QProcess>
 
 namespace ncp::GUI {
@@ -15,9 +16,26 @@ bool DriverController::running() const {
 }
 
 QString DriverController::findNcpExe() {
-    const QString path =
-        QCoreApplication::applicationDirPath() + QStringLiteral("/ncp.exe");
-    return QFile::exists(path) ? path : QString();
+    const QString appDir = QCoreApplication::applicationDirPath();
+#ifdef Q_OS_MACOS
+    // Inside Dynam.app the CLI is staged at Contents/Resources/bin/ncp
+    // (scripts/build_macos_gui_app.sh). NOTE: Contents/MacOS/ncp is the GUI
+    // itself (the bundle binary is named "ncp"), so we must NOT probe
+    // appDir + "/ncp" here or we would relaunch the GUI recursively.
+    const QStringList candidates{
+        appDir + QStringLiteral("/../Resources/bin/ncp"),  // .app bundle
+    };
+#elif defined(Q_OS_WIN)
+    const QStringList candidates{appDir + QStringLiteral("/ncp.exe")};
+#else
+    const QStringList candidates{
+        appDir + QStringLiteral("/ncp"),
+        appDir + QStringLiteral("/ncp.exe"),  // cross-built layout
+    };
+#endif
+    for (const QString& path : candidates)
+        if (QFile::exists(path)) return path;
+    return QString();
 }
 
 QStringList DriverController::availablePresets() {
@@ -41,9 +59,14 @@ void DriverController::start(const Options& opt) {
 
     const QString exe = findNcpExe();
     if (exe.isEmpty()) {
+#ifdef Q_OS_MACOS
+        emit failedToStart(tr("CLI не найден внутри бандла (Contents/Resources/bin/ncp).\n"
+                              "Режим драйвера на macOS пока не поддерживается."));
+#else
         emit failedToStart(tr("ncp.exe не найден рядом с ncp-qt.exe.\n"
                               "Режим драйвера требует ncp.exe, WinDivert.dll "
                               "и WinDivert64.sys в каталоге программы."));
+#endif
         return;
     }
 
@@ -77,8 +100,9 @@ void DriverController::start(const Options& opt) {
         }
     });
 
-    emit lineReceived(QStringLiteral("[ui] запуск драйвера: ncp.exe %1")
-                          .arg(args.join(QLatin1Char(' '))));
+    emit lineReceived(QStringLiteral("[ui] запуск драйвера: %1 %2")
+                          .arg(QFileInfo(exe).fileName(),
+                               args.join(QLatin1Char(' '))));
     proc_->start(exe, args);
     if (proc_->waitForStarted(5000))
         emit startedOk();

@@ -44,6 +44,10 @@
 #include <dirent.h>
 #include <glob.h>
 #include <pwd.h>
+// macOS has no fdatasync — fsync gives the strongest guarantee available.
+#if defined(__APPLE__) && !defined(fdatasync)
+#  define fdatasync(fd) fsync(fd)
+#endif
 #endif
 
 // R10-FIX-01: Secure string clearing helper to avoid UB with sodium_memzero on std::string
