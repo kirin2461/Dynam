@@ -1,9 +1,15 @@
-# Dynam integration testbed: isolated Client + DPI-Server on a private bridge.
-# Nothing here touches the host firewall/DNS — both containers live on their
-# own network; NET_ADMIN/NET_RAW apply inside the containers only.
+# Dynam integration testbed — 3-node topology on two isolated bridges.
+#
+#   client (172.30.1.20) ── clientnet ──► dpi router (.1.10 / .2.10)
+#                                          ── servernet ──► target (172.30.2.30)
+#
+# The DPI box is a real MIDBOX, not the server: it forwards traffic and
+# injects TCP RSTs when a blocked SNI/Host crosses it (iptables -m string is
+# per-packet — exactly how carrier DPI behaves). Fake/desync packets die at
+# the midbox and can never poison the target server. Nothing here touches
+# the host firewall/DNS; NET_ADMIN/NET_RAW apply inside the containers only.
 #
 #   docker compose build
-#   docker compose up -d dpi
 #   docker compose run --rm client        # full combat-test matrix
 #   docker compose down -v
 name: dynam-testbed
@@ -18,17 +24,40 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+    sysctls:
+      - net.ipv4.ip_forward=1
     environment:
       BLOCKED_DOMAINS: forbidden.example,blocked.example
       # DPI_NETEM: "delay 80ms loss 2%"   # enable for impairment scenarios
     networks:
-      testnet:
-        ipv4_address: 172.30.0.10
+      clientnet:
+        ipv4_address: 172.30.1.10
+      servernet:
+        ipv4_address: 172.30.2.10
+    healthcheck:
+      test: ["CMD", "iptables", "-L", "FORWARD", "-n"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.server
+    container_name: dynam-target
+    hostname: target-box
+    cap_add:
+      - NET_ADMIN   # ethtool offload control only
+    environment:
+      BLOCKED_DOMAINS: forbidden.example,blocked.example
+    networks:
+      servernet:
+        ipv4_address: 172.30.2.30
     healthcheck:
       test: ["CMD", "curl", "-sk", "--max-time", "3", "https://127.0.0.1/healthz"]
       interval: 2s
       timeout: 3s
-      retries: 15
+      retries: 30
 
   client:
     build:
@@ -40,23 +69,32 @@ services:
       - NET_ADMIN
       - NET_RAW
     extra_hosts:
-      - "allowed.example:172.30.0.10"
-      - "forbidden.example:172.30.0.10"
-      - "blocked.example:172.30.0.10"
+      - "allowed.example:172.30.2.30"
+      - "forbidden.example:172.30.2.30"
+      - "blocked.example:172.30.2.30"
     environment:
-      DPI_HOST: 172.30.0.10
+      TARGET_HOST: 172.30.2.30
+      DPI_GW: 172.30.1.10
+      TARGET_NET: 172.30.2.0/24
       TESTBED_MARKER: DYNAM-TESTBED-OK
       # PRESETS / ZAPRET_PROFILES / MIMIC_MODES can override the matrix
     depends_on:
       dpi:
-        condition: service_healthy
+        condition: service_started
+      server:
+        condition: service_started
     networks:
-      testnet:
-        ipv4_address: 172.30.0.20
+      clientnet:
+        ipv4_address: 172.30.1.20
 
 networks:
-  testnet:
+  clientnet:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.30.0.0/24
+        - subnet: 172.30.1.0/24
+  servernet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.2.0/24

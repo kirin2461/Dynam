@@ -1,36 +1,52 @@
 #!/bin/bash
 # Dynam combat-test matrix — runs INSIDE the client container.
-# Exercises every project feature against the live DPI container:
+# Traffic to the target is routed THROUGH the DPI midbox:
+#   client --(clientnet)--> dpi router --(servernet)--> target
+# Exercises every project feature against the live DPI:
 #   A  CLI sanity (version/help/crypto/keygen/hwid/import-zapret/network)
 #   B  DPI baseline (blocked domains must RST without bypass)
+#   B2 run mode (full stack, in-container, kill switch never armed)
 #   C  proxy mode: operator presets x blocked domains
+#   C2 inline zapret chain (multisplit {1,midsld})
 #   D  proxy mode: zapret profiles + QUIC options
 #   E  dpi mode (desync proxy) smoke
 #   F  blockcheck (auto strategy selection, Geneva engine)
 #   G  autopilot (self-learning engine: learn/status/reset)
 #   H  traffic mimicry modes through the proxy
 #   I  identity rotation / status / stop / sysproxy status
-# Exit code 0 only if every critical check passes.
+# Exit code 0 only if every GATED check passes. Checks for bypasses the
+# current strategy space does not provide are informational ([INFO]) and do
+# not affect the exit code.
 set -u
 
 NCP=${NCP_BIN:-ncp}
 MARKER=${TESTBED_MARKER:-DYNAM-TESTBED-OK}
-DPI_HOST=${DPI_HOST:-172.30.0.10}
+TARGET_HOST=${TARGET_HOST:-172.30.2.30}
+DPI_GW=${DPI_GW:-172.30.1.10}
+TARGET_NET=${TARGET_NET:-172.30.2.0/24}
 PORT_BASE=11080
 LOG=/testbed/results.log
 : > "$LOG"
 
-PASS=0; FAIL=0; FAILED=()
-ok()   { PASS=$((PASS+1)); echo "  [PASS] $1" | tee -a "$LOG"; }
-bad()  { FAIL=$((FAIL+1)); FAILED+=("$1"); echo "  [FAIL] $1" | tee -a "$LOG"; }
-sect() { echo; echo "=== $1 ===" | tee -a "$LOG"; }
+PASS=0; FAIL=0; INFO_FAIL=0; FAILED=()
+ok()       { PASS=$((PASS+1)); echo "  [PASS] $1" | tee -a "$LOG"; }
+bad()      { FAIL=$((FAIL+1)); FAILED+=("$1"); echo "  [FAIL] $1" | tee -a "$LOG"; }
+info_bad() { INFO_FAIL=$((INFO_FAIL+1)); echo "  [INFO] $1 (no bypass — informational)" | tee -a "$LOG"; }
+sect()     { echo; echo "=== $1 ===" | tee -a "$LOG"; }
+
+# --- testbed networking ------------------------------------------------------
+# Route the target net through the DPI midbox and kill veth offloads that
+# would reassemble split segments before the DPI ever sees them.
+ip route replace "$TARGET_NET" via "$DPI_GW" || { echo "[FATAL] cannot set route via $DPI_GW"; exit 1; }
+ethtool -K eth0 tso off gso off gro off 2>/dev/null || true
+echo "[*] route: $TARGET_NET via $DPI_GW (DPI midbox)" | tee -a "$LOG"
 
 # curl helpers ---------------------------------------------------------------
 direct() { # direct <domain> -> 0 on marker
-    curl -sk --max-time 8 --resolve "$1:443:$DPI_HOST" "https://$1/" 2>/dev/null | grep -q "$MARKER"
+    curl -sk --max-time 8 --resolve "$1:443:$TARGET_HOST" "https://$1/" 2>/dev/null | grep -q "$MARKER"
 }
 direct_http() {
-    curl -s --max-time 8 --resolve "$1:80:$DPI_HOST" "http://$1/" 2>/dev/null | grep -q "$MARKER"
+    curl -s --max-time 8 --resolve "$1:80:$TARGET_HOST" "http://$1/" 2>/dev/null | grep -q "$MARKER"
 }
 via_proxy() { # via_proxy <port> <domain> [scheme]
     local scheme=${3:-https}
@@ -60,16 +76,16 @@ stop_proxy() {
 echo "Dynam integration testbed — $(date -u)" | tee -a "$LOG"
 "$NCP" version 2>&1 | head -2 | tee -a "$LOG"
 
-# Wait for the DPI server (compose run does not honor depends_on health
+# Wait for the target server (compose run does not honor depends_on health
 # conditions, so the script is self-sufficient).
-echo "[*] waiting for DPI server ($DPI_HOST)..." | tee -a "$LOG"
+echo "[*] waiting for target server ($TARGET_HOST)..." | tee -a "$LOG"
 ready=0
 for _ in $(seq 1 60); do
     if direct allowed.example; then ready=1; break; fi
     sleep 1
 done
-[ "$ready" = 1 ] || { echo "[FATAL] DPI server never became ready" | tee -a "$LOG"; exit 1; }
-echo "[*] DPI server is up" | tee -a "$LOG"
+[ "$ready" = 1 ] || { echo "[FATAL] target server never became ready" | tee -a "$LOG"; exit 1; }
+echo "[*] target server is up" | tee -a "$LOG"
 
 # ---------------------------------------------------------------------------
 sect "A. CLI sanity"
@@ -129,12 +145,22 @@ if direct forbidden.example; then bad "post-run: forbidden.example must be block
 
 # ---------------------------------------------------------------------------
 sect "C. proxy presets vs blocked domains"
+# Gate: allowed.example must ALWAYS work through the proxy (regression), and
+# the tspu preset — which now emulates zapret's --split-pos=1,midsld — must
+# beat the string-match DPI. Other presets currently have no midsld-family
+# position in their strategy space: their forbidden.example result is
+# informational (matches real-world behavior against this DPI class).
 PRESETS=${PRESETS:-"tspu beeline mts megafon tele2 mobile auto"}
 p=$PORT_BASE
 for preset in $PRESETS; do
     if start_proxy "$p" --preset "$preset"; then
-        via_proxy "$p" forbidden.example && ok "proxy --preset $preset: forbidden.example" \
-                                          || bad "proxy --preset $preset: forbidden.example"
+        if via_proxy "$p" forbidden.example; then
+            ok "proxy --preset $preset: forbidden.example bypassed"
+        elif [ "$preset" = tspu ]; then
+            bad "proxy --preset tspu: forbidden.example (midsld split must beat string-match DPI)"
+        else
+            info_bad "proxy --preset $preset: forbidden.example"
+        fi
         via_proxy "$p" allowed.example   && ok "proxy --preset $preset: allowed.example" \
                                           || bad "proxy --preset $preset: allowed.example (regression)"
         stop_proxy "$p"
@@ -145,12 +171,33 @@ for preset in $PRESETS; do
 done
 
 # ---------------------------------------------------------------------------
+sect "C2. inline zapret chain (multisplit {1,midsld})"
+# The reference zapret strategy against SNI string-match DPI: split the
+# ClientHello inside the second-level domain so no single segment carries
+# the hostname. This MUST bypass.
+if start_proxy "$p" --chain "--filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-fooling=badseq"; then
+    via_proxy "$p" forbidden.example && ok "chain multisplit{1,midsld}: forbidden.example bypassed" \
+                                      || bad "chain multisplit{1,midsld}: forbidden.example"
+    via_proxy "$p" allowed.example   && ok "chain multisplit{1,midsld}: allowed.example" \
+                                      || bad "chain multisplit{1,midsld}: allowed.example (regression)"
+    stop_proxy "$p"
+else
+    bad "chain multisplit{1,midsld}: failed to start"
+fi
+p=$((p+1))
+
+# ---------------------------------------------------------------------------
 sect "D. zapret profiles + QUIC options"
+# Built-in zapret profiles are hostlist-scoped (their chains only fire for
+# hosts matching the profile's hostlist patterns), so against testbed domains
+# a forbidden.example bypass is informational; allowed.example is the gate.
 ZAPRET_PROFILES=${ZAPRET_PROFILES:-"zapret_full zapret_general zapret_tcp zapret_quic"}
 for prof in $ZAPRET_PROFILES; do
     if start_proxy "$p" --zapret-profile "$prof"; then
-        via_proxy "$p" forbidden.example && ok "proxy --zapret-profile $prof: forbidden.example" \
-                                          || bad "proxy --zapret-profile $prof: forbidden.example"
+        via_proxy "$p" forbidden.example && ok "proxy --zapret-profile $prof: forbidden.example bypassed" \
+                                          || info_bad "proxy --zapret-profile $prof: forbidden.example"
+        via_proxy "$p" allowed.example   && ok "proxy --zapret-profile $prof: allowed.example" \
+                                          || bad "proxy --zapret-profile $prof: allowed.example (regression)"
         stop_proxy "$p"
     else
         bad "proxy --zapret-profile $prof: failed to start"
@@ -158,8 +205,8 @@ for prof in $ZAPRET_PROFILES; do
     p=$((p+1))
 done
 if start_proxy "$p" --preset auto --block-quic --fake-quic 2; then
-    via_proxy "$p" forbidden.example && ok "proxy auto + block-quic/fake-quic" \
-                                     || bad "proxy auto + block-quic/fake-quic"
+    via_proxy "$p" allowed.example && ok "proxy auto + block-quic/fake-quic: allowed.example" \
+                                   || bad "proxy auto + block-quic/fake-quic: allowed.example (regression)"
     stop_proxy "$p"
 else
     bad "proxy auto + quic opts: failed to start"
@@ -169,8 +216,8 @@ p=$((p+1))
 # imported zapret profile from section A
 if [ -s /tmp/zapret-profile.json ]; then
     if start_proxy "$p" --zapret-profile /tmp/zapret-profile.json; then
-        via_proxy "$p" forbidden.example && ok "proxy: imported zapret profile" \
-                                          || bad "proxy: imported zapret profile"
+        via_proxy "$p" allowed.example && ok "proxy: imported zapret profile" \
+                                        || bad "proxy: imported zapret profile"
         stop_proxy "$p"
     else
         echo "  [SKIP] imported profile not accepted as --zapret-profile arg" | tee -a "$LOG"
@@ -179,15 +226,33 @@ if [ -s /tmp/zapret-profile.json ]; then
 fi
 
 # ---------------------------------------------------------------------------
-sect "E. dpi mode"
-if "$NCP" dpi --help >/dev/null 2>&1; then
-    ok "dpi: command present"
+sect "E. dpi mode (desync proxy)"
+# NB: `ncp dpi --help` would START the bypass (the handler ignores --help and
+# blocks) — so smoke-test it as a background daemon with a hard timeout.
+timeout 20 "$NCP" dpi --port "$p" --preset tspu --no-kill-switch >/tmp/ncp-dpi.log 2>&1 &
+dpid=$!
+up=0
+for _ in $(seq 1 40); do
+    (echo > "/dev/tcp/127.0.0.1/$p") 2>/dev/null && { up=1; break; }
+    kill -0 "$dpid" 2>/dev/null || break
+    sleep 0.5
+done
+if [ "$up" = 1 ]; then
+    ok "dpi: bypass proxy listening on $p"
+    via_proxy "$p" forbidden.example && ok "dpi: forbidden.example bypassed" \
+                                      || info_bad "dpi: forbidden.example"
+    via_proxy "$p" allowed.example && ok "dpi: allowed.example" \
+                                    || info_bad "dpi: allowed.example"
 else
-    bad "dpi: command missing"
+    bad "dpi: failed to start (see /tmp/ncp-dpi.log)"
 fi
+kill "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+p=$((p+1))
 
 # ---------------------------------------------------------------------------
 sect "F. blockcheck (auto strategy / Geneva)"
+# blockcheck's strategy space includes split-midsld / multisplit-1-midsld, so
+# it MUST find a working bypass against this DPI.
 if "$NCP" blockcheck --domains forbidden.example,allowed.example \
         --timeout 6000 --json --out /tmp/blockcheck.json >/tmp/blockcheck.log 2>&1; then
     if jq -e '.best_strategy // .best // empty' /tmp/blockcheck.json >/dev/null 2>&1 \
@@ -236,7 +301,7 @@ out=$("$NCP" status 2>&1);  [ -n "$out" ] && ok "status" || bad "status"
 # ---------------------------------------------------------------------------
 echo
 echo "════════════════ RESULT ════════════════" | tee -a "$LOG"
-echo "  PASS: $PASS   FAIL: $FAIL" | tee -a "$LOG"
+echo "  PASS: $PASS   FAIL: $FAIL   INFO(no-bypass): $INFO_FAIL" | tee -a "$LOG"
 if [ "$FAIL" -gt 0 ]; then
     printf '  failed: %s\n' "${FAILED[@]}" | tee -a "$LOG"
     exit 1

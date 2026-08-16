@@ -1,17 +1,16 @@
-# DPI server container for the Dynam integration testbed.
-# Acts as an inline DPI box: serves HTTPS/HTTP content and resets any
-# connection whose TLS ClientHello SNI / HTTP Host matches a "blocked" domain
-# (real-DPI-style RST injection via iptables string match, per-packet — so
-# packet-splitting desync techniques genuinely evade it).
+# DPI midbox container for the Dynam integration testbed.
+# A pure ROUTER between clientnet and servernet: forwards packets and
+# RST-injects any connection whose TLS ClientHello SNI / HTTP Host matches a
+# blocked domain (iptables -m string, per-packet — real inline-DPI style, so
+# packet-splitting desync techniques genuinely evade it). Serves nothing.
 FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 openssl iptables iproute2 curl ca-certificates \
+        iptables iproute2 ethtool iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
-COPY docker/dpi-server.sh /dpi-server.sh
-RUN chmod +x /dpi-server.sh
+COPY docker/dpi-router.sh /dpi-router.sh
+RUN chmod +x /dpi-router.sh
 
-EXPOSE 80 443
-ENTRYPOINT ["/dpi-server.sh"]
+ENTRYPOINT ["/dpi-router.sh"]

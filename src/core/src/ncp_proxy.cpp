@@ -215,6 +215,9 @@ std::vector<size_t> DesyncProxy::split_offsets_from_config(
     if (cfg.split_at_sni) {
         positions.push_back(DPI::ZSplitPos{DPI::ZSplitPosType::HOST, 0});
     }
+    if (cfg.split_at_midsld) {
+        positions.push_back(DPI::ZSplitPos{DPI::ZSplitPosType::MIDSLD, 0});
+    }
     return resolve_split_positions(positions, payload, payload_len);
 }
 
@@ -470,6 +473,11 @@ public:
             }
             if (cfg.base.split_at_sni)
                 plan.positions.push_back(DPI::ZSplitPos{DPI::ZSplitPosType::HOST, 0});
+            // zapret midsld: split inside the second-level domain so that
+            // per-packet SNI string matching (iptables -m string) never sees
+            // the full hostname in a single segment.
+            if (cfg.base.split_at_midsld)
+                plan.positions.push_back(DPI::ZSplitPos{DPI::ZSplitPosType::MIDSLD, 0});
             plan.host_case = cfg.base.enable_host_case;
         }
         return plan;

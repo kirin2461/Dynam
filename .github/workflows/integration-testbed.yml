@@ -1,9 +1,11 @@
 name: Integration Testbed
 
-# Combat-mode testing of every project feature: an isolated two-container
-# stand (Client + DPI server) on a private bridge network. The DPI container
-# RST-injects blocked domains like a real inline DPI; the client container
-# runs the full ncp feature matrix against it. Host network is never touched.
+# Combat-mode testing of every project feature: an isolated three-container
+# stand (Client + DPI midbox router + target server) on two private bridge
+# networks. The DPI midbox RST-injects blocked domains like a real inline
+# DPI (per-packet string match in FORWARD); the client container routes all
+# target traffic THROUGH the midbox and runs the full ncp feature matrix.
+# Host network is never touched.
 
 on:
   pull_request:
@@ -32,7 +34,7 @@ concurrency:
 
 jobs:
   combat:
-    name: Combat test matrix (client vs DPI)
+    name: Combat test matrix (client vs DPI midbox)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -41,8 +43,8 @@ jobs:
       - name: Build testbed images
         run: docker compose build --parallel
 
-      - name: Start DPI server
-        run: docker compose up -d --wait dpi
+      - name: Start DPI midbox and target server
+        run: docker compose up -d --wait dpi server
 
       - name: Run combat matrix
         run: |
@@ -57,6 +59,7 @@ jobs:
         run: |
           mkdir -p testbed-logs
           docker compose logs dpi > testbed-logs/dpi.log 2>&1 || true
+          docker compose logs server > testbed-logs/server.log 2>&1 || true
           cp testbed-output.txt testbed-logs/ 2>/dev/null || true
           docker compose ps >> testbed-logs/compose-ps.txt 2>&1 || true
 
