@@ -43,6 +43,8 @@ services:
       - NET_ADMIN
       - NET_RAW
     entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ./scripts/lab:/lab:ro
     extra_hosts:
       - "allowed.example:172.30.0.10"
       - "forbidden.example:172.30.0.10"
