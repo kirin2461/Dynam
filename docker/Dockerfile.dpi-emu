@@ -1,0 +1,25 @@
+# DPI-emulator container — combined Server/DPI for the Dynam DPI lab.
+# Same server role as docker/Dockerfile.dpi2 (TLS/443 + HTTP/80 with the
+# DYNAM-TESTBED-OK marker) plus the userspace DPI emulator (dpi-emu.py:
+# NFQUEUE + TCP reassembly + TLS SNI / HTTP Host parsing + RST injection).
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev gcc \
+        libnetfilter-queue-dev libnfnetlink-dev \
+        openssl curl ethtool iptables iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir --retries 10 --timeout 60 NetfilterQueue scapy
+
+COPY docker/dpi-emu.py /dpi-emu.py
+COPY docker/dpi-emu-entry.sh /dpi-emu-entry.sh
+RUN chmod +x /dpi-emu-entry.sh
+
+EXPOSE 80 443
+HEALTHCHECK --interval=2s --timeout=4s --retries=30 \
+    CMD curl -sk --max-time 3 https://127.0.0.1/healthz >/dev/null \
+        && pgrep -f dpi-emu.py >/dev/null || exit 1
+
+ENTRYPOINT ["/dpi-emu-entry.sh"]
