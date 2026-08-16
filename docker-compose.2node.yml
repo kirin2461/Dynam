@@ -1,1 +1,73 @@
-client (172.30.0.20) bridge 172.30.0.0/24 dpi-server (172.30.0.10)
+# Dynam integration testbed — 2-NODE variant (simplest isolated stand).
+#
+#   client (172.30.0.20) ── bridge 172.30.0.0/24 ── dpi-server (172.30.0.10)
+#
+# One bridge network, two isolated containers: the Client (ncp CLI built from
+# this repo + full combat matrix) and the combined Server/DPI (HTTPS/HTTP
+# server with the marker + iptables -m string RST injection on INPUT,
+# per-packet — so packet-splitting desync genuinely evades it).
+# Nothing here touches the host firewall/DNS; NET_ADMIN/NET_RAW apply inside
+# the containers only. Host network stays up no matter what the tests do.
+#
+# NOTE: for midbox-realistic desync testing (fake packets dying mid-path)
+# use the 3-node variant in docker-compose.yml. This 2-node stand is the
+# lightweight option for running the FULL feature matrix locally.
+#
+#   docker compose -f docker-compose.2node.yml build
+#   docker compose -f docker-compose.2node.yml up -d --wait dpi-server
+#   docker compose -f docker-compose.2node.yml run --rm --no-deps client
+#   docker compose -f docker-compose.2node.yml down -v
+name: dynam-testbed-2node
+
+services:
+  dpi-server:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dpi2
+    container_name: dynam-dpi-server
+    hostname: dpi-server-box
+    cap_add:
+      - NET_ADMIN   # iptables INPUT rules + ethtool offload control
+      - NET_RAW
+    environment:
+      BLOCKED_DOMAINS: forbidden.example,blocked.example
+    networks:
+      testbed:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "curl", "-sk", "--max-time", "3", "https://127.0.0.1/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  client:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.client
+    container_name: dynam-client-2node
+    hostname: client-box
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    entrypoint: ["/testbed/run_integration_2node.sh"]
+    extra_hosts:
+      - "allowed.example:172.30.0.10"
+      - "forbidden.example:172.30.0.10"
+      - "blocked.example:172.30.0.10"
+    environment:
+      TARGET_HOST: 172.30.0.10
+      TESTBED_MARKER: DYNAM-TESTBED-OK
+      # PRESETS / ZAPRET_PROFILES / MIMIC_MODES can override the matrix
+    depends_on:
+      dpi-server:
+        condition: service_started
+    networks:
+      testbed:
+        ipv4_address: 172.30.0.20
+
+networks:
+  testbed:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
