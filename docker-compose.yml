@@ -1,0 +1,62 @@
+# Dynam integration testbed: isolated Client + DPI-Server on a private bridge.
+# Nothing here touches the host firewall/DNS — both containers live on their
+# own network; NET_ADMIN/NET_RAW apply inside the containers only.
+#
+#   docker compose build
+#   docker compose up -d dpi
+#   docker compose run --rm client        # full combat-test matrix
+#   docker compose down -v
+name: dynam-testbed
+
+services:
+  dpi:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dpi
+    container_name: dynam-dpi
+    hostname: dpi-box
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    environment:
+      BLOCKED_DOMAINS: forbidden.example,blocked.example
+      # DPI_NETEM: "delay 80ms loss 2%"   # enable for impairment scenarios
+    networks:
+      testnet:
+        ipv4_address: 172.30.0.10
+    healthcheck:
+      test: ["CMD", "curl", "-sk", "--max-time", "3", "https://127.0.0.1/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  client:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.client
+    container_name: dynam-client
+    hostname: client-box
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    extra_hosts:
+      - "allowed.example:172.30.0.10"
+      - "forbidden.example:172.30.0.10"
+      - "blocked.example:172.30.0.10"
+    environment:
+      DPI_HOST: 172.30.0.10
+      TESTBED_MARKER: DYNAM-TESTBED-OK
+      # PRESETS / ZAPRET_PROFILES / MIMIC_MODES can override the matrix
+    depends_on:
+      dpi:
+        condition: service_healthy
+    networks:
+      testnet:
+        ipv4_address: 172.30.0.20
+
+networks:
+  testnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
