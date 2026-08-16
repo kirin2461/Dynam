@@ -61,6 +61,10 @@ struct DPIConfig {
     bool enable_tcp_split = true;
     int split_position = 2;
     bool split_at_sni = true;
+    // Split in the middle of the second-level domain of the SNI/Host
+    // (zapret "midsld") — the split that actually defeats per-packet SNI
+    // string matching; without it the hostname stays whole in one segment.
+    bool split_at_midsld = false;
 
     bool enable_noise = true;
     int noise_size = 64;
@@ -204,6 +208,7 @@ struct DPIConfig {
                enable_tcp_split == other.enable_tcp_split &&
                split_position == other.split_position &&
                split_at_sni == other.split_at_sni &&
+               split_at_midsld == other.split_at_midsld &&
                enable_noise == other.enable_noise &&
                noise_size == other.noise_size &&
                enable_host_case == other.enable_host_case &&

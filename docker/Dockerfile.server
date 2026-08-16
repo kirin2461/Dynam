@@ -1,0 +1,16 @@
+# Target server container for the Dynam integration testbed — the "real
+# internet" behind the DPI midbox. Serves the DYNAM-TESTBED-OK marker over
+# HTTPS/443 (threaded TLS server with lazy handshake, robust against
+# desync-damaged connections) and HTTP/80.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 openssl curl ethtool \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/testbed-server.sh /testbed-server.sh
+RUN chmod +x /testbed-server.sh
+
+EXPOSE 80 443
+ENTRYPOINT ["/testbed-server.sh"]

@@ -2523,6 +2523,7 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.enable_tcp_split = true;
         config.split_at_sni = true;
         config.split_position = 1;
+        config.split_at_midsld = true;  // zapret: --split-pos=1,midsld
         config.fragment_size = 1;
         config.fragment_offset = 0;
         config.enable_fake_packet = true;

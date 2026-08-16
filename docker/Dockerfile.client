@@ -1,0 +1,33 @@
+# Client container for the Dynam integration testbed.
+# Builds the ncp CLI from the repo and runs the full combat-test matrix
+# THROUGH the DPI midbox against the target server. Runs with
+# NET_ADMIN/NET_RAW (inside the container only) so run/mimic/rotate and
+# raw-socket desync work for real.
+FROM ubuntu:22.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake build-essential pkg-config git \
+        libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev libpcap-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+        -DENABLE_GUI=OFF -DENABLE_TESTS=OFF \
+    && cmake --build build -j"$(nproc)" --target ncp-cli || cmake --build build -j"$(nproc)"
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+# Same lib set as the build stage => no fragile runtime-soname guessing.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev libpcap-dev \
+        curl iproute2 iptables ethtool ca-certificates python3 jq \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build/bin/ncp /usr/local/bin/ncp
+COPY scripts/testbed/ /testbed/
+RUN chmod +x /testbed/*.sh
+
+ENTRYPOINT ["/testbed/run_integration.sh"]
