@@ -17,14 +17,21 @@ echo "ok" > "$WWW/healthz"
 
 # --- TLS cert (SANs cover every served name; clients use -k anyway) ----------
 NAMES="allowed.example,${BLOCKED_DOMAINS}"
-SAN=""; i=1
 IFS=',' read -ra arr <<< "$NAMES"
-for d in "${arr[@]}"; do SAN="${SAN}DNS.$i=$d,"; i=$((i+1)); done
-SAN="${SAN%,}"
+# -addext wants "DNS:a,DNS:b" (the DNS.1=/DNS.2= numbering is config-file
+# syntax and makes openssl fail here).
+SAN=""
+for d in "${arr[@]}"; do SAN="${SAN},DNS:$d"; done
+SAN="${SAN#,}"
 
-openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+if ! openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
     -keyout /srv/certs/key.pem -out /srv/certs/cert.pem \
-    -subj "/CN=dynam-testbed" -addext "subjectAltName=${SAN}" 2>/dev/null
+    -subj "/CN=dynam-testbed" -addext "subjectAltName=${SAN}"; then
+    echo '[dpi][FATAL] openssl cert generation failed'
+    exit 1
+fi
+[ -s /srv/certs/cert.pem ] && [ -s /srv/certs/key.pem ] || { echo '[dpi][FATAL] cert files missing'; exit 1; }
+echo "[dpi] cert SANs: $SAN"
 
 # --- DPI rules (this container only; host is never touched) ------------------
 # NB: no conntrack ESTABLISHED shortcut here on purpose — the string match
