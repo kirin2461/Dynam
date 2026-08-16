@@ -1,0 +1,139 @@
+name: Code Quality
+
+# Incremental code-quality analysis (Designite-style): on PRs only the lines
+# you actually changed are flagged — reviewdog posts findings as PR review
+# comments (filter-mode: added). Nothing here blocks the build; treat findings
+# as review guidance. Tighten fail_level later if you want a hard gate.
+
+on:
+  pull_request:
+    branches: [main, master, develop]
+  push:
+    branches: [main, master, develop]
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+concurrency:
+  group: code-quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect changed C++ files
+    runs-on: ubuntu-latest
+    outputs:
+      files: ${{ steps.list.outputs.files }}
+      any: ${{ steps.list.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: list
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          if [ -z "$BASE" ] || [ "$BASE" = "0000000000000000000000000000000000000000" ]; then
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || echo HEAD)
+          fi
+          files=$(git diff --name-only --diff-filter=ACMR "$BASE...HEAD"             -- 'src/*.cpp' 'src/*.hpp' 'src/*.h' 'src/*.cc' | tr '\n' ' ')
+          echo "Changed C++ files: $files"
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          if [ -n "$files" ]; then echo 'any=true' >> "$GITHUB_OUTPUT";
+          else echo 'any=false' >> "$GITHUB_OUTPUT"; fi
+
+  clang-format:
+    name: clang-format (changed lines)
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: reviewdog/action-clang-format@v2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          reporter: github-pr-review
+          filter_mode: added
+          fail_level: none
+          level: warning
+          workdir: ./src
+          clang_format_version: '18'
+
+  cppcheck:
+    name: cppcheck (changed files)
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: reviewdog/action-setup@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cppcheck
+        run: sudo apt-get update && sudo apt-get install -y cppcheck
+      - name: Run cppcheck
+        env:
+          FILES: ${{ needs.changes.outputs.files }}
+        run: |
+          srcs=''
+          for f in $FILES; do case "$f" in *.cpp|*.cc) srcs="$srcs $f";; esac; done
+          [ -z "$srcs" ] && { echo 'No .cpp files changed'; exit 0; }
+          cppcheck --std=c++17 --quiet --inline-suppr             --enable=warning,performance,portability             -I src/core/include -I src             --template=gcc $srcs 2> cppcheck.txt || true
+          cat cppcheck.txt
+          < cppcheck.txt reviewdog -efm='%f:%l:%c: %trror: %m' -efm='%f:%l:%c: %tarning: %m'             -efm='%f:%l: %trror: %m' -efm='%f:%l: %tarning: %m'             -name=cppcheck -reporter=github-pr-review -filter-mode=added             -fail-level=none -level=warning
+
+  clang-tidy:
+    name: clang-tidy (changed files)
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: reviewdog/action-setup@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install clang-tidy + build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy cmake build-essential pkg-config             libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev libpcap-dev
+      - name: Generate compile_commands.json (core + CLI only)
+        run: |
+          cmake -S . -B build-cq -DCMAKE_BUILD_TYPE=Release             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON             -DENABLE_GUI=OFF -DENABLE_TESTS=OFF
+      - name: Run clang-tidy
+        env:
+          FILES: ${{ needs.changes.outputs.files }}
+        run: |
+          : > tidy.txt
+          for f in $FILES; do
+            case "$f" in *.cpp|*.cc) ;; *) continue;; esac
+            grep -q "\"$f\"" build-cq/compile_commands.json ||               { echo "skip (not in compile DB): $f"; continue; }
+            echo "== clang-tidy $f"
+            clang-tidy -p build-cq --quiet "$f" >> tidy.txt 2>&1 || true
+          done
+          cat tidy.txt
+          < tidy.txt reviewdog -f=clang-tidy -name=clang-tidy             -reporter=github-pr-review -filter-mode=added             -fail-level=none -level=warning
+
+  lizard:
+    name: Complexity metrics (lizard)
+    needs: changes
+    if: needs.changes.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install lizard
+        run: pipx install lizard || pip install lizard
+      - name: Report complexity of changed files
+        env:
+          FILES: ${{ needs.changes.outputs.files }}
+        run: |
+          echo '## Cyclomatic complexity (changed files)' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          lizard -C 15 -L 100 -a 6 $FILES >> "$GITHUB_STEP_SUMMARY" 2>&1 || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          lizard -C 15 -L 100 -a 6 $FILES || true

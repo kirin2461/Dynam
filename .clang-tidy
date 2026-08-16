@@ -1,0 +1,25 @@
+# NCP clang-tidy profile — run incrementally on PR-changed files by
+# .github/workflows/code-quality.yml. Kept moderate on purpose: no magic-number
+# / identifier-length noise, no forced trailing return types.
+Checks: >
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  concurrency-*,
+  misc-*,
+  -misc-unused-parameters,
+  -misc-no-recursion,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  performance-*,
+  portability-*,
+  readability-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-size,
+  -readability-uppercase-literal-suffix,
+  -readability-braces-around-statements
+WarningsAsErrors: ''
+HeaderFilterRegex: '(src|include)/.*'
+CheckOptions:
+  - key: readability-function-size.LineThreshold
+    value: '400'
