@@ -34,7 +34,7 @@ PROXY_PORT=${PROXY_PORT:-1080}
 PROXY_SPEC=${PROXY_SPEC:-socks5h://127.0.0.1:${PROXY_PORT}}
 CAP_IFACE=${CAP_IFACE:-eth0}
 LAB_DIR=${LAB_DIR:-/tmp/lab}
-MARKER=${MARKER:-DYNAM-TESTBED-OK}
+MARKER=${MARKER-DYNAM-TESTBED-OK}
 CHAIN_ARGS=${CHAIN_ARGS:---filter-tcp=443 --dpi-desync=multisplit --dpi-desync-split-pos=1,midsld --dpi-desync-fooling=badseq}
 METRICS=${METRICS:-/lab/metrics.py}
 
@@ -121,9 +121,11 @@ for mode in ${MODES}; do
                --url "https://${BLOCKED_SNI}${size}"
                --runs "${N_RUNS}"
                --insecure
-               --expect-marker "${MARKER}"
                --timeout 300
                --json "${json_out}" --md "${json_out%.json}.md")
+        # Marker check only makes sense for HTML targets; .bin perf files
+        # are random bytes. Set MARKER appropriately (empty = http-code only).
+        [ -n "${MARKER}" ] && margs+=(--expect-marker "${MARKER}")
         if [ "${mode}" != "direct" ]; then
             margs+=(--proxy "${PROXY_SPEC}")
         fi

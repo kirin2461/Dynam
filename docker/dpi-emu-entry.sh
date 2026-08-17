@@ -42,15 +42,31 @@ for iface in $(ls /sys/class/net | grep -v '^lo$'); do
     ethtool -K "$iface" tso off gso off gro off 2>/dev/null || true
 done
 
-# --- DPI: divert client traffic into NFQUEUE ---------------------------------
+# --- DPI rules: model-dependent ----------------------------------------------
+# off        = no DPI at all (allow-all; used by suite1 formation tests)
+# string     = legacy per-packet iptables -m string match + tcp-reset
+# reassemble = userspace NFQUEUE emulator with TCP reassembly (dpi-emu.py)
 iptables -F INPUT
-iptables -A INPUT -p tcp -m multiport --dports 443,80 \
-    -j NFQUEUE --queue-num "$NFQUEUE_NUM"
-# FORWARD hook for a future 3-node midbox topology (harmless here: no
-# forwarding happens on the 2-node stand).
-iptables -A FORWARD -p tcp -m multiport --dports 443,80 \
-    -j NFQUEUE --queue-num "$NFQUEUE_NUM" 2>/dev/null || true
-echo "[dpi] INPUT dport 443,80 -> NFQUEUE $NFQUEUE_NUM"
+if [ "$DPI_MODEL" = "string" ]; then
+    IFS=',' read -ra barr <<< "$BLOCKED_DOMAINS"
+    for d in "${barr[@]}"; do
+        iptables -A INPUT -p tcp --dport 443 -m string --string "$d" --algo bm \
+            -j REJECT --reject-with tcp-reset
+        iptables -A INPUT -p tcp --dport 80 -m string --string "Host: $d" --algo bm \
+            -j REJECT --reject-with tcp-reset
+    done
+    echo "[dpi] INPUT string-match RST for: $BLOCKED_DOMAINS"
+elif [ "$DPI_MODEL" = "reassemble" ]; then
+    iptables -A INPUT -p tcp -m multiport --dports 443,80 \
+        -j NFQUEUE --queue-num "$NFQUEUE_NUM"
+    # FORWARD hook for a future 3-node midbox topology (harmless here: no
+    # forwarding happens on the 2-node stand).
+    iptables -A FORWARD -p tcp -m multiport --dports 443,80 \
+        -j NFQUEUE --queue-num "$NFQUEUE_NUM" 2>/dev/null || true
+    echo "[dpi] INPUT dport 443,80 -> NFQUEUE $NFQUEUE_NUM"
+else
+    echo "[dpi] DPI off (allow-all)"
+fi
 
 PIDS=""
 cleanup() {
@@ -63,11 +79,13 @@ cleanup() {
 }
 trap cleanup TERM INT
 
-# --- DPI emulator -------------------------------------------------------------
-python3 /dpi-emu.py --model "$DPI_MODEL" --buffer-limit "$BUFFER_LIMIT" \
-    --ooo "$OOO_POLICY" --blocked "$BLOCKED_DOMAINS" --queue "$NFQUEUE_NUM" &
-PIDS="$PIDS $!"
-echo "[dpi] dpi-emu started (model=$DPI_MODEL buffer=$BUFFER_LIMIT ooo=$OOO_POLICY blocked=$BLOCKED_DOMAINS)"
+# --- DPI emulator (reassemble model only) --------------------------------------
+if [ "$DPI_MODEL" = "reassemble" ]; then
+    python3 /dpi-emu.py --model "$DPI_MODEL" --buffer-limit "$BUFFER_LIMIT" \
+        --ooo "$OOO_POLICY" --blocked "$BLOCKED_DOMAINS" --queue "$NFQUEUE_NUM" &
+    PIDS="$PIDS $!"
+    echo "[dpi] dpi-emu started (model=$DPI_MODEL buffer=$BUFFER_LIMIT ooo=$OOO_POLICY blocked=$BLOCKED_DOMAINS)"
+fi
 
 # --- servers (identical to dpi-server-2node.sh) -------------------------------
 # Threaded HTTPS server with per-connection accept timeout and LAZY handshake:

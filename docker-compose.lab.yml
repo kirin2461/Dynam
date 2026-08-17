@@ -26,9 +26,9 @@ services:
       - NET_ADMIN   # iptables NFQUEUE rules + ethtool offload control
       - NET_RAW     # scapy RST injection
     environment:
-      DPI_MODEL: reassemble          # reassemble | string (string = no-op)
-      BUFFER_LIMIT: "16384"
-      OOO_POLICY: permissive-first   # strict | permissive-first | permissive-last
+      DPI_MODEL: ${DPI_MODEL:-reassemble}
+      BUFFER_LIMIT: "${BUFFER_LIMIT:-16384}"
+      OOO_POLICY: ${OOO_POLICY:-permissive-first}
       BLOCKED_DOMAINS: forbidden.example,blocked.example
       NFQUEUE_NUM: "0"
     networks:

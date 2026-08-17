@@ -74,6 +74,8 @@ def tshark_fields(pcap, fields, display_filter=None):
     returned comma-joined by tshark itself; callers split when needed.
     """
     cmd = ["tshark", "-r", pcap, "-n", "-l"]
+    if KEYLOG:
+        cmd += ["-o", "tls.keylog_file:%s" % KEYLOG]
     if display_filter:
         cmd += ["-Y", display_filter]
     cmd += ["-T", "fields", "-E", "separator=\t", "-E", "occurrence=a"]
@@ -92,6 +94,9 @@ def tshark_fields(pcap, fields, display_filter=None):
         if line.strip():
             rows.append(line.split("\t"))
     return rows
+
+
+KEYLOG = None  # set via --keylog (SSLKEYLOGFILE for TLS1.3 decryption)
 
 
 def tshark_count(pcap, display_filter):
@@ -376,11 +381,20 @@ def _first_serverhello(pcap, stream=None):
         ["frame.number", "tcp.stream", "tls.handshake.version",
          # Note: tshark 3.2 spells it with a dot; newer accepts both.
          "tls.handshake.extensions.supported_version",
-         "tls.handshake.extensions_alpn_str"],
+         "tls.handshake.extensions_alpn_str",
+         "tls.handshake.random"],
         filt)
     if not rows:
         return None
-    r = rows[0]
+    # HelloRetryRequest is a ServerHello with the magic random
+    # SHA256("HelloRetryRequest"); it carries no ALPN. Use the last
+    # non-HRR ServerHello for version/ALPN negotiation results.
+    _HRR = "cf21ad74e59c6111be1d8c021e65b891c2fa211691abb89321c3f30703152c61"
+    def _is_hrr(row):
+        rnd = row[5] if len(row) > 5 else ""
+        return rnd.replace(":", "").lower() == _HRR
+    non_hrr = [row for row in rows if not _is_hrr(row)]
+    r = (non_hrr[-1] if non_hrr else rows[-1])
     legacy = _to_int(r[2], base=16)
     supported = _to_int(r[3], base=16)
     negotiated = supported if supported else legacy
@@ -543,9 +557,14 @@ def main(argv=None):
                     help="assert SNI NOT fully visible in a single frame")
     ap.add_argument("--expect-max-retrans", type=int,
                     help="assert retransmission count <= N")
+    ap.add_argument("--keylog",
+                    help="SSLKEYLOGFILE for TLS1.3 decryption (enables "
+                         "HTTP/2 frame visibility)")
     ap.add_argument("--pretty", action="store_true",
                     help="pretty-print the JSON report")
     args = ap.parse_args(argv)
+    global KEYLOG
+    KEYLOG = args.keylog
 
     # Validate client/server early for a clearer error message.
     for name in ("client", "server"):

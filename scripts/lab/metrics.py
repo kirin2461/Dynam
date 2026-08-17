@@ -329,7 +329,12 @@ def run_case(name, url, runs, proxy=None, timeout=60, insecure=False,
     if ss_dst is None:
         u = urlparse(url)
         port = u.port or (443 if u.scheme == "https" else 80)
-        ss_dst = "%s:%d" % (u.hostname, port)
+        import socket as _sock
+        try:
+            _ip = _sock.gethostbyname(u.hostname)
+        except OSError:
+            _ip = u.hostname
+        ss_dst = "%s:%d" % (_ip, port)
 
     sampler = CpuSampler(pid=pid)
     sampler.start()
