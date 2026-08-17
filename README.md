@@ -13,6 +13,8 @@
 - ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop, live per-module engine stats).
 - ✅ **Licensing**: automatic 7-day trial on first launch (all 19 modules), Ed25519-signed keys issued by the standalone `ncp-keygen` tool.
 - ✅ **Desktop GUI**: Qt6 app (`ncp-qt.exe`) with charts, license panel and tray integration.
+- ✅ **Docker testbeds**: three isolated topologies (3-node midbox, 2-node combined Server/DPI, DPI Lab) — the full combat matrix runs without touching the host network.
+- ✅ **DPI Lab**: userspace NFQUEUE DPI emulator with TCP reassembly (buffer-limit + strict/permissive OOO policies), 4 automated suites (desync formation / DPI-model bypass matrix / endpoint compatibility / performance), tc-netem impairment profiles, IPv6 smoke tests.
 
 ### Implementation Progress
 
@@ -22,7 +24,7 @@
 - ✅ **Phase 3: Anti-СОРМ** — CovertChannelManager (4 channels), CrossLayerCorrelator, GeoObfuscator
 - ✅ **Phase 4: Security** — PanicSequence (9 steps), Background Scheduler (8 tasks)
 
-- ✅ **Fully Implemented & Tested**: Cryptography, DPI Bypass, DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, CSPRNG, TLS Fingerprinting (JA3/JA4, browser profiles), Adversarial Padding, Flow Shaping, Probe Resistance, L2 Stealth, L3 Stealth, ARP Spoofing, DHCP Spoofing, Port Knocking, Packet Interceptor, Protocol Morphing, Burst Morphing, Entropy Masking, Geneva Engine/GA (crossover/mutation/selection, sync + background evolution), Identity Management, Timing Protection, Thread Pool, Rotation Coordinator, Security Manager, Capabilities Framework, I2P (SAM protocol client), Traffic Mimicry.
+- ✅ **Fully Implemented & Tested**: Cryptography, DPI Bypass (incl. midSLD splits, zapret chains, fake/fooling), DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, CSPRNG, TLS Fingerprinting (JA3/JA4, browser profiles), Adversarial Padding, Flow Shaping, Probe Resistance, L2 Stealth, L3 Stealth, ARP Spoofing, DHCP Spoofing, Port Knocking, Packet Interceptor, Protocol Morphing, Burst Morphing, Entropy Masking, Geneva Engine/GA (crossover/mutation/selection, sync + background evolution), Identity Management, Timing Protection, Thread Pool, Rotation Coordinator, Security Manager, Capabilities Framework, I2P (SAM protocol client), Traffic Mimicry.
 
 - ✅ **Security Fixes Applied**:
   - ECH info string mismatch — FIXED (canonical info string)
@@ -116,7 +118,69 @@ cd build
 ./bin/ncp_tests            # full suite: 604 tests
 ```
 
-The suite is host-safe: paranoid-mode tests never touch the firewall, and no test requires root network changes. I2P tests skip automatically when no SAM bridge is reachable.
+The suite is host-safe: paranoid-mode tests never touch the firewall, and no test requires root network changes. I2P tests skip automatically when no SAM bridge is reachable. The DPI Lab adds 22 reassembler unit tests (`scripts/lab/test_reassembler.py`).
+
+## Docker Testbeds & DPI Lab
+
+L2/L3 spoofing, traffic interception and desync testing run in isolated containers — the host network is never affected.
+
+### Topologies
+
+| Compose file | Topology | Use |
+|---|---|---|
+| `docker-compose.yml` | client → dpi-router → target (3-node midbox) | full integration matrix |
+| `docker-compose.2node.yml` | client ↔ combined Server/DPI (one bridge) | quick combat runs |
+| `docker-compose.lab.yml` (+ `docker-compose.lab-v6.yml`) | client ↔ dpi-emu (userspace DPI) | DPI Lab suites 1–4, dual-stack IPv6 |
+
+```bash
+docker compose -f docker-compose.lab.yml up -d --build      # IPv4 lab
+docker compose -f docker-compose.lab.yml -f docker-compose.lab-v6.yml up -d   # dual-stack
+```
+
+### DPI emulator models (`docker/dpi-emu.py`)
+
+| Model | Behavior |
+|---|---|
+| `string` | legacy per-packet `iptables -m string` match + `tcp-reset` (baseline DPI) |
+| `reassemble` | NFQUEUE userspace **TCP reassembly** up to `BUFFER_LIMIT` (give-up→allow), out-of-order/overlap policies `strict` / `permissive-first` / `permissive-last`, TLS SNI + HTTP Host stream parser, forged RST via raw socket, JSONL verdict log |
+| `off` | allow-all (desync formation testing) |
+
+GRO/TSO/GSO are disabled on the veth pairs — otherwise the kernel reassembles
+split segments before netfilter and the DPI never sees the desync as crafted.
+
+### Lab suites (`scripts/lab/`)
+
+| Suite | Goal | Checks |
+|---|---|---|
+| `suite1_correctness.sh` | desync packet **formation** (DPI off) | split positions vs TLS record/SNI, seq/ack continuity, zero retransmits (`pcap_assert.py`) |
+| `suite2_dpi_models.sh` | **bypass matrix**: ncp modes × DPI models × impairment | N runs/cell, success rate, median/p95 handshake & TTFB (`metrics.py`) |
+| `suite3_compat.sh` | **endpoint compatibility** | TLS 1.2-only / TLS 1.3 / HTTP/1.1 / HTTP/2 (nghttpd + SSLKEYLOGFILE-decrypted pcap) / QUIC smoke |
+| `suite4_perf.sh` | **performance & resilience** | N=20 downloads of 5/50 MB, per-core CPU, retransmits, speed |
+| `impairment.sh` | network impairment | tc-netem profiles: `clean`, `delay50`, `wan` (100 ms ± 20 + 1% loss), `loss5`, `reorder` (25%), `mtu1400`, `mtu576` (MSS clamp) |
+
+`pcap_assert.py` automates packet-level assertions: split positions relative
+to the TLS record and SNI, TCP seq/ack validation, retransmit detection,
+TLS 1.2/1.3 negotiation, ALPN, HTTP/2 frames (via `--keylog`
+SSLKEYLOGFILE decryption), QUIC datagrams, RST injection, and skips
+HelloRetryRequest ServerHellos when reading negotiation results.
+
+### Latest combat results (2026-08-17, full matrix run)
+
+- `tspu` / `chain` bypass the string-match DPI at **100 %** under clean,
+  delay50, loss5 and reorder profiles; `direct` is always blocked (control ✓).
+- Positional splits score **0 % against the reassembly model** in clean
+  conditions — overlap / bad-checksum / multidisorder strategies are the
+  answer (reorder-profile leaks of 10–30 % show the reassembler degrading).
+- `auto` preset: **0 % bypass in every cell** despite correct packet
+  formation (suite1 PASS) — under investigation.
+- TLS 1.3 **HelloRetryRequest**: the post-HRR second ClientHello is sent
+  without desync → DPI RST. Servers requesting a different key-share group
+  break the bypass until this is covered.
+- **HTTP/2 over desync verified** (ALPN h2, TLS 1.3, HTTP 200 against
+  nghttpd); **IPv6 is an open bypass path** — the DPI logic is IPv4-only.
+- Performance: ~103 MB/s on 50 MB downloads through the desync proxy,
+  handshake overhead +2–8 ms vs direct, success rate 1.0 on the `wan`
+  profile, single-digit retransmits per 20 runs.
 
 ## CLI Tool
 
@@ -291,5 +355,5 @@ quit) and can register itself in autostart (HKCU `Run` on Windows,
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: August 14, 2026
+**Last Updated**: August 17, 2026
 **Version**: 1.5.0-dev (suite builds v1.9.4)
