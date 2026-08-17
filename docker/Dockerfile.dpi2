@@ -1,0 +1,16 @@
+# Combined Server/DPI container — 2-NODE testbed variant.
+# Plays both roles on a single shared bridge: the target HTTPS/HTTP server
+# AND the DPI (iptables -m string RST injection on INPUT). Needs NET_ADMIN
+# (iptables + ethtool offload control) — inside the container netns only.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 openssl curl ethtool iptables iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY docker/dpi-server-2node.sh /dpi-server.sh
+RUN chmod +x /dpi-server.sh
+
+EXPOSE 80 443
+ENTRYPOINT ["/dpi-server.sh"]

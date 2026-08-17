@@ -1,0 +1,67 @@
+# Dynam DPI lab — 2-NODE variant with the userspace DPI emulator.
+#
+#   client (172.30.0.20) ── bridge 172.30.0.0/24 ── dpi-emu (172.30.0.10)
+#
+# Same topology as docker-compose.2node.yml, but the Server/DPI container
+# runs docker/Dockerfile.dpi-emu: TLS/HTTP server + dpi-emu.py (NFQUEUE,
+# per-flow TCP reassembly, TLS SNI / HTTP Host verdicts, RST injection).
+# The client reuses the prebuilt dynam-testbed-2node-client image with a
+# sleep-infinity entrypoint for MANUAL runs (exec in, drive curl/ncp).
+#
+#   docker compose -f docker-compose.lab.yml build dpi-emu
+#   docker compose -f docker-compose.lab.yml up -d
+#   docker exec -it dynam-lab-client bash
+#   docker compose -f docker-compose.lab.yml down -v
+name: dynam-lab
+
+services:
+  dpi-emu:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.dpi-emu
+    image: dynam-lab-dpi-emu
+    container_name: dynam-lab-dpi-emu
+    hostname: dpi-emu-box
+    cap_add:
+      - NET_ADMIN   # iptables NFQUEUE rules + ethtool offload control
+      - NET_RAW     # scapy RST injection
+    environment:
+      DPI_MODEL: ${DPI_MODEL:-reassemble}
+      BUFFER_LIMIT: "${BUFFER_LIMIT:-16384}"
+      OOO_POLICY: ${OOO_POLICY:-permissive-first}
+      BLOCKED_DOMAINS: forbidden.example,blocked.example
+      NFQUEUE_NUM: "0"
+    networks:
+      lab:
+        ipv4_address: 172.30.0.10
+
+  client:
+    image: dynam-testbed-2node-client
+    container_name: dynam-lab-client
+    hostname: client-box
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ./scripts/lab:/lab:ro
+    extra_hosts:
+      - "allowed.example:172.30.0.10"
+      - "forbidden.example:172.30.0.10"
+      - "blocked.example:172.30.0.10"
+    environment:
+      TARGET_HOST: 172.30.0.10
+      TESTBED_MARKER: DYNAM-TESTBED-OK
+    depends_on:
+      dpi-emu:
+        condition: service_healthy
+    networks:
+      lab:
+        ipv4_address: 172.30.0.20
+
+networks:
+  lab:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

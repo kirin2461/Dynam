@@ -1,0 +1,21 @@
+services:
+  dpi-emu:
+    networks:
+      lab:
+        ipv4_address: 172.30.0.10
+        ipv6_address: fd00:30::10
+  client:
+    extra_hosts:
+      - "allowed6.example:fd00:30::10"
+      - "forbidden6.example:fd00:30::10"
+    networks:
+      lab:
+        ipv4_address: 172.30.0.20
+        ipv6_address: fd00:30::20
+networks:
+  lab:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+        - subnet: fd00:30::/64
