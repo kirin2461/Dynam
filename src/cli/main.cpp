@@ -29,6 +29,11 @@
 #include "ncp_dpi_detector.hpp"
 #include "ncp_autopilot.hpp"
 #include "ncp_spa.hpp"
+#include "ncp_reality.hpp"
+#include "ncp_stegodns.hpp"
+#include "ncp_porthop.hpp"
+#include "ncp_fog.hpp"
+#include "ncp_xdp.hpp"
 
 #include <iostream>
 #include <string>
@@ -48,6 +53,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #endif
 #include <cstdlib>
 #include <cstdio>
@@ -821,6 +830,11 @@ void handle_autopilot(const std::vector<std::string>& args);
 void handle_sysproxy(const std::vector<std::string>& args);
 void handle_import_zapret(const std::vector<std::string>& args);
 void handle_spa(const std::vector<std::string>& args);
+void handle_reality(const std::vector<std::string>& args);
+void handle_stegodns(const std::vector<std::string>& args);
+void handle_porthop(const std::vector<std::string>& args);
+void handle_fog(const std::vector<std::string>& args);
+void handle_xdp(const std::vector<std::string>& args);
 
 // ============================================================================
 // main()
@@ -848,6 +862,11 @@ int main(int argc, char* argv[]) {
     parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
     parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
     parser.add_command("spa", "Ed25519 Single Packet Authorization (keygen/knock/serve)", handle_spa, {"<keygen|knock|serve>", "[--out prefix]", "[--key f.key]", "[--allow-port N]", "[--port 54117]", "[--proto tcp]", "[--ttl S]", "[--authorized-keys f]", "[--set-name ncp_spa_allow]", "[--default-ttl 300]", "[--max-ttl 86400]", "[--dry-run]"});
+    parser.add_command("reality", "XTLS-Reality-style fallback server (Enterprise)", handle_reality, {"serve", "--listen <port>", "--fallback <host:port>", "--internal <host:port>", "--key-file <f>", "[--dry-run]"});
+    parser.add_command("stegodns", "Zero-Knowledge steganographic DNS records (Enterprise)", handle_stegodns, {"<encode|decode>", "[options]"});
+    parser.add_command("porthop", "UDP port-hopping transport demo (Enterprise)", handle_porthop, {"<serve|client>", "[options]"});
+    parser.add_command("fog", "Cooperative fog mesh overlay node (Enterprise)", handle_fog, {"node", "--id <hex32>", "--port <n>", "[--peer ip:port]..."});
+    parser.add_command("xdp", "eBPF/XDP kernel packet processing (Enterprise)", handle_xdp, {"<compile|attach|detach|stats|drop|probe>", "[args]"});
 
     parser.parse_and_execute(argc, argv);
 
@@ -3559,4 +3578,747 @@ void handle_spa(const std::vector<std::string>& args) {
 
     std::cerr << "[!] Unknown spa action: " << action << "\n";
     spa_print_usage();
+}
+
+// ============================================================================
+// ncp reality — XTLS-Reality-style fallback server (Enterprise M1)
+// ============================================================================
+
+static void reality_print_usage() {
+    std::cout << "Usage: ncp reality serve --listen <port> --fallback <host:port>\n"
+              << "                         --internal <host:port> --key-file <f> [--dry-run]\n"
+              << "  Authorized clients carry an Ed25519 token in the left-most SNI label\n"
+              << "  and are forwarded to --internal; everyone else is transparently\n"
+              << "  spliced to the real --fallback site.\n"
+              << "  Key file: one client per line — '<key_id> <base64-ed25519-secret-64B>'\n"
+              << "  (a base64 32-byte public key alone is accepted but cannot verify\n"
+              << "  tokens and is skipped). Lines starting with '#' are ignored.\n";
+}
+
+static bool split_host_port(const std::string& s, std::string& host, uint16_t& port) {
+    const auto pos = s.rfind(':');
+    if (pos == std::string::npos || pos == 0 || pos + 1 >= s.size()) return false;
+    host = s.substr(0, pos);
+    try {
+        const int p = std::stoi(s.substr(pos + 1));
+        if (p <= 0 || p > 65535) return false;
+        port = static_cast<uint16_t>(p);
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
+static bool reality_load_keyfile(const std::string& path, ncp::RealityAuth& auth,
+                                 size_t& loaded, size_t& pubkey_only) {
+    std::ifstream f(path);
+    if (!f.is_open()) return false;
+    loaded = 0;
+    pubkey_only = 0;
+    std::string line;
+    while (std::getline(f, line)) {
+        const auto hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        std::istringstream iss(line);
+        std::string key_id, k1, k2;
+        if (!(iss >> key_id)) continue;  // blank line
+        if (!(iss >> k1)) {
+            std::cerr << "[!] reality key-file: no key material for '" << key_id << "'\n";
+            continue;
+        }
+        std::vector<uint8_t> pub, sec;
+        if (iss >> k2) {
+            ncp::spa_base64_decode(k1, pub);
+            ncp::spa_base64_decode(k2, sec);
+        } else {
+            ncp::spa_base64_decode(k1, sec);
+        }
+        if (sec.size() == 64) {
+            std::array<uint8_t, 32> pk{};
+            std::copy(sec.begin() + 32, sec.end(), pk.begin());  // libsodium: sk || pk
+            std::array<uint8_t, 64> sk{};
+            std::copy(sec.begin(), sec.end(), sk.begin());
+            auth.add_key(key_id, pk);
+            auth.provision_secret(key_id, sk);
+            ++loaded;
+        } else if (pub.size() == 32 || sec.size() == 32) {
+            const std::vector<uint8_t>& p = (pub.size() == 32) ? pub : sec;
+            std::array<uint8_t, 32> pk{};
+            std::copy(p.begin(), p.end(), pk.begin());
+            auth.add_key(key_id, pk);
+            ++pubkey_only;
+        } else {
+            std::cerr << "[!] reality key-file: bad key for '" << key_id << "'\n";
+        }
+    }
+    return true;
+}
+
+void handle_reality(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        reality_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+    if (action != "serve") {
+        std::cerr << "[!] Unknown reality action: " << action << "\n";
+        reality_print_usage();
+        return;
+    }
+
+    const int listen_port       = get_option_int(args, "--listen", 443);
+    const std::string fallback  = get_option(args, "--fallback", "");
+    const std::string internal  = get_option(args, "--internal", "");
+    const std::string key_file  = get_option(args, "--key-file", "");
+    const bool dry_run          = has_flag(args, "--dry-run");
+
+    if (fallback.empty() || internal.empty() || key_file.empty() ||
+        listen_port <= 0 || listen_port > 65535) {
+        std::cerr << "[!] serve requires --listen <port>, --fallback <host:port>, "
+                     "--internal <host:port> and --key-file <f>\n";
+        reality_print_usage();
+        return;
+    }
+
+    ncp::RealityConfig cfg;
+    cfg.listen_port = static_cast<uint16_t>(listen_port);
+    if (!split_host_port(fallback, cfg.fallback_host, cfg.fallback_port) ||
+        !split_host_port(internal, cfg.internal_host, cfg.internal_port)) {
+        std::cerr << "[!] --fallback/--internal must be in <host:port> form\n";
+        return;
+    }
+
+    size_t loaded = 0, pubkey_only = 0;
+    if (!reality_load_keyfile(key_file, cfg.auth, loaded, pubkey_only)) {
+        std::cerr << "[!] Cannot read key file " << key_file << "\n";
+        return;
+    }
+    if (loaded == 0 && pubkey_only == 0) {
+        std::cerr << "[!] No client keys loaded from " << key_file << "\n";
+        return;
+    }
+
+    std::cout << "=== NCP Reality fallback server ===\n"
+              << "  Listen:    TCP 0.0.0.0:" << cfg.listen_port << "\n"
+              << "  Fallback:  " << cfg.fallback_host << ":" << cfg.fallback_port << "\n"
+              << "  Internal:  " << cfg.internal_host << ":" << cfg.internal_port << "\n"
+              << "  Clients:   " << loaded << " verifiable";
+    if (pubkey_only)
+        std::cout << " (" << pubkey_only << " pubkey-only, cannot verify)";
+    std::cout << "\n";
+
+    if (dry_run) {
+        std::cout << "[*] Dry run — configuration OK, not listening.\n";
+        return;
+    }
+
+#ifdef _WIN32
+    std::cerr << "[!] reality serve is not supported on Windows\n";
+    return;
+#else
+    ncp::RealityServer server(cfg);
+
+    const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0) {
+        std::cerr << "[!] socket() failed\n";
+        return;
+    }
+    int one = 1;
+    ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(cfg.listen_port);
+    if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(listen_fd, 128) != 0) {
+        std::cerr << "[!] Cannot bind/listen on TCP port " << cfg.listen_port << "\n";
+        ::close(listen_fd);
+        return;
+    }
+    std::cout << "[*] Reality server running — Ctrl-C to stop\n";
+
+    g_running = 1;
+    while (g_running) {
+        pollfd pfd{listen_fd, POLLIN, 0};
+        if (::poll(&pfd, 1, 200) <= 0) continue;
+        sockaddr_in caddr{};
+        socklen_t clen = sizeof(caddr);
+        const int cfd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
+        if (cfd < 0) continue;
+        std::thread([&server, cfd]() {
+            const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+            server.handle_client(cfd, now);
+            ::shutdown(cfd, SHUT_RDWR);
+            ::close(cfd);
+        }).detach();
+    }
+    ::close(listen_fd);
+    std::cout << "[*] Reality server stopped\n";
+#endif
+}
+
+// ============================================================================
+// ncp stegodns — Zero-Knowledge Stego-DNS records (Enterprise M4)
+// ============================================================================
+
+static void stegodns_print_usage() {
+    std::cout << "Usage:\n"
+              << "  ncp stegodns encode --ip <a.b.c.d> --port <n> --spa-pubkey <b64>\n"
+              << "      --passphrase <s> --signing-key <f> --domain <d> [--expires unix]\n"
+              << "  ncp stegodns decode --txt '<record>' --passphrase <s> --verify-pubkey <b64>\n"
+              << "  --signing-key accepts a raw 64-byte Ed25519 secret key, an\n"
+              << "  `ncp spa keygen` keyfile (96 bytes) or base64 of either.\n";
+}
+
+static bool parse_ipv4(const std::string& s, std::array<uint8_t, 4>& out) {
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    char tail = 0;
+    if (std::sscanf(s.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4)
+        return false;
+    if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+    out = {static_cast<uint8_t>(a), static_cast<uint8_t>(b),
+           static_cast<uint8_t>(c), static_cast<uint8_t>(d)};
+    return true;
+}
+
+static bool stegodns_load_signing_key(const std::string& path,
+                                      std::array<uint8_t, 64>& sk) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) return false;
+    std::stringstream buf;
+    buf << f.rdbuf();
+    std::string raw = buf.str();
+    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back())))
+        raw.pop_back();
+
+    std::vector<uint8_t> bytes(raw.begin(), raw.end());
+    if (bytes.size() != 64 && bytes.size() != 96) {
+        std::vector<uint8_t> dec;
+        if (ncp::spa_base64_decode(raw, dec)) bytes = std::move(dec);
+    }
+    if (bytes.size() == 96) bytes.resize(64);  // `ncp spa keygen` keyfile: sk || pk
+    if (bytes.size() != 64) return false;
+    std::copy(bytes.begin(), bytes.end(), sk.begin());
+    return true;
+}
+
+void handle_stegodns(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        stegodns_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+
+    // ── encode ──────────────────────────────────────────────────────────────
+    if (action == "encode") {
+        const std::string ip_str   = get_option(args, "--ip", "");
+        const int port             = get_option_int(args, "--port", 0);
+        const std::string spa_b64  = get_option(args, "--spa-pubkey", "");
+        const std::string pass     = get_option(args, "--passphrase", "");
+        const std::string sk_path  = get_option(args, "--signing-key", "");
+        const std::string domain   = get_option(args, "--domain", "");
+        const int expires          = get_option_int(args, "--expires", 0);
+
+        if (ip_str.empty() || port <= 0 || port > 65535 || spa_b64.empty() ||
+            pass.empty() || sk_path.empty() || domain.empty()) {
+            std::cerr << "[!] encode requires --ip, --port, --spa-pubkey, "
+                         "--passphrase, --signing-key and --domain\n";
+            stegodns_print_usage();
+            return;
+        }
+
+        ncp::NodeParams params;
+        if (!parse_ipv4(ip_str, params.ipv4)) {
+            std::cerr << "[!] Bad IPv4 address: " << ip_str << "\n";
+            return;
+        }
+        params.port = static_cast<uint16_t>(port);
+        params.expires_unix = static_cast<uint32_t>(expires);
+        std::vector<uint8_t> spa_pk;
+        if (!ncp::spa_base64_decode(spa_b64, spa_pk) || spa_pk.size() != 32) {
+            std::cerr << "[!] --spa-pubkey must be base64 of a 32-byte key\n";
+            return;
+        }
+        std::copy(spa_pk.begin(), spa_pk.end(), params.spa_pubkey.begin());
+
+        std::array<uint8_t, 64> sk{};
+        if (!stegodns_load_signing_key(sk_path, sk)) {
+            std::cerr << "[!] Cannot load signing key from " << sk_path << "\n";
+            return;
+        }
+
+        ncp::StegoDnsEncoder encoder(pass, sk);
+        const std::string txt = encoder.encode_txt(params, domain);
+        std::cout << txt << "\n";
+        // Roundtrip helper: the matching verify key is the second half of the
+        // libsodium 64-byte secret key (sk || pk).
+        std::cout << "[*] verify-pubkey: "
+                  << ncp::spa_base64_encode(sk.data() + 32, 32) << "\n";
+        return;
+    }
+
+    // ── decode ──────────────────────────────────────────────────────────────
+    if (action == "decode") {
+        const std::string txt      = get_option(args, "--txt", "");
+        const std::string pass     = get_option(args, "--passphrase", "");
+        const std::string vpk_b64  = get_option(args, "--verify-pubkey", "");
+
+        if (txt.empty() || pass.empty() || vpk_b64.empty()) {
+            std::cerr << "[!] decode requires --txt, --passphrase and --verify-pubkey\n";
+            stegodns_print_usage();
+            return;
+        }
+        std::vector<uint8_t> vpk;
+        if (!ncp::spa_base64_decode(vpk_b64, vpk) || vpk.size() != 32) {
+            std::cerr << "[!] --verify-pubkey must be base64 of a 32-byte key\n";
+            return;
+        }
+        std::array<uint8_t, 32> pk{};
+        std::copy(vpk.begin(), vpk.end(), pk.begin());
+
+        ncp::StegoDnsDecoder decoder(pass, pk);
+        const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+        auto params = decoder.decode_txt(txt, now);
+        if (!params) {
+            std::cerr << "[!] Decode failed (bad record, signature, passphrase "
+                         "or expired)\n";
+            return;
+        }
+        std::cout << "[+] NodeParams:\n"
+                  << "  ip:         " << static_cast<int>(params->ipv4[0]) << "."
+                  << static_cast<int>(params->ipv4[1]) << "."
+                  << static_cast<int>(params->ipv4[2]) << "."
+                  << static_cast<int>(params->ipv4[3]) << "\n"
+                  << "  port:       " << params->port << "\n"
+                  << "  spa_pubkey: " << ncp::spa_base64_encode(params->spa_pubkey.data(), 32) << "\n";
+        if (params->expires_unix)
+            std::cout << "  expires:    " << params->expires_unix << "\n";
+        else
+            std::cout << "  expires:    never\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown stegodns action: " << action << "\n";
+    stegodns_print_usage();
+}
+
+// ============================================================================
+// ncp porthop — UDP port-hopping transport demo (M2)
+// ============================================================================
+
+static void porthop_print_usage() {
+    std::cout << "Usage:\n"
+              << "  ncp porthop serve --base-port <n> --range <n> --secret <s>\n"
+              << "      [--hop-interval S] [--session-id <hex>]...\n"
+              << "  ncp porthop client --host <ip> --base-port <n> --range <n> --secret <s>\n"
+              << "      --message <s> [--hop-interval S] [--session-id <hex>]\n"
+              << "  Default demo session-id: 0x1122334455667788 (must be registered on\n"
+              << "  the server; unknown sessions are dropped by PortHopServer).\n";
+}
+
+static constexpr uint64_t PH_DEFAULT_SESSION = 0x1122334455667788ULL;
+
+static uint64_t parse_session_id(const std::string& s, bool& ok) {
+    try {
+        size_t idx = 0;
+        const uint64_t v = std::stoull(s, &idx, 0);
+        ok = (idx == s.size());
+        return v;
+    } catch (...) {
+        ok = false;
+        return 0;
+    }
+}
+
+void handle_porthop(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        porthop_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+
+    const int base_port          = get_option_int(args, "--base-port", 0);
+    const int range              = get_option_int(args, "--range", 0);
+    const std::string secret     = get_option(args, "--secret", "");
+    const int interval           = get_option_int(args, "--hop-interval", 60);
+
+    if (base_port <= 0 || base_port > 65535 || range <= 0 || secret.empty()) {
+        std::cerr << "[!] porthop requires --base-port <n>, --range <n> and --secret <s>\n";
+        porthop_print_usage();
+        return;
+    }
+
+    ncp::HopSchedule schedule(
+        std::vector<uint8_t>(secret.begin(), secret.end()),
+        static_cast<uint16_t>(base_port),
+        static_cast<uint16_t>(range),
+        static_cast<uint32_t>(interval));
+
+    // ── serve ───────────────────────────────────────────────────────────────
+    if (action == "serve") {
+        ncp::PortHopServer server(schedule);
+
+        auto sid_opts = get_options_all(args, "--session-id");
+        if (sid_opts.empty()) sid_opts.push_back("0x1122334455667788");
+        for (const auto& s : sid_opts) {
+            bool ok = false;
+            const uint64_t sid = parse_session_id(s, ok);
+            if (!ok) {
+                std::cerr << "[!] Bad --session-id: " << s << "\n";
+                return;
+            }
+            server.register_session(sid);
+        }
+
+        if (!server.bind_all()) {
+            std::cerr << "[!] Failed to bind UDP ports [" << base_port << ", "
+                      << (base_port + range) << ")\n";
+            return;
+        }
+        std::cout << "=== NCP PortHop echo server ===\n"
+                  << "  Ports:     UDP [" << base_port << ", " << (base_port + range) << ")"
+                  << " (hop every " << interval << "s)\n"
+                  << "  Sessions:  " << sid_opts.size() << " whitelisted\n"
+                  << "[*] Running — Ctrl-C to stop\n";
+
+        g_running = 1;
+        while (g_running) {
+            auto frames = server.poll(200);
+            for (const auto& r : frames) {
+                const std::string text(r.frame.payload.begin(), r.frame.payload.end());
+                std::cout << "[ph] sid=0x" << std::hex << r.frame.session_id << std::dec
+                          << " seq=" << r.frame.seq
+                          << " from " << r.from_ip << ":" << r.from_port
+                          << " on :" << r.local_port
+                          << " — \"" << text << "\"\n";
+                if (r.frame.flags & ncp::PH_FLAG_ACK_REQUEST)
+                    server.send_ack(r.frame.session_id, r.frame.seq);
+                server.send_to_session(r.frame.session_id,
+                                       r.frame.payload.data(),
+                                       r.frame.payload.size());
+            }
+        }
+        server.close();
+        std::cout << "[*] PortHop server stopped (received "
+                  << server.frames_received() << " frames, "
+                  << server.frames_rejected_unknown_session() << " unknown-session, "
+                  << server.frames_malformed() << " malformed)\n";
+        return;
+    }
+
+    // ── client ──────────────────────────────────────────────────────────────
+    if (action == "client") {
+        const std::string host    = get_option(args, "--host", "");
+        const std::string message = get_option(args, "--message", "");
+        if (host.empty() || message.empty()) {
+            std::cerr << "[!] client requires --host <ip> and --message <s>\n";
+            porthop_print_usage();
+            return;
+        }
+        bool ok = false;
+        uint64_t sid = PH_DEFAULT_SESSION;
+        const std::string sid_str = get_option(args, "--session-id", "");
+        if (!sid_str.empty()) {
+            sid = parse_session_id(sid_str, ok);
+            if (!ok) {
+                std::cerr << "[!] Bad --session-id: " << sid_str << "\n";
+                return;
+            }
+        }
+
+        ncp::PortHopClient client(host, schedule, sid);
+        if (!client.open()) {
+            std::cerr << "[!] Failed to open UDP socket\n";
+            return;
+        }
+
+        const std::vector<uint8_t> payload(message.begin(), message.end());
+        bool echoed = false;
+        for (int attempt = 0; attempt < 3 && !echoed; ++attempt) {
+            if (client.session().should_hop(std::chrono::steady_clock::now()))
+                client.hop();
+            if (!client.send(payload, ncp::PH_FLAG_ACK_REQUEST)) {
+                std::cerr << "[!] send() failed\n";
+                break;
+            }
+            std::cout << "[*] Sent \"" << message << "\" to " << host << ":"
+                      << client.current_target_port()
+                      << " (epoch " << client.current_epoch() << ")\n";
+
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(1500);
+            while (std::chrono::steady_clock::now() < deadline && !echoed) {
+                auto frames = client.poll(200);
+                for (const auto& r : frames) {
+                    if (r.frame.flags & ncp::PH_FLAG_ACK) {
+                        std::cout << "[+] ACK seq=" << r.frame.seq << "\n";
+                        continue;
+                    }
+                    const std::string text(r.frame.payload.begin(), r.frame.payload.end());
+                    std::cout << "[+] Echo from :" << r.local_port << " — \"" << text << "\"\n";
+                    echoed = true;
+                }
+            }
+            if (!echoed && attempt < 2) {
+                std::cout << "[*] No echo — hopping to the next scheduled port\n";
+                client.hop();
+            }
+            if (echoed) break;
+        }
+        client.close();
+        if (!echoed)
+            std::cerr << "[!] No echo received after 3 attempts\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown porthop action: " << action << "\n";
+    porthop_print_usage();
+}
+
+// ============================================================================
+// ncp fog — Cooperative Fog Mesh overlay node (M7)
+// ============================================================================
+
+static void fog_print_usage() {
+    std::cout << "Usage: ncp fog node --id <hex32> --port <n> [--peer ip:port]...\n"
+              << "  --id is the 16-byte node id as 32 hex chars.\n"
+              << "  The node answers PINGs, relays DATA and gossips ROUTE_ADs to the\n"
+              << "  configured --peer neighbours. Received DATA payloads are printed.\n";
+}
+
+static bool fog_parse_id(const std::string& hex, ncp::FogPeerId& id) {
+    if (hex.size() != 32) return false;
+    auto hexval = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    for (size_t i = 0; i < 16; ++i) {
+        const int hi = hexval(hex[2 * i]);
+        const int lo = hexval(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        id.bytes[i] = static_cast<uint8_t>((hi << 4) | lo);
+    }
+    return true;
+}
+
+void handle_fog(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        fog_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+    if (action != "node") {
+        std::cerr << "[!] Unknown fog action: " << action << "\n";
+        fog_print_usage();
+        return;
+    }
+
+    const std::string id_hex = get_option(args, "--id", "");
+    const int port           = get_option_int(args, "--port", 0);
+    const auto peer_opts     = get_options_all(args, "--peer");
+
+    if (id_hex.empty() || port <= 0 || port > 65535) {
+        std::cerr << "[!] fog node requires --id <hex32> and --port <n>\n";
+        fog_print_usage();
+        return;
+    }
+
+    ncp::FogNode::Config cfg;
+    cfg.bind_port = static_cast<uint16_t>(port);
+    if (!fog_parse_id(id_hex, cfg.id)) {
+        std::cerr << "[!] --id must be exactly 32 hex characters (16 bytes)\n";
+        return;
+    }
+
+    ncp::FogNode node(cfg);
+    if (node.start() != ncp::FogError::OK) {
+        std::cerr << "[!] Failed to bind UDP port " << port << "\n";
+        return;
+    }
+
+    std::cout << "=== NCP Fog node ===\n"
+              << "  ID:    " << cfg.id.to_hex() << "\n"
+              << "  Bind:  UDP 0.0.0.0:" << node.bound_port() << "\n";
+
+#ifdef _WIN32
+    if (!peer_opts.empty())
+        std::cerr << "[!] --peer is not supported on Windows\n";
+#else
+    // Static neighbours: registered with a placeholder id (real ids are
+    // learned from incoming frames) and seeded with a ROUTE_AD gossip.
+    std::vector<ncp::FogPeerInfo> neighbours;
+    const uint64_t now0 = static_cast<uint64_t>(std::time(nullptr));
+    for (const auto& p : peer_opts) {
+        std::string host;
+        uint16_t pport = 0;
+        in_addr ia{};
+        if (!split_host_port(p, host, pport) ||
+            ::inet_pton(AF_INET, host.c_str(), &ia) != 1) {
+            std::cerr << "[!] Bad --peer (expected ip:port): " << p << "\n";
+            continue;
+        }
+        ncp::FogPeerInfo info;
+        const size_t h = std::hash<std::string>{}(p);
+        for (int i = 0; i < 8; ++i)
+            info.id.bytes[i] = static_cast<uint8_t>((h >> (i * 8)) & 0xFF);
+        for (int i = 0; i < 8; ++i)
+            info.id.bytes[8 + i] = info.id.bytes[i] ^ 0xA5;
+        info.ipv4 = ntohl(ia.s_addr);
+        info.port = pport;
+        info.last_seen = now0;
+        node.table().register_peer(info, now0);
+        node.send_route_ad(info, now0);
+        neighbours.push_back(info);
+        std::cout << "  Peer:  " << p << "\n";
+    }
+#endif
+
+    std::cout << "[*] Running — Ctrl-C to stop\n";
+    g_running = 1;
+    auto last_gossip = std::chrono::steady_clock::now();
+    while (g_running) {
+        const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+        node.poll(200, now);
+        std::vector<uint8_t> msg;
+        while (node.inbox_pop(msg)) {
+            const std::string text(msg.begin(), msg.end());
+            std::cout << "[fog] DATA delivered: \"" << text << "\"\n";
+        }
+#ifndef _WIN32
+        // Periodic table decay + re-gossip to static neighbours.
+        if (std::chrono::steady_clock::now() - last_gossip >
+            std::chrono::seconds(15)) {
+            node.table().decay(now);
+            for (const auto& n : neighbours)
+                node.send_route_ad(n, now);
+            last_gossip = std::chrono::steady_clock::now();
+        }
+#endif
+    }
+    node.stop();
+    std::cout << "[*] Fog node stopped (relayed " << node.relayed()
+              << ", dropped-ttl " << node.dropped_ttl()
+              << ", dropped-dup " << node.dropped_dup() << ")\n";
+}
+
+// ============================================================================
+// ncp xdp — eBPF/XDP kernel packet processing (Enterprise)
+// ============================================================================
+
+static void xdp_print_usage() {
+    std::cout << "Usage:\n"
+              << "  ncp xdp compile <src.c> <out.o>      Build BPF object (clang -target bpf)\n"
+              << "  ncp xdp attach <iface> <obj> [sec]   Attach XDP program (generic/SKB mode)\n"
+              << "  ncp xdp detach <iface>               Detach XDP program\n"
+              << "  ncp xdp stats <dport>                Show UDP counters for a dest port\n"
+              << "  ncp xdp drop <dport|0>               Set selective-drop port (0 = disable)\n"
+              << "  ncp xdp probe                        Check kernel BPF support\n";
+}
+
+void handle_xdp(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        xdp_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+
+    if (action == "compile") {
+        if (args.size() < 3) {
+            std::cerr << "[!] Usage: ncp xdp compile <src.c> <out.o>\n";
+            return;
+        }
+        std::string err;
+        if (!ncp::XdpManager::compile_program(args[1], args[2], err)) {
+            std::cerr << "[!] XDP compile failed: " << err << "\n";
+            return;
+        }
+        std::cout << "[+] Compiled " << args[1] << " -> " << args[2] << "\n";
+        return;
+    }
+
+    if (action == "attach") {
+        if (args.size() < 3) {
+            std::cerr << "[!] Usage: ncp xdp attach <iface> <obj> [sec]\n";
+            return;
+        }
+        const std::string sec = get_arg(args, 3, "xdp");
+        std::string err;
+        if (!ncp::XdpManager::attach_generic(args[1], args[2], sec, err)) {
+            std::cerr << "[!] XDP attach failed: " << err << "\n";
+            return;
+        }
+        std::cout << "[+] Attached " << args[2] << " (section \"" << sec
+                  << "\") to " << args[1] << " in xdpgeneric mode\n";
+        return;
+    }
+
+    if (action == "detach") {
+        if (args.size() < 2) {
+            std::cerr << "[!] Usage: ncp xdp detach <iface>\n";
+            return;
+        }
+        std::string err;
+        if (!ncp::XdpManager::detach_generic(args[1], err)) {
+            std::cerr << "[!] XDP detach failed: " << err << "\n";
+            return;
+        }
+        std::cout << "[+] Detached XDP program from " << args[1] << "\n";
+        return;
+    }
+
+    if (action == "stats") {
+        if (args.size() < 2) {
+            std::cerr << "[!] Usage: ncp xdp stats <dport>\n";
+            return;
+        }
+        const int dport = std::atoi(args[1].c_str());
+        if (dport < 0 || dport > 65535) {
+            std::cerr << "[!] Bad destination port: " << args[1] << "\n";
+            return;
+        }
+        ncp::XdpStats st;
+        if (!ncp::XdpManager::read_udp_stats(static_cast<uint32_t>(dport), st)) {
+            std::cerr << "[!] Cannot read UDP stats map (no program attached "
+                         "or insufficient privileges)\n";
+            return;
+        }
+        std::cout << "UDP dport " << dport << ": " << st.packets << " packets, "
+                  << st.bytes << " bytes\n";
+        return;
+    }
+
+    if (action == "drop") {
+        if (args.size() < 2) {
+            std::cerr << "[!] Usage: ncp xdp drop <dport|0>\n";
+            return;
+        }
+        const int dport = std::atoi(args[1].c_str());
+        if (dport < 0 || dport > 65535) {
+            std::cerr << "[!] Bad destination port: " << args[1] << "\n";
+            return;
+        }
+        if (!ncp::XdpManager::set_drop_port(static_cast<uint32_t>(dport))) {
+            std::cerr << "[!] Cannot update drop-port map (no program attached "
+                         "or insufficient privileges)\n";
+            return;
+        }
+        if (dport == 0)
+            std::cout << "[+] Selective UDP drop disabled\n";
+        else
+            std::cout << "[+] Dropping UDP traffic to port " << dport << "\n";
+        return;
+    }
+
+    if (action == "probe") {
+        if (ncp::XdpManager::kernel_supports_bpf())
+            std::cout << "[+] Kernel accepts BPF_PROG_LOAD — XDP usable\n";
+        else
+            std::cout << "[!] Kernel rejected BPF_PROG_LOAD (no support or no privilege)\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown xdp action: " << action << "\n";
+    xdp_print_usage();
 }
