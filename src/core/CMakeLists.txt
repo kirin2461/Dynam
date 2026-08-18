@@ -65,6 +65,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_aemm.cpp                  # M9: Reed-Solomon erasure coding core (K of N)
     src/ncp_fog.cpp              # M7: cooperative fog mesh overlay relay
     src/ncp_semfluid.cpp         # M8: semantic HTTP fluid transport
+    src/ncp_xdp.cpp              # Enterprise: eBPF/XDP kernel packet processing
     # L3/L2 Stealth modules (Anti-ISP fingerprinting)
     src/ncp_l3_stealth.cpp       # Phase 1: IPID/TTL/MSS/FlowLabel normalization
     src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WinDivert packet interception + tunneling
