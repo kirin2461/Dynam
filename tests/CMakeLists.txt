@@ -47,6 +47,7 @@ add_executable(ncp_tests
     test_r13_fixes.cpp       # Tests for R11-R13 critical fixes
     test_thread_safety.cpp   # Thread safety verification tests
     test_bypass_features.cpp # Hostlist/proxy/blockcheck/zapret-import/detector
+    test_spa.cpp            # Enterprise SPA (Ed25519 + ipset) tests
 )
 
 target_link_libraries(ncp_tests
