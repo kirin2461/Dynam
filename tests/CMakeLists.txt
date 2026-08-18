@@ -42,6 +42,8 @@ add_executable(ncp_tests
     test_mimicry_stats.cpp      # M5: statistical profile tests
     test_desync_confuse.cpp   # M3: TCP state confusion builders tests
     test_aemm.cpp             # M9: Reed-Solomon erasure coding tests
+    test_fog.cpp               # M7: fog mesh relay tests
+    test_semfluid.cpp          # M8: semantic fluid transport tests
     test_probe_resist.cpp
     test_geneva.cpp
     test_packet_interceptor.cpp
