@@ -88,5 +88,15 @@ TEST(XdpTest, MapOpsOnMissingPinFailCleanly) {
                                                &val, sizeof(val)));
 }
 
+TEST(XdpTest, MapFindMissingFailsCleanly) {
+    // Without privileges returns -1 (EPERM on GET_NEXT_ID); with privileges
+    // returns -1 for a structure/name that does not exist. No crash either way.
+    EXPECT_EQ(XdpManager::map_find("ncp_no_such_map_xyz", 1, 4, 8, 65535), -1);
+}
+
+// NOTE: stats/drop behavior against a live attached program is verified by
+// the lab integration test (netns + veth), not here — unit environment may
+// or may not have an attached program.
+
 // Full attach/detach/counter flow is exercised by the Docker lab integration
 // test (needs NET_ADMIN + writable /sys/fs/bpf); kept out of unit tests.

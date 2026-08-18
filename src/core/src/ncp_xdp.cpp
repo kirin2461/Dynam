@@ -193,14 +193,85 @@ bool XdpManager::map_update_pinned(const std::string& pin_path,
     return rc == 0;
 }
 
+int XdpManager::map_find(const std::string& name, uint32_t type,
+                         uint32_t key_size, uint32_t value_size,
+                         uint32_t max_entries) {
+    // BPF_MAP_GET_NEXT_ID = 12, BPF_OBJ_GET_INFO_BY_FD = 15
+    uint32_t id = 0;
+    for (int guard = 0; guard < 4096; ++guard) {
+        struct { uint32_t start_id; uint32_t next_id; uint32_t open_flags; } attr{};
+        attr.start_id = id;
+        long rc = ::syscall(SYS_bpf, 12, &attr, sizeof(attr));
+        if (rc != 0) return -1;  // no more maps or EPERM
+        id = attr.next_id;
+
+        struct { uint32_t map_id; uint64_t next_id; } fdattr{};
+        fdattr.map_id = id;
+        int fd = static_cast<int>(::syscall(SYS_bpf, 14 /*BPF_MAP_GET_FD_BY_ID*/,
+                                            &fdattr, sizeof(fdattr)));
+        if (fd < 0) continue;
+
+        // struct bpf_map_info: name at offset 24, 16 bytes (BPF_OBJ_NAME_LEN)
+        struct {
+            uint32_t type;
+            uint32_t id;
+            uint32_t key_size;
+            uint32_t value_size;
+            uint32_t max_entries;
+            uint32_t map_flags;
+            char name[16];
+            char _rest[216];
+        } info{};
+        struct { uint32_t bpf_fd; uint32_t info_len; uint64_t info; } iattr{};
+        iattr.bpf_fd = static_cast<uint32_t>(fd);
+        iattr.info_len = sizeof(info);
+        iattr.info = reinterpret_cast<uint64_t>(&info);
+        long irc = ::syscall(SYS_bpf, 15, &iattr, sizeof(iattr));
+        if (irc == 0) {
+            bool match;
+            if (info.name[0] != '\0') {
+                match = (name == info.name);
+            } else {
+                // legacy loader: no name — match structurally
+                match = (info.type == type && info.key_size == key_size &&
+                         info.value_size == value_size &&
+                         info.max_entries == max_entries);
+            }
+            if (match) return fd;  // caller owns fd
+        }
+        ::close(fd);
+    }
+    return -1;
+}
+
 bool XdpManager::read_udp_stats(uint32_t dport, XdpStats& out,
                                 const std::string& pin_path) {
-    return map_lookup_pinned(pin_path, &dport, sizeof(dport), &out, sizeof(out));
+    if (!pin_path.empty() &&
+        map_lookup_pinned(pin_path, &dport, sizeof(dport), &out, sizeof(out)))
+        return true;
+    int fd = map_find("udp_stats_map", 1 /*HASH*/, 4, 16, 1024);
+    if (fd < 0) return false;
+    int rc = bpf_map_lookup(fd, &dport, &out);
+    int saved = errno;
+    ::close(fd);
+    if (rc != 0 && saved == ENOENT) {
+        // Map reachable, no packets counted for this port yet.
+        out = XdpStats{};
+        return true;
+    }
+    return rc == 0;
 }
 
 bool XdpManager::set_drop_port(uint32_t dport, const std::string& pin_path) {
     uint32_t zero = 0;
-    return map_update_pinned(pin_path, &zero, sizeof(zero), &dport, sizeof(dport));
+    if (!pin_path.empty() &&
+        map_update_pinned(pin_path, &zero, sizeof(zero), &dport, sizeof(dport)))
+        return true;
+    int fd = map_find("xdp_config_map", 2 /*ARRAY*/, 4, 4, 1);
+    if (fd < 0) return false;
+    int rc = bpf_map_update(fd, &zero, &dport, 0 /*BPF_ANY*/);
+    ::close(fd);
+    return rc == 0;
 }
 
 bool XdpManager::kernel_supports_bpf() {

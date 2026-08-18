@@ -71,8 +71,19 @@ public:
                                   const void* key, size_t key_len,
                                   const void* value, size_t value_len);
 
-    /// Convenience: read per-port UDP counters from the pinned stats map of
-    /// bpf/xdp_udpmon_kern.c.
+    /// Find a live BPF map by name and/or structure (iterates map IDs via
+    /// BPF_MAP_GET_NEXT_ID + BPF_OBJ_GET_INFO_BY_FD). Works without bpffs
+    /// pinning — maps stay referenced by the attached XDP program.
+    /// Legacy iproute2-loaded maps have empty names, so matching falls back
+    /// to (type, key_size, value_size, max_entries) when name is absent.
+    /// Returns map fd >= 0 (caller closes), or -1 if not found / no privilege.
+    static int map_find(const std::string& name, uint32_t type,
+                        uint32_t key_size, uint32_t value_size,
+                        uint32_t max_entries);
+
+    /// Convenience: read per-port UDP counters from the stats map of
+    /// bpf/xdp_udpmon_kern.c. If pin_path is non-empty, the pinned path is
+    /// tried first; otherwise falls back to name-based lookup.
     static bool read_udp_stats(uint32_t dport, XdpStats& out,
                                const std::string& pin_path =
                                    "/sys/fs/bpf/tc/globals/udp_stats_map");
