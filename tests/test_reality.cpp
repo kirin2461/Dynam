@@ -93,7 +93,7 @@ bool read_full(int fd, char* buf, size_t n) {
 
 class RealityTest : public ::testing::Test {
 protected:
-    static void SetUpTestSuite() { ASSERT_EQ(sodium_init(), 0); }
+    static void SetUpTestSuite() { ASSERT_GE(sodium_init(), 0); }
 
     ClientKeys client = make_client_keys();
     ncp::RealityAuth auth;

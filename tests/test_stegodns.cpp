@@ -39,7 +39,7 @@ ncp::NodeParams make_params(uint32_t expires = 1800000000u) {
 
 class StegoDnsTest : public ::testing::Test {
 protected:
-    static void SetUpTestSuite() { ASSERT_EQ(sodium_init(), 0); }
+    static void SetUpTestSuite() { ASSERT_GE(sodium_init(), 0); }
 
     SignKeys keys = make_sign_keys();
     ncp::StegoDnsEncoder encoder{kPassphrase, keys.sk};
