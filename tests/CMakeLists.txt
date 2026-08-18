@@ -40,6 +40,8 @@ add_executable(ncp_tests
     test_stegodns.cpp
     test_porthop.cpp            # M2: port-hopping transport tests
     test_mimicry_stats.cpp      # M5: statistical profile tests
+    test_desync_confuse.cpp   # M3: TCP state confusion builders tests
+    test_aemm.cpp             # M9: Reed-Solomon erasure coding tests
     test_probe_resist.cpp
     test_geneva.cpp
     test_packet_interceptor.cpp
