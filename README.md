@@ -24,7 +24,7 @@
 - ✅ **Phase 3: Anti-СОРМ** — CovertChannelManager (4 channels), CrossLayerCorrelator, GeoObfuscator
 - ✅ **Phase 4: Security** — PanicSequence (9 steps), Background Scheduler (8 tasks)
 
-- ✅ **Fully Implemented & Tested**: Cryptography, DPI Bypass (incl. midSLD splits, zapret chains, fake/fooling), DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, CSPRNG, TLS Fingerprinting (JA3/JA4, browser profiles), Adversarial Padding, Flow Shaping, Probe Resistance, L2 Stealth, L3 Stealth, ARP Spoofing, DHCP Spoofing, Port Knocking, SPA (Ed25519 Single Packet Authorization + ipset gate control), Packet Interceptor, Protocol Morphing, Burst Morphing, Entropy Masking, Geneva Engine/GA (crossover/mutation/selection, sync + background evolution), Identity Management, Timing Protection, Thread Pool, Rotation Coordinator, Security Manager, Capabilities Framework, I2P (SAM protocol client), Traffic Mimicry.
+- ✅ **Fully Implemented & Tested**: Cryptography, DPI Bypass (incl. midSLD splits, zapret chains, fake/fooling), DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, CSPRNG, TLS Fingerprinting (JA3/JA4, browser profiles), Adversarial Padding, Flow Shaping, Probe Resistance, L2 Stealth, L3 Stealth, ARP Spoofing, DHCP Spoofing, Port Knocking, SPA (Ed25519 Single Packet Authorization + ipset gate control), XTLS-Reality Fallback, Stego-DNS Discovery, UDP Port-Hopping, Statistical Traffic Mimicry Profiles, TCP State Confusion (desync), AEMM Reed-Solomon Erasure Coding, Fog Mesh Relay, Semantic Fluid Transport, eBPF/XDP Kernel Filtering, Packet Interceptor, Protocol Morphing, Burst Morphing, Entropy Masking, Geneva Engine/GA (crossover/mutation/selection, sync + background evolution), Identity Management, Timing Protection, Thread Pool, Rotation Coordinator, Security Manager, Capabilities Framework, I2P (SAM protocol client), Traffic Mimicry.
 
 - ✅ **Security Fixes Applied**:
   - ECH info string mismatch — FIXED (canonical info string)
@@ -191,6 +191,12 @@ ncp crypto <action> [args]
 ncp network <action>
 ncp license <action>
 ncp dpi / i2p / mimic ...
+ncp spa <keygen|serve|knock>
+ncp reality serve [--dry-run]
+ncp stegodns <encode|decode>
+ncp porthop <serve|client>
+ncp fog node
+ncp xdp <compile|attach|detach|stats|drop|probe>
 ```
 
 > **⚠️ Kill switch is opt-in.** Paranoid mode can install a firewall rule dropping **all** non-loopback traffic (`iptables -A OUTPUT ! -o lo -j DROP` / Windows equivalent). If the process dies unexpectedly, the rule can persist and lock the machine off the network entirely — including SSH. `ncp run` arms it **only** when `--kill-switch` is passed explicitly.
@@ -351,6 +357,145 @@ knock returns HTTP 200 through the gate, replayed packets are rejected
 (REPLAY), unknown keys are rejected (UNKNOWN_KEY), and access closes
 automatically on TTL expiry. Asymmetric design: the server stores only public
 keys, so a server compromise does not leak client signing capability.
+
+### Enterprise anti-censorship modules
+
+Nine complementary modules implementing the enterprise feature set. All are
+covered by unit tests (70+ cases) and verified in the Docker DPI Lab.
+
+#### XTLS-Reality-style fallback — `ncp reality serve`
+
+Dest-mapping front server: the first bytes of every connection must be a TLS
+ClientHello. Authorized clients embed an Ed25519 token in the left-most SNI
+label (`<token26>.gw.<domain>`, token = first 26 base32 chars of the
+signature over `"ncp-reality" || domain || 60-second time window`) and are
+forwarded to the internal service; everyone else — scanners, active probers,
+censors — is transparently spliced to a real fallback site, so the server
+presents a genuine TLS session with a real, whitelisted domain:
+
+```bash
+ncp reality serve --listen 8443 --fallback www.microsoft.com:443 \
+    --internal 127.0.0.1:8080 --key-file clients.txt [--dry-run]
+# key file: '<key_id> <base64-ed25519-secret-64B>' per line
+```
+
+Note: a 26-char base32 token carries only ~130 bits of the 512-bit signature,
+so verification re-computes the deterministic Ed25519 signature server-side
+and compares in constant time — the server must hold the client secret keys
+(`provision_secret()`); pubkey-only entries are accepted but skipped.
+Lab-verified: an authorized ClientHello reaches the internal service,
+unknown/bare SNI is spliced to the fallback bytes, non-TLS garbage is dropped.
+
+#### Steganographic DNS discovery — `ncp stegodns`
+
+Publishes bootstrap node parameters (IPv4, port, SPA public key, expiry —
+43 bytes) inside an innocent-looking SPF TXT record. The payload is
+XChaCha20-Poly1305-sealed (key = BLAKE2b(passphrase)) and Ed25519-signed,
+then base32-encoded into
+`v=spf1 ip4:<blob> include:<blob>._ncp.<domain> ~all`:
+
+```bash
+ncp stegodns encode --ip 203.0.113.7 --port 4433 --spa-pubkey <b64> \
+    --passphrase <s> --signing-key spa.key --domain example.com
+ncp stegodns decode --txt '<record>' --passphrase <s> --verify-pubkey <b64>
+```
+
+To a censor the record is indistinguishable from an ordinary SPF policy.
+`expires = 0` means "never". Lab-verified cross-container roundtrip.
+
+#### UDP Port-Hopping transport — `ncp porthop`
+
+QUIC-style port hopping for UDP: both sides derive the current port
+deterministically — `port(epoch) = base + HMAC-SHA256(secret, epoch)[0..2] % range`.
+Frames carry `PH | ver | session_id(8) | epoch(4) | seq(4) | flags | payload`;
+the client hops when >3 segments are unacknowledged or the hop interval
+expires; the server binds the whole port range (SO_REUSEPORT, up to 64
+ports) and demultiplexes by session id, dropping unknown sessions:
+
+```bash
+ncp porthop serve --base-port 40000 --range 16 --secret <s> [--hop-interval 60]
+ncp porthop client --host <ip> --base-port 40000 --range 16 --secret <s> \
+    --message "hello" [--session-id 0x1122334455667788]
+```
+
+Lab-verified: cross-container echo with ACKs; when the current port is
+firewalled mid-session the client hops to the next scheduled port
+(40015 → 40006) and the session continues.
+
+#### Statistical traffic mimicry (`ncp_mimicry_stats`)
+
+Traffic shaping from measurable statistical profiles: packet-size
+distributions (normal / lognormal / discrete mixtures with clamping) and
+inter-arrival models (exponential / normal / fixed). Built-in profiles:
+`webrtc_video` (90 % N(1200,180) + 8 % N(400,80) + 2 % N(8000,1500),
+Exp(33 ms)), `zoom_call`, `youtube_stream`, `voip_opus`.
+`MimicryShaper::plan(len)` splits an outgoing buffer into timed chunks that
+statistically match the chosen cover protocol (seeded `mt19937_64`).
+
+#### TCP State Confusion (`ncp::desync`)
+
+Wire-level desynchronization segment builders (zapret techniques, as a
+reusable library): **overlap** (same-seq decoy + real pair), **TTL-limited
+fake** (ttl 1..3 — crosses on-path DPI, dies before the server),
+**out-of-window fake** (seq + 16 MiB), **badseq fake** (seq − 1, zapret
+badseq analogue) and optional poisoned TCP checksum 0xDEAD (badsum).
+`serialize_segment()` produces full IPv4+TCP packets for the raw-socket
+sender. Lab-verified on the wire: all five injections captured with the
+expected seq/ttl/checksum fields.
+
+#### AEMM Reed-Solomon erasure core (`ncp_aemm`)
+
+Adaptive Forward Error Correction for lossy paths: GF(2^8) (poly 0x11D),
+Cauchy generator matrix, encodes K data shards into N, recovers the block
+from any K shards via GF submatrix inversion. AVX2 4-bit-nibble path
+(`vpshufb`) where available; measured 57 MB/s scalar, 69 MB/s AVX2. Shard
+header: `RS | k | n | idx | block_id | orig_len | blake2b-8`.
+
+#### Cooperative Fog Mesh — `ncp fog node`
+
+Multi-hop volunteer relay overlay: framed as
+`FOG | ver | ttl | type | target(16) | origin(16) | seq(8) | payload`,
+with TTL decrement, loop-guard (10k-entry origin/seq FIFO), PING/PONG
+liveness and ROUTE_AD table gossip. Peer table holds up to 256 entries with
+trust decay (×0.99/min), lowest-trust eviction and best-relay selection:
+
+```bash
+ncp fog node --id <32-hex> --port 5000 --peer <ip:port> [--peer ...]
+```
+
+Lab-verified: cross-container PING→PONG liveness and DATA delivery;
+multi-hop relay covered by loopback unit tests.
+
+#### Semantic Fluid Transport (`ncp_semfluid`)
+
+Payload embedding into high-entropy fields of routine HTTP requests —
+Windows telemetry POST, Chrome component update GET, CDN image GET, OAuth
+token POST, video manifest GET. Payload chunks (43 bytes + BLAKE2b-4
+checksum) are base62-encoded into fixed-width 64-char cookie values
+(`MSFPC`, `_uetsid`) that are statistically indistinguishable from real
+browser cookies; `wrap()/unwrap()/parse_request()` round-trip the stream.
+
+#### eBPF/XDP kernel packet filtering — `ncp xdp`
+
+Kernel-level UDP statistics and selective dropping at the earliest possible
+point in the network stack. Ships a libbpf-free legacy eBPF program
+(`bpf/xdp_udpmon_kern.c`, iproute2-loadable) with a per-port HASH statistics
+map and an ARRAY config map (drop port), plus a `XdpManager` that compiles
+(clang), attaches/detaches (`xdpgeneric`), finds pinned maps by structural
+match and reads counters via raw `bpf(2)` syscalls:
+
+```bash
+ncp xdp compile --out /tmp/xdp_udpmon.o      # clang -target bpf
+ncp xdp attach --iface eth0 --obj /tmp/xdp_udpmon.o
+ncp xdp stats [--pin /sys/fs/bpf/...]        # per-port packets/bytes
+ncp xdp drop --port 4433 [--clear]           # selective drop switch
+ncp xdp detach --iface eth0 ; ncp xdp probe  # kernel capability check
+```
+
+Verified in a disposable host network namespace: exact packet/byte counters,
+selective drop on the configured port with control traffic unaffected.
+Requires `CAP_SYS_ADMIN` + `CAP_NET_ADMIN` (or root) and a kernel with
+`CONFIG_BPF_SYSCALL`.
 
 ### Passive DPI detector
 
