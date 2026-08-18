@@ -36,6 +36,8 @@ add_executable(ncp_tests
     test_burst_morpher.cpp
     test_protocol_morph.cpp
     test_port_knock.cpp
+    test_reality.cpp
+    test_stegodns.cpp
     test_probe_resist.cpp
     test_geneva.cpp
     test_packet_interceptor.cpp
