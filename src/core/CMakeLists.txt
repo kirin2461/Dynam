@@ -56,6 +56,8 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_probe_resist.cpp     # Phase 3: active probing resistance
     src/ncp_orchestrator.cpp     # Phase 4: unified pipeline orchestrator
     src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
+    src/ncp_fog.cpp              # M7: cooperative fog mesh overlay relay
+    src/ncp_semfluid.cpp         # M8: semantic HTTP fluid transport
     # L3/L2 Stealth modules (Anti-ISP fingerprinting)
     src/ncp_l3_stealth.cpp       # Phase 1: IPID/TTL/MSS/FlowLabel normalization
     src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WinDivert packet interception + tunneling
