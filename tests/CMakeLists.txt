@@ -36,6 +36,8 @@ add_executable(ncp_tests
     test_burst_morpher.cpp
     test_protocol_morph.cpp
     test_port_knock.cpp
+    test_desync_confuse.cpp   # M3: TCP state confusion builders tests
+    test_aemm.cpp             # M9: Reed-Solomon erasure coding tests
     test_probe_resist.cpp
     test_geneva.cpp
     test_packet_interceptor.cpp
