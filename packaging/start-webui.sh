@@ -14,5 +14,5 @@ echo "[Dynam] Installing web UI dependencies (first run only)..."
         exit 1
     }
 export NCP_OPEN_BROWSER=1
-echo "[Dynam] Starting Web UI on http://127.0.0.1:8080 ..."
+echo "[Dynam] Starting Web UI on http://127.0.0.1:8085 ..."
 exec "$PY" web/server.py

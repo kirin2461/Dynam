@@ -157,12 +157,34 @@ jobs:
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}}
 
+      - name: Build ncp-gui.exe (frozen Web UI launcher)
+        shell: pwsh
+        run: |
+          # ncp-gui.exe = web UI frozen with PyInstaller. The Qt launcher,
+          # WINDOWS-NOTES.txt and web/server.py all expect it next to ncp.exe.
+          # --uac-admin: server.py starts ncp.exe (requireAdministrator) via
+          # subprocess.Popen - CreateProcess cannot elevate (WinError 740),
+          # so the launcher itself must run elevated; UAC prompts once.
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r web\requirements.txt
+          pyinstaller --noconfirm --clean --onefile --name ncp-gui --uac-admin `
+            --icon resources\Dynam.ico `
+            --paths web `
+            --add-data "web/static;static" `
+            --hidden-import ncp_license --hidden-import ncp_keygen `
+            --hidden-import bypass_routes --hidden-import enterprise_routes `
+            --hidden-import ncp_tray `
+            --hidden-import engineio.async_drivers.threading `
+            web\server.py
+
       - name: Package (CLI + Qt GUI + Web UI + runtime DLLs)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release\ncp-windows-x64 -Force | Out-Null
           Copy-Item build\bin\Release\ncp.exe release\ncp-windows-x64\
           Copy-Item build\bin\Release\ncp-qt.exe release\ncp-windows-x64\
+          Copy-Item dist\ncp-gui.exe release\ncp-windows-x64\
           Copy-Item README.md, LICENSE release\ncp-windows-x64\
           Copy-Item -Recurse web release\ncp-windows-x64\web
           windeployqt --release --no-translations release\ncp-windows-x64\ncp-qt.exe

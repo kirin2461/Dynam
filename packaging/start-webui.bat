@@ -16,6 +16,6 @@ if errorlevel 1 (
     exit /b 1
 )
 set NCP_OPEN_BROWSER=1
-echo [Dynam] Starting Web UI on http://127.0.0.1:8080 ...
+echo [Dynam] Starting Web UI on http://127.0.0.1:8085 ...
 python web\server.py
 pause
