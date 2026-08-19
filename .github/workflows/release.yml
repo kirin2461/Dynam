@@ -93,7 +93,10 @@ jobs:
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
-          version: '6.6.0'
+          # 6.8 LTS: Qt 6.6.0 headers reference stdext::checked-array
+          # iterators that VS2026's STL removed (error C2065/C3861 in
+          # qvarlengtharray.h). 6.8 supports current MSVC toolchains.
+          version: '6.8.3'
           modules: 'qtcharts'
 
       - name: Cache vcpkg
