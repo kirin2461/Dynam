@@ -324,8 +324,10 @@ state = {
         "i2p_sam_port": 7656,
         "i2p_hop_count": 3,
         "garlic_routing": True,
-        "geneva_population": 50,
+        "geneva_population": 20,
         "geneva_mutation": 0.15,
+        "geneva_interval": 60,
+        "geneva_target": "discord.com:443",
         "port_knocking": False,
         "port_knock_seq": "7000,8000,9000",
         # ── Новые модули: Пайплайн и Ядро ──────────────────────────────────
@@ -418,6 +420,7 @@ state = {
 log_buffer = deque(maxlen=LOG_BUFFER_SIZE)
 log_lock = threading.Lock()
 stats_lock = threading.Lock()
+state_lock = threading.Lock()  # guards state["config"] mutations (R7-WEB-02)
 
 # Flag: when True, the NCP process was terminated intentionally (preset change,
 # user stop, etc.).  read_process_output checks this to avoid logging
@@ -488,27 +491,42 @@ def _run_selftest_real() -> dict:
     """Runs a real connectivity self-test: checks DNS resolution and TCP
     connectivity to several well-known hosts.  Returns score 0-100."""
     import socket
+    dns_hijack_hint = ("возможен перехват DNS провайдером (ISP DNS hijack) - "
+                       "обычный UDP/53 у провайдеров РФ часто подменяется; "
+                       "используйте режим прокси с DoH - он не зависит от DNS провайдера")
     checks = [
-        ("DNS google.com", lambda: socket.getaddrinfo("google.com", 443, socket.AF_INET)),
-        ("DNS youtube.com", lambda: socket.getaddrinfo("youtube.com", 443, socket.AF_INET)),
-        ("TCP 8.8.8.8:53", lambda: _tcp_check("8.8.8.8", 53)),
-        ("TCP 1.1.1.1:53", lambda: _tcp_check("1.1.1.1", 53)),
-        ("DNS cloudflare.com", lambda: socket.getaddrinfo("cloudflare.com", 443, socket.AF_INET)),
+        ("DNS google.com", lambda: socket.getaddrinfo("google.com", 443, socket.AF_INET), "dns"),
+        ("DNS youtube.com", lambda: socket.getaddrinfo("youtube.com", 443, socket.AF_INET), "dns"),
+        ("TCP 8.8.8.8:53", lambda: _tcp_check("8.8.8.8", 53), "tcp"),
+        ("TCP 1.1.1.1:53", lambda: _tcp_check("1.1.1.1", 53), "tcp"),
+        ("DNS cloudflare.com", lambda: socket.getaddrinfo("cloudflare.com", 443, socket.AF_INET), "dns"),
+        ("DoH 1.1.1.1", lambda: _doh_check("1.1.1.1", "google.com"), "doh"),
     ]
     passed = 0
     issues = 0
-    for name, fn in checks:
+    hints = []
+    dns_failed = 0
+    doh_ok = False
+    for name, fn, kind in checks:
         try:
             fn()
             passed += 1
+            if kind == "doh":
+                doh_ok = True
         except Exception:
             issues += 1
+            if kind == "dns":
+                dns_failed += 1
             push_log("WARN", f"Self-test failed: {name}")
+    if dns_failed and doh_ok:
+        hints.append(dns_hijack_hint)
+        push_log("INFO", f"Self-test: {dns_hijack_hint}")
     score = int(passed / len(checks) * 100)
     result = {
         "ts": datetime.now().isoformat(),
         "score": score,
         "issues": issues,
+        "hints": hints,
     }
     m = state["modules"]["self_test"]
     m["last_run"] = result["ts"]
@@ -519,6 +537,19 @@ def _run_selftest_real() -> dict:
     if len(history) > 10:
         m["history"] = history[-10:]
     return result
+
+
+def _doh_check(ip: str, name: str, timeout: float = 4.0):
+    # DoH-запрос по прямому IP (обход провайдерского DNS): Cloudflare отдаёт
+    # dns-query по plain HTTP на 1.1.1.1. Бросает исключение при неудаче.
+    import urllib.request
+    req = urllib.request.Request(
+        f"http://{ip}/dns-query?name={name}&type=A",
+        headers={"accept": "application/dns-json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        data = json.loads(r.read().decode())
+    if data.get("Status") != 0 or not data.get("Answer"):
+        raise RuntimeError(f"DoH status={data.get('Status')}")
 
 
 def _tcp_check(host: str, port: int, timeout: float = 3.0):
@@ -795,6 +826,14 @@ def _build_ncp_args() -> list:
         if not cfg.get(config_key, False):
             args.append(flag)
 
+    # Geneva GA evolution (opt-in via the Geneva panel; probing costs traffic)
+    if state["geneva"].get("running"):
+        args.append("--geneva-evolve")
+        args.extend(["--geneva-target", str(cfg.get("geneva_target", "discord.com:443"))])
+        args.extend(["--geneva-interval", str(int(cfg.get("geneva_interval", 60)))])
+        args.extend(["--geneva-population", str(int(cfg.get("geneva_population", 20)))])
+        args.extend(["--geneva-mutation", str(float(cfg.get("geneva_mutation", 0.15)))])
+
     # Covert channel is opt-in (default off)
     if cfg.get("covert_channel", False):
         args.append("--covert")
@@ -924,8 +963,12 @@ def api_set_config():
     if err:
         return err
     data = request.get_json(force=True) or {}
-    state["config"].update(data)
-    save_config(state["config"])
+    # Never accept a nested {"config": {...}} payload — config is a flat dict
+    data.pop("config", None)
+    with state_lock:
+        state["config"].update(data)
+        cfg_snapshot = dict(state["config"])
+    save_config(cfg_snapshot)
     push_log("INFO", "Configuration updated")
     return jsonify({"ok": True, "config": state["config"]})
 
@@ -1710,7 +1753,16 @@ def api_geneva_start():
     state["geneva"]["best_fitness"] = 0.0
     state["geneva"]["fitness_history"] = []
     push_log("INFO", "Geneva GA started - strategy evolution delegated to NCP binary")
-    push_log("INFO", "Note: Geneva evolution runs inside the C++ engine when NCP is active")
+    # Evolution runs INSIDE the ncp binary (needs --geneva-evolve on its
+    # command line, added by _build_ncp_args when state["geneva"]["running"]).
+    # If the engine is already active, restart it so the flag takes effect.
+    if state.get("running") and not state.get("simulation") and state.get("process"):
+        push_log("INFO", "Engine active - restarting NCP with Geneva evolution enabled...")
+        _restart_ncp_process()
+    elif state.get("running"):
+        push_log("WARN", "Simulation mode: Geneva evolution requires the real NCP binary")
+    else:
+        push_log("INFO", "Geneva evolution armed - it will start with the engine (Start Protection)")
     return jsonify({"ok": True})
 
 
@@ -1719,6 +1771,10 @@ def api_geneva_stop():
     state["geneva"]["running"] = False
     push_log("INFO", f"Geneva GA stopped. Generation: {state['geneva']['generation']}, "
              f"Best fitness: {state['geneva']['best_fitness']:.4f}")
+    # Restart the engine without --geneva-evolve so probing actually stops
+    if state.get("running") and not state.get("simulation") and state.get("process"):
+        push_log("INFO", "Restarting NCP without Geneva evolution...")
+        _restart_ncp_process()
     return jsonify({"ok": True, "geneva": state["geneva"]})
 
 
@@ -1728,7 +1784,32 @@ def api_geneva_status():
     eng = _read_engine_stats()
     if eng:
         if isinstance(eng.get("geneva"), dict):
-            g["engine"] = eng["geneva"]
+            ga = eng["geneva"]
+            g["engine"] = ga
+            # Promote live GA counters from the engine stats file into the
+            # top-level fields the Geneva panel polls. Raw fitness scores
+            # (FitnessResult.score(), max ~1000) are normalized to 0..1 for
+            # the UI, which renders best_fitness * 100 as a percentage.
+            if ga.get("ga_running"):
+                gen = int(ga.get("generation", 0))
+                norm_best = min(float(ga.get("best_fitness", 0.0)) / 1000.0, 1.0)
+                norm_avg = min(float(ga.get("avg_fitness", 0.0)) / 1000.0, 1.0)
+                g["generation"] = gen
+                g["best_fitness"] = round(norm_best, 4)
+                g["avg_fitness"] = round(norm_avg, 4)
+                g["evaluations"] = int(ga.get("evaluations", 0))
+                if ga.get("best_strategy"):
+                    g["best_strategy"] = ga["best_strategy"]
+                hist = list(state["geneva"].get("fitness_history") or [])
+                if gen > int(state["geneva"].get("generation", 0)):
+                    hist.append(round(norm_best, 4))
+                    hist = hist[-200:]
+                    state["geneva"]["fitness_history"] = hist
+                    state["geneva"]["generation"] = gen
+                    state["geneva"]["best_fitness"] = round(norm_best, 4)
+                    if ga.get("best_strategy"):
+                        state["geneva"]["best_strategy"] = ga["best_strategy"]
+                g["fitness_history"] = hist
         if isinstance(eng.get("dpi"), dict):
             g["engine_interception"] = bool(eng["dpi"].get("interception_active"))
     return jsonify(g)

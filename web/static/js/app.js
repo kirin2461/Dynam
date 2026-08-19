@@ -1024,6 +1024,9 @@ async function refreshGenevaStatus() {
     }
     document.getElementById('btn-gen-start')?.classList.toggle('hidden', g.running);
     document.getElementById('btn-gen-stop')?.classList.toggle('hidden', !g.running);
+    if (typeof g.best_strategy === 'string' && g.best_strategy) {
+      setEl('gen-best-strategy', g.best_strategy);
+    }
     updateGenevaChart(g.fitness_history || []);
   } catch (_) {}
 }
@@ -2268,8 +2271,8 @@ async function entStegoEncode() {
     passphrase: document.getElementById('ent-stego-pass')?.value,
     signing_key: document.getElementById('ent-stego-signkey')?.value.trim(),
   };
-  if (!body.ip || !body.passphrase || !body.signing_key || !body.domain) {
-    showToast('Заполните IP, домен, passphrase и signing key', 'warn');
+  if (!body.ip || !body.passphrase || !body.signing_key || !body.domain || !body.spa_pubkey) {
+    showToast('Заполните IP, домен, SPA-pubkey, passphrase и signing key', 'warn');
     return;
   }
   try {

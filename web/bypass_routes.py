@@ -157,6 +157,18 @@ def register_bypass_routes(app, ctx):
     push_log = ctx["push_log"]
     save_config = ctx["save_config"]
     ncp_binary = ctx["ncp_binary"]
+    def _engine_ok():
+        try:
+            return bool(ncp_binary) and Path(ncp_binary).exists()
+        except Exception:
+            return False
+
+    def _engine_missing_response():
+        return jsonify({"ok": False, "engine_missing": True,
+                        "error": "Движок ncp не найден. Веб-интерфейс работает, "
+                                 "но для этой функции нужен собранный бинарник ncp "
+                                 "(ncp.exe рядом с ncp-gui.exe или build/ncp)."}), 503
+
     config_dir = Path(ctx["config_dir"])
 
     autohl_path = config_dir / "autohostlist.txt"
@@ -230,6 +242,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/proxy/start", methods=["POST"])
     def api_proxy_start():
+        if not _engine_ok():
+            return _engine_missing_response()
         global _proxy_proc
         with _proxy_lock:
             if _proxy_proc and _proxy_proc.poll() is None:
@@ -547,6 +561,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/monitor/autopilot/learn-preset", methods=["GET", "POST"])
     def api_monitor_autopilot_learn_preset():
+        if not _engine_ok():
+            return _engine_missing_response()
         if request.method == "GET":
             with _ap_preset_lock:
                 return jsonify(dict(_ap_preset))
@@ -565,6 +581,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/monitor/autopilot/learn", methods=["POST"])
     def api_monitor_autopilot_learn():
+        if not _engine_ok():
+            return _engine_missing_response()
         body = request.get_json(force=True) or {}
         domain = (body.get("domain") or "").strip().lower()
         if not domain or " " in domain or "/" in domain:
@@ -582,6 +600,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/monitor/autopilot/reset", methods=["POST"])
     def api_monitor_autopilot_reset():
+        if not _engine_ok():
+            return _engine_missing_response()
         body = request.get_json(force=True) or {}
         domain = (body.get("domain") or "").strip().lower()
         args = [ncp_binary, "autopilot", "reset"] + ([domain] if domain else [])
@@ -594,6 +614,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/monitor/autopilot/enabled", methods=["POST"])
     def api_monitor_autopilot_enabled():
+        if not _engine_ok():
+            return _engine_missing_response()
         body = request.get_json(force=True) or {}
         enabled = bool(body.get("enabled"))
         try:
@@ -641,6 +663,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/blockcheck/start", methods=["POST"])
     def api_blockcheck_start():
+        if not _engine_ok():
+            return _engine_missing_response()
         with _blockcheck_lock:
             if _blockcheck["running"]:
                 return jsonify({"ok": False, "error": "Подбор уже выполняется"}), 409
@@ -747,6 +771,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/zapret/import", methods=["POST"])
     def api_zapret_import():
+        if not _engine_ok():
+            return _engine_missing_response()
         body = request.get_json(force=True) or {}
         zargs = (body.get("args") or "").strip()
         if not zargs:
@@ -777,6 +803,8 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/zapret/apply", methods=["POST"])
     def api_zapret_apply():
+        if not _engine_ok():
+            return _engine_missing_response()
         body = request.get_json(force=True) or {}
         chain_cmdline = (body.get("chain_cmdline") or "").strip()
         if not chain_cmdline:

@@ -167,6 +167,18 @@ def register_enterprise_routes(app, ctx):
     state = ctx["state"]
     push_log = ctx["push_log"]
     ncp_binary = ctx["ncp_binary"]
+    def _engine_ok():
+        try:
+            return bool(ncp_binary) and Path(ncp_binary).exists()
+        except Exception:
+            return False
+
+    def _engine_missing_response():
+        return jsonify({"ok": False, "engine_missing": True,
+                        "error": "Движок ncp не найден. Веб-интерфейс работает, "
+                                 "но для этой функции нужен собранный бинарник ncp "
+                                 "(ncp.exe рядом с ncp-gui.exe или build/ncp)."}), 503
+
     config_dir = Path(ctx["config_dir"])
     require_license = ctx["require_license"]
     bin_dir = str(Path(ncp_binary).parent)
@@ -193,6 +205,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/spa/keygen", methods=["POST"])
     def api_spa_keygen():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("spa")
         if err:
             return err
@@ -230,6 +244,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/spa/knock", methods=["POST"])
     def api_spa_knock():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("spa")
         if err:
             return err
@@ -287,6 +303,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/spa/serve/start", methods=["POST"])
     def api_spa_serve_start():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("spa")
         if err:
             return err
@@ -384,6 +402,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/reality/dry-run", methods=["POST"])
     def api_reality_dry_run():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("reality")
         if err:
             return err
@@ -400,6 +420,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/reality/start", methods=["POST"])
     def api_reality_start():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("reality")
         if err:
             return err
@@ -441,6 +463,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/stegodns/encode", methods=["POST"])
     def api_stegodns_encode():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("stegodns")
         if err:
             return err
@@ -507,6 +531,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/stegodns/decode", methods=["POST"])
     def api_stegodns_decode():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("stegodns")
         if err:
             return err
@@ -570,6 +596,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/porthop/serve/start", methods=["POST"])
     def api_porthop_serve_start():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("porthop")
         if err:
             return err
@@ -616,6 +644,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/porthop/client", methods=["POST"])
     def api_porthop_client():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("porthop")
         if err:
             return err
@@ -653,6 +683,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/fog/start", methods=["POST"])
     def api_fog_start():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("fog")
         if err:
             return err
@@ -711,6 +743,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/xdp/probe")
     def api_xdp_probe():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("xdp")
         if err:
             return err
@@ -727,6 +761,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/xdp/stats", methods=["POST"])
     def api_xdp_stats():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("xdp")
         if err:
             return err
@@ -752,6 +788,8 @@ def register_enterprise_routes(app, ctx):
 
     @app.route("/api/xdp/drop", methods=["POST"])
     def api_xdp_drop():
+        if not _engine_ok():
+            return _engine_missing_response()
         err = require_license("xdp")
         if err:
             return err
