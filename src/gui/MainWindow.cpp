@@ -569,7 +569,7 @@ void MainWindow::onCheckForUpdates() {
 
 void MainWindow::onOpenWebUi() {
     if (Launcher::launchWebUi(this))
-        appendLog(QStringLiteral("[ui] запущен Web UI (ncp-gui.exe)"));
+        appendLog(QStringLiteral("[ui] запущен Web UI"));
 }
 
 void MainWindow::onChooseUiNextTime() {

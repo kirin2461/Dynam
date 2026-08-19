@@ -540,7 +540,7 @@ rejected.
 
 ### Windows tray & autostart
 
-Frozen GUI build (`ncp-gui.exe`) shows a system-tray icon (open panel /
+The GUI build (`ncp-qt.exe`; an optional frozen web-UI build may ship as `ncp-gui.exe`) shows a system-tray icon (open panel /
 quit) and can register itself in autostart (HKCU `Run` on Windows,
 `~/.config/autostart/ncp.desktop` on Linux) — toggled from the GUI.
 
