@@ -23,16 +23,19 @@ jobs:
       - name: Install dependencies
         run: |
           # archive.ubuntu.com is occasionally degraded on GH runners:
-          # hard timeouts + retry the whole update+install transaction.
-          APT_OPTS="-o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::ForceIPv4=true"
+          # Acquire timeouts do NOT kill a trickling connection, so wrap
+          # every apt invocation in a hard `timeout` and retry the whole
+          # update+install transaction.
+          APT_OPTS="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Acquire::ForceIPv4=true"
           ok=0
           for i in 1 2 3 4 5; do
-            sudo apt-get $APT_OPTS update && \
-            sudo apt-get $APT_OPTS install -y --no-install-recommends \
+            sudo apt-get clean
+            sudo timeout 180 apt-get $APT_OPTS update && \
+            sudo timeout 600 apt-get $APT_OPTS install -y --no-install-recommends \
               cmake build-essential pkg-config \
               libpcap-dev libssl-dev libsodium-dev libwebsockets-dev \
               qt6-base-dev qt6-charts-dev && { ok=1; break; } || \
-              { echo "apt attempt $i failed, retrying in 20s..."; sleep 20; }
+              { echo "apt attempt $i failed, retrying in 15s..."; sleep 15; }
           done
           [ "$ok" = 1 ] || { echo "apt failed after 5 attempts"; exit 1; }
 
