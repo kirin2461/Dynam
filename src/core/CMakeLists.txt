@@ -404,8 +404,18 @@ if(WIN32)
     set(NCP_WFP_HEADERS_DIR "${CMAKE_SOURCE_DIR}/deps/wfp-sdk-headers")
     include(CheckCXXSourceCompiles)
     set(_CMAKE_REQUIRED_INCLUDES_SAVE "${CMAKE_REQUIRED_INCLUDES}")
-    if(EXISTS "${NCP_WFP_HEADERS_DIR}/fwpmu.h")
+    set(_CMAKE_REQUIRED_FLAGS_SAVE "${CMAKE_REQUIRED_FLAGS}")
+    # try_compile does not inherit add_definitions(): pass the project
+    # _WIN32_WINNT explicitly or mingw hides all WFP declarations and the
+    # check always fails.
+    set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -D_WIN32_WINNT=0x0A00")
+    # Vendored mingw-w64 headers (system mingw-w64 9.3 set + NCP compat
+    # block with SDK-verified flags/GUIDs) are a MinGW fallback ONLY.
+    # MSVC ships a complete fwpmu.h in the Windows SDK.
+    set(_NCP_USE_VENDORED_WFP OFF)
+    if(NOT MSVC AND EXISTS "${NCP_WFP_HEADERS_DIR}/fwpmu.h")
         set(CMAKE_REQUIRED_INCLUDES "${NCP_WFP_HEADERS_DIR}")
+        set(_NCP_USE_VENDORED_WFP ON)
     endif()
     check_cxx_source_compiles("
 #include <winsock2.h>
@@ -414,8 +424,11 @@ if(WIN32)
 int main() { return (int)FWPM_SESSION_FLAG_DYNAMIC + (int)FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT + (int)FWP_E_ALREADY_EXISTS; }
 " HAVE_WFP_SDK)
     set(CMAKE_REQUIRED_INCLUDES "${_CMAKE_REQUIRED_INCLUDES_SAVE}")
+    set(CMAKE_REQUIRED_FLAGS "${_CMAKE_REQUIRED_FLAGS_SAVE}")
     if(HAVE_WFP_SDK)
-        target_include_directories(ncp_core PUBLIC "${NCP_WFP_HEADERS_DIR}")
+        if(_NCP_USE_VENDORED_WFP)
+            target_include_directories(ncp_core PUBLIC "${NCP_WFP_HEADERS_DIR}")
+        endif()
         target_link_libraries(ncp_core PUBLIC fwpuclnt)
         message(STATUS "WFP enabled (vendored headers: ${NCP_WFP_HEADERS_DIR})")
     else()

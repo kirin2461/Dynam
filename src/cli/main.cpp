@@ -38,6 +38,7 @@
 
 #include <iostream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 #include <map>
 #include <functional>
@@ -731,6 +732,42 @@ static std::vector<std::string> get_options_all(const std::vector<std::string>& 
         if (args[i] == option) out.push_back(args[i + 1]);
     return out;
 }
+// Returns the first positional argument: a token that is neither an option
+// (--foo) nor the VALUE of an option that takes one. Without this, e.g.
+// `ncp run --preset tspu` misread "tspu" (the --preset value) as the
+// positional interface name -> spoofer/DNS setup ran against a
+// non-existent interface and silently failed.
+static std::string first_positional_arg(const std::vector<std::string>& args) {
+    static const std::unordered_set<std::string> kValueOptions = {
+        "--allow-port","--apply","--args","--authorized-keys","--autohostlist",
+        "--base-port","--bind","--chain","--default-ttl","--detector-log",
+        "--domain","--domains","--events-log","--expires","--fake-quic",
+        "--fake-ttl","--fallback","--file","--hop-interval","--host",
+        "--hostlist-dir","--id","--interface","--internal","--ip","--key",
+        "--key-file","--ks-allow","--listen","--max-ttl","--message",
+        "--multisplit","--noise-size","--out","--passphrase","--peer",
+        "--port","--preset","--proto","--pt-obfs4","--pt-snowflake",
+        "--quic-frag","--range","--sam-host","--sam-port","--secret",
+        "--session-id","--set-name","--signing-key","--spa-pubkey",
+        "--split-pos","--stats-file","--status-interval","--target",
+        "--target-port","--timeout","--tor-bridge","--tor-exec","--ttl",
+        "--tunnel-length","--txt","--upstream","--upstream-mss",
+        "--verify-pubkey","--zapret-chains","--zapret-profile",
+    };
+    bool skip_next = false;
+    for (const auto& a : args) {
+        if (skip_next) { skip_next = false; continue; }
+        if (a.rfind("--", 0) == 0) {
+            // "--opt=value" form never consumes the next token
+            if (a.find('=') == std::string::npos && kValueOptions.count(a))
+                skip_next = true;
+            continue;
+        }
+        return a;
+    }
+    return "";
+}
+
 static int get_option_int(const std::vector<std::string>& args, const std::string& option, int default_val) {
     std::string val = get_option(args, option);
     if (val.empty()) return default_val;
@@ -1235,10 +1272,9 @@ void handle_run(const std::vector<std::string>& args) {
         // Windows headers — use iface_opt for the variable name.
         std::string iface_opt = get_option(args, "--interface");
         if (iface_opt.empty()) {
-            // Positional: first arg that doesn't start with --
-            for (const auto& a : args) {
-                if (a.substr(0, 2) != "--") { iface_opt = a; break; }
-            }
+            // Positional interface name, skipping values of --options
+            // (otherwise "--preset tspu" is misread as interface "tspu").
+            iface_opt = first_positional_arg(args);
         }
         
         // Initialize globals
