@@ -217,7 +217,7 @@ void ErasureCoder::encode(const uint8_t* const* data,
         uint8_t* dst = out_parity[p];
         if (!dst) continue;
         std::memset(dst, 0, len);
-        const uint8_t* row = &matrix_[(k_ + p) * k_];
+        const uint8_t* row = &matrix_[static_cast<size_t>(k_ + p) * k_];
         for (uint32_t j = 0; j < k_; ++j) {
             if (data[j]) gf_mul_add(dst, data[j], row[j], len);
         }
@@ -236,7 +236,8 @@ bool ErasureCoder::decode(const std::vector<ShardView>& present,
     // Build the k×k decoding submatrix from the present rows.
     std::vector<uint8_t> sub(static_cast<size_t>(k_) * k_);
     for (uint32_t r = 0; r < k_; ++r) {
-        std::memcpy(&sub[r * k_], &matrix_[present[r].idx * k_], k_);
+        std::memcpy(&sub[static_cast<size_t>(r) * k_],
+                    &matrix_[static_cast<size_t>(present[r].idx) * k_], k_);
     }
     if (!gf_invert(sub, k_)) return false;
 

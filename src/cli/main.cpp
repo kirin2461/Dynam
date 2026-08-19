@@ -3474,9 +3474,10 @@ void handle_spa(const std::vector<std::string>& args) {
     if (action == "knock") {
         // first positional after the action is the target host
         std::string host;
-        for (size_t i = 1; i < args.size(); ++i) {
-            if (args[i].rfind("--", 0) == 0) { ++i; continue; }  // skip option + value
-            if (args[i] == "--send-twice") continue;
+        size_t i = 1;
+        while (i < args.size()) {
+            if (args[i] == "--send-twice") { ++i; continue; }       // flag, no value
+            if (args[i].rfind("--", 0) == 0) { i += 2; continue; }  // skip option + value
             host = args[i];
             break;
         }
@@ -3655,6 +3656,11 @@ static bool reality_load_keyfile(const std::string& path, ncp::RealityAuth& auth
 }
 
 void handle_reality(const std::vector<std::string>& args) {
+    // CLI entry for the XTLS-Reality-style fallback server. Parses
+    // --listen/--fallback/--internal/--key-file, loads the client keys
+    // (secret keys required for truncated-token verification), prints the
+    // effective configuration and runs RealityServer until SIGINT.
+    // --dry-run validates the configuration without opening the socket.
     if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
         reality_print_usage();
         return;
@@ -3931,6 +3937,11 @@ static uint64_t parse_session_id(const std::string& s, bool& ok) {
 }
 
 void handle_porthop(const std::vector<std::string>& args) {
+    // CLI entry for the UDP port-hopping transport. Both actions share the
+    // HopSchedule parameters (--base-port/--range/--secret/--hop-interval).
+    // serve binds the whole port range (SO_REUSEPORT), registers the allowed
+    // --session-id values and echoes payloads with ACKs; client sends
+    // --message to the currently scheduled port and hops on loss/timeout.
     if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
         porthop_print_usage();
         return;
@@ -4218,6 +4229,11 @@ static void xdp_print_usage() {
 }
 
 void handle_xdp(const std::vector<std::string>& args) {
+    // CLI entry for eBPF/XDP management: compile the BPF object with clang,
+    // attach/detach it via iproute2 (xdpgeneric mode), read per-port UDP
+    // counters from the pinned statistics map, set/clear the selective-drop
+    // port and probe kernel BPF support. All map access goes through raw
+    // bpf(2) syscalls guarded to Linux (stubs elsewhere).
     if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
         xdp_print_usage();
         return;

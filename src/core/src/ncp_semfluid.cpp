@@ -223,9 +223,11 @@ const char* SemanticWrapper::template_name(int template_id) {
 HttpRequest SemanticWrapper::wrap(const std::vector<uint8_t>& payload,
                                   std::optional<int> template_id,
                                   std::mt19937_64& rng) {
-    if (sodium_init() < 0) {
-        // Extremely unlikely; fall through, hashing is still functional.
-    }
+    // sodium_init is best-effort here: even in the extremely unlikely
+    // failure case the hashing below (BLAKE2b via crypto_generichash)
+    // remains functional.
+    const int sodium_rc = sodium_init();
+    (void)sodium_rc;
     int tid = template_id ? (*template_id % kTemplateCount + kTemplateCount) % kTemplateCount
                           : static_cast<int>(rng() % kTemplateCount);
     const TemplateDef& t = kTemplates[tid];
