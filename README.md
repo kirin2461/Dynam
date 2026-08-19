@@ -111,6 +111,27 @@ ncp.exe run --preset tspu
 > an incomplete `fwpmu.h`, so WFP code is disabled there automatically
 > (`NCP_NO_WFP`) — WinDivert is the real interception backend regardless.
 
+## Install via npm
+
+Prebuilt `ncp` binaries from [GitHub Releases](https://github.com/kirin2461/Dynam/releases)
+are distributed as the npm package [`dynam-ncp`](https://www.npmjs.com/package/dynam-ncp):
+
+[![npm version](https://img.shields.io/npm/v/dynam-ncp)](https://www.npmjs.com/package/dynam-ncp)
+
+```bash
+npm install -g dynam-ncp
+
+dynam-ncp --help             # or just `ncp`
+sudo dynam-ncp run           # PARANOID mode (all protection layers)
+dynam-ncp proxy --port 1080  # local SOCKS5/HTTP desync proxy (no admin needed)
+dynam-ncp spa keygen --out my_spa
+```
+
+Supported platforms: `linux-x64`, `darwin-x64`, `darwin-arm64` (via Rosetta 2),
+`win32-x64`. The postinstall script downloads and verifies the matching release
+asset; on unsupported platforms the install succeeds with a warning so you can
+build from source instead. Details and environment variables: [`npm/README.md`](npm/README.md).
+
 ## Testing
 
 ```bash

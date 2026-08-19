@@ -1,0 +1,45 @@
+name: npm Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version to publish (leave empty to keep npm/package.json version)'
+        required: false
+        default: ''
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: npm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Sync version with release tag
+        run: |
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION:-${{ inputs.tag }}}"
+          VERSION="${VERSION#v}"
+          if [ -n "$VERSION" ]; then
+            echo "Setting npm package version to $VERSION"
+            npm version "$VERSION" --no-git-tag-version --allow-same-version
+          else
+            echo "Keeping version from package.json"
+          fi
+
+      - name: Verify package contents
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

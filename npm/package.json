@@ -1,0 +1,50 @@
+{
+  "name": "dynam-ncp",
+  "version": "1.5.0",
+  "description": "Dynam NCP - multi-layered DPI-bypass and network privacy platform (binary wrapper). Installs the prebuilt `ncp` CLI from GitHub Releases.",
+  "keywords": [
+    "dynam",
+    "ncp",
+    "dpi-bypass",
+    "anti-censorship",
+    "privacy",
+    "proxy",
+    "desync",
+    "spa",
+    "network"
+  ],
+  "homepage": "https://github.com/kirin2461/Dynam",
+  "bugs": "https://github.com/kirin2461/Dynam/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kirin2461/Dynam.git",
+    "directory": "npm"
+  },
+  "license": "AGPL-3.0-only",
+  "bin": {
+    "dynam-ncp": "bin/dynam-ncp.js",
+    "ncp": "bin/dynam-ncp.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "bin",
+    "vendor",
+    "install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}
