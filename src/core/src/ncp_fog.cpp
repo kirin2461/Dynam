@@ -15,12 +15,14 @@
 
 #include <sodium.h>
 
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/select.h>
+#endif
 
 // Minimal local logging (standalone-build friendly).
 #ifndef NCPX_FOG_LOG
@@ -193,6 +195,10 @@ FogNode::~FogNode() { stop(); }
 
 FogError FogNode::start() {
     if (sock_ >= 0) return FogError::OK;
+#ifdef _WIN32
+    NCPX_FOG_LOG("ERROR", "fog node networking is not supported on Windows yet");
+    return FogError::NOT_BOUND;
+#else
     sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_ < 0) {
         NCPX_FOG_LOG("ERROR", "socket() failed");
@@ -216,13 +222,16 @@ FogError FogNode::start() {
         bound_port_ = ntohs(addr.sin_port);
     }
     return FogError::OK;
+#endif
 }
 
 void FogNode::stop() {
+#ifndef _WIN32
     if (sock_ >= 0) {
         ::close(sock_);
         sock_ = -1;
     }
+#endif
 }
 
 bool FogNode::running() const { return sock_ >= 0; }
@@ -298,8 +307,13 @@ FogError FogNode::send_route_ad(const FogPeerInfo& neighbour, uint64_t now) {
     return send_frame_to(f, neighbour.ipv4, neighbour.port);
 }
 
-FogError FogNode::send_frame_to(const FogFrame& f, uint32_t ip, uint16_t port) {
+FogError FogNode::send_frame_to([[maybe_unused]] const FogFrame& f,
+                                [[maybe_unused]] uint32_t ip,
+                                [[maybe_unused]] uint16_t port) {
     if (sock_ < 0) return FogError::NOT_BOUND;
+#ifdef _WIN32
+    return FogError::NOT_BOUND;
+#else
     std::vector<uint8_t> buf = f.pack();
     sockaddr_in dst{};
     dst.sin_family = AF_INET;
@@ -312,6 +326,7 @@ FogError FogNode::send_frame_to(const FogFrame& f, uint32_t ip, uint16_t port) {
         return FogError::SEND_FAILED;
     }
     return FogError::OK;
+#endif
 }
 
 FogError FogNode::forward(const FogFrame& f, uint64_t now) {
@@ -452,8 +467,12 @@ void FogNode::handle_frame(const FogFrame& f, uint32_t src_ip, uint16_t src_port
     // No route: the frame silently dies here (NO_ROUTE from forward()).
 }
 
-int FogNode::poll(int timeout_ms, uint64_t now) {
+int FogNode::poll([[maybe_unused]] int timeout_ms,
+                  [[maybe_unused]] uint64_t now) {
     if (sock_ < 0) return 0;
+#ifdef _WIN32
+    return 0;
+#else
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(sock_, &rfds);
@@ -478,6 +497,7 @@ int FogNode::poll(int timeout_ms, uint64_t now) {
         ++handled;
     }
     return handled;
+#endif
 }
 
 bool FogNode::inbox_pop(std::vector<uint8_t>& out) {

@@ -8,6 +8,7 @@
 
 #include <sodium.h>
 
+#ifndef _WIN32
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -15,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#endif
 
 namespace ncp {
 
@@ -102,7 +104,12 @@ bool split_sni(const std::string& sni, std::string& token,
 }
 
 // Write all bytes, retrying on EINTR; MSG_NOSIGNAL against SIGPIPE.
-bool write_all(int fd, const uint8_t* data, size_t len) noexcept {
+// Windows: the TCP splice path is not supported yet, stubbed out.
+bool write_all([[maybe_unused]] int fd, [[maybe_unused]] const uint8_t* data,
+               [[maybe_unused]] size_t len) noexcept {
+#ifdef _WIN32
+    return false;
+#else
     size_t off = 0;
     while (off < len) {
         const ssize_t n = ::send(fd, data + off, len - off, MSG_NOSIGNAL);
@@ -114,9 +121,14 @@ bool write_all(int fd, const uint8_t* data, size_t len) noexcept {
         off += static_cast<size_t>(n);
     }
     return true;
+#endif
 }
 
-int connect_to(const std::string& host, uint16_t port) noexcept {
+int connect_to([[maybe_unused]] const std::string& host,
+               [[maybe_unused]] uint16_t port) noexcept {
+#ifdef _WIN32
+    return -1;  // TCP fallback dial is not supported on Windows yet
+#else
     struct addrinfo hints {};
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -135,6 +147,7 @@ int connect_to(const std::string& host, uint16_t port) noexcept {
     }
     ::freeaddrinfo(res);
     return fd;
+#endif
 }
 
 } // anonymous namespace
@@ -320,7 +333,11 @@ RealityServer::Decision RealityServer::classify(const uint8_t* clienthello,
     return Decision::FALLBACK;
 }
 
-void RealityServer::splice(int fd_a, int fd_b) noexcept {
+void RealityServer::splice([[maybe_unused]] int fd_a,
+                           [[maybe_unused]] int fd_b) noexcept {
+#ifdef _WIN32
+    return;  // bidirectional splice is not supported on Windows yet
+#else
     if (fd_a < 0 || fd_b < 0) return;
     bool read_a = true;  // still reading from fd_a
     bool read_b = true;  // still reading from fd_b
@@ -366,9 +383,14 @@ void RealityServer::splice(int fd_a, int fd_b) noexcept {
             }
         }
     }
+#endif
 }
 
-bool RealityServer::handle_client(int client_fd, uint64_t now) const noexcept {
+bool RealityServer::handle_client([[maybe_unused]] int client_fd,
+                                  [[maybe_unused]] uint64_t now) const noexcept {
+#ifdef _WIN32
+    return false;  // fallback relay is not supported on Windows yet
+#else
     if (client_fd < 0) return false;
 
     // Read the ClientHello (single record, capped at 16 KiB).
@@ -408,6 +430,7 @@ bool RealityServer::handle_client(int client_fd, uint64_t now) const noexcept {
     splice(client_fd, upstream);
     ::close(upstream);
     return true;
+#endif
 }
 
 } // namespace ncp
