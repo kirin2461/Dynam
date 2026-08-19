@@ -99,6 +99,25 @@ set_target_properties(ncp-qt PROPERTIES
     OUTPUT_NAME "ncp-qt"
 )
 
+# -- UAC: require administrator on Windows ----------------------------------
+# ncp-qt spawns ncp.exe via QProcess, which cannot elevate a non-elevated
+# child - so the GUI itself must start elevated. Same linker-flag pattern as
+# src/cli (never add .manifest to target_sources: that triggers MSVC's
+# automatic manifest merging which conflicts with /MANIFESTINPUT).
+if(WIN32 AND MSVC)
+    set(NCP_QT_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/ncp-qt.manifest")
+    if(EXISTS "${NCP_QT_MANIFEST}")
+        target_link_options(ncp-qt PRIVATE
+            "/MANIFEST:EMBED"
+            "/MANIFESTUAC:NO"
+            "/MANIFESTINPUT:${NCP_QT_MANIFEST}"
+        )
+        message(STATUS "ncp-qt: UAC manifest embedded (requireAdministrator)")
+    else()
+        message(WARNING "ncp-qt.manifest not found - UAC elevation disabled")
+    endif()
+endif()
+
 if(APPLE)
     # macOS packaging (scripts/build_macos_gui_app.sh) expects the GUI as a
     # bundle at build-gui/bin/ncp.app with the executable named "ncp"

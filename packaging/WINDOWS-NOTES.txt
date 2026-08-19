@@ -1,0 +1,44 @@
+================================================================
+ Dynam NCP v1.5.0 - Windows quick start
+================================================================
+
+WHAT IS IN THIS PACKAGE
+  ncp.exe            CLI engine (requires Administrator rights)
+  ncp-qt.exe         Qt graphical interface (requires Administrator)
+  start-webui.bat    Web UI launcher (browser interface)
+  web/               Web UI sources (Python)
+  WinDivert.dll      packet interception driver library
+  WinDivert64.sys    packet interception kernel driver
+  *.dll              Qt / OpenSSL / libsodium runtime libraries
+
+IMPORTANT: ADMINISTRATOR RIGHTS
+  Traffic interception (WinDivert driver) only works with
+  Administrator rights. ncp.exe and ncp-qt.exe have the
+  requireAdministrator manifest embedded - Windows will show a
+  UAC prompt when you start them. Always answer "Yes".
+  If you run from a terminal, use an elevated ("Run as
+  administrator") Command Prompt / PowerShell.
+
+QUICK START
+  1. GUI:   double-click ncp-qt.exe  (allow the UAC prompt)
+  2. CLI:   ncp.exe --help            (in an elevated terminal)
+            ncp.exe list              show available modes
+  3. Web:   run start-webui.bat
+            (first run installs Python packages via pip;
+             a browser tab opens automatically)
+
+TROUBLESHOOTING
+  * "Access denied. Run as Administrator" in the log:
+    you started the program without elevation - see above.
+  * Discord / other apps still blocked after starting:
+    make sure the engine is actually running (status in GUI),
+    the mode is enabled, and no other VPN/filter driver
+    conflicts. Try stopping and starting again as admin.
+  * Antivirus flags WinDivert64.sys: this is a well-known
+    open-source packet capture driver (https://windivert.info,
+    license in WinDivert-LICENSE.txt). Add an exclusion.
+  * start-webui.bat says Python not found: install Python 3.9+
+    from python.org (tick "Add python.exe to PATH").
+
+More documentation: https://github.com/kirin2461/Dynam
+================================================================

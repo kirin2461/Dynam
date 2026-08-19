@@ -51,6 +51,8 @@ jobs:
           cp build/bin/ncp-qt $pkg/ncp-qt.bin
           cp -r web $pkg/
           cp README.md LICENSE $pkg/
+          cp packaging/start-webui.sh $pkg/
+          chmod +x $pkg/start-webui.sh
           # Bundle every non-baseline shared lib both binaries need
           # (libwebsockets/openssl3/libsodium/libpcap/Qt are NOT present
           # on a stock user system; glibc/libstdc++/libgcc stay system).
@@ -98,6 +100,8 @@ jobs:
           chmod +x release/ncp-macos-x64/ncp
           cp -r web release/ncp-macos-x64/
           cp README.md LICENSE release/ncp-macos-x64/
+          cp packaging/start-webui.sh release/ncp-macos-x64/
+          chmod +x release/ncp-macos-x64/start-webui.sh
           tar -czvf ncp-macos-x64.tar.gz -C release ncp-macos-x64
 
       - name: Upload artifact
@@ -163,6 +167,18 @@ jobs:
           Copy-Item -Recurse web release\ncp-windows-x64\web
           windeployqt --release --no-translations release\ncp-windows-x64\ncp-qt.exe
           Copy-Item C:\vcpkg\installed\x64-windows\bin\*.dll release\ncp-windows-x64\
+          # WinDivert driver files: CMake post-build already placed them next
+          # to ncp.exe (deps/WinDivert auto-detected). Fall back to the repo
+          # copy so the package NEVER ships without the interception driver -
+          # without WinDivert.dll/WinDivert64.sys the bypass silently fails.
+          $wd = 'build\bin\Release'
+          if (-not (Test-Path "$wd\WinDivert.dll")) { $wd = 'deps\WinDivert\x64' }
+          Copy-Item "$wd\WinDivert.dll" release\ncp-windows-x64\
+          Copy-Item "$wd\WinDivert64.sys" release\ncp-windows-x64\
+          Copy-Item deps\WinDivert\LICENSE release\ncp-windows-x64\WinDivert-LICENSE.txt
+          # Web UI launcher + Windows quick-start notes
+          Copy-Item packaging\start-webui.bat release\ncp-windows-x64\
+          Copy-Item packaging\WINDOWS-NOTES.txt release\ncp-windows-x64\
           Compress-Archive -Path release\ncp-windows-x64 -DestinationPath ncp-windows-x64.zip -Force
 
       - name: Upload artifact
