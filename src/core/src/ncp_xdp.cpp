@@ -8,20 +8,32 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>   // struct stat — exists on MSVC too
+#ifndef _WIN32
 #include <fcntl.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#else
+#include <fcntl.h>      // MSVC: O_RDONLY
+#include <io.h>         // MSVC: _open/_read/_close
+#endif
 
 namespace ncp {
 namespace {
 
 // Run a program, capture combined stdout+stderr, return exit status.
-int run_cmd(const std::vector<std::string>& argv, std::string& output) {
+// Windows: the eBPF toolchain (clang -target bpf, iproute2) is Linux-only,
+// so there is nothing to run — report failure like a missing binary would.
+int run_cmd([[maybe_unused]] const std::vector<std::string>& argv,
+            [[maybe_unused]] std::string& output) {
+#ifdef _WIN32
+    return -1;
+#else
     int pipefd[2];
     if (pipe(pipefd) != 0) return -1;
 
@@ -46,6 +58,7 @@ int run_cmd(const std::vector<std::string>& argv, std::string& output) {
     int status = 0;
     waitpid(pid, &status, 0);
     return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+#endif
 }
 
 bool file_exists(const std::string& p) {
@@ -132,15 +145,15 @@ bool XdpManager::compile_program(const std::string& src_path,
         err = "clang reported success but object file missing";
         return false;
     }
-    // sanity: ELF magic
-    int fd = ::open(obj_path.c_str(), O_RDONLY);
-    if (fd < 0) { err = "cannot open object"; return false; }
-    unsigned char magic[4] = {0,0,0,0};
-    ssize_t n = ::read(fd, magic, 4);
-    ::close(fd);
-    if (n != 4 || magic[0] != 0x7F || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
-        err = "object is not an ELF file";
-        return false;
+    // sanity: ELF magic (portable std::ifstream — no POSIX fd API needed)
+    {
+        std::ifstream ifs(obj_path, std::ios::binary);
+        char magic[4] = {0,0,0,0};
+        if (!ifs || !ifs.read(magic, 4)) { err = "cannot open object"; return false; }
+        if (magic[0] != 0x7F || magic[1] != 'E' || magic[2] != 'L' || magic[3] != 'F') {
+            err = "object is not an ELF file";
+            return false;
+        }
     }
     return true;
 }
@@ -189,7 +202,9 @@ bool XdpManager::map_lookup_pinned(const std::string& pin_path,
     int fd = bpf_obj_get(pin_path.c_str());
     if (fd < 0) return false;
     int rc = bpf_map_lookup(fd, key, value);
+#ifndef _WIN32
     ::close(fd);
+#endif
     return rc == 0;
 }
 
@@ -200,7 +215,9 @@ bool XdpManager::map_update_pinned(const std::string& pin_path,
     int fd = bpf_obj_get(pin_path.c_str());
     if (fd < 0) return false;
     int rc = bpf_map_update(fd, key, value, 0 /*BPF_ANY*/);
+#ifndef _WIN32
     ::close(fd);
+#endif
     return rc == 0;
 }
 
