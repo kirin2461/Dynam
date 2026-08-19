@@ -60,6 +60,15 @@ public:
     static void listInterfaces(QObject* ctx,
                                std::function<void(const QStringList&)> cb);
 
+    /// Run an arbitrary one-shot `ncp <args...>` command asynchronously;
+    /// cb gets (exit code, merged stdout+stderr). Used by the Enterprise
+    /// panel for subcommands that terminate on their own (spa keygen/knock,
+    /// stegodns, porthop client, xdp probe/stats/drop, --dry-run checks).
+    /// Long-running daemons must be managed with a dedicated QProcess
+    /// instead. cb is invoked exactly once with code -1 on start failure.
+    static void runNcpCommand(QObject* ctx, const QStringList& args,
+                              std::function<void(int, const QString&)> cb);
+
 signals:
     /// Raw output line from ncp.exe (stdout+stderr merged, trimmed).
     void lineReceived(const QString& line);

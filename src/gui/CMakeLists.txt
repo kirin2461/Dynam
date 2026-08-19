@@ -64,6 +64,7 @@ set(NCP_QT_HEADERS
     widgets/CrawlerDialog.hpp
     widgets/SparklineWidget.hpp
     widgets/BulkDiffDialog.hpp
+    widgets/EnterprisePanel.hpp
 )
 
 add_executable(ncp-qt ${NCP_QT_SOURCES} ${NCP_QT_HEADERS})

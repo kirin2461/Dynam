@@ -14,6 +14,7 @@
 // PR #118 (upstream Qt GUI) tool panels — header-only widgets.
 #include "widgets/UiSettingsDialog.hpp"
 #include "widgets/CryptoPanel.hpp"
+#include "widgets/EnterprisePanel.hpp"
 #include "widgets/IdentityPanel.hpp"
 #include "widgets/DPIMetricsPanel.hpp"
 #include "widgets/DPIStrategyEditor.hpp"
@@ -260,6 +261,12 @@ void MainWindow::setupUI() {
         cryptoPanel_ = new CryptoPanel(crypto_.get(), this);
         tabs->addTab(cryptoPanel_, tr("Крипто"));
     }
+
+    // ─── Enterprise: CLI enterprise modules without GUI coverage ────────
+    // (spa / reality / stegodns / porthop / fog / xdp). Drives the external
+    // ncp CLI via DriverController; stegodns runs in-process in the panel.
+    enterprisePanel_ = new EnterprisePanel(this);
+    tabs->addTab(enterprisePanel_, tr("Enterprise"));
 }
 
 void MainWindow::setupMenuBar() {
