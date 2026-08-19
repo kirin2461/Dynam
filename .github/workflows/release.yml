@@ -45,6 +45,9 @@ jobs:
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(nproc)
 
+      - name: Stamp web UI build id (git sha)
+        run: sed -i "s/__NCP_BUILD_STAMP__/${GITHUB_SHA:0:7}/" web/server.py
+
       - name: Package (CLI + Qt GUI + Web UI, bundled shared libs)
         run: |
           set -e
@@ -91,6 +94,9 @@ jobs:
 
       - name: Build Dynam.app (Qt GUI + embedded CLI) via proven script
         run: ./scripts/build_macos_gui_app.sh
+
+      - name: Stamp web UI build id (git sha)
+        run: sed -i "s/__NCP_BUILD_STAMP__/${GITHUB_SHA:0:7}/" web/server.py
 
       - name: Package (Dynam.app + CLI + Web UI)
         run: |
@@ -159,6 +165,12 @@ jobs:
 
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}}
+
+      - name: Stamp web UI build id (git sha)
+        shell: pwsh
+        run: |
+          $sha = "${GITHUB_SHA}".Substring(0,7)
+          [IO.File]::WriteAllText("web\server.py", ((Get-Content web\server.py -Raw) -replace "__NCP_BUILD_STAMP__", $sha))
 
       - name: Build ncp-gui.exe (frozen Web UI launcher)
         shell: pwsh

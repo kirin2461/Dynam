@@ -225,6 +225,9 @@ STATIC_DIR = (RESOURCE_DIR / "static") if FROZEN else (BASE_DIR / "static")
 LOG_BUFFER_SIZE = 500
 
 # ─── App & SocketIO ──────────────────────────────────────────────────────────
+# Заменяется CI на короткий SHA коммита при сборке релиза
+BUILD_STAMP = "__NCP_BUILD_STAMP__"
+
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
 
 # ── Local API protection ─────────────────────────────────────────────
@@ -442,6 +445,45 @@ def push_log(level: str, msg: str):
     with log_lock:
         log_buffer.append(entry)
     socketio.emit("log", entry, namespace="/ws")
+
+
+# ── API request logging + JSON 404/405 (R7-WEB-04) ──
+# Каждый изменяющий вызов и каждый неудачный вызов API попадает в лог-панель UI:
+# из отчёта "ничего не работает" всегда видно точный метод+путь+статус.
+@app.after_request
+def _api_request_logger(resp):
+    try:
+        path = request.path
+        if not path.startswith("/api"):
+            return resp
+        code = resp.status_code
+        if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            lvl = "INFO" if code < 400 else ("WARN" if code < 500 else "ERROR")
+            push_log(lvl, f"API {request.method} {path} -> {code}")
+        elif code >= 400:
+            push_log("WARN" if code < 500 else "ERROR",
+                     f"API GET {path} -> {code}")
+    except Exception:
+        pass
+    return resp
+
+
+@app.errorhandler(404)
+def _api_404(e):
+    if request.path.startswith("/api"):
+        push_log("WARN", f"API 404 - нет такого эндпоинта: {request.method} {request.path}")
+        return jsonify({"ok": False,
+                        "error": f"Эндпоинт не найден: {request.method} {request.path}"}), 404
+    return e
+
+
+@app.errorhandler(405)
+def _api_405(e):
+    if request.path.startswith("/api"):
+        push_log("WARN", f"API 405 - неверный метод: {request.method} {request.path}")
+        return jsonify({"ok": False,
+                        "error": f"Метод {request.method} не поддерживается для {request.path}"}), 405
+    return e
 
 
 def get_uptime() -> str:
@@ -1819,7 +1861,8 @@ def api_geneva_status():
 def api_version():
     return jsonify({
         "version": "1.4.0-dev",
-        "build": "web-" + datetime.now().strftime("%Y%m%d"),
+        "build": ("web-" + datetime.now().strftime("%Y%m%d")
+                  + ("" if BUILD_STAMP.startswith("__") else "-" + BUILD_STAMP)),
         "platform": platform.system(),
         "python": sys.version.split()[0],
     })
