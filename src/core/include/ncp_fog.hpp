@@ -32,6 +32,8 @@
 #include <mutex>
 #include <optional>
 
+#include "ncp_winsock_init.hpp"
+
 namespace ncp {
 
 // ===== Peer identity =====
@@ -202,7 +204,7 @@ private:
 
     Config        cfg_;
     FogPeerTable  table_;
-    int           sock_ = -1;
+    socket_t      sock_ = kInvalidSocket;
     uint16_t      bound_port_ = 0;
     uint64_t      seq_counter_ = 0;
 

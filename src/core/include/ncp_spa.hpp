@@ -51,6 +51,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ncp_winsock_init.hpp"
 #include "ncp_crypto.hpp"
 #include "ncp_secure_memory.hpp"
 
@@ -266,7 +267,7 @@ private:
     SpaServer& server_;
     uint16_t port_;
     std::string bind_addr_;
-    int sock_ = -1;
+    socket_t sock_ = kInvalidSocket;
     std::atomic<bool> stop_flag_{false};
     std::atomic<bool> running_{false};
     std::thread thread_;

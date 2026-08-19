@@ -42,6 +42,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ncp_winsock_init.hpp"
+
 namespace ncp {
 
 // ===== Frame flags =====
@@ -200,7 +202,7 @@ private:
     };
 
     HopSchedule schedule_;
-    std::vector<int> sockets_;           // one fd per bound port
+    std::vector<socket_t> sockets_;      // one socket per bound port
     std::vector<uint16_t> bound_ports_;  // parallel to sockets_
     std::unordered_map<uint64_t, SessionState> sessions_;
     mutable std::mutex mutex_;
@@ -247,7 +249,7 @@ private:
     HopSchedule schedule_;
     uint64_t session_id_;
     PortHopSession session_;
-    int socket_ = -1;
+    socket_t socket_ = kInvalidSocket;
     uint16_t local_port_ = 0;
 };
 

@@ -456,9 +456,34 @@ bool SpaClient::send_packet(const std::string& host, uint16_t udp_port,
     if (pkt.size() != SPA_PACKET_SIZE) return false;
 
 #ifdef _WIN32
-    NCP_LOG_ERROR("[SPA] knock is not supported on Windows yet");
-    (void)host; (void)udp_port;
-    return false;
+    if (!winsock_init()) {
+        NCP_LOG_ERROR("[SPA] WSAStartup failed");
+        return false;
+    }
+    struct addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    struct addrinfo* res = nullptr;
+    const std::string port_str = std::to_string(udp_port);
+    if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
+        NCP_LOG_ERROR(std::string("[SPA] cannot resolve ") + host);
+        return false;
+    }
+    bool sent = false;
+    for (struct addrinfo* ai = res; ai && !sent; ai = ai->ai_next) {
+        socket_t s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s == kInvalidSocket) continue;
+        const int n = ::sendto(s, reinterpret_cast<const char*>(pkt.data()),
+                               static_cast<int>(pkt.size()), 0,
+                               ai->ai_addr, static_cast<int>(ai->ai_addrlen));
+        ::closesocket(s);
+        sent = (n == static_cast<int>(pkt.size()));
+    }
+    ::freeaddrinfo(res);
+    if (!sent) {
+        NCP_LOG_ERROR(std::string("[SPA] knock send failed to ") + host);
+    }
+    return sent;
 #else
     struct addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
@@ -499,8 +524,55 @@ SpaDaemon::~SpaDaemon() {
 
 bool SpaDaemon::start() {
 #ifdef _WIN32
-    NCP_LOG_ERROR("[SPA] SpaDaemon is not supported on Windows yet");
-    return false;
+    if (running_.load()) return true;
+    if (!winsock_init()) {
+        NCP_LOG_ERROR("[SPA] WSAStartup failed");
+        return false;
+    }
+
+    sock_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock_ == kInvalidSocket) {
+        NCP_LOG_ERROR(std::string("[SPA] socket() failed, WSA error ") +
+                      std::to_string(::WSAGetLastError()));
+        return false;
+    }
+
+    int one = 1;
+    ::setsockopt(sock_, SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&one), sizeof(one));
+
+    // SO_RCVTIMEO on Windows takes a DWORD timeout in milliseconds
+    // (1 s loop so stop() is responsive); an expired recvfrom fails with
+    // WSAETIMEDOUT, matching the POSIX EAGAIN/EWOULDBLOCK tick below.
+    DWORD tv_ms = 1000;
+    ::setsockopt(sock_, SOL_SOCKET, SO_RCVTIMEO,
+                 reinterpret_cast<const char*>(&tv_ms), sizeof(tv_ms));
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port_);
+    if (::inet_pton(AF_INET, bind_addr_.c_str(), &addr.sin_addr) != 1) {
+        NCP_LOG_ERROR(std::string("[SPA] invalid bind address: ") + bind_addr_);
+        ::closesocket(sock_);
+        sock_ = kInvalidSocket;
+        return false;
+    }
+    if (::bind(sock_, reinterpret_cast<struct sockaddr*>(&addr),
+               sizeof(addr)) == SOCKET_ERROR) {
+        NCP_LOG_ERROR(std::string("[SPA] bind ") + bind_addr_ + ":" +
+                      std::to_string(port_) + " failed, WSA error " +
+                      std::to_string(::WSAGetLastError()));
+        ::closesocket(sock_);
+        sock_ = kInvalidSocket;
+        return false;
+    }
+
+    stop_flag_.store(false);
+    running_.store(true);
+    thread_ = std::thread(&SpaDaemon::loop, this);
+    NCP_LOG_INFO(std::string("[SPA] daemon listening on UDP ") + bind_addr_ +
+                 ":" + std::to_string(port_));
+    return true;
 #else
     if (running_.load()) return true;
 
@@ -547,20 +619,36 @@ bool SpaDaemon::start() {
 void SpaDaemon::stop() {
     stop_flag_.store(true);
     if (thread_.joinable()) thread_.join();
-#ifndef _WIN32
-    if (sock_ >= 0) {
+    if (sock_ != kInvalidSocket) {
+#ifdef _WIN32
+        ::closesocket(sock_);
+#else
         ::close(sock_);
-        sock_ = -1;
-    }
 #endif
+        sock_ = kInvalidSocket;
+    }
     running_.store(false);
 }
 
 void SpaDaemon::loop() {
-#ifndef _WIN32
     std::vector<uint8_t> buf(SPA_PACKET_SIZE + 64);
     while (!stop_flag_.load()) {
         struct sockaddr_in src{};
+#ifdef _WIN32
+        int src_len = sizeof(src);
+        const int n = ::recvfrom(sock_, reinterpret_cast<char*>(buf.data()),
+                                 static_cast<int>(buf.size()), 0,
+                                 reinterpret_cast<struct sockaddr*>(&src),
+                                 &src_len);
+        if (n == SOCKET_ERROR) {
+            const int err = ::WSAGetLastError();
+            if (err == WSAETIMEDOUT || err == WSAEWOULDBLOCK) continue;  // 1 s tick
+            if (stop_flag_.load()) break;
+            NCP_LOG_WARN(std::string("[SPA] recvfrom error, WSA code ") +
+                         std::to_string(err));
+            continue;
+        }
+#else
         socklen_t src_len = sizeof(src);
         const ssize_t n = ::recvfrom(sock_, buf.data(), buf.size(), 0,
                                      reinterpret_cast<struct sockaddr*>(&src), &src_len);
@@ -570,12 +658,12 @@ void SpaDaemon::loop() {
             NCP_LOG_WARN(std::string("[SPA] recvfrom error: ") + std::strerror(errno));
             continue;
         }
+#endif
         char ip_str[INET_ADDRSTRLEN] = {0};
         ::inet_ntop(AF_INET, &src.sin_addr, ip_str, sizeof(ip_str));
         server_.process_packet(buf.data(), static_cast<size_t>(n), ip_str);
         // Never send replies — the port must stay silent.
     }
-#endif
 }
 
 } // namespace ncp

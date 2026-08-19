@@ -8,7 +8,10 @@
 
 #include <sodium.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+// ncp_winsock_init.hpp (via ncp_reality.hpp) already provides
+// <winsock2.h>/<ws2tcpip.h>, ncp::socket_t and ncp::winsock_init().
+#else
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
@@ -103,12 +106,23 @@ bool split_sni(const std::string& sni, std::string& token,
     return true;
 }
 
-// Write all bytes, retrying on EINTR; MSG_NOSIGNAL against SIGPIPE.
-// Windows: the TCP splice path is not supported yet, stubbed out.
-bool write_all([[maybe_unused]] int fd, [[maybe_unused]] const uint8_t* data,
-               [[maybe_unused]] size_t len) noexcept {
+// Write all bytes, retrying on EINTR/WSAEINTR; MSG_NOSIGNAL against SIGPIPE
+// on POSIX (Winsock never raises SIGPIPE, so the flag is 0 there).
+bool write_all(socket_t fd, const uint8_t* data, size_t len) noexcept {
 #ifdef _WIN32
-    return false;
+    size_t off = 0;
+    while (off < len) {
+        // Winsock send() takes an int length; our buffers are <= 16 KiB.
+        const int n = ::send(fd, reinterpret_cast<const char*>(data + off),
+                             static_cast<int>(len - off), 0);
+        if (n == SOCKET_ERROR) {
+            if (::WSAGetLastError() == WSAEINTR) continue;
+            return false;
+        }
+        if (n == 0) return false;
+        off += static_cast<size_t>(n);
+    }
+    return true;
 #else
     size_t off = 0;
     while (off < len) {
@@ -124,10 +138,28 @@ bool write_all([[maybe_unused]] int fd, [[maybe_unused]] const uint8_t* data,
 #endif
 }
 
-int connect_to([[maybe_unused]] const std::string& host,
-               [[maybe_unused]] uint16_t port) noexcept {
+socket_t connect_to(const std::string& host, uint16_t port) noexcept {
 #ifdef _WIN32
-    return -1;  // TCP fallback dial is not supported on Windows yet
+    if (!winsock_init()) return kInvalidSocket;
+    struct addrinfo hints {};
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    const std::string port_str = std::to_string(port);
+    struct addrinfo* res = nullptr;
+    if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0) {
+        return kInvalidSocket;
+    }
+    socket_t fd = kInvalidSocket;
+    for (struct addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+        fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd == kInvalidSocket) continue;
+        if (::connect(fd, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0)
+            break;
+        ::closesocket(fd);
+        fd = kInvalidSocket;
+    }
+    ::freeaddrinfo(res);
+    return fd;
 #else
     struct addrinfo hints {};
     hints.ai_family   = AF_UNSPEC;
@@ -333,10 +365,56 @@ RealityServer::Decision RealityServer::classify(const uint8_t* clienthello,
     return Decision::FALLBACK;
 }
 
-void RealityServer::splice([[maybe_unused]] int fd_a,
-                           [[maybe_unused]] int fd_b) noexcept {
+void RealityServer::splice(socket_t fd_a, socket_t fd_b) noexcept {
 #ifdef _WIN32
-    return;  // bidirectional splice is not supported on Windows yet
+    if (fd_a == kInvalidSocket || fd_b == kInvalidSocket) return;
+    bool read_a = true;  // still reading from fd_a
+    bool read_b = true;  // still reading from fd_b
+    std::array<uint8_t, 16384> buf{};
+
+    while (read_a || read_b) {
+        // WSAPoll is available since Vista (the project targets
+        // _WIN32_WINNT=0x0A00); POLLIN/POLLHUP/POLLERR flags match POSIX.
+        WSAPOLLFD pfds[2];
+        pfds[0].fd = read_a ? fd_a : kInvalidSocket;
+        pfds[0].events = POLLIN;
+        pfds[0].revents = 0;
+        pfds[1].fd = read_b ? fd_b : kInvalidSocket;
+        pfds[1].events = POLLIN;
+        pfds[1].revents = 0;
+
+        const int rc = ::WSAPoll(pfds, 2, -1);
+        if (rc == SOCKET_ERROR) {
+            if (::WSAGetLastError() == WSAEINTR) continue;
+            break;
+        }
+
+        for (int side = 0; side < 2; ++side) {
+            const bool is_a = (side == 0);
+            bool& reading = is_a ? read_a : read_b;
+            if (!reading) continue;
+            const short rev = pfds[side].revents;
+            if ((rev & (POLLIN | POLLHUP | POLLERR)) == 0) continue;
+
+            const socket_t src = is_a ? fd_a : fd_b;
+            const socket_t dst = is_a ? fd_b : fd_a;
+            const int n = ::recv(src, reinterpret_cast<char*>(buf.data()),
+                                 static_cast<int>(buf.size()), 0);
+            if (n > 0) {
+                if (!write_all(dst, buf.data(), static_cast<size_t>(n))) {
+                    // Peer write side is dead: stop forwarding both ways.
+                    ::shutdown(dst, SD_SEND);
+                    reading = false;
+                    (is_a ? read_b : read_a) = false;
+                }
+            } else {
+                // EOF or error: half-close the opposite direction and
+                // keep forwarding the remaining direction.
+                ::shutdown(dst, SD_SEND);
+                reading = false;
+            }
+        }
+    }
 #else
     if (fd_a < 0 || fd_b < 0) return;
     bool read_a = true;  // still reading from fd_a
@@ -386,10 +464,50 @@ void RealityServer::splice([[maybe_unused]] int fd_a,
 #endif
 }
 
-bool RealityServer::handle_client([[maybe_unused]] int client_fd,
-                                  [[maybe_unused]] uint64_t now) const noexcept {
+bool RealityServer::handle_client(socket_t client_fd,
+                                  uint64_t now) const noexcept {
 #ifdef _WIN32
-    return false;  // fallback relay is not supported on Windows yet
+    if (client_fd == kInvalidSocket) return false;
+    if (!winsock_init()) return false;
+
+    // Read the ClientHello (single record, capped at 16 KiB).
+    std::array<uint8_t, 16384> hello{};
+    size_t have = 0;
+    while (have < hello.size()) {
+        const int n = ::recv(client_fd,
+                             reinterpret_cast<char*>(hello.data()) + have,
+                             static_cast<int>(hello.size() - have), 0);
+        if (n <= 0) return false;
+        have += static_cast<size_t>(n);
+        if (have >= 5) {
+            const size_t rec_len =
+                (static_cast<size_t>(hello[3]) << 8) | hello[4];
+            if (5 + rec_len > hello.size()) return false;  // oversize record
+            if (have >= 5 + rec_len) break;
+        }
+    }
+
+    const Decision d = classify(hello.data(), have, now);
+    if (d == Decision::NOT_TLS) return false;
+
+    const std::string& host = (d == Decision::AUTHORIZED)
+                                  ? cfg_.internal_host
+                                  : cfg_.fallback_host;
+    const uint16_t port = (d == Decision::AUTHORIZED)
+                              ? cfg_.internal_port
+                              : cfg_.fallback_port;
+
+    const socket_t upstream = connect_to(host, port);
+    if (upstream == kInvalidSocket) return false;
+
+    // Replay the consumed ClientHello bytes to the chosen upstream.
+    if (!write_all(upstream, hello.data(), have)) {
+        ::closesocket(upstream);
+        return false;
+    }
+    splice(client_fd, upstream);
+    ::closesocket(upstream);
+    return true;
 #else
     if (client_fd < 0) return false;
 
