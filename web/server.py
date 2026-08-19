@@ -486,6 +486,27 @@ def _api_405(e):
     return e
 
 
+@app.errorhandler(Exception)
+def _api_unhandled_error(e):
+    """Catch-all: every unhandled exception is logged WITH traceback to the
+    UI log panel and returned as JSON instead of Flask opaque HTML 500."""
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e
+    import traceback
+    push_log("ERROR", f"Необработанная ошибка {request.method} {request.path}: "
+                      f"{type(e).__name__}: {e}")
+    try:
+        for ln in traceback.format_exc().strip().splitlines()[-8:]:
+            push_log("ERROR", "  " + ln)
+    except Exception:
+        pass
+    if request.path.startswith("/api"):
+        return jsonify({"ok": False,
+                        "error": f"Внутренняя ошибка: {type(e).__name__}: {e}"}), 500
+    return "Internal Server Error", 500
+
+
 def get_uptime() -> str:
     if not state["start_time"]:
         return "00:00:00"
@@ -515,6 +536,66 @@ def save_config(cfg: dict):
         push_log("ERROR", f"Config save error: {e}")
 
 
+_VIRTUAL_IFACE_HINTS = (
+    "wi-fi direct", "wifi direct", "bluetooth", "loopback", "pseudo",
+    "vethernet", "vmware", "virtualbox", "hyper-v", "tap-", "tun",
+)
+
+
+def _pick_best_interface(ifaces: list) -> str:
+    """Pick the best connected interface: up + has a routable IPv4."""
+    def score(i):
+        if not i.get("up"):
+            return -1
+        ipv4 = [ip for ip in i.get("ips", [])
+                if "." in ip and not ip.startswith("127.")
+                and not ip.startswith("169.254.")]
+        if not ipv4:
+            return -1
+        s = 10
+        if any(h in i["name"].lower() for h in _VIRTUAL_IFACE_HINTS):
+            s -= 5
+        return s
+    best, best_s = None, -1
+    for i in ifaces:
+        s = score(i)
+        if s > best_s:
+            best, best_s = i, s
+    return best["name"] if best else ""
+
+
+def _resolve_interface(requested: str) -> str:
+    """Validate the configured interface; if it is disconnected or missing,
+    fall back to the best connected adapter so the engine can actually
+    intercept traffic."""
+    req = (requested or "").strip()
+    try:
+        ifaces = list_network_interfaces()
+    except Exception:
+        return req or "auto"
+    if not req or req.lower() == "auto":
+        best = _pick_best_interface(ifaces)
+        if best:
+            push_log("INFO", f"Interface auto-selected: {best}")
+            return best
+        return req or "auto"
+    for i in ifaces:
+        if i["name"] == req:
+            if i.get("up"):
+                return req
+            best = _pick_best_interface(ifaces)
+            push_log("WARN",
+                     f"Адаптер '{req}' отключён (среда передачи недоступна) - "
+                     f"движок не сможет перехватывать через него трафик. "
+                     + (f"Переключаюсь на '{best}'. Смените адаптер в Настройках."
+                        if best else "Подключите сетевой адаптер."))
+            return best or req
+    best = _pick_best_interface(ifaces)
+    push_log("WARN", f"Адаптер '{req}' не найден в системе"
+                     + (f" - переключаюсь на '{best}'" if best else ""))
+    return best or "auto"
+
+
 def list_network_interfaces() -> list:
     interfaces = []
     try:
@@ -524,6 +605,9 @@ def list_network_interfaces() -> list:
             ips = [a.address for a in addr_list if a.family.name in ("AF_INET", "2")]
             is_up = stats[name].isup if name in stats else False
             interfaces.append({"name": name, "ips": ips, "up": is_up})
+        best = _pick_best_interface(interfaces)
+        for i in interfaces:
+            i["recommended"] = (i["name"] == best)
     except Exception as e:
         push_log("WARN", f"Error getting interfaces: {e}")
     return interfaces
@@ -843,7 +927,7 @@ def _build_ncp_args() -> list:
     binary_path = str(NCP_BINARY)
     cfg = state["config"]
     args = [binary_path, "run", "--no-kill-switch",
-            "--interface", cfg.get("interface", "auto"),
+            "--interface", _resolve_interface(cfg.get("interface", "auto")),
             "--preset", cfg.get("dpi_preset", "tspu")]
     # Live per-module stats export (read back by stats_update_loop)
     args.extend(["--stats-file", str(ENGINE_STATS_FILE)])

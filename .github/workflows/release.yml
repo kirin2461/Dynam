@@ -230,9 +230,20 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: write  # required to create the GitHub Release (fixes 403)
+    env:
+      NCP_SIGNING_KEY: ${{ secrets.NCP_SIGNING_KEY }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
+
+      - name: Generate signed update manifest
+        if: ${{ env.NCP_SIGNING_KEY != '' }}
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python3 web/ncp_update.py manifest "${TAG#v}" "$TAG" --key-env NCP_SIGNING_KEY \
+            ncp-windows-x64/ncp-windows-x64.zip ncp-linux-x64/ncp-linux-x64.tar.gz > manifest.json
+          cat manifest.json
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -241,6 +252,8 @@ jobs:
             ncp-linux-x64/ncp-linux-x64.tar.gz
             ncp-macos-x64/ncp-macos-x64.tar.gz
             ncp-windows-x64/ncp-windows-x64.zip
+            manifest.json
+          fail_on_unmatched_files: false
           draft: false
           prerelease: false
         env:

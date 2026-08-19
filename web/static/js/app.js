@@ -13,6 +13,10 @@ const API_BASE = (() => {
 const NCP_TOKEN = (document.querySelector('meta[name=ncp-token]') || {}).content || '';
 
 async function apiFetch(path, opts = {}) {
+  // Normalize: all API endpoints live under /api. Several modules used to
+  // call bare paths ('/proxy/start') which hit Flask's HTML 404 page.
+  if (path.charAt(0) !== '/') path = '/' + path;
+  if (!path.startsWith('/api/') && path !== '/api') path = '/api' + path;
   try {
     const resp = await fetch(API_BASE + path, {
       headers: { 'Content-Type': 'application/json', 'X-NCP-Token': NCP_TOKEN, ...opts.headers },
@@ -792,7 +796,18 @@ function populateInterfaceSelect(ifaces) {
   if (!sel) return;
   const current = appState.config.interface || 'auto';
   sel.innerHTML = `<option value="auto">Авто</option>` +
-    ifaces.map(i => `<option value="${escapeHtml(i.name)}" ${i.name === current ? 'selected' : ''}>${escapeHtml(i.name)}</option>`).join('');
+    ifaces.map(i => {
+      let label = i.name;
+      if (!i.up) label += ' (отключён)';
+      else if (i.recommended) label += ' (рекомендуется)';
+      return `<option value="${escapeHtml(i.name)}" ${i.name === current ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }).join('');
+  const cur = ifaces.find(i => i.name === current);
+  if (cur && !cur.up) {
+    const best = ifaces.find(i => i.recommended);
+    showToast(`Выбранный адаптер «${cur.name}» отключён — защита не будет работать. ` +
+      (best ? `Выберите «${best.name}».` : 'Выберите активный адаптер.'), 'warn', 8000);
+  }
 }
 
 function selectInterface(name) {
@@ -1872,6 +1887,8 @@ async function bypassUpdateCheck() {
 async function bypassUpdateInstall() {
   if (!confirm('Скачать и установить обновление? Приложение перезапустится.')) return;
   const status = document.getElementById('bypass-update-status');
+  status.textContent = 'Остановка защиты перед обновлением…';
+  try { await apiFetch('/api/stop', {method: 'POST'}); } catch (_) {}
   status.textContent = 'Загрузка и проверка подписи…';
   const r = await apiFetch('/update/install', {method: 'POST'});
   status.textContent = r.ok ? (r.message || 'Установлено') : ('Ошибка: ' + (r.error || '?'));
