@@ -125,7 +125,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: C:\vcpkg\installed
-          key: vcpkg-release-deps-x64-windows-${{ hashFiles('.github/workflows/release.yml') }}
+          # Static key on purpose: vcpkg package set is pinned by the install
+          # step below, not by this workflow file — editing release.yml must
+          # not bust the (expensive, ~20 min from-source) dependency cache.
+          key: vcpkg-release-deps-x64-windows-v1
 
       - name: Install vcpkg and dependencies
         shell: cmd
