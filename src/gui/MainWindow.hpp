@@ -39,6 +39,7 @@ class UrlProbePanel;
 class SiteScraperPanel;
 class PollerEngine;
 class PollerPanel;
+class EnterprisePanel;
 
 namespace ncp::GUI {
 
@@ -159,6 +160,10 @@ private:
     SiteScraperPanel* siteScraperPanel_ = nullptr;
     PollerPanel* pollerPanel_ = nullptr;
     std::unique_ptr<PollerEngine> pollerEngine_;
+    // Enterprise tab: CLI enterprise modules (spa/reality/stegodns/porthop/
+    // fog/xdp). Unconditional — needs only the external ncp CLI and the
+    // linked ncp_core (in-process stegodns), no core runtime objects.
+    EnterprisePanel* enterprisePanel_ = nullptr;
 
     // System tray (nullptr when tray unavailable — e.g. RDP session)
     QSystemTrayIcon* trayIcon_ = nullptr;

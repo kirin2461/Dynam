@@ -130,6 +130,32 @@ void DriverController::listInterfaces(QObject* ctx,
     proc->start(exe, {QStringLiteral("network"), QStringLiteral("interfaces")});
 }
 
+void DriverController::runNcpCommand(QObject* ctx, const QStringList& args,
+                                     std::function<void(int, const QString&)> cb) {
+    const QString exe = findNcpExe();
+    if (exe.isEmpty()) {
+        cb(-1, tr("ncp CLI не найден рядом с приложением."));
+        return;
+    }
+    auto* proc = new QProcess(ctx);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
+    proc->start(exe, args);
+    // Synchronous start check (same pattern as start()): on FailedToStart
+    // QProcess never emits finished(), so report here and bail out.
+    if (!proc->waitForStarted(5000)) {
+        cb(-1, tr("Не удалось запустить ncp CLI "
+                  "(возможно, нужны права администратора)."));
+        proc->deleteLater();
+        return;
+    }
+    QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+        ctx, [proc, cb](int code, QProcess::ExitStatus) {
+            const QString out = QString::fromLocal8Bit(proc->readAll());
+            cb(code, out);
+            proc->deleteLater();
+        });
+}
+
 void DriverController::stop() {
     if (!proc_) return;
     if (proc_->state() != QProcess::NotRunning) {

@@ -57,6 +57,15 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_orchestrator.cpp     # Phase 4: unified pipeline orchestrator
     src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
     src/ncp_spa.cpp              # Enterprise SPA (Ed25519 + ipset)
+    src/ncp_reality.cpp          # Enterprise M1: XTLS-Reality-style fallback
+    src/ncp_stegodns.cpp         # Enterprise M4: steganographic DNS discovery
+    src/ncp_porthop.cpp          # M2: UDP port-hopping transport
+    src/ncp_mimicry_stats.cpp    # M5: statistical traffic profiles
+    src/ncp_desync_confuse.cpp        # M3: TCP state confusion builders (desync engine)
+    src/ncp_aemm.cpp                  # M9: Reed-Solomon erasure coding core (K of N)
+    src/ncp_fog.cpp              # M7: cooperative fog mesh overlay relay
+    src/ncp_semfluid.cpp         # M8: semantic HTTP fluid transport
+    src/ncp_xdp.cpp              # Enterprise: eBPF/XDP kernel packet processing
     # L3/L2 Stealth modules (Anti-ISP fingerprinting)
     src/ncp_l3_stealth.cpp       # Phase 1: IPID/TTL/MSS/FlowLabel normalization
     src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WinDivert packet interception + tunneling
@@ -109,6 +118,8 @@ set(NCP_CORE_SRC_SOURCES
     include/ncp_orchestrator.hpp
     include/ncp_port_knock.hpp
     include/ncp_spa.hpp
+    include/ncp_reality.hpp
+    include/ncp_stegodns.hpp
     # New Anti-TSPU headers
     include/ncp_packet_pipeline.hpp
     include/ncp_dns_leak_prevention.hpp
@@ -175,6 +186,8 @@ set(NCP_CORE_INCLUDE_HEADERS
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
     include/ncp_port_knock.hpp
+    include/ncp_reality.hpp
+    include/ncp_stegodns.hpp
     # Geneva / Protocol Morph headers
     include/ncp_geneva_ga.hpp
     include/ncp_protocol_morph.hpp
