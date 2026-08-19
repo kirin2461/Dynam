@@ -19,32 +19,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake build-essential libpcap-dev
-          sudo apt-get install -y qt6-base-dev qt6-charts-dev
-          pip install conan
-          
-      - name: Setup Conan
-        run: |
-          conan profile detect
-          conan install . --build=missing -of=build
-          
+          for i in 1 2 3; do
+            sudo apt-get update && break || { echo "apt-get update attempt $i failed, retrying..."; sleep 15; }
+          done
+          sudo apt-get install -y --no-install-recommends \
+            cmake build-essential pkg-config \
+            libpcap-dev libssl-dev libsodium-dev libwebsockets-dev \
+            qt6-base-dev qt6-charts-dev
+
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DENABLE_GUI=ON -DENABLE_TESTS=OFF
-        
+
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(nproc)
-        
+
       - name: Package
         run: |
           mkdir -p release/ncp-linux-x64
           cp build/bin/ncp release/ncp-linux-x64/
           cp README.md LICENSE release/ncp-linux-x64/
           tar -czvf ncp-linux-x64.tar.gz -C release ncp-linux-x64
-          
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -55,29 +53,25 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install dependencies
         run: |
-          brew install cmake conan qt@6 libpcap
-          
-      - name: Setup Conan
-        run: |
-          conan profile detect
-          conan install . --build=missing -of=build
-          
+          brew update
+          brew install cmake libsodium libwebsockets qt@6 libpcap
+
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DENABLE_GUI=ON -DENABLE_TESTS=OFF
-        
+
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(sysctl -n hw.ncpu)
-        
+
       - name: Package
         run: |
           mkdir -p release/ncp-macos-x64
           cp build/bin/ncp release/ncp-macos-x64/
           cp README.md LICENSE release/ncp-macos-x64/
           tar -czvf ncp-macos-x64.tar.gz -C release ncp-macos-x64
-          
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -88,35 +82,52 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Qt
         uses: jurplel/install-qt-action@v3
         with:
           version: '6.6.0'
           modules: 'qtcharts'
-          
-      - name: Install Conan
-        run: pip install conan
-        
-      - name: Setup Conan
+
+      - name: Cache vcpkg
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\installed
+          key: vcpkg-release-deps-x64-windows-${{ hashFiles('.github/workflows/release.yml') }}
+
+      - name: Install vcpkg and dependencies
+        shell: cmd
         run: |
-          conan profile detect
-          conan install . --build=missing -of=build
-          
+          if not exist C:\vcpkg\vcpkg.exe (
+            git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
+            C:\vcpkg\bootstrap-vcpkg.bat
+          )
+          C:\vcpkg\vcpkg install libsodium:x64-windows libwebsockets:x64-windows openssl:x64-windows
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Configure CMake
-        run: cmake -B build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -DENABLE_GUI=ON -DENABLE_TESTS=OFF
-        
+        shell: pwsh
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} `
+            -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
+            -DENABLE_GUI=ON -DENABLE_TESTS=OFF
+
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}}
-        
+
       - name: Package
+        shell: pwsh
         run: |
-          mkdir release\ncp-windows-x64
-          copy build\bin\Release\ncp.exe release\ncp-windows-x64\
-          copy README.md release\ncp-windows-x64\
-          copy LICENSE release\ncp-windows-x64\
-          Compress-Archive -Path release\ncp-windows-x64 -DestinationPath ncp-windows-x64.zip
-          
+          New-Item -ItemType Directory -Path release\ncp-windows-x64 -Force | Out-Null
+          Copy-Item build\bin\Release\ncp.exe release\ncp-windows-x64\
+          Copy-Item README.md, LICENSE release\ncp-windows-x64\
+          windeployqt --release --no-translations release\ncp-windows-x64\ncp.exe 2>$null
+          Copy-Item C:\vcpkg\installed\x64-windows\bin\*.dll release\ncp-windows-x64\
+          Compress-Archive -Path release\ncp-windows-x64 -DestinationPath ncp-windows-x64.zip -Force
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -130,7 +141,7 @@ jobs:
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
-        
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
