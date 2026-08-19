@@ -10,7 +10,10 @@
 #include <cstring>
 #include <sodium.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+// ncp_winsock_init.hpp (via ncp_porthop.hpp) provides <winsock2.h>/
+// <ws2tcpip.h>, ncp::socket_t, ncp::kInvalidSocket and ncp::winsock_init().
+#else
 # include <arpa/inet.h>
 # include <errno.h>
 # include <fcntl.h>
@@ -55,11 +58,16 @@ uint64_t load_u64_be(const uint8_t* p) {
     return v;
 }
 
-#ifndef _WIN32
-bool set_nonblocking(int fd) {
+bool set_nonblocking(socket_t fd) {
+#ifdef _WIN32
+    // Winsock equivalent of fcntl(O_NONBLOCK).
+    u_long nb = 1;
+    return ::ioctlsocket(fd, FIONBIO, &nb) == 0;
+#else
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return false;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0;
+#endif
 }
 
 std::string addr_to_ip(const struct sockaddr_in& a) {
@@ -68,7 +76,6 @@ std::string addr_to_ip(const struct sockaddr_in& a) {
         return {};
     return buf;
 }
-#endif
 
 } // namespace
 
@@ -231,10 +238,6 @@ PortHopServer::~PortHopServer() {
 }
 
 bool PortHopServer::bind_all() {
-#ifdef _WIN32
-    NCP_LOG_ERROR("PortHopServer: Windows not supported in this module");
-    return false;
-#else
     if (bound_) return true;
 
     uint16_t range = schedule_.port_range();
@@ -243,10 +246,57 @@ bool PortHopServer::bind_all() {
         range = kMaxRange;
     }
 
+#ifdef _WIN32
+    if (!winsock_init()) {
+        NCP_LOG_ERROR("PortHopServer: WSAStartup failed");
+        return false;
+    }
+#endif
+
     for (uint16_t i = 0; i < range; ++i) {
         uint16_t port = static_cast<uint16_t>(schedule_.base_port() + i);
 
-        int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+#ifdef _WIN32
+        socket_t fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (fd == kInvalidSocket) {
+            close();
+            return false;
+        }
+
+        int one = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR,
+                   reinterpret_cast<const char*>(&one), sizeof(one));
+        // NOTE: Windows has no SO_REUSEPORT. On Windows SO_REUSEADDR for
+        // UDP already permits a second bind to the same port, covering the
+        // "allow rebinding" half of the POSIX semantics; the load-balancing
+        // half of SO_REUSEPORT has no Winsock equivalent. Here each socket
+        // binds a *distinct* port of the hop range, so nothing is actually
+        // shared and the option only matters when several NCP instances
+        // (or a previous run in TIME_WAIT-like hold) overlap.
+
+        struct sockaddr_in addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_port = htons(port);
+
+        if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr),
+                   sizeof(addr)) == SOCKET_ERROR) {
+            NCP_LOG_ERROR("PortHopServer: bind failed on port " +
+                          std::to_string(port) + ": WSA error " +
+                          std::to_string(::WSAGetLastError()));
+            ::closesocket(fd);
+            close();
+            return false;
+        }
+
+        if (!set_nonblocking(fd)) {
+            ::closesocket(fd);
+            close();
+            return false;
+        }
+#else
+        socket_t fd = ::socket(AF_INET, SOCK_DGRAM, 0);
         if (fd < 0) {
             close();
             return false;
@@ -276,6 +326,7 @@ bool PortHopServer::bind_all() {
             close();
             return false;
         }
+#endif
 
         sockets_.push_back(fd);
         bound_ports_.push_back(port);
@@ -283,14 +334,16 @@ bool PortHopServer::bind_all() {
 
     bound_ = true;
     return true;
-#endif
 }
 
 void PortHopServer::close() {
-#ifndef _WIN32
-    for (int fd : sockets_)
+    for (socket_t fd : sockets_) {
+#ifdef _WIN32
+        ::closesocket(fd);
+#else
         ::close(fd);
 #endif
+    }
     sockets_.clear();
     bound_ports_.clear();
     bound_ = false;
@@ -317,40 +370,56 @@ bool PortHopServer::has_session(uint64_t session_id) const {
 
 std::vector<PortHopReceived> PortHopServer::poll(int timeout_ms) {
     std::vector<PortHopReceived> out;
-#ifndef _WIN32
     if (!bound_ || sockets_.empty())
         return out;
 
     fd_set rfds;
     FD_ZERO(&rfds);
-    int max_fd = -1;
-    for (int fd : sockets_) {
-        FD_SET(fd, &rfds);
-        if (fd > max_fd) max_fd = fd;
-    }
 
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
-    int ready = ::select(max_fd + 1, &rfds, nullptr, nullptr,
-                         timeout_ms >= 0 ? &tv : nullptr);
+    int ready;
+#ifdef _WIN32
+    // Winsock select() takes SOCKET handles and ignores the nfds argument.
+    for (socket_t fd : sockets_)
+        FD_SET(fd, &rfds);
+    ready = ::select(0, &rfds, nullptr, nullptr,
+                     timeout_ms >= 0 ? &tv : nullptr);
+#else
+    int max_fd = -1;
+    for (socket_t fd : sockets_) {
+        FD_SET(fd, &rfds);
+        if (fd > max_fd) max_fd = fd;
+    }
+    ready = ::select(max_fd + 1, &rfds, nullptr, nullptr,
+                     timeout_ms >= 0 ? &tv : nullptr);
+#endif
     if (ready <= 0)
         return out;
 
     uint8_t buf[kMaxDatagram];
     for (size_t i = 0; i < sockets_.size(); ++i) {
-        int fd = sockets_[i];
+        socket_t fd = sockets_[i];
         if (!FD_ISSET(fd, &rfds))
             continue;
 
         // Drain this socket (it is non-blocking).
         for (;;) {
             struct sockaddr_in from;
+#ifdef _WIN32
+            int from_len = sizeof(from);
+            const int n = ::recvfrom(fd, reinterpret_cast<char*>(buf),
+                                     static_cast<int>(sizeof(buf)), 0,
+                                     reinterpret_cast<struct sockaddr*>(&from),
+                                     &from_len);
+#else
             socklen_t from_len = sizeof(from);
             ssize_t n = ::recvfrom(fd, buf, sizeof(buf), 0,
                                    reinterpret_cast<struct sockaddr*>(&from),
                                    &from_len);
+#endif
             if (n <= 0)
                 break;
 
@@ -391,9 +460,6 @@ std::vector<PortHopReceived> PortHopServer::poll(int timeout_ms) {
             out.push_back(std::move(rec));
         }
     }
-#else
-    (void)timeout_ms;
-#endif
     return out;
 }
 
@@ -401,10 +467,6 @@ bool PortHopServer::send_to_session(uint64_t session_id,
                                     const uint8_t* payload,
                                     size_t payload_len,
                                     uint8_t flags) {
-#ifdef _WIN32
-    (void)session_id; (void)payload; (void)payload_len; (void)flags;
-    return false;
-#else
     if (!bound_ || sockets_.empty())
         return false;
 
@@ -419,6 +481,14 @@ bool PortHopServer::send_to_session(uint64_t session_id,
         std::memcpy(&peer, it->second.peer_addr.data(), sizeof(peer));
     }
 
+#ifdef _WIN32
+    const int n = ::sendto(sockets_.front(),
+                           reinterpret_cast<const char*>(wire.data()),
+                           static_cast<int>(wire.size()), 0,
+                           reinterpret_cast<struct sockaddr*>(&peer),
+                           sizeof(peer));
+    return n == static_cast<int>(wire.size());
+#else
     ssize_t n = ::sendto(sockets_.front(), wire.data(), wire.size(), 0,
                          reinterpret_cast<struct sockaddr*>(&peer),
                          sizeof(peer));
@@ -427,10 +497,6 @@ bool PortHopServer::send_to_session(uint64_t session_id,
 }
 
 bool PortHopServer::send_ack(uint64_t session_id, uint32_t acked_seq) {
-#ifdef _WIN32
-    (void)session_id; (void)acked_seq;
-    return false;
-#else
     if (!bound_ || sockets_.empty())
         return false;
 
@@ -451,6 +517,14 @@ bool PortHopServer::send_ack(uint64_t session_id, uint32_t acked_seq) {
         std::memcpy(&peer, it->second.peer_addr.data(), sizeof(peer));
     }
 
+#ifdef _WIN32
+    const int n = ::sendto(sockets_.front(),
+                           reinterpret_cast<const char*>(wire.data()),
+                           static_cast<int>(wire.size()), 0,
+                           reinterpret_cast<struct sockaddr*>(&peer),
+                           sizeof(peer));
+    return n == static_cast<int>(wire.size());
+#else
     ssize_t n = ::sendto(sockets_.front(), wire.data(), wire.size(), 0,
                          reinterpret_cast<struct sockaddr*>(&peer),
                          sizeof(peer));
@@ -497,11 +571,38 @@ PortHopClient::~PortHopClient() {
 }
 
 bool PortHopClient::open() {
-#ifdef _WIN32
-    return false;
-#else
-    if (socket_ >= 0) return true;
+    if (socket_ != kInvalidSocket) return true;
 
+#ifdef _WIN32
+    if (!winsock_init()) return false;
+
+    socket_t fd = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd == kInvalidSocket) return false;
+    if (!set_nonblocking(fd)) {
+        ::closesocket(fd);
+        return false;
+    }
+
+    // Bind to an ephemeral port so replies have a stable source.
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(0);
+    if (::bind(fd, reinterpret_cast<struct sockaddr*>(&addr),
+               sizeof(addr)) == SOCKET_ERROR) {
+        ::closesocket(fd);
+        return false;
+    }
+
+    int len = sizeof(addr);
+    if (::getsockname(fd, reinterpret_cast<struct sockaddr*>(&addr),
+                      &len) == 0)
+        local_port_ = ntohs(addr.sin_port);
+
+    socket_ = fd;
+    return true;
+#else
     int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return false;
     if (!set_nonblocking(fd)) {
@@ -532,24 +633,23 @@ bool PortHopClient::open() {
 }
 
 void PortHopClient::close() {
-#ifndef _WIN32
-    if (socket_ >= 0)
+    if (socket_ != kInvalidSocket) {
+#ifdef _WIN32
+        ::closesocket(socket_);
+#else
         ::close(socket_);
 #endif
-    socket_ = -1;
+    }
+    socket_ = kInvalidSocket;
 }
 
 bool PortHopClient::is_open() const {
-    return socket_ >= 0;
+    return socket_ != kInvalidSocket;
 }
 
 bool PortHopClient::send(const uint8_t* payload, size_t payload_len,
                          uint8_t flags) {
-#ifdef _WIN32
-    (void)payload; (void)payload_len; (void)flags;
-    return false;
-#else
-    if (socket_ < 0) return false;
+    if (socket_ == kInvalidSocket) return false;
 
     std::vector<uint8_t> wire = session_.encode(payload, payload_len, flags);
     uint16_t port = schedule_.port_for_epoch(session_.current_epoch());
@@ -561,6 +661,13 @@ bool PortHopClient::send(const uint8_t* payload, size_t payload_len,
     if (::inet_pton(AF_INET, server_ip_.c_str(), &to.sin_addr) != 1)
         return false;
 
+#ifdef _WIN32
+    const int n = ::sendto(socket_, reinterpret_cast<const char*>(wire.data()),
+                           static_cast<int>(wire.size()), 0,
+                           reinterpret_cast<struct sockaddr*>(&to),
+                           sizeof(to));
+    return n == static_cast<int>(wire.size());
+#else
     ssize_t n = ::sendto(socket_, wire.data(), wire.size(), 0,
                          reinterpret_cast<struct sockaddr*>(&to), sizeof(to));
     return n == static_cast<ssize_t>(wire.size());
@@ -573,8 +680,7 @@ bool PortHopClient::send(const std::vector<uint8_t>& payload, uint8_t flags) {
 
 std::vector<PortHopReceived> PortHopClient::poll(int timeout_ms) {
     std::vector<PortHopReceived> out;
-#ifndef _WIN32
-    if (socket_ < 0) return out;
+    if (socket_ == kInvalidSocket) return out;
 
     fd_set rfds;
     FD_ZERO(&rfds);
@@ -584,17 +690,30 @@ std::vector<PortHopReceived> PortHopClient::poll(int timeout_ms) {
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
+#ifdef _WIN32
+    // Winsock select() ignores the nfds argument.
+    int ready = ::select(0, &rfds, nullptr, nullptr, &tv);
+#else
     int ready = ::select(socket_ + 1, &rfds, nullptr, nullptr, &tv);
+#endif
     if (ready <= 0)
         return out;
 
     uint8_t buf[kMaxDatagram];
     for (;;) {
         struct sockaddr_in from;
+#ifdef _WIN32
+        int from_len = sizeof(from);
+        const int n = ::recvfrom(socket_, reinterpret_cast<char*>(buf),
+                                 static_cast<int>(sizeof(buf)), 0,
+                                 reinterpret_cast<struct sockaddr*>(&from),
+                                 &from_len);
+#else
         socklen_t from_len = sizeof(from);
         ssize_t n = ::recvfrom(socket_, buf, sizeof(buf), 0,
                                reinterpret_cast<struct sockaddr*>(&from),
                                &from_len);
+#endif
         if (n <= 0)
             break;
 
@@ -609,9 +728,6 @@ std::vector<PortHopReceived> PortHopClient::poll(int timeout_ms) {
         rec.local_port = local_port_;
         out.push_back(std::move(rec));
     }
-#else
-    (void)timeout_ms;
-#endif
     return out;
 }
 

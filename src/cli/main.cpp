@@ -34,6 +34,7 @@
 #include "ncp_porthop.hpp"
 #include "ncp_fog.hpp"
 #include "ncp_xdp.hpp"
+#include "ncp_winsock_init.hpp"
 
 #include <iostream>
 #include <string>
@@ -3719,8 +3720,51 @@ void handle_reality(const std::vector<std::string>& args) {
     }
 
 #ifdef _WIN32
-    std::cerr << "[!] reality serve is not supported on Windows\n";
-    return;
+    if (!ncp::winsock_init()) {
+        std::cerr << "[!] WSAStartup failed\n";
+        return;
+    }
+    ncp::RealityServer server(cfg);
+
+    const SOCKET listen_fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listen_fd == INVALID_SOCKET) {
+        std::cerr << "[!] socket() failed\n";
+        return;
+    }
+    int one = 1;
+    ::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR,
+                 reinterpret_cast<const char*>(&one), sizeof(one));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(cfg.listen_port);
+    if (::bind(listen_fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
+        ::listen(listen_fd, 128) != 0) {
+        std::cerr << "[!] Cannot bind/listen on TCP port " << cfg.listen_port << "\n";
+        ::closesocket(listen_fd);
+        return;
+    }
+    std::cout << "[*] Reality server running — Ctrl-C to stop\n";
+
+    g_running = 1;
+    while (g_running) {
+        WSAPOLLFD pfd{};
+        pfd.fd = listen_fd;
+        pfd.events = POLLIN;
+        if (::WSAPoll(&pfd, 1, 200) <= 0) continue;
+        sockaddr_in caddr{};
+        int clen = sizeof(caddr);
+        const SOCKET cfd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
+        if (cfd == INVALID_SOCKET) continue;
+        std::thread([&server, cfd]() {
+            const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
+            server.handle_client(cfd, now);
+            ::shutdown(cfd, SD_BOTH);
+            ::closesocket(cfd);
+        }).detach();
+    }
+    ::closesocket(listen_fd);
+    std::cout << "[*] Reality server stopped\n";
 #else
     ncp::RealityServer server(cfg);
 
@@ -4153,10 +4197,6 @@ void handle_fog(const std::vector<std::string>& args) {
               << "  ID:    " << cfg.id.to_hex() << "\n"
               << "  Bind:  UDP 0.0.0.0:" << node.bound_port() << "\n";
 
-#ifdef _WIN32
-    if (!peer_opts.empty())
-        std::cerr << "[!] --peer is not supported on Windows\n";
-#else
     // Static neighbours: registered with a placeholder id (real ids are
     // learned from incoming frames) and seeded with a ROUTE_AD gossip.
     std::vector<ncp::FogPeerInfo> neighbours;
@@ -4184,7 +4224,6 @@ void handle_fog(const std::vector<std::string>& args) {
         neighbours.push_back(info);
         std::cout << "  Peer:  " << p << "\n";
     }
-#endif
 
     std::cout << "[*] Running — Ctrl-C to stop\n";
     g_running = 1;
@@ -4197,7 +4236,6 @@ void handle_fog(const std::vector<std::string>& args) {
             const std::string text(msg.begin(), msg.end());
             std::cout << "[fog] DATA delivered: \"" << text << "\"\n";
         }
-#ifndef _WIN32
         // Periodic table decay + re-gossip to static neighbours.
         if (std::chrono::steady_clock::now() - last_gossip >
             std::chrono::seconds(15)) {
@@ -4206,7 +4244,6 @@ void handle_fog(const std::vector<std::string>& args) {
                 node.send_route_ad(n, now);
             last_gossip = std::chrono::steady_clock::now();
         }
-#endif
     }
     node.stop();
     std::cout << "[*] Fog node stopped (relayed " << node.relayed()

@@ -41,6 +41,8 @@
 #include <memory>
 #include <string>
 
+#include "ncp_winsock_init.hpp"
+
 namespace ncp {
 
 // ===== Classification result =====
@@ -121,16 +123,18 @@ public:
     static bool extract_sni(const uint8_t* clienthello, size_t len,
                             std::string& out_sni) noexcept;
 
-    // Bidirectional byte splicing between two connected sockets using poll().
-    // Half-close aware: EOF on one side shutdown()s the opposite write half;
-    // returns once both directions are closed. Single-threaded.
-    static void splice(int fd_a, int fd_b) noexcept;
+    // Bidirectional byte splicing between two connected sockets using
+    // poll() (POSIX) / WSAPoll() (Windows). Half-close aware: EOF on one
+    // side shutdown()s the opposite write half; returns once both
+    // directions are closed. Single-threaded.
+    // socket_t is int on POSIX and Winsock SOCKET on Windows.
+    static void splice(socket_t fd_a, socket_t fd_b) noexcept;
 
     // Read the ClientHello from client_fd, classify it, connect to the
     // internal service (AUTHORIZED) or the fallback domain (FALLBACK) and
     // splice the connection. NOT_TLS connections are closed immediately.
     // Returns true if the connection was spliced to an upstream.
-    bool handle_client(int client_fd, uint64_t now) const noexcept;
+    bool handle_client(socket_t client_fd, uint64_t now) const noexcept;
 
     const RealityConfig& config() const noexcept { return cfg_; }
 

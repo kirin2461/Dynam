@@ -15,7 +15,10 @@
 
 #include <sodium.h>
 
-#ifndef _WIN32
+#ifdef _WIN32
+// ncp_winsock_init.hpp (via ncp_fog.hpp) provides <winsock2.h>/<ws2tcpip.h>,
+// ncp::socket_t, ncp::kInvalidSocket and ncp::winsock_init().
+#else
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -194,10 +197,41 @@ FogNode::FogNode(Config cfg) : cfg_(cfg) {
 FogNode::~FogNode() { stop(); }
 
 FogError FogNode::start() {
-    if (sock_ >= 0) return FogError::OK;
+    if (sock_ != kInvalidSocket) return FogError::OK;
 #ifdef _WIN32
-    NCPX_FOG_LOG("ERROR", "fog node networking is not supported on Windows yet");
-    return FogError::NOT_BOUND;
+    if (!winsock_init()) {
+        NCPX_FOG_LOG("ERROR", "WSAStartup failed");
+        return FogError::NOT_BOUND;
+    }
+    sock_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock_ == kInvalidSocket) {
+        NCPX_FOG_LOG("ERROR", "socket() failed");
+        return FogError::NOT_BOUND;
+    }
+    // Non-blocking mode (Winsock equivalent of fcntl O_NONBLOCK).
+    u_long nb = 1;
+    if (::ioctlsocket(sock_, FIONBIO, &nb) != 0) {
+        NCPX_FOG_LOG("ERROR", "ioctlsocket(FIONBIO) failed");
+        ::closesocket(sock_);
+        sock_ = kInvalidSocket;
+        return FogError::NOT_BOUND;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    addr.sin_port = htons(cfg_.bind_port);
+    if (::bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        NCPX_FOG_LOG("ERROR", "bind() failed");
+        ::closesocket(sock_);
+        sock_ = kInvalidSocket;
+        return FogError::NOT_BOUND;
+    }
+    int alen = sizeof(addr);
+    if (::getsockname(sock_, reinterpret_cast<sockaddr*>(&addr), &alen) == 0) {
+        bound_port_ = ntohs(addr.sin_port);
+    }
+    return FogError::OK;
 #else
     sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
     if (sock_ < 0) {
@@ -226,15 +260,16 @@ FogError FogNode::start() {
 }
 
 void FogNode::stop() {
-#ifndef _WIN32
-    if (sock_ >= 0) {
-        ::close(sock_);
-        sock_ = -1;
-    }
+    if (sock_ == kInvalidSocket) return;
+#ifdef _WIN32
+    ::closesocket(sock_);
+#else
+    ::close(sock_);
 #endif
+    sock_ = kInvalidSocket;
 }
 
-bool FogNode::running() const { return sock_ >= 0; }
+bool FogNode::running() const { return sock_ != kInvalidSocket; }
 uint16_t FogNode::bound_port() const { return bound_port_; }
 
 uint64_t FogNode::next_seq_unlocked() { return ++seq_counter_; }
@@ -242,7 +277,7 @@ uint64_t FogNode::next_seq_unlocked() { return ++seq_counter_; }
 FogError FogNode::send_data(const FogPeerId& target,
                             const std::vector<uint8_t>& payload,
                             uint64_t now) {
-    if (sock_ < 0) return FogError::NOT_BOUND;
+    if (sock_ == kInvalidSocket) return FogError::NOT_BOUND;
     FogFrame f;
     f.ttl = cfg_.default_ttl;
     f.type = FogMsgType::DATA;
@@ -258,7 +293,7 @@ FogError FogNode::send_data(const FogPeerId& target,
 }
 
 FogError FogNode::send_ping(const FogPeerId& target, uint64_t now) {
-    if (sock_ < 0) return FogError::NOT_BOUND;
+    if (sock_ == kInvalidSocket) return FogError::NOT_BOUND;
     FogFrame f;
     f.ttl = cfg_.default_ttl;
     f.type = FogMsgType::PING;
@@ -273,7 +308,7 @@ FogError FogNode::send_ping(const FogPeerId& target, uint64_t now) {
 }
 
 FogError FogNode::send_route_ad(const FogPeerInfo& neighbour, uint64_t now) {
-    if (sock_ < 0) return FogError::NOT_BOUND;
+    if (sock_ == kInvalidSocket) return FogError::NOT_BOUND;
     FogFrame f;
     f.ttl = 1; // gossip is one-hop
     f.type = FogMsgType::ROUTE_AD;
@@ -307,26 +342,29 @@ FogError FogNode::send_route_ad(const FogPeerInfo& neighbour, uint64_t now) {
     return send_frame_to(f, neighbour.ipv4, neighbour.port);
 }
 
-FogError FogNode::send_frame_to([[maybe_unused]] const FogFrame& f,
-                                [[maybe_unused]] uint32_t ip,
-                                [[maybe_unused]] uint16_t port) {
-    if (sock_ < 0) return FogError::NOT_BOUND;
-#ifdef _WIN32
-    return FogError::NOT_BOUND;
-#else
+FogError FogNode::send_frame_to(const FogFrame& f,
+                                uint32_t ip,
+                                uint16_t port) {
+    if (sock_ == kInvalidSocket) return FogError::NOT_BOUND;
     std::vector<uint8_t> buf = f.pack();
     sockaddr_in dst{};
     dst.sin_family = AF_INET;
     dst.sin_addr.s_addr = htonl(ip);
     dst.sin_port = htons(port);
+#ifdef _WIN32
+    const int sent = ::sendto(sock_, reinterpret_cast<const char*>(buf.data()),
+                              static_cast<int>(buf.size()), 0,
+                              reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+    if (sent != static_cast<int>(buf.size())) {
+#else
     ssize_t sent = ::sendto(sock_, buf.data(), buf.size(), 0,
                             reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
     if (sent != static_cast<ssize_t>(buf.size())) {
+#endif
         NCPX_FOG_LOG("WARN", "sendto() short/failed");
         return FogError::SEND_FAILED;
     }
     return FogError::OK;
-#endif
 }
 
 FogError FogNode::forward(const FogFrame& f, uint64_t now) {
@@ -467,19 +505,20 @@ void FogNode::handle_frame(const FogFrame& f, uint32_t src_ip, uint16_t src_port
     // No route: the frame silently dies here (NO_ROUTE from forward()).
 }
 
-int FogNode::poll([[maybe_unused]] int timeout_ms,
-                  [[maybe_unused]] uint64_t now) {
-    if (sock_ < 0) return 0;
-#ifdef _WIN32
-    return 0;
-#else
+int FogNode::poll(int timeout_ms, uint64_t now) {
+    if (sock_ == kInvalidSocket) return 0;
     fd_set rfds;
     FD_ZERO(&rfds);
     FD_SET(sock_, &rfds);
     timeval tv{};
     tv.tv_sec  = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
+#ifdef _WIN32
+    // Winsock select() works on SOCKET handles; the nfds argument is ignored.
+    int rc = ::select(0, &rfds, nullptr, nullptr, &tv);
+#else
     int rc = ::select(sock_ + 1, &rfds, nullptr, nullptr, &tv);
+#endif
     if (rc <= 0) return 0;
 
     int handled = 0;
@@ -487,9 +526,18 @@ int FogNode::poll([[maybe_unused]] int timeout_ms,
     for (int i = 0; i < 64; ++i) {
         uint8_t buf[65535];
         sockaddr_in src{};
+#ifdef _WIN32
+        // The socket is non-blocking (FIONBIO), so the drain stops with
+        // WSAEWOULDBLOCK once the queue is empty — MSG_DONTWAIT equivalent.
+        int slen = sizeof(src);
+        const int n = ::recvfrom(sock_, reinterpret_cast<char*>(buf),
+                                 static_cast<int>(sizeof(buf)), 0,
+                                 reinterpret_cast<sockaddr*>(&src), &slen);
+#else
         socklen_t slen = sizeof(src);
         ssize_t n = ::recvfrom(sock_, buf, sizeof(buf), MSG_DONTWAIT,
                                reinterpret_cast<sockaddr*>(&src), &slen);
+#endif
         if (n <= 0) break;
         auto frame = FogFrame::parse(buf, static_cast<size_t>(n));
         if (!frame) continue;
@@ -497,7 +545,6 @@ int FogNode::poll([[maybe_unused]] int timeout_ms,
         ++handled;
     }
     return handled;
-#endif
 }
 
 bool FogNode::inbox_pop(std::vector<uint8_t>& out) {
