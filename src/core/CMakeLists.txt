@@ -56,6 +56,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_probe_resist.cpp     # Phase 3: active probing resistance
     src/ncp_orchestrator.cpp     # Phase 4: unified pipeline orchestrator
     src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
+    src/ncp_spa.cpp              # Enterprise SPA (Ed25519 + ipset)
     # L3/L2 Stealth modules (Anti-ISP fingerprinting)
     src/ncp_l3_stealth.cpp       # Phase 1: IPID/TTL/MSS/FlowLabel normalization
     src/ncp_packet_interceptor.cpp # Phase 2: NFQUEUE/WinDivert packet interception + tunneling
@@ -107,6 +108,7 @@ set(NCP_CORE_SRC_SOURCES
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
     include/ncp_port_knock.hpp
+    include/ncp_spa.hpp
     # New Anti-TSPU headers
     include/ncp_packet_pipeline.hpp
     include/ncp_dns_leak_prevention.hpp

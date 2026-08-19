@@ -28,6 +28,7 @@
 #include "ncp_hostlist.hpp"
 #include "ncp_dpi_detector.hpp"
 #include "ncp_autopilot.hpp"
+#include "ncp_spa.hpp"
 
 #include <iostream>
 #include <string>
@@ -819,6 +820,7 @@ void handle_blockcheck(const std::vector<std::string>& args);
 void handle_autopilot(const std::vector<std::string>& args);
 void handle_sysproxy(const std::vector<std::string>& args);
 void handle_import_zapret(const std::vector<std::string>& args);
+void handle_spa(const std::vector<std::string>& args);
 
 // ============================================================================
 // main()
@@ -845,6 +847,7 @@ int main(int argc, char* argv[]) {
     parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable|learn-preset>", "[domain|preset]", "[--json]", "[--timeout ms]"});
     parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
     parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
+    parser.add_command("spa", "Ed25519 Single Packet Authorization (keygen/knock/serve)", handle_spa, {"<keygen|knock|serve>", "[--out prefix]", "[--key f.key]", "[--allow-port N]", "[--port 54117]", "[--proto tcp]", "[--ttl S]", "[--authorized-keys f]", "[--set-name ncp_spa_allow]", "[--default-ttl 300]", "[--max-ttl 86400]", "[--dry-run]"});
 
     parser.parse_and_execute(argc, argv);
 
@@ -3407,4 +3410,153 @@ void handle_import_zapret(const std::vector<std::string>& args) {
     if (!result.warnings.empty())
         std::cout << ", " << result.warnings.size() << " warning(s)";
     std::cout << "\n";
+}
+
+// ============================================================================
+// ncp spa — Ed25519 Single Packet Authorization (keygen/knock/serve)
+// ============================================================================
+
+static void spa_print_usage() {
+    std::cout << "Usage: ncp spa <action> [options]\n"
+              << "  keygen --out <prefix>              Generate keypair -> <prefix>.key; prints key_id + authorized_keys line\n"
+              << "  knock <host> --key <file.key> --allow-port <N> [--port 54117] [--proto tcp] [--ttl S] [--send-twice]\n"
+              << "  serve --authorized-keys <file> [--port 54117] [--bind 0.0.0.0] [--set-name ncp_spa_allow]\n"
+              << "        [--default-ttl 300] [--max-ttl 86400] [--dry-run]\n";
+}
+
+void handle_spa(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        spa_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+
+    // ── keygen ──────────────────────────────────────────────────────────────
+    if (action == "keygen") {
+        const std::string prefix = get_option(args, "--out", "spa");
+        ncp::SpaClient client;
+        if (!client.generate()) {
+            std::cerr << "[!] SPA key generation failed\n";
+            return;
+        }
+        const std::string key_path = prefix + ".key";
+        if (!client.save_keyfile(key_path)) {
+            std::cerr << "[!] Cannot write " << key_path << "\n";
+            return;
+        }
+        std::cout << "[+] SPA keypair written to " << key_path << " (keep it secret)\n"
+                  << "    key_id: " << client.key_id_hex() << "\n"
+                  << "    authorized_keys line (add on the server):\n"
+                  << client.pubkey_base64() << "\n";
+        return;
+    }
+
+    // ── knock ───────────────────────────────────────────────────────────────
+    if (action == "knock") {
+        // first positional after the action is the target host
+        std::string host;
+        for (size_t i = 1; i < args.size(); ++i) {
+            if (args[i].rfind("--", 0) == 0) { ++i; continue; }  // skip option + value
+            if (args[i] == "--send-twice") continue;
+            host = args[i];
+            break;
+        }
+        const std::string key_path = get_option(args, "--key", "");
+        const int udp_port    = get_option_int(args, "--port", static_cast<int>(ncp::SPA_DEFAULT_PORT));
+        const int allow_port  = get_option_int(args, "--allow-port", 0);
+        const std::string ps  = get_option(args, "--proto", "tcp");
+        const int ttl         = get_option_int(args, "--ttl", 0);
+        const bool twice      = has_flag(args, "--send-twice");
+        const uint8_t proto   = (ps == "udp") ? 17 : 6;
+
+        if (host.empty() || key_path.empty() || allow_port <= 0 || allow_port > 65535) {
+            std::cerr << "[!] knock requires <host>, --key <file.key> and --allow-port <N>\n";
+            spa_print_usage();
+            return;
+        }
+
+        ncp::SpaClient client;
+        if (!client.load_keyfile(key_path)) {
+            std::cerr << "[!] Cannot load SPA key from " << key_path << "\n";
+            return;
+        }
+        auto pkt = client.build_packet(proto, static_cast<uint16_t>(allow_port),
+                                       static_cast<uint32_t>(ttl));
+        if (pkt.empty()) {
+            std::cerr << "[!] Failed to build SPA packet\n";
+            return;
+        }
+        if (!client.send_packet(host, static_cast<uint16_t>(udp_port), pkt)) {
+            std::cerr << "[!] Knock send failed to " << host << ":" << udp_port << "\n";
+            return;
+        }
+        std::cout << "[+] SPA knock sent to " << host << ":" << udp_port
+                  << " (open " << ps << "/" << allow_port
+                  << ", key_id " << client.key_id_hex() << ")\n";
+        if (twice) {
+            // Replay self-test: resend the exact same datagram — the server
+            // must answer REPLAY (no second grant).
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            client.send_packet(host, static_cast<uint16_t>(udp_port), pkt);
+            std::cout << "[+] Same packet re-sent (expect REPLAY on the server)\n";
+        }
+        return;
+    }
+
+    // ── serve ───────────────────────────────────────────────────────────────
+    if (action == "serve") {
+        const std::string keys_path = get_option(args, "--authorized-keys", "");
+        if (keys_path.empty()) {
+            std::cerr << "[!] serve requires --authorized-keys <file>\n";
+            spa_print_usage();
+            return;
+        }
+        const int port        = get_option_int(args, "--port", static_cast<int>(ncp::SPA_DEFAULT_PORT));
+        const std::string bind_addr  = get_option(args, "--bind", "0.0.0.0");
+        const std::string set_name   = get_option(args, "--set-name", "ncp_spa_allow");
+        const int default_ttl = get_option_int(args, "--default-ttl", 300);
+        const int max_ttl     = get_option_int(args, "--max-ttl", 86400);
+        const bool dry_run    = has_flag(args, "--dry-run");
+
+        ncp::SpaServer::Config cfg;
+        cfg.default_ttl_sec = static_cast<uint32_t>(default_ttl);
+        cfg.max_ttl_sec     = static_cast<uint32_t>(max_ttl);
+
+        auto ctrl = std::make_shared<ncp::IpSetAccessController>(set_name, dry_run);
+        ncp::SpaServer server(cfg);
+        server.set_access_controller(ctrl);
+        if (!server.load_authorized_keys(keys_path)) {
+            std::cerr << "[!] No valid keys loaded from " << keys_path << "\n";
+            return;
+        }
+        ctrl->ensure_set();
+
+        std::cout << "═══ NCP SPA server ═══\n"
+                  << "  Listen:          UDP " << bind_addr << ":" << port << "\n"
+                  << "  Authorized keys: " << server.authorized_key_count()
+                  << " (" << keys_path << ")\n"
+                  << "  ipset:           " << set_name
+                  << (dry_run ? " (DRY-RUN — commands logged only)" : "") << "\n"
+                  << "  TTL:             default " << default_ttl << "s, max " << max_ttl << "s\n"
+                  << "  Companion firewall rule (per protected port):\n"
+                  << "    " << ncp::IpSetAccessController::iptables_rule_hint(6, 22, set_name) << "\n";
+
+        ncp::SpaDaemon daemon(server, static_cast<uint16_t>(port), bind_addr);
+        if (!daemon.start()) {
+            std::cerr << "[!] Failed to start SPA daemon on UDP " << bind_addr << ":" << port << "\n";
+            return;
+        }
+        std::cout << "[*] SPA daemon running — Ctrl-C to stop\n";
+
+        g_running = 1;
+        while (g_running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        }
+        daemon.stop();
+        std::cout << "[*] SPA daemon stopped\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown spa action: " << action << "\n";
+    spa_print_usage();
 }

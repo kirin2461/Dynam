@@ -24,7 +24,7 @@
 - ✅ **Phase 3: Anti-СОРМ** — CovertChannelManager (4 channels), CrossLayerCorrelator, GeoObfuscator
 - ✅ **Phase 4: Security** — PanicSequence (9 steps), Background Scheduler (8 tasks)
 
-- ✅ **Fully Implemented & Tested**: Cryptography, DPI Bypass (incl. midSLD splits, zapret chains, fake/fooling), DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, CSPRNG, TLS Fingerprinting (JA3/JA4, browser profiles), Adversarial Padding, Flow Shaping, Probe Resistance, L2 Stealth, L3 Stealth, ARP Spoofing, DHCP Spoofing, Port Knocking, Packet Interceptor, Protocol Morphing, Burst Morphing, Entropy Masking, Geneva Engine/GA (crossover/mutation/selection, sync + background evolution), Identity Management, Timing Protection, Thread Pool, Rotation Coordinator, Security Manager, Capabilities Framework, I2P (SAM protocol client), Traffic Mimicry.
+- ✅ **Fully Implemented & Tested**: Cryptography, DPI Bypass (incl. midSLD splits, zapret chains, fake/fooling), DPI Advanced (multi-technique pipeline), Network Spoofing, Secure Memory/Buffer, DoH, Database, License, Logging, Configuration, CSPRNG, TLS Fingerprinting (JA3/JA4, browser profiles), Adversarial Padding, Flow Shaping, Probe Resistance, L2 Stealth, L3 Stealth, ARP Spoofing, DHCP Spoofing, Port Knocking, SPA (Ed25519 Single Packet Authorization + ipset gate control), Packet Interceptor, Protocol Morphing, Burst Morphing, Entropy Masking, Geneva Engine/GA (crossover/mutation/selection, sync + background evolution), Identity Management, Timing Protection, Thread Pool, Rotation Coordinator, Security Manager, Capabilities Framework, I2P (SAM protocol client), Traffic Mimicry.
 
 - ✅ **Security Fixes Applied**:
   - ECH info string mismatch — FIXED (canonical info string)
@@ -319,6 +319,38 @@ Exact + suffix domain matching (`*.example.com`, bare `example.com`,
 two-level TLD aware). Auto-hostlist records hosts where DPI blocking was
 detected (timeout / RST injection) and feeds them back into chain
 selection (`--hostlist` rules).
+
+### Single Packet Authorization — `ncp spa`
+
+Enterprise-grade SPA (upgrade over classic port knocking, which is vulnerable
+to replay and timing analysis): the protected service port stays a black hole
+for scanners until the client sends a **single Ed25519-signed UDP packet**
+(256 bytes: key-id, timestamp, nonce, requested proto/port/TTL + 64-byte
+signature + CSPRNG padding). The server verifies the signature against an
+authorized-keys file, rejects replays (per-key nonce cache + ±60 s timestamp
+window), and only then dynamically opens access — for that source IP only —
+via **ipset** with automatic TTL expiry:
+
+```bash
+ncp spa keygen --out client                        # Ed25519 keypair + authorized_keys line
+ncp spa serve --authorized-keys keys.txt \
+    --port 54117 --set-name ncp_spa_allow \
+    --default-ttl 300 --max-ttl 86400              # [--dry-run] to log without applying
+ncp spa knock <server-ip> --key client.key \
+    --allow-port 443 --ttl 300                     # open tcp/443 for this IP only
+```
+
+Server-side gate rule (printed by `serve` at startup):
+
+```bash
+iptables -A INPUT -p tcp --dport 443 -m set ! --match-set ncp_spa_allow src -j DROP
+```
+
+Verified in the Docker DPI Lab: pre-knock connections time out (DROP), a valid
+knock returns HTTP 200 through the gate, replayed packets are rejected
+(REPLAY), unknown keys are rejected (UNKNOWN_KEY), and access closes
+automatically on TTL expiry. Asymmetric design: the server stores only public
+keys, so a server compromise does not leak client signing capability.
 
 ### Passive DPI detector
 
