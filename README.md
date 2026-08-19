@@ -116,7 +116,11 @@ ncp.exe run --preset tspu
 Prebuilt `ncp` binaries from [GitHub Releases](https://github.com/kirin2461/Dynam/releases)
 are distributed as the npm package [`dynam-ncp`](https://www.npmjs.com/package/dynam-ncp):
 
-[![npm version](https://img.shields.io/npm/v/dynam-ncp)](https://www.npmjs.com/package/dynam-ncp)
+[![npm: dynam-ncp](https://img.shields.io/badge/npm-dynam--ncp-cb3837?logo=npm)](https://www.npmjs.com/package/dynam-ncp)
+
+> The package is published automatically on the next release (see
+> `.github/workflows/npm-publish.yml`, requires the `NPM_TOKEN` repo secret).
+> Until the first publish the npmjs.com link above will 404 — this is expected.
 
 ```bash
 npm install -g dynam-ncp
