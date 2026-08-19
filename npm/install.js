@@ -120,7 +120,10 @@ function findBinary(dir) {
 // ---------------------------------------------------------------------------
 function verifyBinary(binPath) {
     const stat = fs.statSync(binPath);
-    if (!stat.isFile() || stat.size < 1024) {
+    // Bundled-libs layout: `ncp` is a small $ORIGIN wrapper script and the
+    // real ELF is the sibling `ncp.bin` — allow the small file then.
+    const hasBundledSibling = fs.existsSync(binPath + '.bin');
+    if ((!stat.isFile() || stat.size < 1024) && !hasBundledSibling) {
         throw new Error('Downloaded binary is suspiciously small (' + stat.size + ' bytes)');
     }
     if (!IS_WIN) {
@@ -220,8 +223,17 @@ async function main() {
         warnAndExit('Archive did not contain an ncp binary.');
     }
 
+    // Release assets ship ncp alongside its runtime: bundled shared libs
+    // (lib/ + ncp.bin wrapper layout on Linux, *.dll on Windows,
+    // Dynam.app on macOS) and the web/ UI. Copy the whole payload
+    // directory so the binary actually starts on a stock system.
     fs.mkdirSync(VENDOR_DIR, { recursive: true });
-    fs.copyFileSync(found, BIN_PATH);
+    const payloadDir = path.dirname(found);
+    if (fs.cpSync) {
+        fs.cpSync(payloadDir, VENDOR_DIR, { recursive: true });
+    } else {
+        execFileSync('cp', ['-r', payloadDir + '/.', VENDOR_DIR], { stdio: 'pipe' });
+    }
 
     try {
         verifyBinary(BIN_PATH);

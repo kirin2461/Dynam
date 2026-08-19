@@ -1,6 +1,6 @@
 {
   "name": "dynam-ncp",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Dynam NCP - multi-layered DPI-bypass and network privacy platform (binary wrapper). Installs the prebuilt `ncp` CLI from GitHub Releases.",
   "keywords": [
     "dynam",
