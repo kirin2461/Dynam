@@ -42,13 +42,30 @@ jobs:
       - name: Build
         run: cmake --build build --config ${{env.BUILD_TYPE}} -j$(nproc)
 
-      - name: Package (CLI + Qt GUI + Web UI)
+      - name: Package (CLI + Qt GUI + Web UI, bundled shared libs)
         run: |
-          mkdir -p release/ncp-linux-x64
-          cp build/bin/ncp release/ncp-linux-x64/
-          cp build/bin/ncp-qt release/ncp-linux-x64/
-          cp -r web release/ncp-linux-x64/
-          cp README.md LICENSE release/ncp-linux-x64/
+          set -e
+          pkg=release/ncp-linux-x64
+          mkdir -p $pkg/lib
+          cp build/bin/ncp $pkg/ncp.bin
+          cp build/bin/ncp-qt $pkg/ncp-qt.bin
+          cp -r web $pkg/
+          cp README.md LICENSE $pkg/
+          # Bundle every non-baseline shared lib both binaries need
+          # (libwebsockets/openssl3/libsodium/libpcap/Qt are NOT present
+          # on a stock user system; glibc/libstdc++/libgcc stay system).
+          for bin in build/bin/ncp build/bin/ncp-qt; do
+            ldd $bin | awk '/=> \//{print $3}' | while read -r lib; do
+              case "$lib" in
+                *libc.so*|*libm.so*|*libmvec*|*libpthread*|*libdl*|*librt*|*ld-linux*|*libresolv*|*libstdc++*|*libgcc_s*) ;;
+                *) cp -L "$lib" $pkg/lib/ || true ;;
+              esac
+            done
+          done
+          # $ORIGIN wrappers so binaries find bundled libs without env setup
+          printf '%s\n' '#!/bin/sh'             'DIR="$(cd "$(dirname "$0")" && pwd)"'             'LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$DIR/ncp.bin" "$@"'             > $pkg/ncp
+          printf '%s\n' '#!/bin/sh'             'DIR="$(cd "$(dirname "$0")" && pwd)"'             'LD_LIBRARY_PATH="$DIR/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$DIR/ncp-qt.bin" "$@"'             > $pkg/ncp-qt
+          chmod +x $pkg/ncp $pkg/ncp-qt
           tar -czvf ncp-linux-x64.tar.gz -C release ncp-linux-x64
 
       - name: Upload artifact
@@ -74,7 +91,11 @@ jobs:
         run: |
           mkdir -p release/ncp-macos-x64
           ditto --noextattr --norsrc dist/Dynam.app release/ncp-macos-x64/Dynam.app
-          cp build-portable/bin/ncp release/ncp-macos-x64/ncp
+          # Standalone `ncp` entry point: the CLI inside Dynam.app is built
+          # with BUILD_PORTABLE_MACOS and resolves its dylibs from the app
+          # itself, so the top-level ncp is a thin wrapper into the bundle.
+          printf '%s\n' '#!/bin/sh'             'DIR="$(cd "$(dirname "$0")" && pwd)"'             'exec "$DIR/Dynam.app/Contents/Resources/bin/ncp" "$@"'             > release/ncp-macos-x64/ncp
+          chmod +x release/ncp-macos-x64/ncp
           cp -r web release/ncp-macos-x64/
           cp README.md LICENSE release/ncp-macos-x64/
           tar -czvf ncp-macos-x64.tar.gz -C release ncp-macos-x64
