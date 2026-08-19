@@ -1,8 +1,11 @@
 name: npm Publish
 
 on:
-  release:
-    types: [published]
+  # NOTE: автоматический триггер `release: types: [published]` намеренно
+  # отключён до добавления секрета NPM_TOKEN в Settings -> Secrets.
+  # После добавления секрета верните блок:
+  #   release:
+  #     types: [published]
   workflow_dispatch:
     inputs:
       tag:
