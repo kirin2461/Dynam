@@ -90,6 +90,7 @@ function loadSectionData(id) {
     case 'transport': loadModuleStats(); break;
     case 'telegram':  loadTgProxies(); break;
     case 'monitor':   monitorInit(); break;
+    case 'enterprise': enterpriseInit(); break;
   }
 }
 
@@ -2084,4 +2085,350 @@ async function monitorAutopilotPresetPoll() {
     st.textContent = r.ok ? `пресет ${r.preset}: готово` : `пресет ${r.preset}: ошибка`;
   }
   monitorAutopilotPoll();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Enterprise modules — SPA, Reality, Stego-DNS, Port-Hopping, Fog, XDP
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _entPoll = null;
+
+function _entSetBadge(id, running, label) {
+  const badge = document.getElementById(id);
+  if (!badge) return;
+  badge.textContent = running ? (label || 'Запущен') : 'Выкл';
+  badge.className = 'badge ' + (running ? 'badge--active' : 'badge--inactive');
+}
+
+function _entSetLog(id, lines) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = (lines || []).join('\n');
+  el.scrollTop = el.scrollHeight;
+}
+
+function _entDaemonUI(st, badgeId, btnStartId, btnStopId, logId, label) {
+  _entSetBadge(badgeId, st.running, label);
+  const bStart = document.getElementById(btnStartId);
+  const bStop = document.getElementById(btnStopId);
+  if (bStart) bStart.disabled = !!st.running;
+  if (bStop) bStop.disabled = !st.running;
+  _entSetLog(logId, st.log);
+}
+
+async function _entRefreshStatuses() {
+  try {
+    const spa = await apiFetch('/api/spa/serve/status');
+    _entDaemonUI(spa, 'ent-spa-badge', 'ent-spa-btn-start', 'ent-spa-btn-stop', 'ent-spa-serve-log',
+      spa.running ? 'UDP :' + (spa.params && spa.params.port || '') : null);
+  } catch (_) {}
+  try {
+    const re = await apiFetch('/api/reality/status');
+    _entDaemonUI(re, 'ent-reality-badge', 'ent-reality-btn-start', 'ent-reality-btn-stop', 'ent-reality-log',
+      re.running ? 'TCP :' + (re.params && re.params.listen || '') : null);
+  } catch (_) {}
+  try {
+    const ph = await apiFetch('/api/porthop/serve/status');
+    _entDaemonUI(ph, 'ent-porthop-badge', 'ent-ph-btn-start', 'ent-ph-btn-stop', 'ent-ph-log',
+      ph.running ? 'UDP [' + (ph.params && ph.params.base_port || '?') + '+)' : null);
+  } catch (_) {}
+  try {
+    const fog = await apiFetch('/api/fog/status');
+    _entDaemonUI(fog, 'ent-fog-badge', 'ent-fog-btn-start', 'ent-fog-btn-stop', 'ent-fog-log',
+      fog.running ? 'UDP :' + (fog.params && fog.params.port || '') : null);
+  } catch (_) {}
+}
+
+function enterpriseInit() {
+  _entRefreshStatuses();
+  if (_entPoll) clearInterval(_entPoll);
+  _entPoll = setInterval(() => {
+    if (currentSection === 'enterprise') _entRefreshStatuses();
+  }, 4000);
+}
+
+// ── SPA ───────────────────────────────────────────────────────────────────
+
+async function entSpaKeygen() {
+  const box = document.getElementById('ent-spa-keygen-result');
+  try {
+    const r = await apiFetch('/api/spa/keygen', { method: 'POST', body: JSON.stringify({}) });
+    if (!r.ok) { showToast(r.error || 'Ошибка keygen', 'error'); return; }
+    if (box) {
+      box.style.display = '';
+      box.innerHTML = '<b>key_id:</b> <code>' + _esc(r.key_id) + '</code><br>' +
+        '<b>authorized_keys (добавить на сервер):</b><br><code>' + _esc(r.authorized_keys_line) + '</code><br>' +
+        '<b>Файл ключа:</b> <code>' + _esc(r.key_path) + '</code><br>' +
+        '<b>Содержимое .key (храните в секрете):</b><br><code>' + _esc(r.key_content) + '</code>';
+    }
+    const keyTa = document.getElementById('ent-spa-knock-key');
+    if (keyTa && !keyTa.value.trim()) keyTa.value = r.key_content || '';
+    const akTa = document.getElementById('ent-spa-serve-keys');
+    if (akTa && !akTa.value.trim()) akTa.value = r.authorized_keys_line || '';
+    showToast('Ключевая пара SPA создана', 'success');
+  } catch (_) {}
+}
+
+async function entSpaKnock() {
+  const res = document.getElementById('ent-spa-knock-result');
+  const body = {
+    host: document.getElementById('ent-spa-knock-host')?.value.trim(),
+    allow_port: Number(document.getElementById('ent-spa-knock-allowport')?.value),
+    port: Number(document.getElementById('ent-spa-knock-port')?.value),
+    ttl: Number(document.getElementById('ent-spa-knock-ttl')?.value || 0),
+    proto: document.getElementById('ent-spa-knock-proto')?.value,
+    key_content: document.getElementById('ent-spa-knock-key')?.value.trim(),
+  };
+  if (!body.host || !body.key_content) { showToast('Укажите хост и ключ', 'warn'); return; }
+  if (res) { res.style.color = 'var(--text-secondary)'; res.textContent = 'Отправка…'; }
+  try {
+    const r = await apiFetch('/api/spa/knock', { method: 'POST', body: JSON.stringify(body) });
+    if (res) {
+      res.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+      res.textContent = r.output || (r.ok ? 'Knock отправлен' : 'Ошибка');
+    }
+  } catch (e) {
+    if (res) { res.style.color = 'var(--red)'; res.textContent = e.message || 'Ошибка'; }
+  }
+}
+
+function _entSpaServeBody() {
+  return {
+    authorized_keys: document.getElementById('ent-spa-serve-keys')?.value,
+    port: Number(document.getElementById('ent-spa-serve-port')?.value),
+    bind: document.getElementById('ent-spa-serve-bind')?.value.trim(),
+    dry_run: !!document.getElementById('ent-spa-serve-dryrun')?.checked,
+  };
+}
+
+async function entSpaServeStart() {
+  try {
+    const r = await apiFetch('/api/spa/serve/start', { method: 'POST', body: JSON.stringify(_entSpaServeBody()) });
+    if (r.ok) showToast('SPA-сервер запущен (PID ' + r.pid + ')', 'success');
+    _entRefreshStatuses();
+  } catch (_) { _entRefreshStatuses(); }
+}
+
+async function entSpaServeStop() {
+  try {
+    await apiFetch('/api/spa/serve/stop', { method: 'POST', body: '{}' });
+    showToast('SPA-сервер остановлен', 'info');
+  } catch (_) {}
+  _entRefreshStatuses();
+}
+
+// ── Reality ───────────────────────────────────────────────────────────────
+
+function _entRealityBody() {
+  return {
+    listen: Number(document.getElementById('ent-reality-listen')?.value),
+    fallback: document.getElementById('ent-reality-fallback')?.value.trim(),
+    internal: document.getElementById('ent-reality-internal')?.value.trim(),
+    key_file: document.getElementById('ent-reality-keyfile')?.value,
+  };
+}
+
+async function entRealityDryRun() {
+  const log = document.getElementById('ent-reality-log');
+  try {
+    const r = await apiFetch('/api/reality/dry-run', { method: 'POST', body: JSON.stringify(_entRealityBody()) });
+    _entSetLog('ent-reality-log', [r.output || '']);
+    if (r.ok) showToast('Reality: конфигурация корректна', 'success');
+  } catch (e) {
+    if (log) log.textContent = e.message || 'Ошибка проверки';
+  }
+}
+
+async function entRealityStart() {
+  try {
+    const r = await apiFetch('/api/reality/start', { method: 'POST', body: JSON.stringify(_entRealityBody()) });
+    if (r.ok) showToast('Reality-сервер запущен (PID ' + r.pid + ')', 'success');
+    _entRefreshStatuses();
+  } catch (_) { _entRefreshStatuses(); }
+}
+
+async function entRealityStop() {
+  try {
+    await apiFetch('/api/reality/stop', { method: 'POST', body: '{}' });
+    showToast('Reality-сервер остановлен', 'info');
+  } catch (_) {}
+  _entRefreshStatuses();
+}
+
+// ── Stego-DNS ─────────────────────────────────────────────────────────────
+
+async function entStegoEncode() {
+  const box = document.getElementById('ent-stego-encode-result');
+  const body = {
+    ip: document.getElementById('ent-stego-ip')?.value.trim(),
+    port: Number(document.getElementById('ent-stego-port')?.value),
+    expires: Number(document.getElementById('ent-stego-expires')?.value || 0),
+    spa_pubkey: document.getElementById('ent-stego-spapub')?.value.trim(),
+    domain: document.getElementById('ent-stego-domain')?.value.trim(),
+    passphrase: document.getElementById('ent-stego-pass')?.value,
+    signing_key: document.getElementById('ent-stego-signkey')?.value.trim(),
+  };
+  if (!body.ip || !body.passphrase || !body.signing_key || !body.domain) {
+    showToast('Заполните IP, домен, passphrase и signing key', 'warn');
+    return;
+  }
+  try {
+    const r = await apiFetch('/api/stegodns/encode', { method: 'POST', body: JSON.stringify(body) });
+    if (!r.ok) { showToast(r.error || 'Ошибка encode', 'error'); return; }
+    if (box) {
+      box.style.display = '';
+      box.innerHTML = '<b>TXT-запись:</b><br><code>' + _esc(r.txt) + '</code>' +
+        (r.verify_pubkey ? '<br><b>verify-pubkey:</b> <code>' + _esc(r.verify_pubkey) + '</code>' : '');
+    }
+    const decTxt = document.getElementById('ent-stego-dec-txt');
+    if (decTxt && !decTxt.value.trim()) decTxt.value = r.txt;
+    const decVpk = document.getElementById('ent-stego-dec-vpk');
+    if (decVpk && !decVpk.value.trim() && r.verify_pubkey) decVpk.value = r.verify_pubkey;
+    showToast('TXT-запись создана', 'success');
+  } catch (_) {}
+}
+
+async function entStegoDecode() {
+  const res = document.getElementById('ent-stego-decode-result');
+  const body = {
+    txt: document.getElementById('ent-stego-dec-txt')?.value.trim(),
+    passphrase: document.getElementById('ent-stego-dec-pass')?.value,
+    verify_pubkey: document.getElementById('ent-stego-dec-vpk')?.value.trim(),
+  };
+  if (!body.txt || !body.passphrase || !body.verify_pubkey) {
+    showToast('Укажите TXT-запись, passphrase и verify pubkey', 'warn');
+    return;
+  }
+  try {
+    const r = await apiFetch('/api/stegodns/decode', { method: 'POST', body: JSON.stringify(body) });
+    if (res) {
+      res.style.color = 'var(--text-primary)';
+      res.textContent = r.output || JSON.stringify(r.params, null, 2);
+    }
+    showToast('Запись расшифрована', 'success');
+  } catch (e) {
+    if (res) { res.style.color = 'var(--red)'; res.textContent = e.message || 'Не удалось расшифровать'; }
+  }
+}
+
+// ── Port-Hopping ──────────────────────────────────────────────────────────
+
+function _entPorthopBody() {
+  return {
+    base_port: Number(document.getElementById('ent-ph-base')?.value),
+    range: Number(document.getElementById('ent-ph-range')?.value),
+    hop_interval: Number(document.getElementById('ent-ph-interval')?.value),
+    secret: document.getElementById('ent-ph-secret')?.value,
+  };
+}
+
+async function entPorthopStart() {
+  try {
+    const r = await apiFetch('/api/porthop/serve/start', { method: 'POST', body: JSON.stringify(_entPorthopBody()) });
+    if (r.ok) showToast('PortHop-сервер запущен (PID ' + r.pid + ')', 'success');
+    _entRefreshStatuses();
+  } catch (_) { _entRefreshStatuses(); }
+}
+
+async function entPorthopStop() {
+  try {
+    await apiFetch('/api/porthop/serve/stop', { method: 'POST', body: '{}' });
+    showToast('PortHop-сервер остановлен', 'info');
+  } catch (_) {}
+  _entRefreshStatuses();
+}
+
+async function entPorthopClient() {
+  const body = _entPorthopBody();
+  body.host = document.getElementById('ent-ph-client-host')?.value.trim();
+  body.message = document.getElementById('ent-ph-client-msg')?.value;
+  if (!body.host || !body.message || !body.secret) {
+    showToast('Укажите хост, сообщение и секрет', 'warn');
+    return;
+  }
+  _entSetLog('ent-ph-log', ['Отправка…']);
+  try {
+    const r = await apiFetch('/api/porthop/client', { method: 'POST', body: JSON.stringify(body) });
+    _entSetLog('ent-ph-log', [r.output || '']);
+    if (r.echoed) showToast('Эхо получено', 'success');
+    else showToast('Эхо не получено', 'warn');
+  } catch (e) {
+    _entSetLog('ent-ph-log', [e.message || 'Ошибка клиента']);
+  }
+}
+
+// ── Fog ───────────────────────────────────────────────────────────────────
+
+function entFogGenId() {
+  const el = document.getElementById('ent-fog-id');
+  if (!el) return;
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  el.value = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+}
+
+async function entFogStart() {
+  const body = {
+    id: document.getElementById('ent-fog-id')?.value.trim(),
+    port: Number(document.getElementById('ent-fog-port')?.value),
+    peers: document.getElementById('ent-fog-peers')?.value,
+  };
+  if (!body.id) { showToast('Укажите или сгенерируйте ID узла', 'warn'); return; }
+  try {
+    const r = await apiFetch('/api/fog/start', { method: 'POST', body: JSON.stringify(body) });
+    if (r.ok) showToast('Fog-узел запущен (PID ' + r.pid + ')', 'success');
+    _entRefreshStatuses();
+  } catch (_) { _entRefreshStatuses(); }
+}
+
+async function entFogStop() {
+  try {
+    await apiFetch('/api/fog/stop', { method: 'POST', body: '{}' });
+    showToast('Fog-узел остановлен', 'info');
+  } catch (_) {}
+  _entRefreshStatuses();
+}
+
+// ── XDP ───────────────────────────────────────────────────────────────────
+
+async function entXdpProbe() {
+  const el = document.getElementById('ent-xdp-probe-result');
+  if (el) { el.style.color = 'var(--text-secondary)'; el.textContent = 'Проверка…'; }
+  try {
+    const r = await apiFetch('/api/xdp/probe');
+    if (el) {
+      el.style.color = r.supported ? 'var(--green)' : 'var(--yellow)';
+      el.textContent = r.output || (r.supported ? 'BPF поддерживается' : 'BPF недоступен');
+    }
+  } catch (e) {
+    if (el) { el.style.color = 'var(--red)'; el.textContent = e.message || 'Ошибка'; }
+  }
+}
+
+async function entXdpStats() {
+  const el = document.getElementById('ent-xdp-stats-result');
+  const port = Number(document.getElementById('ent-xdp-stats-port')?.value);
+  try {
+    const r = await apiFetch('/api/xdp/stats', { method: 'POST', body: JSON.stringify({ port }) });
+    if (el) {
+      el.style.color = 'var(--text-primary)';
+      el.textContent = 'UDP :' + r.port + ' — ' + r.packets + ' пакетов, ' + r.bytes + ' байт';
+    }
+  } catch (e) {
+    if (el) { el.style.color = 'var(--red)'; el.textContent = e.message || 'Счётчики недоступны'; }
+  }
+}
+
+async function entXdpDrop(clear) {
+  const el = document.getElementById('ent-xdp-drop-result');
+  const port = clear ? 0 : Number(document.getElementById('ent-xdp-drop-port')?.value);
+  try {
+    const r = await apiFetch('/api/xdp/drop', { method: 'POST', body: JSON.stringify({ port }) });
+    if (el) {
+      el.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+      el.textContent = r.output || (r.ok ? 'Готово' : 'Ошибка');
+    }
+  } catch (e) {
+    if (el) { el.style.color = 'var(--red)'; el.textContent = e.message || 'Ошибка'; }
+  }
 }

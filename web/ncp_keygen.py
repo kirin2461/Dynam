@@ -56,6 +56,13 @@ ALL_MODULES = [
     "protocol_rotation",
     "as_router",
     "geo_obfuscator",
+    # Enterprise-модули (web/enterprise_routes.py)
+    "spa",
+    "reality",
+    "stegodns",
+    "porthop",
+    "fog",
+    "xdp",
 ]
 
 VALID_PLANS = ["trial", "basic", "pro", "ultimate"]

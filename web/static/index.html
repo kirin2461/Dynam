@@ -187,6 +187,14 @@
           Транспорт
         </li>
 
+        <li class="sidebar__item" data-nav="enterprise">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4z"/>
+            <polyline points="9 12 11 14 15 10"/>
+          </svg>
+          Enterprise
+        </li>
+
         <li class="sidebar__sep"></li>
         <li class="sidebar__label">Система</li>
 
@@ -1955,6 +1963,278 @@
           <a href="https://www.perplexity.ai/computer" target="_blank" rel="noopener noreferrer" style="color:var(--text-muted);text-decoration:none">
             Created with Perplexity Computer
           </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ ENTERPRISE ═══════════════════════════════════════════════════ -->
+    <section id="sec-enterprise" class="section">
+      <h2 class="section-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4z"/>
+          <polyline points="9 12 11 14 15 10"/>
+        </svg>
+        Enterprise-модули
+      </h2>
+
+      <div class="grid-2col">
+        <!-- ── SPA ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            SPA (Single Packet Authorization)
+            <span id="ent-spa-badge" class="badge badge--inactive">Выкл</span>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Скрытие портов за Ed25519-авторизацией одним пакетом: порт открывается только после криптографически подписанного «стука».
+          </div>
+          <div class="card__title" style="font-size:var(--text-sm)">Генерация ключей</div>
+          <button class="btn" onclick="entSpaKeygen()">Сгенерировать ключевую пару</button>
+          <div id="ent-spa-keygen-result" class="text-sm mt-3" style="display:none;word-break:break-all"></div>
+          <div class="card__title mt-4" style="font-size:var(--text-sm)">Knock (открыть порт на сервере)</div>
+          <div class="form-group">
+            <label class="form-label">Хост сервера</label>
+            <input class="form-input" id="ent-spa-knock-host" placeholder="203.0.113.10">
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <div class="form-group" style="flex:1;min-width:110px">
+              <label class="form-label">Открыть порт</label>
+              <input type="number" class="form-input" id="ent-spa-knock-allowport" value="22" min="1" max="65535">
+            </div>
+            <div class="form-group" style="flex:1;min-width:110px">
+              <label class="form-label">SPA UDP-порт</label>
+              <input type="number" class="form-input" id="ent-spa-knock-port" value="54117" min="1" max="65535">
+            </div>
+            <div class="form-group" style="flex:1;min-width:90px">
+              <label class="form-label">TTL (сек)</label>
+              <input type="number" class="form-input" id="ent-spa-knock-ttl" value="0" min="0" max="86400">
+            </div>
+            <div class="form-group" style="flex:1;min-width:90px">
+              <label class="form-label">Протокол</label>
+              <select class="form-select" id="ent-spa-knock-proto">
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Ключ клиента (содержимое .key файла)</label>
+            <textarea class="form-input" id="ent-spa-knock-key" rows="2" placeholder="Вставьте ключ из результата keygen"></textarea>
+          </div>
+          <button class="btn btn--primary" onclick="entSpaKnock()">Отправить knock</button>
+          <div id="ent-spa-knock-result" class="text-sm mt-3" style="color:var(--text-secondary);white-space:pre-wrap"></div>
+          <div class="card__title mt-4" style="font-size:var(--text-sm)">SPA-сервер (демон)</div>
+          <div class="form-group">
+            <label class="form-label">authorized_keys (по строке на ключ)</label>
+            <textarea class="form-input" id="ent-spa-serve-keys" rows="2" placeholder="base64-публичные ключи клиентов"></textarea>
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center">
+            <div class="form-group" style="min-width:110px">
+              <label class="form-label">UDP-порт</label>
+              <input type="number" class="form-input" id="ent-spa-serve-port" value="54117" min="1" max="65535">
+            </div>
+            <div class="form-group" style="min-width:120px">
+              <label class="form-label">Bind</label>
+              <input class="form-input" id="ent-spa-serve-bind" value="0.0.0.0">
+            </div>
+            <label class="toggle" style="margin-top:var(--sp-4)"><input type="checkbox" id="ent-spa-serve-dryrun"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+            <span class="text-sm">dry-run (без ipset)</span>
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <button class="btn btn--primary" id="ent-spa-btn-start" onclick="entSpaServeStart()">Запустить</button>
+            <button class="btn" id="ent-spa-btn-stop" onclick="entSpaServeStop()" disabled>Остановить</button>
+          </div>
+          <div id="ent-spa-serve-log" class="text-sm mt-3" style="color:var(--text-secondary);white-space:pre-wrap;max-height:140px;overflow-y:auto"></div>
+        </div>
+
+        <!-- ── Reality ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Reality fallback-сервер
+            <span id="ent-reality-badge" class="badge badge--inactive">Выкл</span>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Маскировка под реальный HTTPS-сайт: авторизованные клиенты (Ed25519-токен в SNI) уходят на внутренний сервис, остальные прозрачно попадают на настоящий сайт. Только Linux.
+          </div>
+          <div class="form-group">
+            <label class="form-label">Listen-порт (TCP)</label>
+            <input type="number" class="form-input" id="ent-reality-listen" value="443" min="1" max="65535" style="max-width:120px">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Fallback (маскирующий сайт) host:port</label>
+            <input class="form-input" id="ent-reality-fallback" placeholder="www.example.com:443">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Internal (внутренний сервис) host:port</label>
+            <input class="form-input" id="ent-reality-internal" placeholder="127.0.0.1:8080">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Key-file (key_id base64-secret, по строке на клиента)</label>
+            <textarea class="form-input" id="ent-reality-keyfile" rows="3" placeholder="myclient AAAA...=="></textarea>
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <button class="btn" onclick="entRealityDryRun()">Проверить (dry-run)</button>
+            <button class="btn btn--primary" id="ent-reality-btn-start" onclick="entRealityStart()">Запустить</button>
+            <button class="btn" id="ent-reality-btn-stop" onclick="entRealityStop()" disabled>Остановить</button>
+          </div>
+          <div id="ent-reality-log" class="text-sm mt-3" style="color:var(--text-secondary);white-space:pre-wrap;max-height:140px;overflow-y:auto"></div>
+        </div>
+      </div>
+
+      <div class="grid-2col mt-4">
+        <!-- ── Stego-DNS ── -->
+        <div class="card">
+          <div class="card__title">Stego-DNS (Zero-Knowledge DNS-записи)</div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Публикация параметров узла в TXT-записи: без passphrase запись неотличима от мусора.
+          </div>
+          <div class="card__title" style="font-size:var(--text-sm)">Encode</div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <div class="form-group" style="flex:1;min-width:130px">
+              <label class="form-label">IP узла</label>
+              <input class="form-input" id="ent-stego-ip" placeholder="203.0.113.10">
+            </div>
+            <div class="form-group" style="min-width:100px">
+              <label class="form-label">Порт</label>
+              <input type="number" class="form-input" id="ent-stego-port" value="443" min="1" max="65535">
+            </div>
+            <div class="form-group" style="min-width:130px">
+              <label class="form-label">Expires (unix, 0=нет)</label>
+              <input type="number" class="form-input" id="ent-stego-expires" value="0" min="0">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">SPA-публичный ключ (base64, 32 байта)</label>
+            <input class="form-input" id="ent-stego-spapub" placeholder="AAAA...==">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Домен</label>
+            <input class="form-input" id="ent-stego-domain" placeholder="node.example.com">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Passphrase</label>
+            <input type="password" class="form-input" id="ent-stego-pass" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Signing key (base64, 64-байт Ed25519 secret)</label>
+            <input type="password" class="form-input" id="ent-stego-signkey" autocomplete="off">
+          </div>
+          <button class="btn btn--primary" onclick="entStegoEncode()">Создать TXT-запись</button>
+          <div id="ent-stego-encode-result" class="text-sm mt-3" style="display:none;word-break:break-all"></div>
+          <div class="card__title mt-4" style="font-size:var(--text-sm)">Decode</div>
+          <div class="form-group">
+            <label class="form-label">TXT-запись</label>
+            <textarea class="form-input" id="ent-stego-dec-txt" rows="2"></textarea>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Passphrase</label>
+            <input type="password" class="form-input" id="ent-stego-dec-pass" autocomplete="off">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Verify pubkey (base64)</label>
+            <input class="form-input" id="ent-stego-dec-vpk">
+          </div>
+          <button class="btn" onclick="entStegoDecode()">Расшифровать</button>
+          <div id="ent-stego-decode-result" class="text-sm mt-3" style="color:var(--text-secondary);white-space:pre-wrap"></div>
+        </div>
+
+        <!-- ── Port-Hopping ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Port-Hopping (UDP)
+            <span id="ent-porthop-badge" class="badge badge--inactive">Выкл</span>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Эхо-транспорт, прыгающий по диапазону UDP-портов по общему секрету — DPI видит лишь короткие всплески на случайных портах.
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <div class="form-group" style="flex:1;min-width:110px">
+              <label class="form-label">Base-порт</label>
+              <input type="number" class="form-input" id="ent-ph-base" value="40000" min="1" max="65535">
+            </div>
+            <div class="form-group" style="flex:1;min-width:90px">
+              <label class="form-label">Диапазон</label>
+              <input type="number" class="form-input" id="ent-ph-range" value="16" min="1" max="1000">
+            </div>
+            <div class="form-group" style="flex:1;min-width:110px">
+              <label class="form-label">Hop-интервал (сек)</label>
+              <input type="number" class="form-input" id="ent-ph-interval" value="60" min="1" max="86400">
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Общий секрет</label>
+            <input type="password" class="form-input" id="ent-ph-secret" autocomplete="off">
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <button class="btn btn--primary" id="ent-ph-btn-start" onclick="entPorthopStart()">Запустить сервер</button>
+            <button class="btn" id="ent-ph-btn-stop" onclick="entPorthopStop()" disabled>Остановить</button>
+          </div>
+          <div class="card__title mt-4" style="font-size:var(--text-sm)">Клиент (одно сообщение)</div>
+          <div class="form-group">
+            <label class="form-label">Хост сервера (IPv4)</label>
+            <input class="form-input" id="ent-ph-client-host" placeholder="203.0.113.10">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Сообщение</label>
+            <input class="form-input" id="ent-ph-client-msg" value="ping">
+          </div>
+          <button class="btn" onclick="entPorthopClient()">Отправить</button>
+          <div id="ent-ph-log" class="text-sm mt-3" style="color:var(--text-secondary);white-space:pre-wrap;max-height:140px;overflow-y:auto"></div>
+        </div>
+      </div>
+
+      <div class="grid-2col mt-4">
+        <!-- ── Fog ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Fog Mesh (оверлей-узел)
+            <span id="ent-fog-badge" class="badge badge--inactive">Выкл</span>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Кооперативная mesh-сеть: узел отвечает на PING, ретранслирует DATA и рассылает ROUTE_AD соседям.
+          </div>
+          <div class="form-group">
+            <label class="form-label">ID узла (32 hex-символа)</label>
+            <div style="display:flex;gap:var(--sp-2)">
+              <input class="form-input" id="ent-fog-id" style="flex:1" placeholder="0123456789abcdef...">
+              <button class="btn" onclick="entFogGenId()">Случайный</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">UDP-порт</label>
+            <input type="number" class="form-input" id="ent-fog-port" value="46000" min="1" max="65535" style="max-width:120px">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Peer'ы (ip:port, по строке на соседа)</label>
+            <textarea class="form-input" id="ent-fog-peers" rows="2" placeholder="203.0.113.11:46000"></textarea>
+          </div>
+          <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap">
+            <button class="btn btn--primary" id="ent-fog-btn-start" onclick="entFogStart()">Запустить узел</button>
+            <button class="btn" id="ent-fog-btn-stop" onclick="entFogStop()" disabled>Остановить</button>
+          </div>
+          <div id="ent-fog-log" class="text-sm mt-3" style="color:var(--text-secondary);white-space:pre-wrap;max-height:140px;overflow-y:auto"></div>
+        </div>
+
+        <!-- ── XDP ── -->
+        <div class="card">
+          <div class="card__title">XDP/eBPF диагностика <span class="badge badge--inactive" style="margin-left:var(--sp-2)">только Linux</span></div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Проверка поддержки BPF ядром и счётчики привязанной XDP-программы. Управление программой (compile/attach/detach) доступно только из CLI — требует root.
+          </div>
+          <button class="btn" onclick="entXdpProbe()">Проверить поддержку BPF</button>
+          <div id="ent-xdp-probe-result" class="text-sm mt-3" style="color:var(--text-secondary)"></div>
+          <div class="card__title mt-4" style="font-size:var(--text-sm)">Счётчики UDP-порта</div>
+          <div style="display:flex;gap:var(--sp-2);align-items:center">
+            <input type="number" class="form-input" id="ent-xdp-stats-port" value="54117" min="0" max="65535" style="max-width:120px">
+            <button class="btn" onclick="entXdpStats()">Показать</button>
+          </div>
+          <div id="ent-xdp-stats-result" class="text-sm mt-3" style="color:var(--text-secondary)"></div>
+          <div class="card__title mt-4" style="font-size:var(--text-sm)">Selective drop</div>
+          <div style="display:flex;gap:var(--sp-2);align-items:center">
+            <input type="number" class="form-input" id="ent-xdp-drop-port" value="0" min="0" max="65535" style="max-width:120px">
+            <button class="btn" onclick="entXdpDrop(false)">Установить</button>
+            <button class="btn" onclick="entXdpDrop(true)">Сбросить</button>
+          </div>
+          <div id="ent-xdp-drop-result" class="text-sm mt-3" style="color:var(--text-secondary)"></div>
         </div>
       </div>
     </section>

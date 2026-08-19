@@ -1947,6 +1947,24 @@ except Exception as _bypass_err:
     logger.warning(f"Bypass routes not available: {_bypass_err}")
 
 
+# ── Enterprise module routes (SPA / Reality / Stego-DNS / Port-Hopping /
+#    Fog mesh / XDP diagnostics) ──
+try:
+    import enterprise_routes
+    enterprise_routes.register_enterprise_routes(app, {
+        "state": state,
+        "push_log": push_log,
+        "save_config": save_config,
+        "ncp_binary": str(NCP_BINARY),
+        "config_dir": CONFIG_PATH.parent,
+        "exe_dir": EXE_DIR,
+        "require_license": _require_license,
+    })
+    logger.info("Enterprise routes registered")
+except Exception as _ent_err:
+    logger.warning(f"Enterprise routes not available: {_ent_err}")
+
+
 if __name__ == "__main__":
     # Restore saved license
     _try_restore_license()
