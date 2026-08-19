@@ -19,6 +19,8 @@
 #include "ncp_session_fragmenter.hpp"
 #include "ncp_cross_layer_correlator.hpp"
 #include "ncp_geneva_engine.hpp"
+#include "ncp_geneva_ga.hpp"
+#include "geneva_fitness.hpp"
 #include "ncp_covert_channel.hpp"
 #include "ncp_transport_manager.hpp"
 #include "ncp_proxy.hpp"
@@ -69,6 +71,8 @@
 #include <chrono>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
+#include <mutex>
 
 using namespace ncp;
 using namespace ncp::DPI;
@@ -92,6 +96,12 @@ struct AppState {
     std::unique_ptr<SessionFragmenter> session_frag;
     std::unique_ptr<CrossLayerCorrelator> cross_layer;
     std::unique_ptr<DPI::GenevaEngine> geneva;
+    std::unique_ptr<DPI::GenevaGA> geneva_ga;
+    // Hot-apply slot: latest winning strategy from the GA. Guarded by mutex
+    // because on_new_best fires from the GA evolution thread.
+    std::mutex geneva_best_mutex;
+    DPI::GenevaStrategy geneva_best_strategy;
+    bool geneva_best_valid = false;
     std::unique_ptr<CovertChannelManager> covert_channel;
     // Transport modules
     std::unique_ptr<ProtocolRotationSchedule> protocol_rotation;
@@ -104,6 +114,7 @@ struct AppState {
         as_router.reset();
         protocol_rotation.reset();
         covert_channel.reset();
+        if (geneva_ga) { geneva_ga->stop(); geneva_ga.reset(); }  // stop GA thread before engine
         geneva.reset();
         cross_layer.reset();
         session_frag.reset();
@@ -749,6 +760,8 @@ static std::string first_positional_arg(const std::vector<std::string>& args) {
         "--port","--preset","--proto","--pt-obfs4","--pt-snowflake",
         "--quic-frag","--range","--sam-host","--sam-port","--secret",
         "--session-id","--set-name","--signing-key","--spa-pubkey",
+        "--geneva-target","--geneva-interval","--geneva-population",
+        "--geneva-mutation",
         "--split-pos","--stats-file","--status-interval","--target",
         "--target-port","--timeout","--tor-bridge","--tor-exec","--ttl",
         "--tunnel-length","--txt","--upstream","--upstream-mss",
@@ -884,7 +897,7 @@ int main(int argc, char* argv[]) {
 
     ArgumentParser parser("ncp", "v1.5.0");
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch)", handle_run, {"[<interface>]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
     parser.add_command("rotate", "Rotate all identities", handle_rotate);
@@ -998,7 +1011,23 @@ static void write_module_stats_json(const std::string& path) {
           << ",\"packets_fragmented\":" << v.packets_fragmented
           << ",\"packets_tampered\":" << v.packets_tampered
           << ",\"packets_dropped\":" << v.packets_dropped
-          << ",\"total_overhead_bytes\":" << v.total_overhead_bytes << "}";
+          << ",\"total_overhead_bytes\":" << v.total_overhead_bytes;
+        // GA evolution state (web UI Geneva panel polls these fields)
+        j << ",\"ga_running\":" << ((g_app.geneva_ga && g_app.geneva_ga->is_running()) ? 1 : 0);
+        if (g_app.geneva_ga) {
+            const auto gst = g_app.geneva_ga->get_stats();
+            j << ",\"generation\":" << gst.current_generation
+              << ",\"best_fitness\":" << gst.best_fitness
+              << ",\"avg_fitness\":" << gst.avg_fitness
+              << ",\"evaluations\":" << gst.total_evaluations
+              << ",\"best_strategy\":\"";
+            for (char c : gst.best_strategy_desc) {  // minimal JSON escaping
+                if (c == '"' || c == '\\') j << '\\';
+                if (c != '\n' && c != '\r') j << c;
+            }
+            j << "\"";
+        }
+        j << "}";
     }
     if (g_app.dns_leak) {
         bool act = g_app.dns_leak->is_active();
@@ -1313,9 +1342,17 @@ void handle_run(const std::vector<std::string>& args) {
         
         std::string iface = (iface_opt.empty() || iface_opt == "auto") ? detect_default_interface() : iface_opt;
         std::cout << "[*] Interface: " << iface << "\n";
-        
+
+        // --no-spoof: skip NetworkSpoofer entirely (no DNS/IP/MAC/hostname
+        // changes). Intended for safe smoke tests on shared hosts and for
+        // users who manage DNS themselves.
+        const bool no_spoof = has_flag(args, "--no-spoof");
+
         bool dns_set = false;
-        if (!g_app.spoofer->enable(iface, spoof_cfg)) {
+        if (no_spoof) {
+            std::cout << "[*] --no-spoof: NetworkSpoofer skipped (DNS/IP/MAC unchanged)\n";
+            g_app.spoofer.reset();
+        } else if (!g_app.spoofer->enable(iface, spoof_cfg)) {
             std::cerr << "[!] Warning: spoofing module failed on " << iface << "\n";
             g_app.spoofer.reset();
 #ifdef _WIN32
@@ -1344,7 +1381,7 @@ void handle_run(const std::vector<std::string>& args) {
             if (status.hostname_spoofed)
                 std::cout << "[+]   Hostname: " << status.current_hostname << "\n";
         }
-        if (!dns_set) {
+        if (!dns_set && !no_spoof) {
             std::cerr << "[!] WARNING: DNS not changed! Beeline/mobile ISPs hijack DNS.\n";
             std::cerr << "[!] YouTube/Telegram will NOT work without DNS 8.8.8.8.\n";
             std::cerr << "[!] Please set DNS manually: Settings > Network > Wi-Fi > DNS = 8.8.8.8\n";
@@ -1621,6 +1658,82 @@ void handle_run(const std::vector<std::string>& args) {
             }
         }
 
+        // 14b. Geneva GA — evolutionary strategy search (opt-in: probing costs traffic)
+        if (has_flag(args, "--geneva-evolve")) {
+            if (!g_app.geneva) {
+                std::cerr << "[!] --geneva-evolve requires the Geneva Engine (remove --no-geneva)\n";
+            } else {
+                try {
+                    // Parse --geneva-target host[:port] (default: discord.com:443 —
+                    // the service our RU audience most often needs to unblock)
+                    std::string target = get_option(args, "--geneva-target", "discord.com:443");
+                    std::string thost = target;
+                    uint16_t tport = 443;
+                    size_t colon = target.find_last_of(':');
+                    if (colon != std::string::npos && target.find(':') == colon) {
+                        std::string ps = target.substr(colon + 1);
+                        if (!ps.empty() && std::all_of(ps.begin(), ps.end(),
+                                [](char c) { return c >= '0' && c <= '9'; })) {
+                            thost = target.substr(0, colon);
+                            tport = static_cast<uint16_t>(std::stoi(ps) & 0xFFFF);
+                        }
+                    }
+
+                    DPI::GAConfig ga_cfg;
+                    // Each generation costs population_size x fitness_probes TCP probes.
+                    ga_cfg.population_size = static_cast<size_t>(
+                        std::max(4, get_option_int(args, "--geneva-population", 20)));
+                    ga_cfg.evolution_interval_sec =
+                        std::max(5, get_option_int(args, "--geneva-interval", 60));
+                    {
+                        double mr = 0.15;
+                        try { mr = std::stod(get_option(args, "--geneva-mutation", "0.15")); }
+                        catch (...) { mr = 0.15; }
+                        ga_cfg.mutation_rate = std::min(1.0, std::max(0.0, mr));
+                    }
+
+                    g_app.geneva_ga = std::make_unique<DPI::GenevaGA>();
+                    g_app.geneva_ga->set_config(ga_cfg);
+                    g_app.geneva_ga->set_target(thost, tport);
+                    // REAL fitness probes: TCP connect + strategy-shaped ClientHello
+                    g_app.geneva_ga->set_fitness_evaluator(&ncp::cli::geneva_probe_fitness);
+                    // Callbacks MUST be set before start() (GA contract)
+                    g_app.geneva_ga->on_generation([](uint32_t gen, const DPI::GAStats& st) {
+                        std::cout << "[*] Geneva GA gen=" << gen
+                                  << " best=" << st.best_fitness
+                                  << " avg=" << st.avg_fitness
+                                  << " evals=" << st.total_evaluations << "\n" << std::flush;
+                    });
+                    g_app.geneva_ga->on_new_best([](const DPI::Individual& best) {
+                        {
+                            std::lock_guard<std::mutex> lk(g_app.geneva_best_mutex);
+                            g_app.geneva_best_strategy = best.strategy;
+                            g_app.geneva_best_valid = true;
+                        }
+                        std::cout << "[+] New best Geneva strategy applied for future connections: "
+                                  << best.strategy.description
+                                  << " (fitness=" << best.fitness.score() << ")\n" << std::flush;
+                    });
+                    g_app.geneva_ga->initialize_population();
+                    g_app.geneva_ga->inject_preset_strategies();
+                    if (g_app.geneva_ga->start()) {
+                        std::cout << "[+] Geneva GA evolving (population=" << ga_cfg.population_size
+                                  << ", interval=" << ga_cfg.evolution_interval_sec << "s"
+                                  << ", target=" << thost << ":" << tport << ")\n";
+                        std::cout << "[i] Each generation runs " << ga_cfg.population_size
+                                  << " x " << ga_cfg.fitness_probes
+                                  << " TCP probes against " << thost << ":" << tport << "\n";
+                    } else {
+                        std::cerr << "[!] Geneva GA failed to start\n";
+                        g_app.geneva_ga.reset();
+                    }
+                } catch (const std::exception& ex) {
+                    std::cerr << "[!] Geneva GA exception: " << ex.what() << "\n";
+                    g_app.geneva_ga.reset();
+                }
+            }
+        }
+
         // 15. Covert Channel Manager (disabled by default; only if --covert flag)
         if (has_flag(args, "--covert")) {
             try {
@@ -1742,7 +1855,7 @@ void handle_run(const std::vector<std::string>& args) {
         {
             std::vector<std::string> config_only;
             if (g_app.rtt_equalizer)     config_only.push_back("rtt-equalizer");
-            if (g_app.geneva)            config_only.push_back("geneva");
+            if (g_app.geneva && !g_app.geneva_ga) config_only.push_back("geneva");
             if (g_app.session_frag)      config_only.push_back("session-fragmenter");
             if (g_app.cross_layer)       config_only.push_back("cross-layer-correlator");
             if (g_app.covert_channel)    config_only.push_back("covert-channel");
@@ -1773,6 +1886,7 @@ void handle_run(const std::vector<std::string>& args) {
                           (g_app.session_frag != nullptr) ||
                           (g_app.cross_layer != nullptr) ||
                           (g_app.geneva != nullptr) ||
+                          (g_app.geneva_ga != nullptr) ||
                           (g_app.protocol_rotation != nullptr) ||
                           (g_app.as_router != nullptr) ||
                           (g_app.geo_obfuscator != nullptr);
@@ -1802,6 +1916,7 @@ void handle_run(const std::vector<std::string>& args) {
             if (g_app.session_frag) add_mod("session-fragmenter");
             if (g_app.cross_layer) add_mod("cross-layer-correlator");
             if (g_app.geneva) add_mod("geneva");
+            if (g_app.geneva_ga) add_mod("geneva-ga");
             if (g_app.protocol_rotation) add_mod("protocol-rotation");
             if (g_app.as_router) add_mod("as-router");
             if (g_app.geo_obfuscator) add_mod("geo-obfuscator");
@@ -1994,6 +2109,14 @@ void handle_run(const std::vector<std::string>& args) {
                       << " tampered=" << v.packets_tampered
                       << " (not in packet path in run mode)\n";
         }
+        if (g_app.geneva_ga) {
+            const auto gst = g_app.geneva_ga->get_stats();
+            std::cout << "  Geneva GA: generations=" << gst.current_generation
+                      << " best=" << gst.best_fitness
+                      << " avg=" << gst.avg_fitness
+                      << " evaluations=" << gst.total_evaluations
+                      << " best_strategy=" << gst.best_strategy_desc << "\n";
+        }
         if (g_app.dns_leak && g_app.dns_leak->is_active()) {
             auto v = g_app.dns_leak->get_stats();
             std::cout << "  DNS Leak Prevention: dns_blocked=" << v.dns_queries_blocked.load()
@@ -2019,6 +2142,11 @@ void handle_run(const std::vector<std::string>& args) {
         if (g_app.covert_channel) {
             g_app.covert_channel.reset();
             std::cout << "[+] Covert Channel Manager stopped\n";
+        }
+        if (g_app.geneva_ga) {
+            g_app.geneva_ga->stop();  // join evolution/health threads first
+            g_app.geneva_ga.reset();
+            std::cout << "[+] Geneva GA stopped\n";
         }
         if (g_app.geneva) {
             g_app.geneva.reset();
@@ -2169,6 +2297,11 @@ void handle_stop(const std::vector<std::string>& args) {
     if (g_app.covert_channel) {
         g_app.covert_channel.reset();
         std::cout << "[+] Covert Channel Manager stopped\n";
+    }
+    if (g_app.geneva_ga) {
+        g_app.geneva_ga->stop();  // join evolution/health threads first
+        g_app.geneva_ga.reset();
+        std::cout << "[+] Geneva GA stopped\n";
     }
     if (g_app.geneva) {
         g_app.geneva.reset();
