@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstring>
 #include <regex>
 #include <string>
 
@@ -72,7 +73,14 @@ TEST_F(StegoDnsTest, TamperAnyCharFails) {
         infix + 9u, infix + 9u + 40u, txt.find("._ncp.") - 1u};
     for (size_t pos : positions) {
         std::string bad = txt;
-        bad[pos] = (bad[pos] == 'a') ? 'b' : 'a';
+        // Flip the MOST significant base32 bit of the character. The low
+        // bits of a slot-final character can be zero padding that the
+        // decoder ignores — flipping only those would decode identically
+        // (flaky). The MSB always lies inside the authenticated payload.
+        static const char kAlpha[] = "abcdefghijklmnopqrstuvwxyz234567";
+        const char* hit = std::strchr(kAlpha, bad[pos]);
+        ASSERT_NE(hit, nullptr) << "pos " << pos << " not inside a base32 slot";
+        bad[pos] = kAlpha[(hit - kAlpha) ^ 0x10];
         EXPECT_FALSE(decoder.decode_txt(bad, kNow).has_value())
             << "tampered at pos " << pos;
     }
