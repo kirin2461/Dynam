@@ -53,7 +53,9 @@ bool file_exists(const std::string& p) {
     return ::stat(p.c_str(), &st) == 0;
 }
 
-// ---- raw bpf(2) ----
+// ---- raw bpf(2) — Linux only; stubs below keep the API linkable elsewhere ----
+
+#if defined(__linux__)
 
 union bpf_attr_min {
     struct { __attribute__((aligned(8))) char pathname[8]; uint32_t bpf_fd; uint32_t file_flags; } obj;
@@ -103,6 +105,15 @@ int bpf_map_update(int map_fd, const void* key, const void* value, uint64_t flag
     attr.flags = flags;
     return static_cast<int>(::syscall(SYS_bpf, 2 /*BPF_MAP_UPDATE_ELEM*/, &attr, sizeof(attr)));
 }
+
+#else  // !__linux__ — no bpf(2) syscall on this platform
+
+int bpf_obj_get(const char*)                      { errno = ENOSYS; return -1; }
+int bpf_map_lookup(int, const void*, void*)       { errno = ENOSYS; return -1; }
+int bpf_map_update(int, const void*, const void*, uint64_t)
+                                                  { errno = ENOSYS; return -1; }
+
+#endif  // __linux__
 
 } // namespace
 
@@ -196,6 +207,11 @@ bool XdpManager::map_update_pinned(const std::string& pin_path,
 int XdpManager::map_find(const std::string& name, uint32_t type,
                          uint32_t key_size, uint32_t value_size,
                          uint32_t max_entries) {
+#if !defined(__linux__)
+    (void)name; (void)type; (void)key_size; (void)value_size; (void)max_entries;
+    errno = ENOSYS;
+    return -1;
+#else
     // BPF_MAP_GET_NEXT_ID = 12, BPF_OBJ_GET_INFO_BY_FD = 15
     uint32_t id = 0;
     for (int guard = 0; guard < 4096; ++guard) {
@@ -242,6 +258,7 @@ int XdpManager::map_find(const std::string& name, uint32_t type,
         ::close(fd);
     }
     return -1;
+#endif  // __linux__
 }
 
 bool XdpManager::read_udp_stats(uint32_t dport, XdpStats& out,
@@ -275,6 +292,9 @@ bool XdpManager::set_drop_port(uint32_t dport, const std::string& pin_path) {
 }
 
 bool XdpManager::kernel_supports_bpf() {
+#if !defined(__linux__)
+    return false;  // bpf(2) is a Linux syscall
+#else
     // Minimal probe: an intentionally invalid-but-parseable program load.
     // EPERM/EINVAL => syscall exists; ENOSYS => no BPF support.
     uint64_t insns[2] = {
@@ -301,6 +321,7 @@ bool XdpManager::kernel_supports_bpf() {
     int rc = static_cast<int>(::syscall(SYS_bpf, 5 /*BPF_PROG_LOAD*/, &attr, sizeof(attr)));
     if (rc >= 0) { ::close(rc); return true; }
     return errno != ENOSYS;
+#endif  // __linux__
 }
 
 } // namespace ncp
