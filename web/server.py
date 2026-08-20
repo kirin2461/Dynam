@@ -429,6 +429,7 @@ state_lock = threading.Lock()  # guards state["config"] mutations (R7-WEB-02)
 # user stop, etc.).  read_process_output checks this to avoid logging
 # "exit code 1" as an ERROR — on Windows, terminate() always gives rc=1.
 _intentional_kill = False
+_intentional_kills = set()  # pids we terminated on purpose (restart/stop)
 
 # Baseline network counters for real traffic measurement
 _net_baseline = {"bytes_sent": 0, "bytes_recv": 0, "ts": 0}
@@ -613,6 +614,17 @@ def list_network_interfaces() -> list:
     return interfaces
 
 
+def _doh_check_any(name, timeout=4.0):
+    """Try several DoH endpoints by direct IP — some ISPs null-route 1.1.1.1."""
+    last = None
+    for ip in ("1.1.1.1", "1.0.0.1", "9.9.9.9"):
+        try:
+            return _doh_check(ip, name, timeout)
+        except Exception as e:
+            last = e
+    raise last
+
+
 def _run_selftest_real() -> dict:
     """Runs a real connectivity self-test: checks DNS resolution and TCP
     connectivity to several well-known hosts.  Returns score 0-100."""
@@ -626,7 +638,7 @@ def _run_selftest_real() -> dict:
         ("TCP 8.8.8.8:53", lambda: _tcp_check("8.8.8.8", 53), "tcp"),
         ("TCP 1.1.1.1:53", lambda: _tcp_check("1.1.1.1", 53), "tcp"),
         ("DNS cloudflare.com", lambda: socket.getaddrinfo("cloudflare.com", 443, socket.AF_INET), "dns"),
-        ("DoH 1.1.1.1", lambda: _doh_check("1.1.1.1", "google.com"), "doh"),
+        ("DoH (1.1.1.1/1.0.0.1/9.9.9.9)", lambda: _doh_check_any("google.com"), "doh"),
     ]
     passed = 0
     issues = 0
@@ -882,9 +894,9 @@ def read_process_output(proc):
     # When process exits, log the return code
     try:
         rc = proc.wait(timeout=2)
-        if rc != 0 and not _intentional_kill:
+        if rc != 0 and proc.pid not in _intentional_kills:
             push_log("ERROR", f"NCP process exited with code {rc}")
-        elif rc != 0 and _intentional_kill:
+        elif rc != 0:
             push_log("DEBUG", f"NCP process stopped (code {rc})")
     except Exception:
         pass
@@ -1057,6 +1069,7 @@ def api_stop():
     if proc and proc.poll() is None:
         global _intentional_kill
         _intentional_kill = True
+        _intentional_kills.add(proc.pid)
         proc.terminate()
         try:
             proc.wait(timeout=5)
@@ -1157,6 +1170,7 @@ def _restart_ncp_process():
     proc = state.get("process")
     if proc and proc.poll() is None:
         _intentional_kill = True
+        _intentional_kills.add(proc.pid)
         proc.terminate()
         try:
             proc.wait(timeout=5)

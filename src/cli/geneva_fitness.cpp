@@ -4,7 +4,9 @@
 #include "ncp_winsock_init.hpp"   // winsock_init(), portable socket_t / kInvalidSocket
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <cstdio>
 
 #ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
@@ -65,8 +67,14 @@ socket_t gf_connect(const std::string& host, uint16_t port, int timeout_ms) {
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr;
-    if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res)
+    if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) {
+        static std::atomic<bool> dns_warned{false};
+        if (!dns_warned.exchange(true))
+            std::fprintf(stderr, "[!] Geneva: cannot resolve %s - DNS is broken "
+                                 "(ISP blocks public DNS?), fitness stays 0\n",
+                         host.c_str());
         return kInvalidSocket;
+    }
 
     socket_t out = kInvalidSocket;
     for (addrinfo* ai = res; ai && out == kInvalidSocket; ai = ai->ai_next) {

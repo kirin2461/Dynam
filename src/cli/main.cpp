@@ -222,6 +222,66 @@ private:
 // Utility functions
 // ============================================================================
 
+// Probe a DNS server with a real UDP query (A record for google.com).
+// Many RU ISPs null-route or hijack 1.1.1.1/8.8.8.8 - setting them blindly
+// kills ALL name resolution on the machine. Portable (winsock/POSIX).
+static bool probe_dns_server(const char* ip, int timeout_ms = 1500) {
+#ifdef _WIN32
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return false;
+    DWORD tv = (DWORD)timeout_ms;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#else
+    int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s < 0) return false;
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+    // Minimal DNS query: id=0x4e63, flags=RD, qdcount=1, google.com A IN
+    static const unsigned char q[] = {
+        0x4e,0x63, 0x01,0x00, 0x00,0x01, 0x00,0x00, 0x00,0x00, 0x00,0x00,
+        6,'g','o','o','g','l','e',3,'c','o','m',0,
+        0x00,0x01, 0x00,0x01 };
+    sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(53);
+    sa.sin_addr.s_addr = inet_addr(ip);
+    bool ok = false;
+    if (sendto(s, (const char*)q, (int)sizeof(q), 0,
+               (sockaddr*)&sa, sizeof(sa)) == (int)sizeof(q)) {
+        unsigned char buf[512];
+        int n = (int)recvfrom(s, (char*)buf, sizeof(buf), 0, nullptr, nullptr);
+        // Valid response: matching id, QR bit set, rcode==0, ancount>0
+        if (n >= 12 && buf[0] == 0x4e && buf[1] == 0x63 &&
+            (buf[2] & 0x80) && (buf[3] & 0x0f) == 0 && (buf[6] || buf[7]))
+            ok = true;
+    }
+#ifdef _WIN32
+    closesocket(s);
+#else
+    close(s);
+#endif
+    return ok;
+}
+
+// Pick up to `want` public DNS resolvers that actually answer right now.
+static std::vector<std::string> pick_working_dns(size_t want = 2) {
+    static const char* candidates[] = {
+        "1.1.1.1", "8.8.8.8", "9.9.9.9", "77.88.8.8",
+        "94.140.14.14", "1.0.0.1", "8.8.4.4" };
+    std::vector<std::string> out;
+    for (const char* c : candidates) {
+        if (probe_dns_server(c)) {
+            out.push_back(c);
+            if (out.size() >= want) break;
+        }
+    }
+    return out;
+}
+
 #ifdef _WIN32
 // Standalone DNS setter — works even when the full spoofer fails.
 // R10-FIX-06: Command injection prevention - validate inputs and use safe parameter passing
@@ -895,7 +955,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.5.1");
+    ArgumentParser parser("ncp", "v1.5.2");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
@@ -1323,7 +1383,19 @@ void handle_run(const std::vector<std::string>& args) {
         spoof_cfg.spoof_ipv6  = false; // Would break DHCP
         spoof_cfg.spoof_mac   = false; // Would drop Wi-Fi + USB adapters ignore it
         spoof_cfg.spoof_dns   = true;
-        spoof_cfg.custom_dns_servers = {"1.1.1.1", "8.8.8.8"};
+        // Probe public resolvers FIRST: if the ISP blocks 1.1.1.1/8.8.8.8,
+        // setting them kills all name resolution (everything times out).
+        auto working_dns = pick_working_dns(2);
+        if (working_dns.empty()) {
+            std::cout << "[!] No public DNS resolver answers (ISP blocks them all) -\n"
+                         "    keeping system DNS. Use Proxy mode with DoH instead.\n";
+            spoof_cfg.spoof_dns = false;
+        } else {
+            spoof_cfg.custom_dns_servers = working_dns;
+            std::cout << "[*] Working DNS resolvers found: " << working_dns[0];
+            if (working_dns.size() > 1) std::cout << ", " << working_dns[1];
+            std::cout << "\n";
+        }
         spoof_cfg.spoof_hw_info = false;
         spoof_cfg.spoof_smbios = false;
         spoof_cfg.spoof_disk_serial = false;
@@ -1357,9 +1429,11 @@ void handle_run(const std::vector<std::string>& args) {
             g_app.spoofer.reset();
 #ifdef _WIN32
             // Fallback: set DNS directly even when spoofer fails
-            std::cout << "[*] Setting DNS directly (8.8.8.8, 1.1.1.1)...\n";
-            if (force_set_dns(iface, "8.8.8.8", "1.1.1.1")) {
-                std::cout << "[+] DNS set to 8.8.8.8, 1.1.1.1\n";
+            std::string d1 = !working_dns.empty() ? working_dns[0] : "8.8.8.8";
+            std::string d2 = working_dns.size() > 1 ? working_dns[1] : d1;
+            std::cout << "[*] Setting DNS directly (" << d1 << ", " << d2 << ")...\n";
+            if (force_set_dns(iface, d1, d2)) {
+                std::cout << "[+] DNS set to " << d1 << ", " << d2 << "\n";
                 dns_set = true;
             } else {
                 std::cerr << "[!] DNS change failed - set DNS manually in network settings to 8.8.8.8\n";
@@ -1371,7 +1445,9 @@ void handle_run(const std::vector<std::string>& args) {
             auto status = g_app.spoofer->get_status();
             std::cout << "[+] Spoofing enabled on " << iface << "\n";
             if (status.dns_spoofed) {
-                std::cout << "[+]   DNS: 1.1.1.1, 8.8.8.8\n";
+                std::cout << "[+]   DNS:";
+                for (const auto& d : working_dns) std::cout << " " << d;
+                std::cout << "\n";
                 dns_set = true;
             }
             if (status.mac_spoofed)
@@ -1498,7 +1574,10 @@ void handle_run(const std::vector<std::string>& args) {
         }
 
         // 4. DNS Leak Prevention
-        if (!has_flag(args, "--no-dns-leak")) {
+        // Gate on spoof_dns: if we could not redirect DNS (ISP blocks all
+        // public resolvers or --no-spoof), blocking UDP/53 to anything but
+        // public DNS would kill the router/system resolver too.
+        if (!has_flag(args, "--no-dns-leak") && spoof_cfg.spoof_dns && !no_spoof) {
             try {
                 g_app.dns_leak = std::make_unique<DNSLeakPrevention>();
                 DNSLeakConfig dns_cfg;
@@ -1507,7 +1586,10 @@ void handle_run(const std::vector<std::string>& args) {
                 dns_cfg.block_webrtc_stun = false;
                 dns_cfg.block_raw_ipv6    = false;
                 dns_cfg.allowed_dns_servers = {"8.8.8.8", "1.1.1.1", "8.8.4.4", "1.0.0.1",
+                                               "9.9.9.9", "77.88.8.8", "94.140.14.14",
                                                "127.0.0.1", "::1"};
+                for (const auto& d : working_dns)
+                    dns_cfg.allowed_dns_servers.push_back(d);
                 g_app.dns_leak->set_config(dns_cfg);
                 if (g_app.dns_leak->activate()) {
                     std::cout << "[+] DNS Leak Prevention active\n";
@@ -1680,6 +1762,9 @@ void handle_run(const std::vector<std::string>& args) {
                     }
 
                     DPI::GAConfig ga_cfg;
+                    // Blocked targets eat the full timeout per probe; keep it
+                    // short so generations advance even when everything fails.
+                    ga_cfg.fitness_timeout_ms = 2500;
                     // Each generation costs population_size x fitness_probes TCP probes.
                     ga_cfg.population_size = static_cast<size_t>(
                         std::max(4, get_option_int(args, "--geneva-population", 20)));

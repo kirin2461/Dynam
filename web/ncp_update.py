@@ -42,7 +42,7 @@ MANIFEST_RAW_URL = f"https://raw.githubusercontent.com/{REPO}/master/update-mani
 
 NCP_UPDATE_PUBLIC_KEY_B64 = "FT2FWdlm6rGldWix5fDJBuZmrHIR+73CuRpWszs/Hog="
 
-CURRENT_VERSION = "1.5.1"
+CURRENT_VERSION = "1.5.2"
 
 _UA = {"User-Agent": "NCP-Updater/1.5"}
 

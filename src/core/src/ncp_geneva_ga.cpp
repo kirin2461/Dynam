@@ -1,7 +1,10 @@
 #include "ncp_geneva_ga.hpp"
 #include <sodium.h>
 #include <algorithm>
+#include <atomic>
 #include <numeric>
+#include <thread>
+#include <vector>
 #include <cassert>
 
 namespace ncp {
@@ -453,16 +456,34 @@ void GenevaGA::evolve_one_generation() {
     // ── Lock released ─────────────────────────────────────────────────
 
     // ── Phase 2: Evaluate WITHOUT lock (slow — real TCP connects) ────
-    size_t evaluated_count = 0;
-    for (auto& ind : new_pop) {
-        if (!running_.load(std::memory_order_relaxed)) return;  // Early exit
-
-        // Only evaluate individuals that don't have fitness yet
-        // (elites already have valid fitness from previous generation)
-        if (ind.fitness.score() == 0.0 && !ind.fitness.connected) {
-            ind.fitness = evaluate_individual(ind);
-            ++evaluated_count;
-        }
+    // Parallel evaluation: probes are independent and the evaluator is
+    // thread-safe (private engine per probe). Sequential probing against a
+    // blocked target burns the full timeout per probe — with population 200
+    // that is 200 x 3 x 2.5s = 25 min per generation, so the GA looks stuck.
+    std::atomic<size_t> eval_next{0};
+    std::atomic<size_t> evaluated_count{0};
+    {
+        const size_t n = new_pop.size();
+        unsigned workers = std::thread::hardware_concurrency();
+        workers = std::min(6u, std::max(2u, workers / 2));
+        auto worker = [&]() {
+            for (;;) {
+                if (!running_.load(std::memory_order_relaxed)) return;
+                size_t i = eval_next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= n) return;
+                Individual& ind = new_pop[i];
+                // Only evaluate individuals that don't have fitness yet
+                // (elites already have valid fitness from previous generation)
+                if (ind.fitness.score() == 0.0 && !ind.fitness.connected) {
+                    ind.fitness = evaluate_individual(ind);
+                    evaluated_count.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve(workers);
+        for (unsigned w = 0; w < workers; ++w) pool.emplace_back(worker);
+        for (auto& t : pool) t.join();
     }
 
     // ── Phase 3: Write back under lock (fast) ────────────────────────
@@ -488,7 +509,7 @@ void GenevaGA::evolve_one_generation() {
         std::lock_guard<std::mutex> slock(stats_mutex_);
         stats_.current_generation++;
         gen = stats_.current_generation;
-        stats_.total_evaluations += evaluated_count;
+        stats_.total_evaluations += evaluated_count.load();
         stats_.last_evolution = std::chrono::steady_clock::now();
 
         {

@@ -78,7 +78,7 @@ struct GAConfig {
 
     // Evolution loop
     int    evolution_interval_sec = 300;     // Run GA every N seconds
-    int    fitness_timeout_ms     = 5000;    // TCP connect timeout
+    int    fitness_timeout_ms     = 3000;    // TCP connect timeout
     int    fitness_probes         = 3;       // Probes per evaluation
     size_t max_generations        = 1000;    // Stop condition
     double target_fitness         = 950.0;   // Stop if reached
