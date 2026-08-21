@@ -290,7 +290,9 @@ static bool is_valid_netsh_identifier(const std::string& s) {
     if (s.empty() || s.length() > 256) return false;
     for (char c : s) {
         // Allow alphanumeric, dot, dash, underscore, space (for interface names with spaces)
-        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '-' && 
+        unsigned char uc = static_cast<unsigned char>(c);
+        if (uc >= 0x80) continue;  // UTF-8 bytes (Cyrillic adapter names etc.) — safe: no shell involved
+        if (!std::isalnum(uc) && c != '.' && c != '-' && 
             c != '_' && c != ' ' && c != '\\' && c != '/' && c != '(' && c != ')' &&
             c != '[' && c != ']') {
             return false;
@@ -377,8 +379,12 @@ static bool force_set_dns(const std::string& iface_utf8,
 // all name resolution even when NCP is not running.
 static bool force_set_dns_dhcp(const std::string& iface_utf8) {
     if (!is_valid_netsh_identifier(iface_utf8)) return false;
-    std::wstring cmd = L"netsh interface ip set dns name=\"" +
-                       to_wide(iface_utf8) + L"\" dhcp";
+    // Proper UTF-8 -> UTF-16 (adapter names may be Cyrillic, e.g. "Беспроводная сеть")
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, iface_utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 0) return false;
+    std::wstring iface_w(wlen - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, iface_utf8.c_str(), -1, &iface_w[0], wlen);
+    std::wstring cmd = L"netsh interface ip set dns name=\"" + iface_w + L"\" dhcp";
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
