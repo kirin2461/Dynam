@@ -224,6 +224,14 @@
           </svg>
           Настройки
         </li>
+        <li class="sidebar__item" data-nav="help">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+          Справка
+        </li>
       </ul>
     </nav>
   </aside>
@@ -2240,6 +2248,20 @@
       </div>
     </section>
 
+    <!-- ─── Справка ──────────────────────────────────────────────────── -->
+    <section id="sec-help" class="section">
+      <h2 class="section-title">Справка — что это и как пользоваться</h2>
+      <div class="card">
+        <div class="card__title">Каждая функция — простыми словами</div>
+        <p class="text-sm" style="color:var(--text-secondary);margin-bottom:12px">
+          Нажмите на любую карточку — откроется подробное объяснение: что делает функция,
+          как ей пользоваться по шагам, когда она нужна и чего опасаться.
+          Кнопка <b>?</b> рядом с заголовком каждого раздела открывает справку именно по этому разделу.
+        </p>
+        <div id="help-grid" class="help-grid"></div>
+      </div>
+    </section>
+
   </main>
 
   <!-- ─── Status Bar ────────────────────────────────────────────────────── -->
@@ -2278,6 +2300,7 @@
 <script src="js/websocket.js"></script>
 <script src="js/charts.js"></script>
 <script src="js/app.js"></script>
+<script src="js/help.js"></script>
 
 </body>
 </html>

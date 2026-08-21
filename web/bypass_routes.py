@@ -642,7 +642,7 @@ def register_bypass_routes(app, ctx):
             args += ["--domains", ",".join(domains)]
         try:
             proc = subprocess.run(args, capture_output=True, text=True,
-                                  timeout=max(180, timeout_ms * 40 // 1000))
+                                  timeout=max(600, timeout_ms * 150 // 1000))
             report = None
             if out_path.exists():
                 try:
@@ -654,6 +654,11 @@ def register_bypass_routes(app, ctx):
             with _blockcheck_lock:
                 _blockcheck["report"] = report
                 _blockcheck["error"] = None if report else (proc.stderr or proc.stdout)[-500:]
+        except subprocess.TimeoutExpired:
+            with _blockcheck_lock:
+                _blockcheck["error"] = ("blockcheck не уложился во время - обычно это значит, "
+                                        "что сейчас не работает DNS или интернет. "
+                                        "Запустите самотест и проверьте DNS.")
         except Exception as e:
             with _blockcheck_lock:
                 _blockcheck["error"] = str(e)

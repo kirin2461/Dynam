@@ -371,6 +371,31 @@ static bool force_set_dns(const std::string& iface_utf8,
 
     return ok1; // primary is the critical one
 }
+
+// Reset adapter DNS to DHCP (automatic). Undoes a stale static DNS left by
+// older runs (e.g. 1.1.1.1 null-routed by the ISP), which otherwise kills
+// all name resolution even when NCP is not running.
+static bool force_set_dns_dhcp(const std::string& iface_utf8) {
+    if (!is_valid_netsh_identifier(iface_utf8)) return false;
+    std::wstring cmd = L"netsh interface ip set dns name=\"" +
+                       to_wide(iface_utf8) + L"\" dhcp";
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+    buf.push_back(L'\0');
+    if (!CreateProcessW(nullptr, buf.data(), nullptr, nullptr,
+                        FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+        return false;
+    WaitForSingleObject(pi.hProcess, 5000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    return exitCode == 0;
+}
 #endif
 
 static std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
@@ -955,7 +980,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.5.2");
+    ArgumentParser parser("ncp", "v1.5.3");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
@@ -1458,6 +1483,15 @@ void handle_run(const std::vector<std::string>& args) {
                 std::cout << "[+]   Hostname: " << status.current_hostname << "\n";
         }
         if (!dns_set && !no_spoof) {
+#ifdef _WIN32
+            // Recovery: an older run may have left a STATIC DNS on the adapter
+            // (e.g. 1.1.1.1 that the ISP null-routes) — resolution stays dead
+            // even with NCP off. Reset the adapter to automatic (DHCP) DNS.
+            if (force_set_dns_dhcp(iface)) {
+                std::cout << "[+] DNS reset to automatic (DHCP) on " << iface
+                          << " - cleared stale dead resolver\n";
+            }
+#endif
             std::cerr << "[!] WARNING: DNS not changed! Beeline/mobile ISPs hijack DNS.\n";
             std::cerr << "[!] YouTube/Telegram will NOT work without DNS 8.8.8.8.\n";
             std::cerr << "[!] Please set DNS manually: Settings > Network > Wi-Fi > DNS = 8.8.8.8\n";
