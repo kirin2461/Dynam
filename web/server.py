@@ -614,10 +614,11 @@ def list_network_interfaces() -> list:
     return interfaces
 
 
-def _doh_check_any(name, timeout=4.0):
+def _doh_check_any(name, timeout=2.0):
     """Try several DoH endpoints by direct IP — some ISPs null-route 1.1.1.1."""
     last = None
-    for ip in ("1.1.1.1", "1.0.0.1", "9.9.9.9"):
+    for ip in ("1.1.1.1", "1.0.0.1", "9.9.9.9", "149.112.112.112",
+               "8.8.8.8", "8.8.4.4", "94.140.14.14", "77.88.8.8"):
         try:
             return _doh_check(ip, name, timeout)
         except Exception as e:
@@ -638,7 +639,7 @@ def _run_selftest_real() -> dict:
         ("TCP 8.8.8.8:53", lambda: _tcp_check("8.8.8.8", 53), "tcp"),
         ("TCP 1.1.1.1:53", lambda: _tcp_check("1.1.1.1", 53), "tcp"),
         ("DNS cloudflare.com", lambda: socket.getaddrinfo("cloudflare.com", 443, socket.AF_INET), "dns"),
-        ("DoH (1.1.1.1/1.0.0.1/9.9.9.9)", lambda: _doh_check_any("google.com"), "doh"),
+        ("DoH (Cloudflare/Google/Quad9/AdGuard/Yandex)", lambda: _doh_check_any("google.com"), "doh"),
     ]
     passed = 0
     issues = 0
@@ -875,7 +876,7 @@ def read_process_output(proc):
             if line:
                 level = "INFO"
                 ll = line.upper()
-                if "ERROR" in ll or "FAIL" in ll:
+                if "ERROR" in ll or "FAILED" in ll:
                     level = "ERROR"
                 elif "WARN" in ll:
                     level = "WARN"

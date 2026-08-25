@@ -26,7 +26,11 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #endif
+#include <cerrno>
+#include <cstdio>
 
 // OpenSSL for HTTPS
 #ifdef HAVE_OPENSSL
@@ -496,6 +500,74 @@ static std::string parse_chunked_body(const std::string& body) {
 // ==================== HTTPS Communication ====================
 
 #ifdef HAVE_OPENSSL
+// Portable bounded TCP connect. The host is an IP literal here, so
+// getaddrinfo never touches the (possibly dead) system resolver.
+static int tcp_connect_timeout(const std::string& host, uint16_t port, int timeout_ms) {
+    struct addrinfo hints {}, *res = nullptr;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    std::string port_str = std::to_string(port);
+    if (getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) return -1;
+    int fd = static_cast<int>(socket(res->ai_family, res->ai_socktype, res->ai_protocol));
+    if (fd < 0) { freeaddrinfo(res); return -1; }
+#ifdef _WIN32
+    u_long nb = 1;
+    ioctlsocket(fd, FIONBIO, &nb);
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+#endif
+    int rc = connect(fd, res->ai_addr, static_cast<int>(res->ai_addrlen));
+    freeaddrinfo(res);
+    if (rc != 0) {
+#ifdef _WIN32
+        if (WSAGetLastError() != WSAEWOULDBLOCK) { closesocket(fd); return -1; }
+#else
+        if (errno != EINPROGRESS) { close(fd); return -1; }
+#endif
+        fd_set wfds;
+        FD_ZERO(&wfds);
+        FD_SET(fd, &wfds);
+        struct timeval tv { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+        rc = select(fd + 1, nullptr, &wfds, nullptr, &tv);
+        if (rc <= 0) {
+#ifdef _WIN32
+            closesocket(fd);
+#else
+            close(fd);
+#endif
+            return -1;
+        }
+        int soerr = 0;
+        socklen_t sl = sizeof(soerr);
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soerr), &sl);
+        if (soerr != 0) {
+#ifdef _WIN32
+            closesocket(fd);
+#else
+            close(fd);
+#endif
+            return -1;
+        }
+    }
+#ifdef _WIN32
+    u_long blk = 0;
+    ioctlsocket(fd, FIONBIO, &blk);
+#else
+    int fl2 = fcntl(fd, F_GETFL, 0);
+    if (fl2 >= 0) fcntl(fd, F_SETFL, fl2 & ~O_NONBLOCK);
+#endif
+    return fd;
+}
+
+static void doh_close_fd(int fd) {
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+}
+
 std::vector<uint8_t> DoHClient::perform_https_doh_request(
     const std::string& server_url,
     const std::vector<uint8_t>& dns_query
@@ -540,18 +612,24 @@ std::vector<uint8_t> DoHClient::perform_https_doh_request(
     SSL_CTX* ctx = pImpl->ssl_ctx;
     if (!ctx) return response;
 
-    std::string connect_str = host + ":443";
-    BIO* bio = BIO_new_ssl_connect(ctx);
-    BIO_set_conn_hostname(bio, connect_str.c_str());
-
-    SSL* ssl = nullptr;
-    BIO_get_ssl(bio, &ssl);
-    if (ssl) {
-        SSL_set_tlsext_host_name(ssl, host.c_str());
+    // Bounded I/O: BIO_do_connect has no timeout, so a null-routed DoH
+    // endpoint would hang the resolver for minutes. 1.5s connect + 2s read.
+    int fd = tcp_connect_timeout(host, 443, 1500);
+    if (fd < 0) return response;
+    {
+        struct timeval rtv { 2, 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&rtv), sizeof(rtv));
     }
 
-    if (BIO_do_connect(bio) <= 0) {
-        BIO_free_all(bio);
+    SSL* ssl = SSL_new(ctx);
+    if (!ssl) { doh_close_fd(fd); return response; }
+    SSL_set_fd(ssl, fd);
+    SSL_set_tlsext_host_name(ssl, host.c_str());
+
+    if (SSL_connect(ssl) <= 0) {
+        SSL_free(ssl);
+        doh_close_fd(fd);
         return response;
     }
 
@@ -560,17 +638,22 @@ std::vector<uint8_t> DoHClient::perform_https_doh_request(
     request += "Accept: application/dns-message\r\n";
     request += "Connection: close\r\n\r\n";
 
-    BIO_write(bio, request.c_str(), static_cast<int>(request.size()));
+    if (SSL_write(ssl, request.c_str(), static_cast<int>(request.size())) <= 0) {
+        SSL_free(ssl);
+        doh_close_fd(fd);
+        return response;
+    }
 
     char buffer[4096];
     std::string http_response;
     int len;
-    while ((len = BIO_read(bio, buffer, sizeof(buffer) - 1)) > 0) {
+    while ((len = SSL_read(ssl, buffer, sizeof(buffer) - 1)) > 0) {
         buffer[len] = '\0';
         http_response.append(buffer, len);
     }
 
-    BIO_free_all(bio);
+    SSL_free(ssl);
+    doh_close_fd(fd);
     // NOTE: Do NOT free ctx here — it's owned by pImpl
 
     // Parse HTTP response — detect chunked transfer encoding
@@ -606,15 +689,33 @@ DoHClient::DNSResult DoHClient::perform_doh_query(const std::string& hostname, R
 
     try {
         std::vector<uint8_t> query = build_dns_query(hostname, type);
-        std::string server_url = get_provider_url(pImpl->config.provider);
 
 #ifdef HAVE_OPENSSL
-        std::vector<uint8_t> response = perform_https_doh_request(server_url, query);
-        if (!response.empty()) {
+        // Endpoint cascade: configured provider first, then every other known
+        // DoH endpoint. Many ISPs null-route specific endpoints (e.g. 1.1.1.1)
+        // while others stay reachable - never get stuck on a dead one.
+        std::vector<std::string> urls;
+        urls.push_back(get_provider_url(pImpl->config.provider));
+        for (const auto& kv : DOH_SERVERS) {
+            if (kv.second != urls.front()) urls.push_back(kv.second);
+        }
+        bool got = false;
+        for (const auto& server_url : urls) {
+            std::vector<uint8_t> response = perform_https_doh_request(server_url, query);
+            if (response.empty()) continue;
             result = parse_dns_response(response);
             result.status_code = 200;
-        } else {
-            throw std::runtime_error("Empty DoH response");
+            got = true;
+            if (server_url != urls.front()) {
+                static std::atomic<bool> cascade_logged{false};
+                if (!cascade_logged.exchange(true))
+                    fprintf(stderr, "[DoH] primary endpoint unreachable - using fallback %s\n",
+                            server_url.c_str());
+            }
+            break;
+        }
+        if (!got) {
+            throw std::runtime_error("All DoH endpoints unreachable");
         }
 #else
         result = fallback_to_system_dns(hostname, type);

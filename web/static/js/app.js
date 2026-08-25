@@ -326,6 +326,8 @@ function updateOverviewSubsystems(data) {
 // ─── Log Handler ─────────────────────────────────────────────────────────
 
 function onLogEntry(entry) {
+  const prev = appState.logBuffer[appState.logBuffer.length - 1];
+  if (prev && prev.ts === entry.ts && prev.level === entry.level && prev.msg === entry.msg) return;
   appState.logBuffer.push(entry);
   if (appState.logBuffer.length > 1000) appState.logBuffer.shift();
   if (currentSection === 'logs') appendLogEntry(entry);
@@ -354,7 +356,13 @@ async function loadLogs() {
   viewer.innerHTML = '';
   try {
     const logs = await apiFetch(`/api/logs?n=200`);
-    logs.forEach(appendLogEntry);
+    const seen = new Set();
+    logs.forEach(e => {
+      const k = e.ts + '|' + e.level + '|' + e.msg;
+      if (seen.has(k)) return;
+      seen.add(k);
+      appendLogEntry(e);
+    });
   } catch (_) {}
 }
 

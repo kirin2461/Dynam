@@ -986,7 +986,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.5.3");
+    ArgumentParser parser("ncp", "v1.5.4");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
