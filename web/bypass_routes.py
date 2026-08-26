@@ -187,6 +187,27 @@ def heal_stale_system_proxy(ncp_binary: str, port: int = 1080, log=None) -> bool
         return False
 
 
+def _proxy_watchdog_loop(proc, ncp_binary, port, log):
+    """Wait for the desync proxy process to exit; if Windows proxy settings
+    still point at our local port afterwards, restore them.
+
+    Covers the crash/external-kill path where neither the UI stop button nor
+    atexit gets a chance to run. restore_system_proxy() is idempotent, so a
+    graceful stop (which already restored) makes this a silent no-op."""
+    try:
+        proc.wait()
+    except Exception:
+        pass
+    try:
+        enabled, server = _read_win_proxy()
+        if enabled and re.fullmatch(r"127\.0\.0\.1:(\d+)", (server or "").strip()):
+            if log:
+                log("WARN", "Процесс прокси завершился — восстанавливаю системный прокси Windows…")
+            restore_system_proxy(ncp_binary, port, log=log)
+    except Exception:
+        pass
+
+
 def _doh_preflight(timeout: float = 2.5) -> bool:
     """True if any major DoH endpoint answers a real DNS wire query.
 
@@ -460,6 +481,10 @@ def register_bypass_routes(app, ctx):
                 push_log("ERROR", f"Proxy start failed: {e}")
                 return jsonify({"ok": False, "error": str(e)}), 500
             push_log("INFO", f"Desync proxy started on 127.0.0.1:{cfg.get('proxy_port', 1080)} (PID {_proxy_proc.pid})")
+            threading.Thread(target=_proxy_watchdog_loop,
+                             args=(_proxy_proc, ncp_binary,
+                                   int(cfg.get("proxy_port", 1080) or 1080), push_log),
+                             daemon=True).start()
         return jsonify({"ok": True, "pid": _proxy_proc.pid,
                         "port": state["config"].get("proxy_port", 1080)})
 

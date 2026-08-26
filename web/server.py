@@ -901,6 +901,17 @@ def read_process_output(proc):
             push_log("DEBUG", f"NCP process stopped (code {rc})")
     except Exception:
         pass
+    # v1.5.5: if the engine had enabled the Windows system proxy and then died
+    # (crash or external kill), its graceful-exit restore never ran — heal the
+    # settings from here. restore_system_proxy() is a no-op unless the current
+    # settings point at our own 127.0.0.1:<port>.
+    try:
+        import bypass_routes as _br
+        _br.restore_system_proxy(str(NCP_BINARY),
+                                 int(state["config"].get("proxy_port", 1080) or 1080),
+                                 log=push_log)
+    except Exception:
+        pass
 
 
 # ─── REST API ────────────────────────────────────────────────────────────────
