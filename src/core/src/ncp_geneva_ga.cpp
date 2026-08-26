@@ -591,6 +591,13 @@ void GenevaGA::stop() {
     if (health_thread_.joinable()) health_thread_.join();
 }
 
+void GenevaGA::request_stop() {
+    // Callback-safe stop: clears running_ so the evolution/health loops exit at
+    // their next checkpoint. Does NOT join threads (use stop() for that), so it
+    // is safe to call from on_generation_ which runs on the evolution thread.
+    running_.store(false);
+}
+
 bool GenevaGA::is_running() const {
     return running_.load();
 }

@@ -150,6 +150,7 @@ public:
     bool start();                                  // Start background evolution
     void stop();                                   // Stop background thread
     bool is_running() const;
+    void request_stop();                           // Signal loops to exit; callback-safe (no join)
 
     // ---- Results ----
     Individual get_best() const;                   // Current best individual

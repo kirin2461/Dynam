@@ -41,5 +41,10 @@ DPI::FitnessResult geneva_probe_fitness(const DPI::GenevaStrategy& strategy,
                                         uint16_t target_port,
                                         int timeout_ms) noexcept;
 
+/// Number of probes that died at the getaddrinfo() stage (DNS blocked).
+/// Monotonic for the process lifetime; the GA wiring diffs it per generation
+/// to detect "target can never be resolved" and stop evolving at fitness 0.
+uint64_t geneva_resolve_failure_count() noexcept;
+
 } // namespace cli
 } // namespace ncp

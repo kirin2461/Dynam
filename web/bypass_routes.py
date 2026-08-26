@@ -33,6 +33,189 @@ from flask import jsonify, request
 _proxy_proc = None
 _proxy_lock = threading.Lock()
 
+# ─────────────────────────────────────────────────────────────────────────────
+# System-proxy safety net (v1.5.5)
+#
+# The engine restores Windows system-proxy settings only on GRACEFUL exit.
+# The web layer kills the engine/proxy with TerminateProcess (proc.terminate()),
+# so that cleanup never ran: ProxyEnable=1 stayed pointing at a dead
+# 127.0.0.1:<port> and the user lost internet every time NCP was stopped.
+# These helpers restore the settings from the web side no matter how the
+# engine died, and refuse to enable the system proxy when it cannot work.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _win_inet_notify():
+    """Tell Windows the proxy settings changed (same as engine's win_inet_notify)."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        wininet = ctypes.windll.wininet
+        # INTERNET_OPTION_SETTINGS_CHANGED = 39, INTERNET_OPTION_REFRESH = 37
+        wininet.InternetSetOptionW(0, 39, 0, 0)
+        wininet.InternetSetOptionW(0, 37, 0, 0)
+    except Exception:
+        pass
+
+
+def _read_win_proxy():
+    """Return (ProxyEnable, ProxyServer) from HKCU Internet Settings."""
+    if os.name != "nt":
+        return None, None
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        try:
+            enabled = winreg.QueryValueEx(key, "ProxyEnable")[0]
+        except OSError:
+            enabled = 0
+        try:
+            server = winreg.QueryValueEx(key, "ProxyServer")[0]
+        except OSError:
+            server = ""
+        winreg.CloseKey(key)
+        return enabled, server or ""
+    except Exception:
+        return None, None
+
+
+def _winreg_clear_proxy(port: int) -> bool:
+    """Fallback: clear ProxyEnable when it points at OUR local proxy port.
+
+    Never touches settings that point anywhere else."""
+    if os.name != "nt":
+        return False
+    try:
+        enabled, server = _read_win_proxy()
+        if not enabled:
+            return False
+        m = re.fullmatch(r"127\.0\.0\.1:(\d+)", (server or "").strip())
+        if not m or int(m.group(1)) != int(port):
+            return False
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                             0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+        winreg.CloseKey(key)
+        _win_inet_notify()
+        return True
+    except Exception:
+        return False
+
+
+def restore_system_proxy(ncp_binary: str, port: int = 1080, log=None) -> bool:
+    """Restore Windows system proxy after the desync proxy stops.
+
+    Preferred path: `ncp sysproxy off` (the engine keeps a saved-settings state
+    file and restores ProxyServer/ProxyOverride exactly). Fallback: clear
+    ProxyEnable via winreg when it points at our own 127.0.0.1:<port>.
+    No-op on non-Windows or when the current proxy settings are not ours.
+    """
+    if os.name != "nt":
+        return False
+    restored = False
+    try:
+        enabled, server = _read_win_proxy()
+        ours = bool(enabled) and bool(
+            re.fullmatch(r"127\.0\.0\.1:(\d+)", (server or "").strip()))
+        if not ours:
+            return False
+        if ncp_binary and Path(ncp_binary).exists():
+            try:
+                subprocess.run([ncp_binary, "sysproxy", "off"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=10, cwd=str(Path(ncp_binary).parent))
+                enabled2, _srv = _read_win_proxy()
+                restored = not enabled2
+            except Exception:
+                restored = False
+        if not restored:
+            restored = _winreg_clear_proxy(port)
+        if restored and log:
+            log("INFO", "Системный прокси Windows восстановлен — интернет снова работает напрямую")
+        elif not restored and log:
+            log("WARN", "Не удалось автоматически отключить системный прокси Windows. "
+                        "Откройте Параметры → Сеть и интернет → Прокси и выключите "
+                        "«Использовать прокси-сервер».")
+    except Exception:
+        pass
+    return restored
+
+
+def ensure_proxy_stopped(ncp_binary: str, port: int = 1080, log=None):
+    """Kill the desync proxy if it is running, then restore the system proxy.
+
+    Called from /api/stop and via atexit — the app must never leave Windows
+    pointing at a dead local proxy."""
+    global _proxy_proc
+    try:
+        with _proxy_lock:
+            proc = _proxy_proc
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            _proxy_proc = None
+    except Exception:
+        pass
+    restore_system_proxy(ncp_binary, port, log=log)
+
+
+def heal_stale_system_proxy(ncp_binary: str, port: int = 1080, log=None) -> bool:
+    """Startup heal: a previous crash/kill may have left ProxyEnable=1 pointing
+    at our dead local proxy. Restore it before the user notices dead internet."""
+    if os.name != "nt":
+        return False
+    try:
+        enabled, server = _read_win_proxy()
+        m = re.fullmatch(r"127\.0\.0\.1:(\d+)", (server or "").strip())
+        if not enabled or not m:
+            return False
+        with _proxy_lock:
+            alive = bool(_proxy_proc and _proxy_proc.poll() is None)
+        if alive:
+            return False  # proxy is actually running — leave the settings alone
+        if log:
+            log("WARN", "Обнаружен «застывший» системный прокси от прошлого запуска "
+                        f"(127.0.0.1:{m.group(1)}) — восстанавливаю настройки Windows…")
+        return restore_system_proxy(ncp_binary, port, log=log)
+    except Exception:
+        return False
+
+
+def _doh_preflight(timeout: float = 2.5) -> bool:
+    """True if any major DoH endpoint answers a real DNS wire query.
+
+    Enabling the Windows system proxy while every DoH endpoint is blocked would
+    instantly kill the user's internet (all browser traffic routed into a proxy
+    that cannot resolve anything). Hand-built DNS wire query — stdlib only."""
+    import base64
+    import ssl
+    import urllib.request
+    # DNS query: example.com IN A (12-byte header + qname + qtype/qclass)
+    query = (bytes.fromhex("000001000001000000000000")
+             + b"\x07example\x03com\x00" + bytes.fromhex("00010001"))
+    b64 = base64.urlsafe_b64encode(query).rstrip(b"=").decode("ascii")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE  # connectivity preflight, not identity check
+    for host in ("1.1.1.1", "1.0.0.1", "9.9.9.9", "77.88.8.8"):
+        try:
+            req = urllib.request.Request(
+                f"https://{host}/dns-query?dns={b64}",
+                headers={"accept": "application/dns-message"})
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                if resp.status == 200 and len(resp.read(64)) > 12:
+                    return True
+        except Exception:
+            continue
+    return False
+
+
 _blockcheck = {
     "running": False,
     "started": 0.0,
@@ -249,6 +432,20 @@ def register_bypass_routes(app, ctx):
             if _proxy_proc and _proxy_proc.poll() is None:
                 return jsonify({"ok": False, "error": "Прокси уже запущен"}), 409
             cfg = state["config"]
+            # v1.5.5: never enable the Windows system proxy when every DoH
+            # endpoint is unreachable — the proxy would be unable to resolve
+            # anything and all browser traffic would die (the exact
+            # "proxy breaks my internet" scenario users reported).
+            if cfg.get("proxy_system_wide") and os.name == "nt" and cfg.get("proxy_doh", True):
+                if not _doh_preflight():
+                    push_log("WARN", "Системный прокси НЕ включён: DoH недоступен "
+                                     "(DNS/TLS заблокированы) — прокси сломал бы интернет. "
+                                     "Сначала подберите рабочую стратегию (Автопилот/Blockcheck).")
+                    return jsonify({"ok": False, "doh_blocked": True,
+                                    "error": "Системный прокси не включён: DoH (запасной DNS) "
+                                             "недоступен — прокси сломал бы вам интернет. Сначала "
+                                             "подберите рабочую стратегию в разделе «Автопилот» или "
+                                             "«Blockcheck», затем запускайте прокси."}), 503
             args = _proxy_args(cfg)
             # fresh event stream per proxy run (bounded growth)
             try:
@@ -278,6 +475,9 @@ def register_bypass_routes(app, ctx):
             except subprocess.TimeoutExpired:
                 _proxy_proc.kill()
             push_log("INFO", "Desync proxy stopped")
+        restore_system_proxy(ncp_binary,
+                             int(state["config"].get("proxy_port", 1080) or 1080),
+                             log=push_log)
         return jsonify({"ok": True})
 
     @app.route("/api/proxy/status")

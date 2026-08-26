@@ -986,7 +986,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.5.4");
+    ArgumentParser parser("ncp", "v1.5.5");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
@@ -1828,6 +1828,35 @@ void handle_run(const std::vector<std::string>& args) {
                                   << " best=" << st.best_fitness
                                   << " avg=" << st.avg_fitness
                                   << " evals=" << st.total_evaluations << "\n" << std::flush;
+                        // v1.5.5: dead-DNS guard. If every probe of a generation
+                        // died at getaddrinfo(), evolution can never progress
+                        // (fitness pinned to 0) — stop with actionable advice
+                        // instead of burning generations and traffic.
+                        static uint64_t s_prev_rf = 0;
+                        static uint32_t s_prev_gen = 0;
+                        static int s_dead_gens = 0;
+                        if (gen > s_prev_gen) {
+                            uint64_t rf = ncp::cli::geneva_resolve_failure_count();
+                            uint64_t df = rf - s_prev_rf;
+                            s_prev_rf = rf;
+                            s_prev_gen = gen;
+                            if (df >= 4 && st.best_fitness <= 0.0 && st.avg_fitness <= 0.0) {
+                                if (++s_dead_gens >= 2) {
+                                    std::cerr << "\n[!] Geneva stopped: target cannot be resolved - "
+                                                 "DNS is completely blocked on this line.\n"
+                                                 "[!] Every probe died at the DNS stage, so evolution "
+                                                 "has nothing to learn from (fitness pinned to 0).\n"
+                                                 "[!] What to do: use an IP-literal target, e.g.\n"
+                                                 "[!]   --geneva-target 162.159.138.232:443\n"
+                                                 "[!] or restore DNS first (ncp dns set 1.1.1.1 / "
+                                                 "web UI Network section).\n"
+                                              << std::flush;
+                                    if (g_app.geneva_ga) g_app.geneva_ga->request_stop();
+                                }
+                            } else {
+                                s_dead_gens = 0;
+                            }
+                        }
                     });
                     g_app.geneva_ga->on_new_best([](const DPI::Individual& best) {
                         {

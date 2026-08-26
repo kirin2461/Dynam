@@ -34,6 +34,13 @@
 
 namespace ncp {
 namespace cli {
+
+static std::atomic<uint64_t> g_resolve_failures{0};
+
+uint64_t geneva_resolve_failure_count() noexcept {
+    return g_resolve_failures.load(std::memory_order_relaxed);
+}
+
 namespace {
 
 // Portable readability/writability wait. Returns >0 ready, 0 timeout, <0 error.
@@ -68,6 +75,7 @@ socket_t gf_connect(const std::string& host, uint16_t port, int timeout_ms) {
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr;
     if (::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0 || !res) {
+        g_resolve_failures.fetch_add(1, std::memory_order_relaxed);
         static std::atomic<bool> dns_warned{false};
         if (!dns_warned.exchange(true))
             std::fprintf(stderr, "[!] Geneva: cannot resolve %s - DNS is broken "

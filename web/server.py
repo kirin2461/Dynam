@@ -1063,6 +1063,17 @@ def api_start():
 
 @app.route("/api/stop", methods=["POST"])
 def api_stop():
+    # v1.5.5: always stop the desync proxy and restore the Windows system
+    # proxy FIRST — even when the engine itself is not running, the proxy
+    # may still be holding ProxyEnable=1 pointed at a dead local port.
+    try:
+        import bypass_routes as _br
+        _br.ensure_proxy_stopped(str(NCP_BINARY),
+                                 int(state["config"].get("proxy_port", 1080) or 1080),
+                                 log=push_log)
+    except Exception as _px_err:
+        logger.warning(f"proxy cleanup on stop failed: {_px_err}")
+
     if not state["running"]:
         return jsonify({"ok": False, "error": "NCP not running"}), 409
 
@@ -2198,6 +2209,17 @@ if __name__ == "__main__":
     # Start background stats thread (collects REAL network stats, no simulation)
     stats_thread = threading.Thread(target=stats_update_loop, daemon=True)
     stats_thread.start()
+
+    # v1.5.5: heal a stale system proxy left behind by a previous crash/kill,
+    # and guarantee restore-on-exit no matter how the GUI terminates.
+    try:
+        import atexit
+        import bypass_routes as _br
+        _px_port = int(state["config"].get("proxy_port", 1080) or 1080)
+        _br.heal_stale_system_proxy(str(NCP_BINARY), _px_port, log=push_log)
+        atexit.register(_br.ensure_proxy_stopped, str(NCP_BINARY), _px_port, push_log)
+    except Exception as _heal_err:
+        logger.warning(f"startup proxy heal failed: {_heal_err}")
 
     _initial_logs()
 
