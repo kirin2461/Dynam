@@ -132,6 +132,16 @@ struct DPIConfig {
     // Mimics GoodbyeDPI --reverse-frag; effective on Beeline and some TSPU
     bool enable_reverse_frag = false;
 
+    // Selective desync (v1.6.0, winws2-style --hostlist/--hostlist-exclude/
+    // --ipset). Empty = feature off: every intercepted TLS ClientHello gets
+    // desynced (legacy behaviour). With a hostlist active, only listed domains
+    // (SNI suffix match) — or destination IPs from the ipset — are desynced;
+    // everything else passes through untouched. This is what makes zapret
+    // practical: games, banking and gov sites stay on the clean path.
+    std::string hostlist_file;          // include mode: desync ONLY these
+    std::string hostlist_exclude_file;  // exclude mode: desync all EXCEPT these
+    std::string ipset_file;             // CIDR / plain-IP list for dst-IP filter
+
     // Auto-TTL: automatically determine fake TTL based on incoming packets
     // Uses incoming TTL to estimate hop count: fake_ttl = path_hops + autottl_delta
     //

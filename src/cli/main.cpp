@@ -986,9 +986,9 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.5.5");
+    ArgumentParser parser("ncp", "v1.6.0");
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--no-spoof]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
     parser.add_command("rotate", "Rotate all identities", handle_rotate);
@@ -1522,6 +1522,17 @@ void handle_run(const std::vector<std::string>& args) {
 
         DPI::DPIConfig dpi_cfg;
         DPI::apply_preset(chosen_preset, dpi_cfg);
+        // v1.6.0: selective desync lists (winws2-style hostlist/ipset)
+        dpi_cfg.hostlist_file = get_option(args, "--hostlist", "");
+        dpi_cfg.hostlist_exclude_file = get_option(args, "--hostlist-exclude", "");
+        dpi_cfg.ipset_file = get_option(args, "--ipset", "");
+        if (!dpi_cfg.hostlist_file.empty() || !dpi_cfg.hostlist_exclude_file.empty() ||
+            !dpi_cfg.ipset_file.empty()) {
+            std::cout << "[*] Selective desync:"
+                      << (!dpi_cfg.hostlist_file.empty() ? " hostlist(include)" : "")
+                      << (!dpi_cfg.hostlist_exclude_file.empty() ? " hostlist(exclude)" : "")
+                      << (!dpi_cfg.ipset_file.empty() ? " ipset" : "") << "\n";
+        }
         if (has_flag(args, "--quic-block")) {
             dpi_cfg.quic_force_tcp = true;
             std::cout << "[*] QUIC blocked — clients will fall back to TCP/TLS\n";
@@ -2995,6 +3006,10 @@ void handle_dpi(const std::vector<std::string>& args) {
     config.enable_fake_packet = !has_flag(args, "--no-fake");
     config.fake_ttl = get_option_int(args, "--fake-ttl", 1);
     config.enable_disorder = !has_flag(args, "--no-disorder");
+    // v1.6.0: selective desync lists (winws2-style)
+    config.hostlist_file = get_option(args, "--hostlist", "");
+    config.hostlist_exclude_file = get_option(args, "--hostlist-exclude", "");
+    config.ipset_file = get_option(args, "--ipset", "");
 
     // Kill switch: EXPLICIT opt-in only, never default. Drops all direct
     // outbound traffic (WinDivert driver mode) so nothing leaks if the

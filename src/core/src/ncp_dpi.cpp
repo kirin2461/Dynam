@@ -16,6 +16,9 @@
 #include <vector>
 #include <sodium.h>
 #include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
@@ -203,6 +206,14 @@ public:
     //   DPIBypass::init -> init_advanced_bypass -> AdvancedDPIBypass::init
     //   -> creates inner DPIBypass (base_only) -> no further recursion.
     bool base_only{false};
+
+    // Selective desync lists (v1.6.0) — populated by load_desync_lists().
+    struct IpNet { uint32_t net; uint32_t mask; };  // host byte order
+    std::set<std::string> hostlist_;
+    bool hostlist_active_ = false;
+    bool hostlist_exclude_mode_ = false;
+    std::vector<IpNet> ipset_;
+    bool ipset_active_ = false;
 
     // FIX #39: Dedicated mutex for config reads/writes.
     mutable std::mutex config_mutex;
@@ -1431,6 +1442,113 @@ public:
         Sleep(500);
     }
 
+    // ── Selective desync lists (v1.6.0, winws2-style) ─────────────────────
+    static std::string hl_lower_trim(std::string s) {
+        while (!s.empty() && (s.back() == '\r' || s.back() == '\n' ||
+                              s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        size_t b = s.find_first_not_of(" \t");
+        if (b == std::string::npos) return "";
+        s = s.substr(b);
+        for (auto& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        while (!s.empty() && s.front() == '.') s.erase(s.begin());
+        return s;
+    }
+
+    static bool hl_parse_ipv4(const std::string& s, uint32_t& out_host_order) {
+        unsigned a, b, c, d;
+        if (std::sscanf(s.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return false;
+        if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+        out_host_order = (a << 24) | (b << 16) | (c << 8) | d;
+        return true;
+    }
+
+    void load_desync_lists(const DPIConfig& cfg) {
+        hostlist_.clear();
+        ipset_.clear();
+        hostlist_active_ = false;
+        ipset_active_ = false;
+        hostlist_exclude_mode_ = false;
+
+        std::string hl_file = cfg.hostlist_file;
+        if (hl_file.empty() && !cfg.hostlist_exclude_file.empty()) {
+            hl_file = cfg.hostlist_exclude_file;
+            hostlist_exclude_mode_ = true;
+        }
+        if (!hl_file.empty()) {
+            std::ifstream in(hl_file);
+            if (!in) {
+                log("hostlist: cannot open " + hl_file +
+                    " - desync applies to ALL sites");
+            } else {
+                std::string line;
+                while (std::getline(in, line)) {
+                    size_t h = line.find('#');
+                    if (h != std::string::npos) line = line.substr(0, h);
+                    std::string d = hl_lower_trim(line);
+                    if (!d.empty()) hostlist_.insert(d);
+                }
+                if (hostlist_.empty()) {
+                    log("hostlist: " + hl_file + " is empty - desync applies to ALL sites");
+                } else {
+                    hostlist_active_ = true;
+                    log("hostlist: " + std::to_string(hostlist_.size()) + " domains (" +
+                        (hostlist_exclude_mode_ ? std::string("exclude") : std::string("include")) +
+                        " mode) from " + hl_file);
+                }
+            }
+        }
+        if (!cfg.ipset_file.empty()) {
+            std::ifstream in(cfg.ipset_file);
+            if (!in) {
+                log("ipset: cannot open " + cfg.ipset_file + " - no IP filtering");
+            } else {
+                std::string line;
+                while (std::getline(in, line)) {
+                    size_t h = line.find('#');
+                    if (h != std::string::npos) line = line.substr(0, h);
+                    std::string e = hl_lower_trim(line);
+                    if (e.empty()) continue;
+                    int prefix = 32;
+                    size_t sl = e.find('/');
+                    if (sl != std::string::npos) {
+                        prefix = std::atoi(e.substr(sl + 1).c_str());
+                        e = e.substr(0, sl);
+                        if (prefix < 0 || prefix > 32) continue;
+                    }
+                    uint32_t ip = 0;
+                    if (!hl_parse_ipv4(e, ip)) continue;
+                    uint32_t mask = (prefix == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix));
+                    ipset_.push_back({ip & mask, mask});
+                }
+                if (!ipset_.empty()) {
+                    ipset_active_ = true;
+                    log("ipset: " + std::to_string(ipset_.size()) +
+                        " entries from " + cfg.ipset_file);
+                }
+            }
+        }
+    }
+
+    // Suffix match like zapret: "example.com" covers "www.example.com".
+    bool hostlist_match(const std::string& host) const {
+        std::string h = hl_lower_trim(host);
+        while (!h.empty()) {
+            if (hostlist_.find(h) != hostlist_.end()) return true;
+            size_t dot = h.find('.');
+            if (dot == std::string::npos) break;
+            h = h.substr(dot + 1);
+        }
+        return false;
+    }
+
+    bool ipset_match(uint32_t dst_addr_net_order) const {
+        uint32_t h = ntohl(dst_addr_net_order);
+        for (const auto& n : ipset_) {
+            if ((h & n.mask) == n.net) return true;
+        }
+        return false;
+    }
+
     bool init_windivert() {
         // Ensure WinDivert DLL and driver can be found.
         // WinDivertOpen loads WinDivert.dll which installs WinDivert64.sys
@@ -1663,6 +1781,19 @@ public:
                 }
 
                 uint16_t udp_dst = ntohs(udp_header->DstPort);
+
+                // v1.6.0: selective desync by ipset — QUIC desync applies only
+                // to listed destination IPs when an ipset is active.
+                if (udp_dst == 443 && ipset_active_ && !ipset_match(ip_header->DstAddr)) {
+                    if (!WinDivertSend(wd_handle_, packet, packet_len, nullptr, &addr)) {
+                        DWORD wd_err = GetLastError();
+                        if (wd_err != ERROR_HOST_UNREACHABLE && wd_err != ERROR_NETWORK_UNREACHABLE) {
+                            log("WinDivertSend (ipset UDP passthrough) failed: err=" + std::to_string(wd_err));
+                            stats.send_errors++;
+                        }
+                    }
+                    continue;
+                }
 
                 // === QUIC force-TCP: drop outbound QUIC (UDP/443) so clients
                 // fall back to TCP/TLS where TCP desync strategies apply ===
@@ -1926,6 +2057,28 @@ public:
                             reinterpret_cast<const char*>(tcp_payload + sni_off + 2),
                             host_len);
                     }
+                }
+            }
+
+            // ── Selective desync by hostlist/ipset (v1.6.0, winws2-style) ──
+            // include mode: desync ONLY listed domains (or ipset-listed dst IP);
+            // exclude mode: desync everything EXCEPT listed. Both empty = off.
+            if (hostlist_active_ || ipset_active_) {
+                bool listed = false;
+                if (hostlist_active_ && !sni_hostname.empty())
+                    listed = hostlist_match(sni_hostname);
+                if (!listed && ipset_active_)
+                    listed = ipset_match(ip_header->DstAddr);
+                if (hostlist_exclude_mode_) listed = !listed;
+                if (!listed) {
+                    if (!WinDivertSend(wd_handle_, packet, packet_len, nullptr, &addr)) {
+                        DWORD wd_err = GetLastError();
+                        if (wd_err != ERROR_HOST_UNREACHABLE && wd_err != ERROR_NETWORK_UNREACHABLE) {
+                            log("WinDivertSend (hostlist passthrough) failed: err=" + std::to_string(wd_err));
+                            stats.send_errors++;
+                        }
+                    }
+                    continue;
                 }
             }
 
@@ -2832,6 +2985,7 @@ bool DPIBypass::start() {
 
 #if defined(HAVE_WINDIVERT) && defined(_WIN32)
     if (cfg_snap.mode == DPIMode::DRIVER) {
+        impl_->load_desync_lists(cfg_snap);
         if (!impl_->init_windivert()) return false;
         impl_->running = true;
         impl_->intercept_active = true;

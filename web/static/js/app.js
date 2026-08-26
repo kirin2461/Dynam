@@ -94,6 +94,7 @@ function loadSectionData(id) {
     case 'transport': loadModuleStats(); break;
     case 'telegram':  loadTgProxies(); break;
     case 'monitor':   monitorInit(); break;
+    case 'bypass':    driverPacketModeInit(); break;
     case 'enterprise': enterpriseInit(); break;
   }
 }
@@ -1661,6 +1662,25 @@ async function bypassProxyStart() {
 async function bypassProxyStop() {
   await apiFetch('/proxy/stop', {method: 'POST'});
   bypassProxyStatus();
+}
+
+// ── packet mode (WinDivert) settings ──
+
+function driverPacketModeSave() {
+  const m = document.getElementById('driver-hostlist-mode');
+  const ip = document.getElementById('driver-ipset-enabled');
+  saveConfig({
+    driver_hostlist_mode: m ? m.value : 'off',
+    driver_ipset_enabled: !!(ip && ip.checked),
+  });
+}
+
+function driverPacketModeInit() {
+  const c = appState.config || {};
+  const m = document.getElementById('driver-hostlist-mode');
+  if (m && document.activeElement !== m) m.value = c.driver_hostlist_mode || 'off';
+  const ip = document.getElementById('driver-ipset-enabled');
+  if (ip) ip.checked = !!c.driver_ipset_enabled;
 }
 
 // ── blockcheck ──

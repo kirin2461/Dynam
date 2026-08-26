@@ -75,7 +75,7 @@
     <div class="header__spacer"></div>
 
     <div class="header__connection">
-      <span class="header__version">v1.5.5</span>
+      <span class="header__version">v1.6.0</span>
       <span id="header-dot" class="status-dot"></span>
       <button id="btn-connect" class="btn-connect">
         <span class="status-dot"></span> Подключить
@@ -608,6 +608,34 @@
           </div>
           <div class="text-sm mt-3" style="color:var(--text-secondary)">
             Стратегия: <span id="bypass-strategy-label" style="color:var(--text-primary)">split-2 + SNI (по умолчанию)</span>
+          </div>
+        </div>
+
+        <!-- ── Пакетный режим (WinDivert) ── -->
+        <div class="card">
+          <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+            Пакетный режим (WinDivert)
+            <button class="help-btn" onclick="showHelp('packet-mode')" title="Что это?">?</button>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+            Обход на уровне пакетов (как winws2 из zapret): фейковые пакеты и фрагментация
+            применяются прямо в сети. Не нужен прокси и не зависит от DoH — работает даже при
+            полностью заблокированном DNS. Включается кнопкой «Защита» (нужны права администратора).
+          </div>
+          <div class="form-group">
+            <label class="form-label" title="По умолчанию обход применяется ко всем сайтам. С фильтром — только к заблокированным: остальные сайты идут напрямую, быстрее и чище.">Фильтр по хостлисту</label>
+            <select class="form-input" id="driver-hostlist-mode" onchange="driverPacketModeSave()">
+              <option value="off">Выключен — обход для всех сайтов</option>
+              <option value="include">Только сайты из хостлиста</option>
+              <option value="exclude">Все, кроме сайтов из хостлиста</option>
+            </select>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin:var(--sp-2) 0">
+            <span class="text-sm" title="Дополнительно ограничивает обход по IP-адресам назначения из файла ipset.txt (CIDR-список, как ipset-all.txt в zapret)">Фильтр по IP (ipset.txt)</span>
+            <label class="toggle"><input type="checkbox" id="driver-ipset-enabled" onchange="driverPacketModeSave()"><div class="toggle__track"></div><div class="toggle__thumb"></div></label>
+          </div>
+          <div class="text-sm" style="color:var(--text-secondary)">
+            Хостлист редактируется в разделе «Хостлисты». Изменения применяются при следующем запуске защиты.
           </div>
         </div>
 
@@ -1953,7 +1981,7 @@
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:var(--sp-4);font-size:var(--text-sm)">
           <div>
             <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Версия</div>
-            <div class="text-accent">NCP v1.5.5</div>
+            <div class="text-accent">NCP v1.6.0</div>
           </div>
           <div>
             <div style="color:var(--text-muted);margin-bottom:var(--sp-1)">Сборка</div>

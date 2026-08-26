@@ -1001,6 +1001,19 @@ def _build_ncp_args() -> list:
         if custom and isinstance(custom, list):
             args.extend(["--zapret-chains", ",".join(custom)])
 
+    # v1.6.0: selective packet-level desync (winws2-style). By default the
+    # WinDivert driver mode desyncs every TLS ClientHello; with these options
+    # only the listed domains/IPs get desynced and everything else flows
+    # untouched — faster, cleaner, less fingerprintable.
+    hl_mode = cfg.get("driver_hostlist_mode", "off")
+    hl_file = CONFIG_PATH.parent / "autohostlist.txt"
+    if hl_mode == "include":
+        args.extend(["--hostlist", str(hl_file)])
+    elif hl_mode == "exclude":
+        args.extend(["--hostlist-exclude", str(hl_file)])
+    if cfg.get("driver_ipset_enabled", False):
+        args.extend(["--ipset", str(CONFIG_PATH.parent / "ipset.txt")])
+
     return args
 
 
