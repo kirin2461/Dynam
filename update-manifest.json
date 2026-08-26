@@ -1,20 +1,20 @@
 {
-  "version": "1.5.5",
-  "notes": "NCP v1.5.5",
+  "version": "1.6.0",
+  "notes": "NCP v1.6.0",
   "assets": {
     "windows-x64": {
       "name": "ncp-windows-x64.zip",
-      "url": "https://github.com/kirin2461/Dynam/releases/download/v1.5.5/ncp-windows-x64.zip",
-      "sha256": "430dc92023db5a5d826e424bb20eba172bd8fee04ca82fd31ab5db7543385e9f",
-      "signature": "kPFcKiVp3ewRHDXBk6+8D75BAkjQTeMhmS1aic2SFJSN5zcIxdUDOzXdAozGjNZ1KQ+ISkBj5OzTSRcEkdUlDQ==",
-      "size_hint": 71587750
+      "url": "https://github.com/kirin2461/Dynam/releases/download/v1.6.0/ncp-windows-x64.zip",
+      "sha256": "fbbdc65be503cb1251ae054ec262738ddd9c608c972306cdbbc36e6e5ad9cbbc",
+      "signature": "RrPAmIk9S/C0PgsCH0MMAsBEceWOOVUCIQQZQ9qkgbIwmZ/85UIF+nrGQ8VKrR3sNg8Fkzm8VdX9y8OItWiHAA==",
+      "size_hint": 71598856
     },
     "linux-x64": {
       "name": "ncp-linux-x64.tar.gz",
-      "url": "https://github.com/kirin2461/Dynam/releases/download/v1.5.5/ncp-linux-x64.tar.gz",
-      "sha256": "a01f683e06304f4ee47cecf9a23900e65b9b67f2741240a4cecf3317491f84f2",
-      "signature": "/huD3/FkEgIGFkL2+wy69+UssxC523mkO/HPFiBxCNDneJMGwWKUpFLLnIeIO8gUBukFL019aqqYVii19FKFDQ==",
-      "size_hint": 42295973
+      "url": "https://github.com/kirin2461/Dynam/releases/download/v1.6.0/ncp-linux-x64.tar.gz",
+      "sha256": "8aaffa79ad87c9fcc7f79c8b40f45ab2c0e79eb844009ece615b2b7bb070d0e9",
+      "signature": "vpj4AR1NX6D1ie+0Ibwo/TAtDvxk8FpVezgOp7m0k0t9A0SJ8jXB+Wi41E9sLyU/58dm0VwVxlpIQsd19sx2AQ==",
+      "size_hint": 42300376
     }
   }
 }
