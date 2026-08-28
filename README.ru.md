@@ -1,3 +1,124 @@
+# Dynam (NCP C++) — Network Control Protocol
+
+[English](README.md) | **Русский**
+
+> Многоуровневая платформа сетевой анонимизации и приватности: обход DPI, спуфинг трафика, параноидальный режим и современная криптография. Написана на современном C++17.
+
+## Текущий статус
+
+**Версия**: 1.6.0
+**Версия CMake**: 1.5.0 (синхронизирована)
+
+- ✅ **Сборка**: Linux (GCC 9+) и Windows (проверен кросс-билд mingw-w64 — статически слинкованный `ncp.exe`; поддерживается и MSVC) через CMake + Ninja.
+- ✅ **Тесты**: 604 теста — 596 пройдено, 8 пропущено (интеграционные тесты I2P требуют живой SAM-мост), 0 упавших.
+- ✅ **MASTER_ORCHESTRATOR на 100% готов**: полный 7-стадийный конвейер с anti-ML, стеганографией и поведенческой маскировкой.
+- ✅ **Веб-интерфейс**: панель управления на Flask в `web/` (активация лицензии, переключатели модулей, живые логи, старт/стоп, живая статистика движка по модулям).
+- ✅ **Лицензирование**: автоматический 7-дневный триал при первом запуске (все 19 модулей), ключи с подписью Ed25519 выпускаются отдельной утилитой `ncp-keygen`.
+- ✅ **Десктопный GUI**: приложение Qt6 (`ncp-qt.exe`) с графиками, панелью лицензии и значком в трее.
+- ✅ **Docker-тестовые стенды**: три изолированные топологии (3-узловой midbox, 2-узловой комбинированный Server/DPI, DPI Lab) — вся боевая матрица гоняется, не трогая сеть хоста.
+- ✅ **DPI Lab**: юзерспейсный NFQUEUE-эмулятор DPI с TCP-реассемблированием (лимит буфера + политики strict/permissive для out-of-order), 4 автоматических набора тестов (формирование десинка / матрица обхода DPI-моделей / совместимость с эндпоинтами / производительность), профили tc-netem, дымовые тесты IPv6.
+
+### Что нового в 1.5.3 – 1.6.0
+
+- **v1.6.0 — избирательный пакетный обход (в стиле winws2).** WinDivert driver-режим получил опции `--hostlist` / `--hostlist-exclude` / `--ipset`: обход применяется только к доменам из списка (суффиксное совпадение по SNI) или к IP назначения (CIDR) — всё остальное идёт напрямую, без замедления. В веб-интерфейсе — новая карточка «Пакетный режим (WinDivert)» в разделе «Обход».
+- **v1.5.5 — защита от «сломанного интернета».** Остановка приложения/прокси (и любой краш) теперь всегда восстанавливает системный прокси Windows; при старте лечатся «застывшие» настройки; preflight-проверка DoH не даёт включить системный прокси, если это убьёт интернет. Geneva GA останавливается с понятной подсказкой, если цель вообще не резолвится (DNS полностью заблокирован).
+- **v1.5.4 — каскад DoH-эндпоинтов.** Движок перебирает 6 DoH-эндпоинтов с ограниченными таймаутами (1.5 с на подключение / 2 с на чтение) вместо одного захардкоженного провайдера; самотест проверяет 8 резолверов; исправлен шум в логах.
+- **v1.5.3 — встроенная справка.** Понятные человеческие гайды по каждой функции (раздел «Справка», контекстные кнопки «?»), автовосстановление DNS на DHCP, таймаут blockcheck увеличен до 600 с.
+
+### Прогресс реализации
+
+**MasterOrchestrator — готов на 100%** (13 модулей, ~3500 строк):
+- ✅ **Фаза 1: Базовая интеграция** — MasterOrchestrator, 7-стадийный конвейер, API отправки/приёма
+- ✅ **Фаза 2: Anti-ТСПУ ML** — BehavioralCloak, ProtocolRotationSchedule, SessionPatternRandomizer
+- ✅ **Фаза 3: Anti-СОРМ** — CovertChannelManager (4 канала), CrossLayerCorrelator, GeoObfuscator
+- ✅ **Фаза 4: Безопасность** — PanicSequence (9 шагов), фоновый планировщик (8 задач)
+
+- ✅ **Полностью реализовано и покрыто тестами**: криптография, обход DPI (включая midSLD-сплиты, zapret-цепочки, fake/fooling), продвинутый DPI, сетевой спуфинг, защищённая память/буферы, DoH, база данных, лицензии, логирование, конфигурация, CSPRNG, TLS-фингерпринтинг (JA3/JA4, браузерные профили), adversarial padding, flow shaping, probe resistance, L2/L3-стелс, ARP/DHCP-спуфинг, port knocking, SPA (Ed25519 Single Packet Authorization + управление ipset), XTLS-Reality fallback, Stego-DNS discovery, UDP port-hopping, статистические профили мимикрии трафика, TCP state confusion (desync), AEMM Reed-Solomon erasure coding, Fog Mesh relay, Semantic Fluid Transport, eBPF/XDP фильтрация в ядре, перехватчик пакетов, морфинг протоколов, burst-морфинг, маскировка энтропии, Geneva Engine/GA (кроссовер/мутация/селекция, синхронная и фоновая эволюция), управление идентичностью, защита по таймингам, пул потоков, координатор ротации, менеджер безопасности, фреймворк возможностей, I2P (клиент SAM-протокола), мимикрия трафика.
+
+- ✅ **Исправленные проблемы безопасности**:
+  - Несовпадение info-строки ECH — ИСПРАВЛЕНО (каноническая info-строка)
+  - Перепутанные encaps/decaps в Kyber1024 — ИСПРАВЛЕНО (получатель декапсулирует)
+  - OpenSSL-фолбэк ECDH_P256 — ИСПРАВЛЕНО (поддержка OpenSSL 1.1.1 + 3.0+)
+  - Усечение соли HMAC — ИСПРАВЛЕНО (длинные соли хешируются)
+  - Рандомизация TLS-фингерпринта — ИСПРАВЛЕНО (minor_permute вместо secure_shuffle)
+  - Тайминг-оракул при проверке авторизации — ИСПРАВЛЕНО (memcmp постоянного времени)
+  - XOR как фолбэк HMAC — ИСПРАВЛЕНО (libsodium crypto_auth)
+
+- ⚠️ **Известные ограничения**:
+  - I2P — SAM-клиент реализован и покрыт юнит-тестами; живым интеграционным тестам нужен запущенный I2P-роутер с SAM-мостом (порт 7656). Без него I2P-тесты сами пропускаются.
+  - Шифрование базы SQLite (`SQLITE_HAS_CODEC`) требует SQLCipher; на стандартной SQLite база работает без шифрования и честно об этом сообщает.
+
+## Сборка
+
+### Linux
+
+```bash
+sudo apt install build-essential cmake ninja-build \
+    libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev \
+    libpcap-dev libnetfilter-queue-dev
+cmake -B build -G Ninja -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
+cmake --build build
+```
+
+> `libwebsockets-dev` **обязателен** (защищённое туннелирование). `libpcap-dev` и
+> `libnetfilter-queue-dev` опциональны, но включают L2-функции и NFQUEUE-бэкенд
+> обхода DPI соответственно.
+
+Бинарники: `build/bin/ncp` (CLI), `build/bin/ncp_tests` (набор тестов).
+
+### Windows
+
+#### Вариант A — кросс-компиляция из Linux (проверено)
+
+Тестировано на Ubuntu 20.04 с mingw-w64 (получается статически слинкованный
+`ncp.exe` с поддержкой ECH/HPKE):
+
+```bash
+sudo apt install mingw-w64
+# Используйте POSIX-вариант потоков (поддержка std::thread/std::mutex):
+sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-posix
+sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-posix
+```
+
+Соберите зависимости под mingw (проверенные версии):
+
+- **libsodium 1.0.20** — `./configure --host=x86_64-w64-mingw32 --prefix=/opt/win-deps`
+- **OpenSSL 3.5.1** — `./Configure mingw64 --prefix=/opt/win-deps --cross-compile-prefix=x86_64-w64-mingw32- no-shared no-tests no-apps`
+- **libwebsockets 4.3.3** — CMake с тулчейн-файлом ниже, `-DLWS_WITH_SHARED=OFF -DLWS_WITH_ZLIB=OFF`
+
+Затем сконфигурируйте и соберите:
+
+```bash
+cmake -B build-win -G Ninja \
+    -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-x86_64.cmake \
+    -DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=OFF -DENABLE_CLI=ON
+cmake --build build-win     # -> build-win/bin/ncp.exe
+```
+
+#### Вариант B — MSVC (нативно)
+
+Требования: Visual Studio 2019+, CMake и vcpkg:
+
+```powershell
+vcpkg install libsodium:x64-windows openssl:x64-windows libwebsockets:x64-windows
+cmake -B build -DENABLE_CLI=ON -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
+cmake --build build --config Release
+```
+
+#### Требование для запуска (оба варианта)
+
+Перехват пакетов на Windows использует **WinDivert**: скачайте
+[WinDivert 2.x](https://reqrypt.org/windivert.html) и положите `WinDivert.dll`
+и `WinDivert64.sys` рядом с `ncp.exe`, затем запускайте от имени администратора:
+
+```powershell
+ncp.exe run --preset tspu
+```
+
+> Устаревший WFP-бэкенд (Windows Filtering Platform) компилируется только при
+> наличии полного WFP SDK (проверка `HAVE_WFP_SDK` в CMake). В mingw-w64 < v10
+> файл `fwpmu.h` неполный, поэтому там WFP-код отключается автоматически
+> (`NCP_NO_WFP`) — реальным бэкендом перехвата в любом случае является WinDivert.
 
 ## Установка через npm
 
