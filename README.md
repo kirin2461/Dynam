@@ -1,11 +1,20 @@
 # Dynam (NCP C++) - Network Control Protocol
 
+**English** | [Русский](README.ru.md)
+
 > Multi-layered network anonymization and privacy platform with DPI bypass, traffic spoofing, paranoid mode, and advanced cryptography. Written in modern C++17.
 
 ## Current Status
 
-**Version**: 1.5.0-dev (Active Development)
+**Version**: 1.6.0
 **CMake Version**: 1.5.0 (synced)
+
+### What's new in 1.5.3 – 1.6.0
+
+- **v1.6.0 — selective packet-level desync (winws2-style).** The WinDivert driver mode now supports `--hostlist` / `--hostlist-exclude` / `--ipset`: desync is applied only to listed domains (SNI suffix match) or destination IPs (CIDR) — everything else flows untouched. Web GUI: new *Packet mode (WinDivert)* card in the Bypass section.
+- **v1.5.5 — system-proxy safety net.** Stopping the app/proxy (or any crash) now always restores the Windows system proxy; startup heals stale settings; a DoH preflight refuses system-wide proxy when it would kill the internet. Geneva GA stops with actionable advice when the target cannot be resolved at all (DNS fully blocked).
+- **v1.5.4 — DoH endpoint cascade.** Engine DoH tries 6 endpoints with bounded timeouts (1.5 s connect / 2 s read) instead of one hardcoded provider; the self-test checks 8 resolvers; log-noise fixes.
+- **v1.5.3 — in-app help system.** Plain-language guides for every feature («Справка» section, contextual «?» buttons), DNS DHCP auto-recovery, blockcheck timeout raised to 600 s.
 
 - ✅ **Build**: Linux (GCC 9+) and Windows (mingw-w64 cross-build verified — statically linked `ncp.exe`; MSVC also supported) via CMake + Ninja.
 - ✅ **Tests**: 604 tests — 596 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
@@ -226,6 +235,18 @@ ncp xdp <compile|attach|detach|stats|drop|probe>
 
 `--preset` selects a provider profile (e.g. `tspu`, `beeline`, ...). See `ncp dpi` output for the full list.
 
+### Packet-level bypass with selective desync (Windows, WinDivert)
+
+On Windows `ncp run` / `ncp dpi` use the **WinDivert driver mode**: fake packets (badsum/badseq/low-TTL), TCP splits, reverse-frag and disorder are applied on the wire — no system proxy, no DoH dependency, works even when the ISP blocks all DNS. Since v1.6.0 the desync can be **scoped to a hostlist/ipset** (like winws2):
+
+```bash
+ncp run --hostlist C:\ncp\hostlist.txt            # desync ONLY listed domains
+ncp run --hostlist-exclude C:\ncp\exclude.txt     # desync all EXCEPT listed
+ncp run --ipset C:\ncp\ipset.txt                  # limit by destination IP (CIDR)
+```
+
+Domain matching is suffix-based (`example.com` covers `www.example.com`). The ipset filter also applies to the QUIC/UDP desync path (QUIC has no visible SNI). An empty or missing file disables the feature (every intercepted ClientHello is desynced, as before). The same lists are configurable from the web GUI — *Bypass → Packet mode (WinDivert)* card, reusing the autohostlist edited in the *Hostlists* section.
+
 ## Web GUI
 
 ```bash
@@ -234,7 +255,7 @@ pip install -r requirements.txt
 python3 server.py    # http://127.0.0.1:8085
 ```
 
-Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core, **live per-module engine statistics** (the engine exports real counters via `ncp run --stats-file` every 2 s — DPI pipeline, Geneva GA, WF Defense, Volume Normalizer, Behavioral Cloak, Time Breaker, RTT Equalizer, Session Fragmenter, Cross-Layer, Covert Channel, Protocol Rotation, AS Router). The **Bypass** section adds: one-click desync proxy start/stop, automatic strategy selection (blockcheck) with per-strategy apply, availability checker for popular sites, auto-hostlist management, zapret strategy import with preview, DPI detector event feed, signed auto-update and autostart toggle. GUI-launched instances always run with `--no-kill-switch`.
+Features: license activation (Ed25519-signed keys, `NCP-XXXXX` format), DPI preset selection, per-module toggles, live log stream over WebSocket, start/stop of the `ncp` core, **live per-module engine statistics** (the engine exports real counters via `ncp run --stats-file` every 2 s — DPI pipeline, Geneva GA, WF Defense, Volume Normalizer, Behavioral Cloak, Time Breaker, RTT Equalizer, Session Fragmenter, Cross-Layer, Covert Channel, Protocol Rotation, AS Router). The **Bypass** section adds: one-click desync proxy start/stop, automatic strategy selection (blockcheck) with per-strategy apply, availability checker for popular sites, auto-hostlist management, zapret strategy import with preview, DPI detector event feed, packet-mode (WinDivert) hostlist/ipset controls, built-in plain-language help (Справка), signed auto-update and autostart toggle. GUI-launched instances always run with `--no-kill-switch`.
 
 ## Licensing (trial + keys)
 
@@ -553,5 +574,5 @@ quit) and can register itself in autostart (HKCU `Run` on Windows,
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: August 17, 2026
-**Version**: 1.5.0-dev (suite builds v1.9.4)
+**Last Updated**: August 27, 2026
+**Version**: 1.6.0
