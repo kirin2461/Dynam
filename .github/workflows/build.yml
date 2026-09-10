@@ -96,13 +96,23 @@ jobs:
 
       - name: Download Npcap SDK
         run: |
-          $maxRetries = 3; $retryDelay = 10
+          $maxRetries = 5; $retryDelay = 15
+          $url = 'https://npcap.com/dist/npcap-sdk-1.13.zip'
           for ($i = 1; $i -le $maxRetries; $i++) {
             try {
-              Invoke-WebRequest -Uri 'https://npcap.com/dist/npcap-sdk-1.13.zip' -OutFile npcap-sdk.zip -TimeoutSec 60
+              # npcap.com intermittently rejects requests from CI IPs
+              # without a browser-like User-Agent
+              Invoke-WebRequest -Uri $url -OutFile npcap-sdk.zip -TimeoutSec 90 -UserAgent 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
               break
             } catch {
-              Write-Host "Attempt $i failed: $_"
+              Write-Host "Attempt $i (Invoke-WebRequest) failed: $_"
+              try {
+                & curl.exe -fSL --retry 2 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' -o npcap-sdk.zip $url
+                if ($LASTEXITCODE -eq 0) { break }
+                Write-Host "Attempt $i (curl) exit code: $LASTEXITCODE"
+              } catch {
+                Write-Host "Attempt $i (curl) failed: $_"
+              }
               if ($i -eq $maxRetries) { throw "Failed to download Npcap SDK after $maxRetries attempts" }
               Start-Sleep -Seconds $retryDelay
             }
