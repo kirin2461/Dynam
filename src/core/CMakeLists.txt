@@ -460,24 +460,26 @@ if(ENABLE_LIBOQS AND liboqs_FOUND)
     target_compile_definitions(ncp_core PRIVATE HAVE_LIBOQS)
 endif()
 
-# ==================== Required: libwebsockets ====================
-# WebSocket tunneling is REQUIRED for secure tunneling functionality
-if(TARGET websockets_shared)
-    target_link_libraries(ncp_core PUBLIC websockets_shared)
-elseif(TARGET websockets)
-    target_link_libraries(ncp_core PUBLIC websockets)
-else()
-    find_library(WEBSOCKETS_LIB NAMES websockets)
-    if(WEBSOCKETS_LIB)
-        target_link_libraries(ncp_core PUBLIC ${WEBSOCKETS_LIB})
+# ==================== Optional: libwebsockets ====================
+# Linked only when ENABLE_WEBSOCKETS=ON (root CMakeLists enforces presence).
+if(ENABLE_WEBSOCKETS)
+    if(TARGET websockets_shared)
+        target_link_libraries(ncp_core PUBLIC websockets_shared)
+    elseif(TARGET websockets)
+        target_link_libraries(ncp_core PUBLIC websockets)
     else()
-        message(FATAL_ERROR "libwebsockets library not found!\n"
-                            "Please install libwebsockets:\n"
-                            "  vcpkg: vcpkg install libwebsockets:x64-windows\n"
-                            "  Conan: conan install libwebsockets/4.3.3@")
+        find_library(WEBSOCKETS_LIB NAMES websockets)
+        if(WEBSOCKETS_LIB)
+            target_link_libraries(ncp_core PUBLIC ${WEBSOCKETS_LIB})
+        else()
+            message(FATAL_ERROR "libwebsockets library not found!\n"
+                                "Please install libwebsockets:\n"
+                                "  vcpkg: vcpkg install libwebsockets:x64-windows\n"
+                                "  Conan: conan install libwebsockets/4.3.3@")
+        endif()
     endif()
+    target_compile_definitions(ncp_core PRIVATE HAVE_LIBWEBSOCKETS)
 endif()
-target_compile_definitions(ncp_core PRIVATE HAVE_LIBWEBSOCKETS)
 
 # Include directories
 target_include_directories(ncp_core

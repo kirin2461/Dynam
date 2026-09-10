@@ -1234,9 +1234,11 @@ bool License::check_debugger_flags() {
             }
         }
     }
-    // Try ptrace
-    if (ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) == -1) return true;
-    ptrace(PTRACE_DETACH, 0, nullptr, nullptr);
+    // TracerPid == 0 means no debugger. Do NOT fall back to
+    // ptrace(PTRACE_TRACEME) here: on success it makes our parent the
+    // tracer and there is no way to self-detach, so the next delivered
+    // signal (e.g. SIGCHLD from any fork+exec) ptrace-stops the process
+    // forever — this hung the test suite under ctest/Docker.
     return false;
 #endif
 }

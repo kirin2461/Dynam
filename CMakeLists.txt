@@ -30,7 +30,7 @@ option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(ENABLE_DOCS "Generate Doxygen documentation" OFF)
 
 # ==================== Optional Feature Options ====================
-# NOTE: ENABLE_WEBSOCKETS is now REQUIRED (removed option)
+option(ENABLE_WEBSOCKETS "Enable WebSocket tunneling via libwebsockets" ON)
 option(ENABLE_LIBOQS "Enable post-quantum cryptography via liboqs" OFF)
 option(ENABLE_TOR_PROXY "Enable Tor proxy support" OFF)
 option(ENABLE_FUZZING "Enable fuzzing tests (requires Clang with LibFuzzer)" OFF)
@@ -277,27 +277,36 @@ if(ENABLE_LIBOQS)
     endif()
 endif()
 
-# ==================== Required: libwebsockets ====================
-# WebSocket tunneling is REQUIRED for secure tunneling functionality
-# Uses vcpkg's libwebsockets-config.cmake (CONFIG mode required)
+# ==================== Optional: libwebsockets ====================
+# WebSocket tunneling (ENABLE_WEBSOCKETS=ON, default) requires libwebsockets.
+# Uses vcpkg's libwebsockets-config.cmake (CONFIG mode required).
+# When ENABLE_WEBSOCKETS=OFF the library is not needed and all
+# WebSocket code compiles out via HAVE_LIBWEBSOCKETS guards.
 
-find_package(libwebsockets CONFIG QUIET)
-# Linux distro packages ship LibwebsocketsConfig.cmake (capital L)
-if(NOT libwebsockets_FOUND)
-    find_package(Libwebsockets CONFIG QUIET)
-    if(Libwebsockets_FOUND)
-        set(libwebsockets_FOUND TRUE)
-        message(STATUS "libwebsockets found via distro config (LibwebsocketsConfig.cmake)")
+if(ENABLE_WEBSOCKETS)
+    find_package(libwebsockets CONFIG QUIET)
+    # Linux distro packages ship LibwebsocketsConfig.cmake (capital L)
+    if(NOT libwebsockets_FOUND)
+        find_package(Libwebsockets CONFIG QUIET)
+        if(Libwebsockets_FOUND)
+            set(libwebsockets_FOUND TRUE)
+            message(STATUS "libwebsockets found via distro config (LibwebsocketsConfig.cmake)")
+        endif()
     endif()
-endif()
 
-if(libwebsockets_FOUND)
-    add_definitions(-DHAVE_LIBWEBSOCKETS)
-    message(STATUS "libwebsockets found via vcpkg (REQUIRED)")
+    if(libwebsockets_FOUND)
+        add_definitions(-DHAVE_LIBWEBSOCKETS)
+        message(STATUS "libwebsockets found")
+    else()
+        message(FATAL_ERROR "libwebsockets not found but ENABLE_WEBSOCKETS=ON!\n"
+                            "Either install libwebsockets:\n"
+                            "  Debian/Ubuntu: apt install libwebsockets-dev\n"
+                            "  macOS:         brew install libwebsockets\n"
+                            "  vcpkg:         vcpkg install libwebsockets:x64-windows\n"
+                            "or configure with -DENABLE_WEBSOCKETS=OFF")
+    endif()
 else()
-    message(FATAL_ERROR "libwebsockets not found!\n"
-                        "Please install via vcpkg:\n"
-                        "  vcpkg install libwebsockets:x64-windows")
+    message(STATUS "WebSocket tunneling disabled (ENABLE_WEBSOCKETS=OFF)")
 endif()
 
 if(ENABLE_TOR_PROXY)
