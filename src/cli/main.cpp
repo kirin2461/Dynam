@@ -35,6 +35,10 @@
 #include "ncp_stegodns.hpp"
 #include "ncp_porthop.hpp"
 #include "ncp_fog.hpp"
+#include "ncp_header_protection.hpp"
+#include "ncp_cps.hpp"
+#include "ncp_scoped_trust.hpp"
+#include "ncp_timer_range.hpp"
 #include "ncp_xdp.hpp"
 #include "ncp_winsock_init.hpp"
 
@@ -976,6 +980,8 @@ void handle_reality(const std::vector<std::string>& args);
 void handle_stegodns(const std::vector<std::string>& args);
 void handle_porthop(const std::vector<std::string>& args);
 void handle_fog(const std::vector<std::string>& args);
+void handle_cps(const std::vector<std::string>& args);
+void handle_trust(const std::vector<std::string>& args);
 void handle_xdp(const std::vector<std::string>& args);
 
 // ============================================================================
@@ -986,7 +992,7 @@ int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 
-    ArgumentParser parser("ncp", "v1.6.0");
+    ArgumentParser parser("ncp", "v1.7.0");
 
     parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
@@ -1007,7 +1013,9 @@ int main(int argc, char* argv[]) {
     parser.add_command("reality", "XTLS-Reality-style fallback server (Enterprise)", handle_reality, {"serve", "--listen <port>", "--fallback <host:port>", "--internal <host:port>", "--key-file <f>", "[--dry-run]"});
     parser.add_command("stegodns", "Zero-Knowledge steganographic DNS records (Enterprise)", handle_stegodns, {"<encode|decode>", "[options]"});
     parser.add_command("porthop", "UDP port-hopping transport demo (Enterprise)", handle_porthop, {"<serve|client>", "[options]"});
-    parser.add_command("fog", "Cooperative fog mesh overlay node (Enterprise)", handle_fog, {"node", "--id <hex32>", "--port <n>", "[--peer ip:port]..."});
+    parser.add_command("fog", "Cooperative fog mesh overlay node (Enterprise)", handle_fog, {"node", "--id <hex32>", "--port <n>", "[--peer ip:port]...", "[--frame-secret s]", "[--ver-range min-max]"});
+    parser.add_command("cps", "CPS pre-handshake fake-packet chains (AWG I1-I5 analogue)", handle_cps, {"<send|test>", "--chain \"dns:x.ru;wait:50;quic\"", "[--host ip --port N --proto udp|tcp]"});
+    parser.add_command("trust", "Scoped trust for state roots (NUЦ containment)", handle_trust, {"<policy-test|init-ca|verify|update-roots>", "[options]"});
     parser.add_command("xdp", "eBPF/XDP kernel packet processing (Enterprise)", handle_xdp, {"<compile|attach|detach|stats|drop|probe>", "[args]"});
 
     parser.parse_and_execute(argc, argv);
@@ -4297,9 +4305,21 @@ void handle_stegodns(const std::vector<std::string>& args) {
 static void porthop_print_usage() {
     std::cout << "Usage:\n"
               << "  ncp porthop serve --base-port <n> --range <n> --secret <s>\n"
-              << "      [--hop-interval S] [--session-id <hex>]...\n"
+              << "      [--hop-interval S|Smin-Smax] [--session-id <hex>]...\n"
+              << "      [--hp-secret <s>] [--ver-range <min>-<max>]\n"
+              << "      [--content-padding <min>-<max>]\n"
               << "  ncp porthop client --host <ip> --base-port <n> --range <n> --secret <s>\n"
-              << "      --message <s> [--hop-interval S] [--session-id <hex>]\n"
+              << "      --message <s> [--hop-interval S|Smin-Smax] [--session-id <hex>]\n"
+              << "      [--hp-secret <s>] [--ver-range <min>-<max>]\n"
+              << "      [--content-padding <min>-<max>] [--cps \"dns:x.ru;wait:50;quic\"]\n"
+              << "\n"
+              << "  AWG 3.1-style hardening (all sides must use identical settings):\n"
+              << "    --hp-secret        session-derived header prefix replaces the\n"
+              << "                       static \"PH\" magic (HKDF from this secret + epoch)\n"
+              << "    --ver-range        version byte is randomised inside [min,max]\n"
+              << "    --content-padding  random pad appended to every datagram\n"
+              << "    --hop-interval     may be a range (sampled per epoch)\n"
+              << "    --cps              pre-handshake fake-packet chain (client only)\n"
               << "  Default demo session-id: 0x1122334455667788 (must be registered on\n"
               << "  the server; unknown sessions are dropped by PortHopServer).\n";
 }
@@ -4333,7 +4353,7 @@ void handle_porthop(const std::vector<std::string>& args) {
     const int base_port          = get_option_int(args, "--base-port", 0);
     const int range              = get_option_int(args, "--range", 0);
     const std::string secret     = get_option(args, "--secret", "");
-    const int interval           = get_option_int(args, "--hop-interval", 60);
+    const std::string interval_s = get_option(args, "--hop-interval", "60");
 
     if (base_port <= 0 || base_port > 65535 || range <= 0 || secret.empty()) {
         std::cerr << "[!] porthop requires --base-port <n>, --range <n> and --secret <s>\n";
@@ -4341,15 +4361,66 @@ void handle_porthop(const std::vector<std::string>& args) {
         return;
     }
 
+    // --hop-interval accepts a fixed value ("60") or a range ("30-120").
+    uint32_t hop_min = 60, hop_max = 0;
+    {
+        const size_t dash = interval_s.find('-');
+        try {
+            if (dash == std::string::npos) {
+                hop_min = static_cast<uint32_t>(std::stoul(interval_s));
+            } else {
+                hop_min = static_cast<uint32_t>(std::stoul(interval_s.substr(0, dash)));
+                hop_max = static_cast<uint32_t>(std::stoul(interval_s.substr(dash + 1)));
+            }
+        } catch (...) {
+            std::cerr << "[!] Bad --hop-interval: " << interval_s << "\n";
+            return;
+        }
+        if (hop_min == 0) hop_min = 1;
+    }
+    const int interval = static_cast<int>(hop_min);  // display default
+
     ncp::HopSchedule schedule(
         std::vector<uint8_t>(secret.begin(), secret.end()),
         static_cast<uint16_t>(base_port),
         static_cast<uint16_t>(range),
-        static_cast<uint32_t>(interval));
+        static_cast<uint32_t>(hop_min));
+    if (hop_max > hop_min)
+        schedule.set_interval_range(hop_min, hop_max);
+
+    // AWG 3.1-style options (must match on both sides).
+    const std::string hp_secret = get_option(args, "--hp-secret", "");
+    const std::string ver_range = get_option(args, "--ver-range", "");
+    const std::string pad_spec  = get_option(args, "--content-padding", "");
+
+    ncp::HeaderProtection hp;
+    if (!hp_secret.empty())
+        hp = ncp::HeaderProtection(
+            std::vector<uint8_t>(hp_secret.begin(), hp_secret.end()),
+            "ncp-ph");
+    if (!ver_range.empty()) {
+        const auto vr = ncp::HeaderProtection::parse_version_range(ver_range);
+        if (!vr) {
+            std::cerr << "[!] Bad --ver-range: " << ver_range << "\n";
+            return;
+        }
+        hp.set_version_range(vr->first, vr->second);
+    }
+    ncp::ContentPaddingConfig pad_cfg;
+    if (!pad_spec.empty()) {
+        const auto p = ncp::ContentPaddingConfig::parse(pad_spec);
+        if (!p || !p->enabled()) {
+            std::cerr << "[!] Bad --content-padding: " << pad_spec << "\n";
+            return;
+        }
+        pad_cfg = *p;
+    }
 
     // ── serve ───────────────────────────────────────────────────────────────
     if (action == "serve") {
         ncp::PortHopServer server(schedule);
+        server.set_header_protection(hp);
+        server.set_content_padding(pad_cfg);
 
         auto sid_opts = get_options_all(args, "--session-id");
         if (sid_opts.empty()) sid_opts.push_back("0x1122334455667788");
@@ -4370,8 +4441,11 @@ void handle_porthop(const std::vector<std::string>& args) {
         }
         std::cout << "=== NCP PortHop echo server ===\n"
                   << "  Ports:     UDP [" << base_port << ", " << (base_port + range) << ")"
-                  << " (hop every " << interval << "s)\n"
+                  << " (hop every " << interval << "s" << (hop_max > hop_min ? ("-" + std::to_string(hop_max) + "s") : "") << ")\n"
                   << "  Sessions:  " << sid_opts.size() << " whitelisted\n"
+                  << "  Header protection: " << (hp.enabled() ? "ON" : "off")
+                  << "  VerRange: " << (ver_range.empty() ? "off" : ver_range)
+                  << "  Padding: " << (pad_cfg.enabled() ? pad_spec : "off") << "\n"
                   << "[*] Running — Ctrl-C to stop\n";
 
         g_running = 1;
@@ -4424,6 +4498,27 @@ void handle_porthop(const std::vector<std::string>& args) {
             std::cerr << "[!] Failed to open UDP socket\n";
             return;
         }
+        client.session().set_header_protection(hp);
+        client.session().set_content_padding(pad_cfg);
+
+        // Optional CPS pre-handshake chain (AWG I1-I5 analogue).
+        const std::string cps_spec = get_option(args, "--cps", "");
+        if (!cps_spec.empty()) {
+            const auto chain = ncp::cps::CpsChain::parse(cps_spec);
+            if (!chain) {
+                std::cerr << "[!] Bad --cps chain: " << cps_spec << "\n";
+                return;
+            }
+            std::string cps_err;
+            if (!ncp::cps::execute_chain_udp(*chain, host,
+                                             client.current_target_port(),
+                                             &cps_err)) {
+                std::cerr << "[!] CPS chain failed: " << cps_err << "\n";
+                return;
+            }
+            std::cout << "[*] CPS chain sent (" << chain->steps.size()
+                      << " steps)\n";
+        }
 
         const std::vector<uint8_t> payload(message.begin(), message.end());
         bool echoed = false;
@@ -4474,7 +4569,12 @@ void handle_porthop(const std::vector<std::string>& args) {
 
 static void fog_print_usage() {
     std::cout << "Usage: ncp fog node --id <hex32> --port <n> [--peer ip:port]...\n"
+              << "                     [--frame-secret <s>] [--ver-range <min>-<max>]\n"
               << "  --id is the 16-byte node id as 32 hex chars.\n"
+              << "  --frame-secret enables AWG-style header protection: the static\n"
+              << "  \"FOG\" magic is replaced by an HKDF-derived per-seq prefix; all\n"
+              << "  mesh nodes must share the same secret. --ver-range randomises the\n"
+              << "  version byte inside [min,max].\n"
               << "  The node answers PINGs, relays DATA and gossips ROUTE_ADs to the\n"
               << "  configured --peer neighbours. Received DATA payloads are printed.\n";
 }
@@ -4526,6 +4626,27 @@ void handle_fog(const std::vector<std::string>& args) {
     }
 
     ncp::FogNode node(cfg);
+
+    // AWG 3.1-style frame protection (shared mesh secret).
+    const std::string frame_secret = get_option(args, "--frame-secret", "");
+    const std::string fog_ver      = get_option(args, "--ver-range", "");
+    if (!frame_secret.empty() || !fog_ver.empty()) {
+        ncp::HeaderProtection hp;
+        if (!frame_secret.empty())
+            hp = ncp::HeaderProtection(
+                std::vector<uint8_t>(frame_secret.begin(), frame_secret.end()),
+                "ncp-fog");
+        if (!fog_ver.empty()) {
+            const auto vr = ncp::HeaderProtection::parse_version_range(fog_ver);
+            if (!vr) {
+                std::cerr << "[!] Bad --ver-range: " << fog_ver << "\n";
+                return;
+            }
+            hp.set_version_range(vr->first, vr->second);
+        }
+        node.set_frame_protection(hp);
+    }
+
     if (node.start() != ncp::FogError::OK) {
         std::cerr << "[!] Failed to bind UDP port " << port << "\n";
         return;
@@ -4712,4 +4833,243 @@ void handle_xdp(const std::vector<std::string>& args) {
 
     std::cerr << "[!] Unknown xdp action: " << action << "\n";
     xdp_print_usage();
+}
+
+
+// ============================================================================
+// ncp cps — CPS pre-handshake fake-packet chains (AWG I1-I5 analogue)
+// ============================================================================
+
+static void cps_print_usage() {
+    std::cout << "Usage:\n"
+              << "  ncp cps test --chain \"<spec>\"\n"
+              << "      Parse the chain and print the built packet sizes (no network).\n"
+              << "  ncp cps send --host <ip> --port <n> --chain \"<spec>\" [--proto udp|tcp]\n"
+              << "      Execute the chain against host:port.\n"
+              << "\n"
+              << "Chain spec — steps separated by ';':\n"
+              << "  dns:<domain>   fake DNS A-query (random txid)\n"
+              << "  quic[:<sni>]   fake QUIC Initial (random conn ids, >=1200 bytes)\n"
+              << "  tls:<domain>   fake TLS ClientHello with SNI\n"
+              << "  hex:<hex>      literal bytes\n"
+              << "  wait:<ms|min-max>  pause (range is sampled per run)\n"
+              << "Example: \"dns:yandex.ru;wait:20-80;quic;tls:mail.ru\"\n";
+}
+
+void handle_cps(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        cps_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+    const std::string spec   = get_option(args, "--chain", "");
+    if (spec.empty()) {
+        std::cerr << "[!] cps requires --chain \"<spec>\"\n";
+        cps_print_usage();
+        return;
+    }
+    const auto chain = ncp::cps::CpsChain::parse(spec);
+    if (!chain) {
+        std::cerr << "[!] Bad chain spec: " << spec << "\n";
+        cps_print_usage();
+        return;
+    }
+
+    if (action == "test") {
+        std::cout << "[*] Chain: " << chain->to_string() << "\n";
+        for (const auto& st : chain->steps) {
+            if (st.kind == ncp::cps::StepKind::WAIT) {
+                std::cout << "  wait " << st.wait_min_ms;
+                if (st.wait_max_ms > st.wait_min_ms)
+                    std::cout << "-" << st.wait_max_ms;
+                std::cout << " ms\n";
+                continue;
+            }
+            const auto pkt = ncp::cps::build_packet(st);
+            std::cout << "  packet: " << pkt.size() << " bytes";
+            if (!pkt.empty()) {
+                std::cout << "  [";
+                for (size_t i = 0; i < pkt.size() && i < 12; ++i)
+                    std::printf("%02x", pkt[i]);
+                std::cout << (pkt.size() > 12 ? "…" : "") << "]";
+            }
+            std::cout << "\n";
+        }
+        return;
+    }
+
+    if (action == "send") {
+        const std::string host  = get_option(args, "--host", "");
+        const int port          = get_option_int(args, "--port", 0);
+        const std::string proto = get_option(args, "--proto", "udp");
+        if (host.empty() || port <= 0 || port > 65535) {
+            std::cerr << "[!] cps send requires --host <ip> and --port <n>\n";
+            return;
+        }
+        std::string err;
+        const bool ok = (proto == "tcp")
+            ? ncp::cps::execute_chain_tcp(*chain, host,
+                                          static_cast<uint16_t>(port), &err)
+            : ncp::cps::execute_chain_udp(*chain, host,
+                                          static_cast<uint16_t>(port), &err);
+        if (!ok) {
+            std::cerr << "[!] CPS chain failed: " << err << "\n";
+            return;
+        }
+        std::cout << "[+] CPS chain sent (" << chain->steps.size()
+                  << " steps, " << proto << ")\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown cps action: " << action << "\n";
+    cps_print_usage();
+}
+
+// ============================================================================
+// ncp trust — scoped trust for state roots (NUЦ containment)
+// ============================================================================
+
+static void trust_print_usage() {
+    std::cout << "Usage:\n"
+              << "  ncp trust policy-test --host <h> [--rules <file>]\n"
+              << "      Show which root set applies to <h> (custom state root vs public).\n"
+              << "  ncp trust init-ca --out <prefix>\n"
+              << "      Generate a per-installation local CA (prefix.key / prefix.crt).\n"
+              << "  ncp trust verify --host <h> --chain <pem> [--roots <pem>] [--rules f]\n"
+              << "      Verify a PEM chain with the scoped policy. Exits 0 on success.\n"
+              << "  ncp trust update-roots --file <pem> --sha256 <hex> --sig <b64>\n"
+              << "      --pubkey <b64> --dest <path>\n"
+              << "      Install a new custom root bundle only after SHA-256 + Ed25519\n"
+              << "      verification (same mechanism as NCP release updates).\n"
+              << "\n"
+              << "Rules file: one rule per line — \".ru\" (suffix) or \"bank.ru\"\n"
+              << "(domain + subdomains); '#' comments. Without --rules the default RU\n"
+              << "containment set is used (.ru/.su/.рф + known bank/gov domains).\n";
+}
+
+static ncp::ScopedTrustPolicy trust_load_policy(
+        const std::vector<std::string>& args) {
+    ncp::ScopedTrustPolicy policy;
+    const std::string rules = get_option(args, "--rules", "");
+    if (!rules.empty()) {
+        std::string err;
+        if (!policy.load_rules_file(rules, &err)) {
+            std::cerr << "[!] " << err << "\n";
+        }
+    } else {
+        policy.set_default_rules_ru();
+    }
+    return policy;
+}
+
+void handle_trust(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        trust_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+
+    if (action == "policy-test") {
+        const std::string host = get_option(args, "--host", "");
+        if (host.empty()) {
+            std::cerr << "[!] policy-test requires --host <h>\n";
+            return;
+        }
+        const auto policy = trust_load_policy(args);
+        std::cout << "host:  " << host << "\n"
+                  << "rules: " << policy.rule_count() << " loaded\n"
+                  << "root set: "
+                  << (policy.uses_custom_root(host)
+                          ? "CUSTOM (in-process state root)"
+                          : "PUBLIC (system roots)")
+                  << "\n";
+        return;
+    }
+
+    if (action == "init-ca") {
+        const std::string out = get_option(args, "--out", "ncp-local-ca");
+        std::string err;
+        if (!ncp::generate_local_ca(out + ".key", out + ".crt",
+                                    "NCP Local CA", &err)) {
+            std::cerr << "[!] init-ca failed: " << err << "\n";
+            return;
+        }
+        std::cout << "[+] Local CA generated:\n"
+                  << "  key:  " << out << ".key (mode 600 — keep private)\n"
+                  << "  cert: " << out << ".crt\n";
+        return;
+    }
+
+    if (action == "verify") {
+        const std::string host  = get_option(args, "--host", "");
+        const std::string chain = get_option(args, "--chain", "");
+        const std::string roots = get_option(args, "--roots", "");
+        if (host.empty() || chain.empty()) {
+            std::cerr << "[!] verify requires --host <h> and --chain <pem>\n";
+            return;
+        }
+        const auto policy = trust_load_policy(args);
+        ncp::ScopedTrustStore store;
+        if (!roots.empty()) {
+            std::string err;
+            if (!store.load_custom_roots_pem(roots, &err)) {
+                std::cerr << "[!] " << err << "\n";
+                return;
+            }
+        }
+        store.set_event_callback([](const ncp::ScopedTrustEvent& ev) {
+            std::cout << "[event] custom_root_validation host=" << ev.host
+                      << " custom_root=" << (ev.custom_root_used ? "yes" : "no")
+                      << " verified=" << (ev.verified ? "yes" : "no")
+                      << " (" << ev.details << ")\n";
+        });
+        std::ifstream f(chain);
+        if (!f.is_open()) {
+            std::cerr << "[!] cannot open " << chain << "\n";
+            return;
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        std::string err;
+        const bool ok = store.verify_peer_chain(host, ss.str(), policy, &err);
+        std::cout << (ok ? "[+] chain verified" : "[!] verification failed")
+                  << (ok ? "" : ": " + err) << "\n";
+        if (!ok) std::exit(1);
+        return;
+    }
+
+    if (action == "update-roots") {
+        const std::string file = get_option(args, "--file", "");
+        const std::string sha  = get_option(args, "--sha256", "");
+        const std::string sig  = get_option(args, "--sig", "");
+        const std::string pk   = get_option(args, "--pubkey", "");
+        const std::string dest = get_option(args, "--dest", "");
+        if (file.empty() || sha.empty() || sig.empty() || pk.empty() ||
+            dest.empty()) {
+            std::cerr << "[!] update-roots requires --file, --sha256, --sig,"
+                         " --pubkey and --dest\n";
+            return;
+        }
+        std::ifstream f(file, std::ios::binary);
+        if (!f.is_open()) {
+            std::cerr << "[!] cannot open " << file << "\n";
+            return;
+        }
+        std::stringstream ss;
+        ss << f.rdbuf();
+        const std::string raw = ss.str();
+        std::string err;
+        if (!ncp::verified_root_update(
+                std::vector<uint8_t>(raw.begin(), raw.end()),
+                sha, sig, pk, dest, &err)) {
+            std::cerr << "[!] update-roots refused: " << err << "\n";
+            std::exit(1);
+        }
+        std::cout << "[+] custom root bundle installed to " << dest
+                  << " (SHA-256 + Ed25519 verified)\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown trust action: " << action << "\n";
+    trust_print_usage();
 }

@@ -107,12 +107,42 @@ uint16_t HopSchedule::port_for_epoch(uint32_t epoch) const {
     return static_cast<uint16_t>(base_port_ + (v % port_range_));
 }
 
+void HopSchedule::set_interval_range(uint32_t min_sec, uint32_t max_sec) {
+    if (min_sec == 0) min_sec = 1;
+    if (max_sec < min_sec) max_sec = min_sec;
+    interval_sec_ = min_sec;
+    interval_max_sec_ = (max_sec > min_sec) ? max_sec : 0;
+}
+
+uint32_t HopSchedule::sample_interval_sec() const {
+    if (interval_max_sec_ <= interval_sec_)
+        return interval_sec_;
+    const uint32_t span = interval_max_sec_ - interval_sec_ + 1;
+    return interval_sec_ + randombytes_uniform(span);
+}
+
 // ==================== PortHopSession ====================
 
 PortHopSession::PortHopSession(uint64_t session_id, HopSchedule schedule)
     : session_id_(session_id),
       schedule_(std::move(schedule)),
+      cur_interval_sec_(schedule_.sample_interval_sec()),
       epoch_start_(std::chrono::steady_clock::now()) {}
+
+void PortHopSession::set_header_protection(const HeaderProtection& hp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hp_ = hp;
+}
+
+bool PortHopSession::header_protection_enabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return hp_.enabled();
+}
+
+void PortHopSession::set_content_padding(const ContentPaddingConfig& cfg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    padding_ = cfg;
+}
 
 std::vector<uint8_t> PortHopSession::encode(const uint8_t* payload,
                                             size_t payload_len,
@@ -120,16 +150,27 @@ std::vector<uint8_t> PortHopSession::encode(const uint8_t* payload,
     std::lock_guard<std::mutex> lock(mutex_);
 
     std::vector<uint8_t> out(HEADER_SIZE + payload_len);
-    out[0] = kMagic0;
-    out[1] = kMagic1;
-    out[2] = kVersion;
+    if (hp_.enabled()) {
+        // AWG-style: session-derived prefix instead of a static magic.
+        hp_.prefix(epoch_, out.data(), 2);
+        out[2] = hp_.random_version();
+    } else {
+        out[0] = kMagic0;
+        out[1] = kMagic1;
+        out[2] = kVersion;
+    }
     store_u64_be(out.data() + 3, session_id_);
     store_u32_be(out.data() + 11, epoch_);
     uint32_t seq = next_seq_++;
     store_u32_be(out.data() + 15, seq);
-    out[19] = flags;
     if (payload_len > 0 && payload)
         std::memcpy(out.data() + HEADER_SIZE, payload, payload_len);
+
+    if (padding_.enabled()) {
+        flags |= PH_FLAG_CONTENT_PADDING;
+        content_pad_append(out, padding_, kMaxDatagram);
+    }
+    out[19] = flags;
 
     if (flags & PH_FLAG_ACK_REQUEST)
         unacked_.push_back(seq);
@@ -137,11 +178,9 @@ std::vector<uint8_t> PortHopSession::encode(const uint8_t* payload,
     return out;
 }
 
-std::optional<PortHopFrame> PortHopSession::decode_raw(const uint8_t* data,
-                                                       size_t len) {
+std::optional<PortHopFrame> PortHopSession::parse_fields(const uint8_t* data,
+                                                         size_t len) {
     if (!data || len < HEADER_SIZE)
-        return std::nullopt;
-    if (data[0] != kMagic0 || data[1] != kMagic1 || data[2] != kVersion)
         return std::nullopt;
 
     PortHopFrame f;
@@ -149,17 +188,42 @@ std::optional<PortHopFrame> PortHopSession::decode_raw(const uint8_t* data,
     f.epoch = load_u32_be(data + 11);
     f.seq = load_u32_be(data + 15);
     f.flags = data[19];
-    f.payload.assign(data + HEADER_SIZE, data + len);
+    size_t payload_len = len - HEADER_SIZE;
+    if (f.flags & PH_FLAG_CONTENT_PADDING) {
+        const auto stripped =
+            content_pad_strip(data + HEADER_SIZE, payload_len);
+        if (!stripped)
+            return std::nullopt;
+        payload_len = *stripped;
+    }
+    f.payload.assign(data + HEADER_SIZE, data + HEADER_SIZE + payload_len);
     return f;
 }
 
 std::optional<PortHopFrame> PortHopSession::decode(const uint8_t* data,
                                                    size_t len) {
-    auto raw = decode_raw(data, len);
-    if (!raw)
-        return std::nullopt;
-
     std::lock_guard<std::mutex> lock(mutex_);
+
+    std::optional<PortHopFrame> raw;
+    if (hp_.enabled()) {
+        raw = parse_fields(data, len);
+        if (!raw)
+            return std::nullopt;
+        // Constant-time prefix check bound to the frame's epoch; the
+        // version byte must fall inside the accepted range.
+        if (!hp_.matches(raw->epoch, data, 2) ||
+            !hp_.version_accepted(data[2]))
+            return std::nullopt;
+    } else {
+        raw = decode_raw(data, len);
+        if (!raw)
+            return std::nullopt;
+        if (raw->flags & PH_FLAG_CONTENT_PADDING) {
+            // Legacy peers never set this bit; treat as malformed.
+            return std::nullopt;
+        }
+    }
+
     if (raw->session_id != session_id_)
         return std::nullopt;
 
@@ -179,11 +243,28 @@ std::optional<PortHopFrame> PortHopSession::decode(const uint8_t* data,
         if (next_epoch > epoch_) {
             epoch_ = next_epoch;
             epoch_start_ = std::chrono::steady_clock::now();
+            cur_interval_sec_ = schedule_.sample_interval_sec();
             unacked_.clear();
         }
     }
 
     return raw;
+}
+
+std::optional<PortHopFrame> PortHopSession::decode_raw(const uint8_t* data,
+                                                       size_t len) {
+    if (!data || len < HEADER_SIZE)
+        return std::nullopt;
+    if (data[0] != kMagic0 || data[1] != kMagic1 || data[2] != kVersion)
+        return std::nullopt;
+
+    PortHopFrame f;
+    f.session_id = load_u64_be(data + 3);
+    f.epoch = load_u32_be(data + 11);
+    f.seq = load_u32_be(data + 15);
+    f.flags = data[19];
+    f.payload.assign(data + HEADER_SIZE, data + len);
+    return f;
 }
 
 bool PortHopSession::should_hop(
@@ -193,13 +274,14 @@ bool PortHopSession::should_hop(
         return true;
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
         now - epoch_start_);
-    return elapsed.count() > static_cast<int64_t>(schedule_.interval_sec());
+    return elapsed.count() > static_cast<int64_t>(cur_interval_sec_);
 }
 
 void PortHopSession::hop() {
     std::lock_guard<std::mutex> lock(mutex_);
     ++epoch_;
     epoch_start_ = std::chrono::steady_clock::now();
+    cur_interval_sec_ = schedule_.sample_interval_sec();
     unacked_.clear();
 }
 
@@ -355,7 +437,30 @@ bool PortHopServer::is_bound() const {
 
 void PortHopServer::register_session(uint64_t session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    sessions_.try_emplace(session_id, session_id, schedule_);
+    auto r = sessions_.try_emplace(session_id, session_id, schedule_);
+    if (r.second) {
+        r.first->second.session.set_header_protection(hp_);
+        r.first->second.session.set_content_padding(padding_);
+    }
+}
+
+void PortHopServer::set_header_protection(const HeaderProtection& hp) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    hp_ = hp;
+    for (auto& kv : sessions_)
+        kv.second.session.set_header_protection(hp_);
+}
+
+bool PortHopServer::header_protection_enabled() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return hp_.enabled();
+}
+
+void PortHopServer::set_content_padding(const ContentPaddingConfig& cfg) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    padding_ = cfg;
+    for (auto& kv : sessions_)
+        kv.second.session.set_content_padding(cfg);
 }
 
 void PortHopServer::remove_session(uint64_t session_id) {
@@ -423,14 +528,18 @@ std::vector<PortHopReceived> PortHopServer::poll(int timeout_ms) {
             if (n <= 0)
                 break;
 
-            auto raw = PortHopSession::decode_raw(buf, static_cast<size_t>(n));
+            std::lock_guard<std::mutex> lock(mutex_);
+            // With header protection there is no static magic to match:
+            // parse the fields optimistically and let the per-session
+            // decode() verify the HKDF prefix in constant time.
+            auto raw = hp_.enabled()
+                           ? PortHopSession::parse_fields(buf, static_cast<size_t>(n))
+                           : PortHopSession::decode_raw(buf, static_cast<size_t>(n));
             if (!raw) {
-                std::lock_guard<std::mutex> lock(mutex_);
                 ++malformed_;
                 continue;
             }
 
-            std::lock_guard<std::mutex> lock(mutex_);
             auto it = sessions_.find(raw->session_id);
             if (it == sessions_.end()) {
                 ++rejected_unknown_;

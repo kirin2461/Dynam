@@ -40,3 +40,9 @@ Thumbs.db
 .DS_Store
 build-win/
 build-win-nonpcap/
+
+# deploy/ — per-installation secrets (NEVER commit)
+deploy/.env
+deploy/secrets/
+deploy/client-configs/
+deploy/awg/awg0.conf

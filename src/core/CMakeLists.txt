@@ -64,6 +64,9 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_desync_confuse.cpp        # M3: TCP state confusion builders (desync engine)
     src/ncp_aemm.cpp                  # M9: Reed-Solomon erasure coding core (K of N)
     src/ncp_fog.cpp              # M7: cooperative fog mesh overlay relay
+    src/ncp_header_protection.cpp  # AWG 3.1: header protection + content padding
+    src/ncp_cps.cpp                # AWG 3.1: CPS pre-handshake chains
+    src/ncp_scoped_trust.cpp       # Scoped trust (NUЦ containment) core
     src/ncp_semfluid.cpp         # M8: semantic HTTP fluid transport
     src/ncp_xdp.cpp              # Enterprise: eBPF/XDP kernel packet processing
     # L3/L2 Stealth modules (Anti-ISP fingerprinting)

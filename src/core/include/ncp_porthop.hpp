@@ -16,10 +16,23 @@
  *   magic(2) = "PH" | ver(1) = 1 | session_id(8) | epoch(4, BE) |
  *   seq(4, BE) | flags(1) | payload...
  *
+ * AWG 3.1-style hardening (optional, per-session):
+ *   - Header protection (1.1): magic bytes are replaced by
+ *     HKDF-SHA256(secret, "ncp-ph" || epoch_BE)[0..2), verified in
+ *     constant time. The epoch field sits at a fixed offset, so the
+ *     receiver re-derives the expected prefix after parsing.
+ *   - Version-range randomisation (1.2): the ver byte is drawn at random
+ *     from a per-installation range; the receiver accepts the whole range.
+ *   - Content padding (1.3): PH_FLAG_CONTENT_PADDING appends random
+ *     bytes + 1 length byte after the payload.
+ *   - Hop-interval ranges (1.4): the hop interval may be a [min,max]
+ *     range sampled per epoch.
+ *
  * flags bits:
  *   bit0 (0x01) ACK_REQUEST — receiver should echo seq in an ACK frame
  *   bit1 (0x02) ACK         — seq field echoes the acknowledged seq
  *   bit2 (0x04) HOP_NOTIFY  — payload = next epoch u32 BE
+ *   bit3 (0x08) CONTENT_PADDING — payload followed by pad bytes + len byte
  *
  * Server binds every port in [base, base+range) via SO_REUSEPORT sockets
  * (range is capped at 64 for tests) and demultiplexes by session_id.
@@ -43,6 +56,7 @@
 #include <vector>
 
 #include "ncp_winsock_init.hpp"
+#include "ncp_header_protection.hpp"
 
 namespace ncp {
 
@@ -53,6 +67,7 @@ enum PortHopFlags : uint8_t {
     PH_FLAG_ACK_REQUEST = 0x01,  // bit0: receiver must ACK this seq
     PH_FLAG_ACK         = 0x02,  // bit1: seq echoes the acknowledged seq
     PH_FLAG_HOP_NOTIFY  = 0x04,  // bit2: payload = next epoch (u32 BE)
+    PH_FLAG_CONTENT_PADDING = 0x08,  // bit3: payload || pad || padlen(1)
 };
 
 // ===== Decoded frame =====
@@ -81,11 +96,18 @@ public:
     uint16_t port_range() const noexcept { return port_range_; }
     uint32_t interval_sec() const noexcept { return interval_sec_; }
 
+    /// Timer-as-range (1.4): hop interval becomes [min_s, max_s], sampled
+    /// per epoch by the session. set_interval_range(m, 0) restores fixed.
+    void set_interval_range(uint32_t min_sec, uint32_t max_sec);
+    /// Random interval from the configured range (CSPRNG).
+    uint32_t sample_interval_sec() const;
+
 private:
     std::vector<uint8_t> secret_;
     uint16_t base_port_;
     uint16_t port_range_;
     uint32_t interval_sec_;
+    uint32_t interval_max_sec_ = 0;  // 0 = fixed interval_sec_ (legacy)
 };
 
 // ===== Shared session logic (used by both client and server side) =====
@@ -110,6 +132,18 @@ public:
     /// Session-independent frame parser: validates magic/version only.
     static std::optional<PortHopFrame> decode_raw(const uint8_t* data, size_t len);
 
+    /// Session-independent field parser WITHOUT magic/version checks.
+    /// Used when header protection is enabled: the prefix can only be
+    /// verified after the epoch field has been read.
+    static std::optional<PortHopFrame> parse_fields(const uint8_t* data, size_t len);
+
+    /// Enable AWG-style header protection (1.1) and version range (1.2).
+    void set_header_protection(const HeaderProtection& hp);
+    bool header_protection_enabled() const;
+
+    /// Content padding config (1.3); disabled by default.
+    void set_content_padding(const ContentPaddingConfig& cfg);
+
     /// Hop decision: more than 3 unacked packets or epoch expired.
     bool should_hop(std::chrono::steady_clock::time_point now) const;
 
@@ -128,9 +162,12 @@ public:
 private:
     uint64_t session_id_;
     HopSchedule schedule_;
+    HeaderProtection hp_;            // disabled => legacy "PH" framing
+    ContentPaddingConfig padding_;   // disabled by default
     uint32_t epoch_ = 0;
     uint32_t next_seq_ = 0;
     uint32_t last_ack_seq_ = 0;
+    uint32_t cur_interval_sec_ = 0;  // sampled per epoch (timer range)
     std::vector<uint32_t> unacked_;  // seqs sent with ACK_REQUEST, awaiting ACK
     std::chrono::steady_clock::time_point epoch_start_;
     mutable std::mutex mutex_;
@@ -169,6 +206,16 @@ public:
     void remove_session(uint64_t session_id);
     bool has_session(uint64_t session_id) const;
 
+    /// Enable AWG-style header protection for all (current and future)
+    /// sessions. When enabled, the fixed "PH" magic is replaced by
+    /// HKDF-derived per-epoch prefixes and poll() uses the
+    /// parse-then-verify path.
+    void set_header_protection(const HeaderProtection& hp);
+    bool header_protection_enabled() const;
+
+    /// Content padding applied to frames sent via send_to_session().
+    void set_content_padding(const ContentPaddingConfig& cfg);
+
     /// Non-blocking-ish receive pump: waits up to timeout_ms, drains all
     /// pending datagrams, returns frames from registered sessions.
     std::vector<PortHopReceived> poll(int timeout_ms = 0);
@@ -202,6 +249,8 @@ private:
     };
 
     HopSchedule schedule_;
+    HeaderProtection hp_;            // applied to sessions + poll path
+    ContentPaddingConfig padding_;   // applied to sessions
     std::vector<socket_t> sockets_;      // one socket per bound port
     std::vector<uint16_t> bound_ports_;  // parallel to sockets_
     std::unordered_map<uint64_t, SessionState> sessions_;

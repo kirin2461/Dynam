@@ -1,0 +1,114 @@
+name: dynam-ncp
+
+# Server-side deployment: AmneziaWG 3.1 transport + NCP protection modules.
+# All parameters come from .env (generated uniquely per installation by
+# install.sh). Do NOT commit real .env / client-configs.
+
+services:
+  amnezia-awg:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.amneziawg
+    image: dynam-amneziawg:local
+    container_name: dynam-awg
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ./awg:/etc/amnezia/amneziawg:ro
+    environment:
+      AWG_ADDRESS: ${AWG_ADDRESS}
+      AWG_MTU: ${AWG_MTU}
+      AWG_PORT: ${AWG_PORT}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "awg", "show", "awg0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ncp-spa:
+    image: dynam-ncp:local
+    container_name: dynam-ncp-spa
+    network_mode: host
+    cap_add:
+      - NET_ADMIN        # ipset gate
+    volumes:
+      - ./secrets/spa_authorized_keys:/run/ncp/spa_authorized_keys:ro
+    command:
+      - spa
+      - serve
+      - --authorized-keys
+      - /run/ncp/spa_authorized_keys
+      - --allow-port
+      - "${AWG_PORT}"
+      - --port
+      - "${SPA_PORT}"
+      - --proto
+      - udp
+      - --default-ttl
+      - "${SPA_TTL}"
+      - --set-name
+      - ncp_spa_allow
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ncp", "version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  ncp-reality:
+    image: dynam-ncp:local
+    container_name: dynam-ncp-reality
+    network_mode: host
+    volumes:
+      - ./secrets/reality_keys:/run/ncp/reality_keys:ro
+    command:
+      - reality
+      - serve
+      - --listen
+      - "${REALITY_PORT}"
+      - --fallback
+      - "${REALITY_FALLBACK}"
+      - --internal
+      - "${REALITY_INTERNAL}"
+      - --key-file
+      - /run/ncp/reality_keys
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ncp", "version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+
+  ncp-porthop:
+    image: dynam-ncp:local
+    container_name: dynam-ncp-porthop
+    network_mode: host
+    command:
+      - porthop
+      - serve
+      - --base-port
+      - "${PORTHOP_BASE_PORT}"
+      - --range
+      - "${PORTHOP_RANGE}"
+      - --secret
+      - "${PORTHOP_SECRET}"
+      - --hp-secret
+      - "${PORTHOP_HP_SECRET}"
+      - --ver-range
+      - "${PORTHOP_VER_RANGE}"
+      - --content-padding
+      - "${PORTHOP_PADDING}"
+      - --hop-interval
+      - "${PORTHOP_HOP_INTERVAL}"
+      - --session-id
+      - "${PORTHOP_SESSION_ID}"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ncp", "version"]
+      interval: 60s
+      timeout: 10s
+      retries: 3

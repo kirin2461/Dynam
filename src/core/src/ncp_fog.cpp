@@ -117,6 +117,46 @@ std::optional<FogFrame> FogFrame::parse(const uint8_t* data, size_t len) {
     return f;
 }
 
+std::vector<uint8_t> FogFrame::pack(const HeaderProtection& hp) const {
+    if (!hp.enabled()) return pack();
+    std::vector<uint8_t> out;
+    out.reserve(kHeaderSize + payload.size());
+    uint8_t tag[3];
+    hp.prefix(seq, tag, sizeof(tag));
+    out.insert(out.end(), tag, tag + 3);
+    out.push_back(hp.random_version());
+    out.push_back(ttl);
+    out.push_back(static_cast<uint8_t>(type));
+    out.insert(out.end(), target_id.bytes.begin(), target_id.bytes.end());
+    out.insert(out.end(), origin_id.bytes.begin(), origin_id.bytes.end());
+    for (int i = 7; i >= 0; --i) {
+        out.push_back(static_cast<uint8_t>((seq >> (i * 8)) & 0xFF));
+    }
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+std::optional<FogFrame> FogFrame::parse(const uint8_t* data, size_t len,
+                                        const HeaderProtection& hp) {
+    if (!hp.enabled()) return parse(data, len);
+    if (!data || len < kHeaderSize) return std::nullopt;
+    if (!hp.version_accepted(data[3])) return std::nullopt;
+    FogFrame f;
+    f.ttl  = data[4];
+    uint8_t mt = data[5];
+    if (mt < 1 || mt > 4) return std::nullopt;
+    f.type = static_cast<FogMsgType>(mt);
+    std::copy(data + 6,  data + 22, f.target_id.bytes.begin());
+    std::copy(data + 22, data + 38, f.origin_id.bytes.begin());
+    uint64_t s = 0;
+    for (int i = 0; i < 8; ++i) s = (s << 8) | data[38 + i];
+    f.seq = s;
+    // Constant-time prefix verification bound to the frame's seq.
+    if (!hp.matches(f.seq, data, 3)) return std::nullopt;
+    f.payload.assign(data + kHeaderSize, data + len);
+    return f;
+}
+
 // ===== Peer table =====
 
 void FogPeerTable::register_peer(const FogPeerInfo& info, uint64_t now) {
@@ -346,7 +386,7 @@ FogError FogNode::send_frame_to(const FogFrame& f,
                                 uint32_t ip,
                                 uint16_t port) {
     if (sock_ == kInvalidSocket) return FogError::NOT_BOUND;
-    std::vector<uint8_t> buf = f.pack();
+    std::vector<uint8_t> buf = hp_.enabled() ? f.pack(hp_) : f.pack();
     sockaddr_in dst{};
     dst.sin_family = AF_INET;
     dst.sin_addr.s_addr = htonl(ip);
@@ -539,7 +579,9 @@ int FogNode::poll(int timeout_ms, uint64_t now) {
                                reinterpret_cast<sockaddr*>(&src), &slen);
 #endif
         if (n <= 0) break;
-        auto frame = FogFrame::parse(buf, static_cast<size_t>(n));
+        auto frame = hp_.enabled()
+                         ? FogFrame::parse(buf, static_cast<size_t>(n), hp_)
+                         : FogFrame::parse(buf, static_cast<size_t>(n));
         if (!frame) continue;
         handle_frame(*frame, ntohl(src.sin_addr.s_addr), ntohs(src.sin_port), now);
         ++handled;
@@ -558,6 +600,16 @@ bool FogNode::inbox_pop(std::vector<uint8_t>& out) {
 size_t FogNode::inbox_size() const {
     std::lock_guard<std::mutex> lk(mtx_);
     return inbox_.size();
+}
+
+void FogNode::set_frame_protection(const HeaderProtection& hp) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    hp_ = hp;
+}
+
+bool FogNode::frame_protection_enabled() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return hp_.enabled();
 }
 
 } // namespace ncp

@@ -31,6 +31,9 @@
 #include <vector>
 
 namespace ncp {
+
+class HeaderProtection;  // ncp_header_protection.hpp
+
 namespace aemm {
 
 /// Wire shard header size: 2 + 1 + 1 + 1 + 4 + 4 + 8.
@@ -122,6 +125,19 @@ std::vector<uint8_t> pack_shard(uint8_t k, uint8_t n, uint8_t shard_idx,
 /// Parse and checksum-verify a wire shard. nullopt on any mismatch/truncation.
 std::optional<UnpackedShard> unpack_shard(const uint8_t* buf, size_t len);
 std::optional<UnpackedShard> unpack_shard(const std::vector<uint8_t>& buf);
+
+/// AWG 3.1-style header protection variants: the static "RS" magic is
+/// replaced by HKDF-SHA256(secret, "ncp-aemm" || block_id_BE)[0..2),
+/// verified in constant time on receipt.
+std::vector<uint8_t> pack_shard_hp(uint8_t k, uint8_t n, uint8_t shard_idx,
+                                   uint32_t block_id,
+                                   const uint8_t* payload, size_t payload_len,
+                                   uint32_t orig_len,
+                                   const HeaderProtection& hp);
+std::optional<UnpackedShard> unpack_shard_hp(const uint8_t* buf, size_t len,
+                                             const HeaderProtection& hp);
+std::optional<UnpackedShard> unpack_shard_hp(const std::vector<uint8_t>& buf,
+                                             const HeaderProtection& hp);
 
 } // namespace aemm
 } // namespace ncp

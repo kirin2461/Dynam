@@ -1,4 +1,5 @@
 #include "ncp_aemm.hpp"
+#include "ncp_header_protection.hpp"
 
 #include <cstring>
 
@@ -377,6 +378,61 @@ std::optional<UnpackedShard> unpack_shard(const uint8_t* buf, size_t len) {
 
 std::optional<UnpackedShard> unpack_shard(const std::vector<uint8_t>& buf) {
     return unpack_shard(buf.data(), buf.size());
+}
+
+// ---------------------------------------------------------------------------
+// AWG 3.1-style header protection variants (see ncp_header_protection.hpp)
+// ---------------------------------------------------------------------------
+
+std::vector<uint8_t> pack_shard_hp(uint8_t k, uint8_t n, uint8_t shard_idx,
+                                   uint32_t block_id,
+                                   const uint8_t* payload, size_t payload_len,
+                                   uint32_t orig_len,
+                                   const HeaderProtection& hp) {
+    if (!hp.enabled())
+        return pack_shard(k, n, shard_idx, block_id, payload, payload_len,
+                          orig_len);
+    std::vector<uint8_t> out = pack_shard(k, n, shard_idx, block_id,
+                                          payload, payload_len, orig_len);
+    hp.prefix(block_id, out.data(), 2);  // session-derived tag replaces "RS"
+    return out;
+}
+
+std::optional<UnpackedShard> unpack_shard_hp(const uint8_t* buf, size_t len,
+                                             const HeaderProtection& hp) {
+    if (!hp.enabled())
+        return unpack_shard(buf, len);
+    if (!buf || len < kShardHeaderSize) return std::nullopt;
+
+    // Parse fields first (no static magic to match), then verify the
+    // prefix against the block_id in constant time.
+    UnpackedShard s;
+    s.k = buf[2];
+    s.n = buf[3];
+    s.shard_idx = buf[4];
+    s.block_id = read32be(&buf[5]);
+    s.orig_len = read32be(&buf[9]);
+    if (s.k < 1 || s.n < s.k) return std::nullopt;
+
+    if (!hp.matches(s.block_id, buf, 2)) return std::nullopt;
+
+    const uint8_t* payload = &buf[kShardHeaderSize];
+    const size_t payload_len = len - kShardHeaderSize;
+
+    ensure_sodium();
+    uint8_t check[8];
+    crypto_generichash(check, sizeof(check),
+                       payload_len ? payload : nullptr, payload_len,
+                       nullptr, 0);
+    if (sodium_memcmp(check, &buf[13], 8) != 0) return std::nullopt;
+
+    s.payload.assign(payload, payload + payload_len);
+    return s;
+}
+
+std::optional<UnpackedShard> unpack_shard_hp(const std::vector<uint8_t>& buf,
+                                             const HeaderProtection& hp) {
+    return unpack_shard_hp(buf.data(), buf.size(), hp);
 }
 
 } // namespace aemm

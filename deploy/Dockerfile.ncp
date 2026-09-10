@@ -1,0 +1,31 @@
+# NCP (Dynam) server image — builds the ncp CLI from the repo source.
+# Used by deploy/docker-compose.yml for the server-side modules
+# (reality / spa / porthop / fog).
+FROM ubuntu:22.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake ninja-build build-essential pkg-config git ca-certificates \
+        libssl-dev libsodium-dev libsqlite3-dev libwebsockets-dev \
+        libpcap-dev libnetfilter-queue-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DENABLE_GUI=OFF -DENABLE_TESTS=OFF \
+    && cmake --build build -j"$(nproc)" --target ncp-cli \
+    || cmake --build build -j"$(nproc)"
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libssl3 libsodium23 libsqlite3-0 libwebsockets16 libpcap0.8 \
+        libnetfilter-queue1 iproute2 iptables ipset ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build/bin/ncp /usr/local/bin/ncp
+
+ENTRYPOINT ["ncp"]
+CMD ["--help"]

@@ -6,8 +6,40 @@
 
 ## Current Status
 
-**Version**: 1.6.0
-**CMake Version**: 1.5.0 (synced)
+**Version**: 1.7.0
+**CMake Version**: 1.7.0 (synced)
+
+### What's new in 1.7.0 — AWG 3.1 hardening + NUЦ scoped trust + auto-installer
+
+- **v1.7.0 — AWG 3.1-style header protection.** The static frame magics
+  (`PH` port-hopping, `FOG` fog mesh, `RS` AEMM shards) are replaced by
+  per-session HKDF-SHA256 prefixes (keyed by shared secret + epoch/seq/
+  block_id), verified in constant time — no more ready-made DPI
+  signatures. New module `ncp_header_protection` (+ `ncp_timer_range`).
+- **Version-range randomisation (AWG H1–H4 analogue).** Frame version/type
+  bytes are drawn at random from a per-installation range
+  (`--ver-range <min>-<max>` on `ncp porthop` / `ncp fog`); receivers accept
+  the whole range, so no universal DPI rule exists.
+- **Content padding (AWG ContentPaddingAddition analogue).**
+  `--content-padding <min>-<max>` appends CSPRNG padding to every porthop
+  datagram, breaking 16-byte-multiple statistical patterns.
+- **Timers as ranges.** `--hop-interval 30-120` is sampled per epoch
+  (anti-ML against fixed-constant classifiers); reusable `TimerRange`
+  primitive for all protocol timers.
+- **CPS chains (AWG I1–I5 analogue).** New `ncp cps` command and
+  `--cps "dns:x.ru;wait:20-80;quic;tls:y.ru"` porthop client option:
+  fake DNS/QUIC/TLS pre-handshake sequences against active probing.
+- **Scoped trust for state roots (NUЦ containment).** New module
+  `ncp_scoped_trust` + `ncp trust` CLI: the state root is held in-process
+  and applied ONLY to whitelisted RU domains (`.ru/.su/.рф` + bank/gov
+  list); everything else uses the public root set. `custom_root_validation`
+  events for the GUI feed; local per-install CA generation; root-bundle
+  auto-update gated on SHA-256 + Ed25519 signature.
+- **One-command server installer (`deploy/`).** `sudo ./install.sh` brings
+  up Docker Compose with AmneziaWG 3.1 (unique parameters per install) +
+  `ncp reality` + `ncp spa` + `ncp porthop`, generates all keys, configures
+  the firewall and prints the client bundle (AWG config + QR, SPA knock
+  command, porthop/reality parameters). `uninstall.sh` removes everything.
 
 ### What's new in 1.5.3 – 1.6.0
 
@@ -17,7 +49,7 @@
 - **v1.5.3 — in-app help system.** Plain-language guides for every feature («Справка» section, contextual «?» buttons), DNS DHCP auto-recovery, blockcheck timeout raised to 600 s.
 
 - ✅ **Build**: Linux (GCC 9+) and Windows (mingw-w64 cross-build verified — statically linked `ncp.exe`; MSVC also supported) via CMake + Ninja.
-- ✅ **Tests**: 604 tests — 596 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
+- ✅ **Tests**: 786 tests — 778 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
 - ✅ **MASTER_ORCHESTRATOR 100% COMPLETE**: Full 7-stage pipeline with anti-ML, steganography, and behavioral cloaking implemented.
 - ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop, live per-module engine stats).
 - ✅ **Licensing**: automatic 7-day trial on first launch (all 19 modules), Ed25519-signed keys issued by the standalone `ncp-keygen` tool.
@@ -145,7 +177,7 @@ build from source instead. Details and environment variables: [`npm/README.md`](
 
 ```bash
 cd build
-./bin/ncp_tests            # full suite: 604 tests
+./bin/ncp_tests            # full suite: 786 tests
 ```
 
 The suite is host-safe: paranoid-mode tests never touch the firewall, and no test requires root network changes. I2P tests skip automatically when no SAM bridge is reachable. The DPI Lab adds 22 reassembler unit tests (`scripts/lab/test_reassembler.py`).
@@ -574,5 +606,5 @@ quit) and can register itself in autostart (HKCU `Run` on Windows,
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: August 27, 2026
-**Version**: 1.6.0
+**Last Updated**: September 11, 2026
+**Version**: 1.7.0

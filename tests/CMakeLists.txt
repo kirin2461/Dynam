@@ -57,6 +57,8 @@ add_executable(ncp_tests
     test_thread_safety.cpp   # Thread safety verification tests
     test_bypass_features.cpp # Hostlist/proxy/blockcheck/zapret-import/detector
     test_spa.cpp            # Enterprise SPA (Ed25519 + ipset) tests
+    test_awg31_hardening.cpp  # AWG 3.1: header protection, padding, timers, CPS
+    test_scoped_trust.cpp     # Scoped trust (NUЦ containment) tests
 )
 
 target_link_libraries(ncp_tests

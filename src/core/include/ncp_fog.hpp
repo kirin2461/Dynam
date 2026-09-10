@@ -32,6 +32,8 @@
 #include <mutex>
 #include <optional>
 
+#include "ncp_header_protection.hpp"
+
 #include "ncp_winsock_init.hpp"
 
 namespace ncp {
@@ -105,6 +107,14 @@ struct FogFrame {
 
     std::vector<uint8_t> pack() const;
     static std::optional<FogFrame> parse(const uint8_t* data, size_t len);
+
+    /// AWG 3.1-style header protection: the static "FOG" magic is replaced
+    /// by HKDF-SHA256(secret, "ncp-fog" || seq_BE)[0..3) and the version
+    /// byte is drawn from the configured range. parse() with an enabled
+    /// `hp` verifies the prefix in constant time after reading seq.
+    std::vector<uint8_t> pack(const HeaderProtection& hp) const;
+    static std::optional<FogFrame> parse(const uint8_t* data, size_t len,
+                                         const HeaderProtection& hp);
 };
 
 // ===== Peer table =====
@@ -192,6 +202,11 @@ public:
     uint64_t dropped_dup() const { return dropped_dup_; }
     uint64_t relayed()     const { return relayed_; }
 
+    /// Enable AWG-style frame header protection (shared mesh secret).
+    /// All nodes of the mesh must be configured with the same secret.
+    void set_frame_protection(const HeaderProtection& hp);
+    bool frame_protection_enabled() const;
+
 private:
     void handle_frame(const FogFrame& f, uint32_t src_ip, uint16_t src_port,
                       uint64_t now);
@@ -219,6 +234,8 @@ private:
     uint64_t dropped_ttl_ = 0;
     uint64_t dropped_dup_ = 0;
     uint64_t relayed_     = 0;
+
+    HeaderProtection hp_;  // disabled => legacy "FOG" framing
 };
 
 } // namespace ncp

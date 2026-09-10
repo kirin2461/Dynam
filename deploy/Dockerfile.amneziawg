@@ -1,0 +1,29 @@
+# AmneziaWG server image — userspace amneziawg-go + awg-tools,
+# built from source (no third-party registry images).
+FROM golang:1.22-bookworm AS build-go
+RUN git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git /awg-go \
+    && cd /awg-go && make
+
+FROM debian:bookworm-slim AS build-tools
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git make gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools.git /awg-tools \
+    && cd /awg-tools/src && make
+
+FROM debian:bookworm-slim
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        iproute2 iptables \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build-go /awg-go/amneziawg-go /usr/local/bin/amneziawg-go
+COPY --from=build-tools /awg-tools/src/wg /usr/local/bin/awg
+COPY --from=build-tools /awg-tools/src/wg-quick/linux.bash /usr/local/bin/awg-quick
+RUN chmod +x /usr/local/bin/amneziawg-go /usr/local/bin/awg /usr/local/bin/awg-quick
+
+COPY deploy/awg/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
