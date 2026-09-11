@@ -13,6 +13,8 @@
 #include "ncp_blockcheck.hpp"
 
 #include <fstream>
+
+#include "ncp_test_temp.hpp"
 #include <cstring>
 
 using namespace ncp;
@@ -46,7 +48,7 @@ TEST(HostlistMatcher, WildcardPattern) {
 }
 
 TEST(HostlistMatcher, LoadSaveRoundtrip) {
-    const std::string path = "/tmp/ncp_test_hostlist.txt";
+    const std::string path = ncp_test::temp_path("ncp_test_hostlist.txt");
     {
         std::ofstream f(path);
         f << "# comment\nyoutube.com\n\n*.discord.gg\n  x.com  \ninvalid host!\n";
@@ -58,7 +60,7 @@ TEST(HostlistMatcher, LoadSaveRoundtrip) {
     EXPECT_TRUE(m.contains("cdn.discord.gg"));
     EXPECT_TRUE(m.contains("x.com"));
 
-    const std::string out = "/tmp/ncp_test_hostlist_out.txt";
+    const std::string out = ncp_test::temp_path("ncp_test_hostlist_out.txt");
     EXPECT_TRUE(m.save(out));
     HostlistMatcher m2;
     EXPECT_EQ(m2.load(out), 3);
@@ -74,7 +76,7 @@ TEST(HostlistMatcher, NoBareTldMatch) {
 }
 
 TEST(AutoHostlist, RecordAndPersist) {
-    const std::string path = "/tmp/ncp_test_autohl.txt";
+    const std::string path = ncp_test::temp_path("ncp_test_autohl.txt");
     std::remove(path.c_str());
     AutoHostlist a(path);
     EXPECT_TRUE(a.record_blocked("YouTube.COM"));

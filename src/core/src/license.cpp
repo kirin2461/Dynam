@@ -18,6 +18,7 @@
 #include <set>
 #include <map>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -171,6 +172,8 @@ struct License::Impl {
     // Periodic validation thread
     std::atomic<bool> periodic_active{false};
     std::thread periodic_thread;
+    std::mutex periodic_mutex;              // pairs with periodic_cv
+    std::condition_variable periodic_cv;    // lets stop() interrupt the wait
 
     // License cache (encrypted blob)
     mutable std::mutex cache_mutex;
@@ -188,7 +191,11 @@ struct License::Impl {
     }
     ~Impl() {
         if (periodic_active.load()) {
-            periodic_active.store(false);
+            {
+                std::lock_guard<std::mutex> lk(periodic_mutex);
+                periodic_active.store(false);
+            }
+            periodic_cv.notify_all();
             if (periodic_thread.joinable()) periodic_thread.join();
         }
     }
@@ -1700,16 +1707,30 @@ void License::start_periodic_validation(int interval_minutes) {
     validation_interval_ = std::chrono::minutes(interval_minutes);
     impl_->periodic_active.store(true);
     impl_->periodic_thread = std::thread([this]() {
+        std::unique_lock<std::mutex> lk(impl_->periodic_mutex);
         while (impl_->periodic_active.load()) {
-            std::this_thread::sleep_for(validation_interval_);
-            if (!impl_->periodic_active.load()) break;
+            // Interruptible wait: stop() notifies periodic_cv, so shutdown
+            // is immediate instead of blocking join() for a full interval
+            // (a plain sleep_for made stop take up to `interval_minutes`,
+            // which timed out the tsan CI job at ctest --timeout 120).
+            if (impl_->periodic_cv.wait_for(lk, validation_interval_,
+                    [this] { return !impl_->periodic_active.load(); }))
+                break;  // stop requested
+            lk.unlock();  // don't hold periodic_mutex during validation work
             schedule_next_validation();
+            lk.lock();
         }
     });
 }
 
 void License::stop_periodic_validation() {
-    impl_->periodic_active.store(false);
+    {
+        // Hold the mutex around the flag store so the worker's wait_for
+        // predicate can't miss the notification.
+        std::lock_guard<std::mutex> lk(impl_->periodic_mutex);
+        impl_->periodic_active.store(false);
+    }
+    impl_->periodic_cv.notify_all();
     if (impl_->periodic_thread.joinable())
         impl_->periodic_thread.join();
 }

@@ -500,16 +500,24 @@ std::vector<std::string> PortKnock::get_open_gates() const {
 }
 
 void PortKnock::cleanup_expired_gates() {
-    std::lock_guard lock(gate_mutex_);
     auto now = std::chrono::steady_clock::now();
-    for (auto it = gates_.begin(); it != gates_.end();) {
-        if (now > it->second.expires_at) {
-            it = gates_.erase(it);
-        } else {
-            ++it;
+
+    // Keep the gate sweep in its own scope: process_knock() locks
+    // progress_mutex_ and then takes gate_mutex_ via open_gate(), so the
+    // canonical order is progress -> gate. Holding gate_mutex_ while
+    // locking progress_mutex_ below would invert that order (TSan:
+    // lock-order-inversion) and could deadlock against a live knock.
+    {
+        std::lock_guard lock(gate_mutex_);
+        for (auto it = gates_.begin(); it != gates_.end();) {
+            if (now > it->second.expires_at) {
+                it = gates_.erase(it);
+            } else {
+                ++it;
+            }
         }
+        stats_.active_gates.store(gates_.size());
     }
-    stats_.active_gates.store(gates_.size());
 
     uint32_t knock_timeout;
     uint32_t attempt_window;

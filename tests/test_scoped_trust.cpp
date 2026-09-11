@@ -23,6 +23,8 @@
 
 #include <sodium.h>
 
+#include "ncp_test_temp.hpp"
+
 using namespace ncp;
 
 // ==================== Policy ====================
@@ -46,7 +48,7 @@ TEST(ScopedTrustPolicy, DefaultRulesRu) {
 }
 
 TEST(ScopedTrustPolicy, CustomRulesFile) {
-    const std::string path = "/tmp/ncp_test_rules.txt";
+    const std::string path = ncp_test::temp_path("ncp_test_rules.txt");
     {
         std::ofstream f(path);
         f << "# comment\n"
@@ -73,8 +75,8 @@ TEST(ScopedTrustPolicy, CustomRulesFile) {
 namespace {
 
 struct PemFiles {
-    std::string key = "/tmp/ncp_test_ca.key";
-    std::string crt = "/tmp/ncp_test_ca.crt";
+    std::string key = ncp_test::temp_path("ncp_test_ca.key");
+    std::string crt = ncp_test::temp_path("ncp_test_ca.crt");
     ~PemFiles() {
         std::remove(key.c_str());
         std::remove(crt.c_str());
@@ -235,7 +237,7 @@ TEST(VerifiedRootUpdate, AcceptsValidSignature) {
         std::snprintf(sha_hex + i * 2, 3, "%02x", digest[i]);
     sha_hex[64] = 0;
 
-    const std::string dest = "/tmp/ncp_test_roots.pem";
+    const std::string dest = ncp_test::temp_path("ncp_test_roots.pem");
     std::string err;
     ASSERT_TRUE(verified_root_update(data, sha_hex, sig_b64, pk_b64, dest,
                                      &err)) << err;
@@ -257,7 +259,7 @@ TEST(VerifiedRootUpdate, RejectsBadHashOrSignature) {
     sodium_bin2base64(pk_b64, sizeof(pk_b64), pk, sizeof(pk),
                       sodium_base64_VARIANT_ORIGINAL);
 
-    const std::string dest = "/tmp/ncp_test_roots2.pem";
+    const std::string dest = ncp_test::temp_path("ncp_test_roots2.pem");
     std::string err;
 
     // Wrong hash.

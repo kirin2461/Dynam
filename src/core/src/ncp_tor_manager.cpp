@@ -300,10 +300,6 @@ void TorManager::stop() {
         CloseHandle(impl_->proc);
         impl_->proc = nullptr;
     }
-    if (impl_->read_pipe) {
-        CloseHandle(impl_->read_pipe);
-        impl_->read_pipe = nullptr;
-    }
 #else
     if (impl_->pid > 0) {
         ::kill(impl_->pid, SIGTERM);
@@ -314,12 +310,24 @@ void TorManager::stop() {
         ::waitpid(impl_->pid, &status, 0);
         impl_->pid = -1;
     }
+#endif
+    // Join the reader thread BEFORE closing the pipe/fd it is blocked on:
+    // killing the child closes the pipe's write end, so the reader's
+    // read()/ReadFile() returns EOF and the thread exits on its own.
+    // Closing the fd first races with an in-flight read (TSan: data race
+    // in close) and could let the fd number be reused underneath it.
+    if (impl_->reader.joinable()) impl_->reader.join();
+#ifdef _WIN32
+    if (impl_->read_pipe) {
+        CloseHandle(impl_->read_pipe);
+        impl_->read_pipe = nullptr;
+    }
+#else
     if (impl_->read_fd >= 0) {
         ::close(impl_->read_fd);
         impl_->read_fd = -1;
     }
 #endif
-    if (impl_->reader.joinable()) impl_->reader.join();
     impl_->bootstrap.store(0);
 }
 

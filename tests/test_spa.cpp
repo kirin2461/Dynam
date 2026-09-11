@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -27,13 +28,34 @@ public:
         uint32_t ttl;
     };
 
-    std::vector<Call> calls;
-
+    // grant() is invoked from the SpaDaemon network thread while the test
+    // thread reads the record — all access goes through these locked
+    // methods (TSan flagged the unlocked vector as a data race).
     bool grant(const std::string& src_ip, uint8_t proto,
                uint16_t port, uint32_t ttl_sec) override {
-        calls.push_back({src_ip, proto, port, ttl_sec});
+        std::lock_guard<std::mutex> lk(mtx_);
+        calls_.push_back({src_ip, proto, port, ttl_sec});
         return true;
     }
+
+    size_t call_count() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return calls_.size();
+    }
+
+    bool calls_empty() const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return calls_.empty();
+    }
+
+    Call call_at(size_t i) const {
+        std::lock_guard<std::mutex> lk(mtx_);
+        return calls_.at(i);
+    }
+
+private:
+    mutable std::mutex mtx_;
+    std::vector<Call> calls_;
 };
 
 // ============================================================================
@@ -77,11 +99,11 @@ TEST_F(SpaTest, KeygenBuildVerifyRoundtrip) {
 
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::GRANTED);
 
-    ASSERT_EQ(mock->calls.size(), 1u);
-    EXPECT_EQ(mock->calls[0].ip, "192.0.2.10");
-    EXPECT_EQ(mock->calls[0].proto, 6u);
-    EXPECT_EQ(mock->calls[0].port, 22u);
-    EXPECT_EQ(mock->calls[0].ttl, 600u);
+    ASSERT_EQ(mock->call_count(), 1u);
+    EXPECT_EQ(mock->call_at(0).ip, "192.0.2.10");
+    EXPECT_EQ(mock->call_at(0).proto, 6u);
+    EXPECT_EQ(mock->call_at(0).port, 22u);
+    EXPECT_EQ(mock->call_at(0).ttl, 600u);
 }
 
 // key_id must equal BLAKE2b-64(pubkey) first 8 bytes
@@ -110,7 +132,7 @@ TEST_F(SpaTest, FlippedByteGivesBadSignature) {
     pkt[37] ^= 0x01;  // flip one payload byte inside the signed region (port LSB)
 
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::BAD_SIGNATURE);
-    EXPECT_TRUE(mock->calls.empty());
+    EXPECT_TRUE(mock->calls_empty());
 }
 
 // ============================================================================
@@ -125,7 +147,7 @@ TEST_F(SpaTest, UnknownKeyRejected) {
 
     auto pkt = stranger.build_packet(6, 22, 0);
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::UNKNOWN_KEY);
-    EXPECT_TRUE(mock->calls.empty());
+    EXPECT_TRUE(mock->calls_empty());
 }
 
 // ============================================================================
@@ -142,7 +164,7 @@ TEST_F(SpaTest, StaleTimestampRejected) {
             std::chrono::system_clock::now().time_since_epoch()).count());
     auto pkt = client.build_packet_ts(6, 22, 0, now_s - 120);
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::STALE_TIMESTAMP);
-    EXPECT_TRUE(mock->calls.empty());
+    EXPECT_TRUE(mock->calls_empty());
 }
 
 // Timestamp exactly at the edge of the window is still accepted
@@ -170,7 +192,7 @@ TEST_F(SpaTest, ReplayRejected) {
     auto pkt = client.build_packet(6, 22, 0);
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::GRANTED);
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::REPLAY);
-    EXPECT_EQ(mock->calls.size(), 1u);
+    EXPECT_EQ(mock->call_count(), 1u);
 }
 
 // ============================================================================
@@ -191,12 +213,12 @@ TEST_F(SpaTest, TwoClientsBothGranted) {
     EXPECT_EQ(server->process_packet(pa, "192.0.2.1"), SpaResult::GRANTED);
     EXPECT_EQ(server->process_packet(pb, "192.0.2.2"), SpaResult::GRANTED);
 
-    ASSERT_EQ(mock->calls.size(), 2u);
-    EXPECT_EQ(mock->calls[0].ip, "192.0.2.1");
-    EXPECT_EQ(mock->calls[0].proto, 6u);
-    EXPECT_EQ(mock->calls[1].ip, "192.0.2.2");
-    EXPECT_EQ(mock->calls[1].proto, 17u);
-    EXPECT_EQ(mock->calls[1].port, 51820u);
+    ASSERT_EQ(mock->call_count(), 2u);
+    EXPECT_EQ(mock->call_at(0).ip, "192.0.2.1");
+    EXPECT_EQ(mock->call_at(0).proto, 6u);
+    EXPECT_EQ(mock->call_at(1).ip, "192.0.2.2");
+    EXPECT_EQ(mock->call_at(1).proto, 17u);
+    EXPECT_EQ(mock->call_at(1).port, 51820u);
 }
 
 // ============================================================================
@@ -216,8 +238,8 @@ TEST_F(SpaTest, TtlClampedToMax) {
 
     auto pkt = client.build_packet(6, 22, 99999999);
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::GRANTED);
-    ASSERT_EQ(mock->calls.size(), 1u);
-    EXPECT_EQ(mock->calls[0].ttl, 86400u);
+    ASSERT_EQ(mock->call_count(), 1u);
+    EXPECT_EQ(mock->call_at(0).ttl, 86400u);
 }
 
 TEST_F(SpaTest, TtlZeroUsesServerDefault) {
@@ -233,8 +255,8 @@ TEST_F(SpaTest, TtlZeroUsesServerDefault) {
 
     auto pkt = client.build_packet(6, 22, 0);
     EXPECT_EQ(server->process_packet(pkt, "192.0.2.10"), SpaResult::GRANTED);
-    ASSERT_EQ(mock->calls.size(), 1u);
-    EXPECT_EQ(mock->calls[0].ttl, 300u);
+    ASSERT_EQ(mock->call_count(), 1u);
+    EXPECT_EQ(mock->call_at(0).ttl, 300u);
 }
 
 // ============================================================================
@@ -387,13 +409,13 @@ TEST_F(SpaTest, DaemonEndToEndLoopback) {
     EXPECT_TRUE(client.knock("127.0.0.1", 54917, 6, 22, 42));
 
     // give the receive loop a moment
-    for (int i = 0; i < 50 && mock->calls.empty(); ++i) {
+    for (int i = 0; i < 50 && mock->calls_empty(); ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     d2.stop();
 
-    ASSERT_EQ(mock->calls.size(), 1u);
-    EXPECT_EQ(mock->calls[0].ip, "127.0.0.1");
-    EXPECT_EQ(mock->calls[0].port, 22u);
-    EXPECT_EQ(mock->calls[0].ttl, 42u);
+    ASSERT_EQ(mock->call_count(), 1u);
+    EXPECT_EQ(mock->call_at(0).ip, "127.0.0.1");
+    EXPECT_EQ(mock->call_at(0).port, 22u);
+    EXPECT_EQ(mock->call_at(0).ttl, 42u);
 }
