@@ -94,13 +94,21 @@ std::string read_file(const std::string& path) {
 std::string make_leaf_pem(const std::string& ca_key_path,
                           const std::string& ca_crt_path,
                           const std::string& dns_name) {
-    // Load CA key + cert.
-    FILE* kf = std::fopen(ca_key_path.c_str(), "rb");
-    EVP_PKEY* ca_key = PEM_read_PrivateKey(kf, nullptr, nullptr, nullptr);
-    std::fclose(kf);
-    FILE* cf = std::fopen(ca_crt_path.c_str(), "rb");
-    X509* ca_crt = PEM_read_X509(cf, nullptr, nullptr, nullptr);
-    std::fclose(cf);
+    // Load CA key + cert. Never hand an app-side FILE* to OpenSSL on
+    // Windows (OPENSSL_Applink abort) — read into memory BIOs instead.
+    const std::string key_pem = read_file(ca_key_path);
+    const std::string crt_pem = read_file(ca_crt_path);
+    BIO* kbio = BIO_new_mem_buf(key_pem.data(),
+                                static_cast<int>(key_pem.size()));
+    EVP_PKEY* ca_key =
+        kbio ? PEM_read_bio_PrivateKey(kbio, nullptr, nullptr, nullptr)
+             : nullptr;
+    if (kbio) BIO_free(kbio);
+    BIO* cbio = BIO_new_mem_buf(crt_pem.data(),
+                                static_cast<int>(crt_pem.size()));
+    X509* ca_crt =
+        cbio ? PEM_read_bio_X509(cbio, nullptr, nullptr, nullptr) : nullptr;
+    if (cbio) BIO_free(cbio);
     if (!ca_key || !ca_crt) return {};
 
     // Leaf key.
