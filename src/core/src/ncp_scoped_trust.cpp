@@ -322,8 +322,8 @@ bool generate_local_ca(const std::string& key_out_path,
     EVP_PKEY* pkey = nullptr;
     EVP_PKEY_CTX* kctx = nullptr;
     X509* cert = nullptr;
-    FILE* kf = nullptr;
-    FILE* cf = nullptr;
+    BIO* key_bio = nullptr;
+    BIO* cert_bio = nullptr;
 
     kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_EC, nullptr);
     if (!kctx || EVP_PKEY_keygen_init(kctx) <= 0 ||
@@ -389,27 +389,52 @@ bool generate_local_ca(const std::string& key_out_path,
         goto done;
     }
 
-    kf = std::fopen(key_out_path.c_str(), "wb");
-    if (!kf || PEM_write_PrivateKey(kf, pkey, nullptr, nullptr, 0,
-                                    nullptr, nullptr) != 1) {
-        if (err) *err = "cannot write key to " + key_out_path;
+    // NOTE: never pass an application-side FILE* to OpenSSL PEM_write_* —
+    // on Windows that crosses a CRT boundary and aborts with
+    // "no OPENSSL_Applink" unless the host app links applink.c.
+    // Memory BIOs + std::ofstream keep all CRT I/O in this module.
+    key_bio = BIO_new(BIO_s_mem());
+    if (!key_bio ||
+        PEM_write_bio_PrivateKey(key_bio, pkey, nullptr, nullptr, 0,
+                                 nullptr, nullptr) != 1) {
+        if (key_bio) BIO_free(key_bio);
+        if (err) *err = "cannot serialize private key";
         goto done;
     }
-    std::fclose(kf);
-    kf = nullptr;
+    {
+        BUF_MEM* km = nullptr;
+        BIO_get_mem_ptr(key_bio, &km);
+        std::ofstream out(key_out_path, std::ios::binary | std::ios::trunc);
+        if (!out || !out.write(km->data, static_cast<std::streamsize>(km->length))) {
+            BIO_free(key_bio);
+            if (err) *err = "cannot write key to " + key_out_path;
+            goto done;
+        }
+    }
+    BIO_free(key_bio);
 #ifndef _WIN32
     chmod(key_out_path.c_str(), 0600);
 #endif
-    cf = std::fopen(cert_out_path.c_str(), "wb");
-    if (!cf || PEM_write_X509(cf, cert) != 1) {
-        if (err) *err = "cannot write cert to " + cert_out_path;
+    cert_bio = BIO_new(BIO_s_mem());
+    if (!cert_bio || PEM_write_bio_X509(cert_bio, cert) != 1) {
+        if (cert_bio) BIO_free(cert_bio);
+        if (err) *err = "cannot serialize certificate";
         goto done;
     }
+    {
+        BUF_MEM* cm = nullptr;
+        BIO_get_mem_ptr(cert_bio, &cm);
+        std::ofstream out(cert_out_path, std::ios::binary | std::ios::trunc);
+        if (!out || !out.write(cm->data, static_cast<std::streamsize>(cm->length))) {
+            BIO_free(cert_bio);
+            if (err) *err = "cannot write cert to " + cert_out_path;
+            goto done;
+        }
+    }
+    BIO_free(cert_bio);
     ok = true;
 
 done:
-    if (kf) std::fclose(kf);
-    if (cf) std::fclose(cf);
     if (cert) X509_free(cert);
     if (pkey) EVP_PKEY_free(pkey);
     if (kctx) EVP_PKEY_CTX_free(kctx);
