@@ -117,7 +117,8 @@ jobs:
               Start-Sleep -Seconds $retryDelay
             }
           }
-          Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk
+          # -Force: the repo vendors npcap-sdk/, so the destination exists
+          Expand-Archive npcap-sdk.zip -DestinationPath npcap-sdk -Force
 
       - name: Setup MSVC
         uses: ilammy/msvc-dev-cmd@v1
