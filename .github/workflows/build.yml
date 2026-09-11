@@ -92,7 +92,7 @@ jobs:
             git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
             C:\vcpkg\bootstrap-vcpkg.bat
           )
-          C:\vcpkg\vcpkg install libsodium:x64-windows sqlite3:x64-windows
+          C:\vcpkg\vcpkg install libsodium:x64-windows sqlite3:x64-windows openssl:x64-windows
 
       - name: Download Npcap SDK
         run: |
