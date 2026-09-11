@@ -281,7 +281,10 @@ endif()
 find_package(SQLite3 QUIET)
 if(SQLite3_FOUND)
     target_link_libraries(ncp_core PUBLIC SQLite::SQLite3)
-    target_compile_definitions(ncp_core PRIVATE HAVE_SQLITE)
+    # PUBLIC: ncp_db.hpp guards a Database member on HAVE_SQLITE — consumers
+    # must see the same class layout (PRIVATE caused an ODR violation:
+    # stack smash + 0xc0000409 fastfail on Windows tests)
+    target_compile_definitions(ncp_core PUBLIC HAVE_SQLITE)
 endif()
 
 find_package(unofficial-sodium CONFIG QUIET)
