@@ -140,7 +140,17 @@ jobs:
       - name: Run tests
         run: |
           cd build
-          ctest -C Release --output-on-failure --timeout 120
+          set +e
+          ctest -C Release --output-on-failure --timeout 120 2>&1 | tee test_output.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            # Surface failures as workflow annotations (visible without logs access)
+            grep -E "FAILED|Timeout|timeout|Exit code|not run|Subprocess" test_output.log \
+              | head -60 \
+              | sed -e "s/%/%25/g" -e "s/\\r/%0D/g" \
+              | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit $rc
         shell: bash
 
       - name: Archive build artifacts

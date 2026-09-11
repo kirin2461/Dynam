@@ -154,4 +154,15 @@ jobs:
 
       - name: Run tests
         working-directory: build
-        run: ctest -C Release --output-on-failure
+        shell: bash
+        run: |
+          set +e
+          ctest -C Release --output-on-failure 2>&1 | tee test_output.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            grep -E "FAILED|Timeout|timeout|Exit code|not run|Subprocess" test_output.log \
+              | head -60 \
+              | sed -e "s/%/%25/g" -e "s/\\r/%0D/g" \
+              | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit $rc
