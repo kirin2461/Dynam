@@ -178,7 +178,11 @@ TEST(CombinedStealthTest, L3AndL2Pipeline) {
     packet[9] = 6;  // TCP
 
     ASSERT_TRUE(l3.process_ipv4_packet(packet));
-    EXPECT_EQ(packet[8], 64); // TTL normalized (depends on OS profile)
+    // TTL is normalized to the detected OS profile's default:
+    // 64 on Linux/macOS, 128 for the Windows profile.
+    const auto profile = L3Stealth::detect_os_profile();
+    EXPECT_EQ(packet[8],
+              static_cast<uint8_t>(L3Stealth::default_ttl_for_profile(profile)));
 
     // Stats
     auto l3stats = l3.get_stats();
@@ -205,6 +209,13 @@ TEST(PacketInterceptorBasicTest, BackendDetection) {
     // Should return NFQUEUE on Linux with HAVE_NFQUEUE, NONE otherwise
 #if defined(__linux__) && defined(HAVE_NFQUEUE)
     EXPECT_EQ(backend, PacketInterceptor::Backend::NFQUEUE);
+#elif defined(_WIN32)
+    // WFP ships with Windows and is always detectable; WinDivert only when
+    // the driver is installed; NONE on stripped-down systems. All valid.
+    EXPECT_TRUE(backend == PacketInterceptor::Backend::WFP ||
+                backend == PacketInterceptor::Backend::WINDIVERT ||
+                backend == PacketInterceptor::Backend::NONE)
+        << "unexpected backend: " << static_cast<int>(backend);
 #else
     EXPECT_EQ(backend, PacketInterceptor::Backend::NONE);
 #endif

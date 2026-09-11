@@ -91,10 +91,13 @@ bool Database::open(const std::string& db_path, const std::string& password) {
     db_path_ = db_path;
     return true;
 #else
+    // No SQLite compiled in — fail honestly instead of pretending to be
+    // connected: callers (and the test fixture's skip logic) key off this.
     (void)password;
     db_path_ = db_path;
-    is_connected_ = true;
-    return true;
+    last_error_ = "SQLite support not compiled in (HAVE_SQLITE undefined)";
+    is_connected_ = false;
+    return false;
 #endif
 }
 

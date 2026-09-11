@@ -92,7 +92,7 @@ jobs:
             git clone https://github.com/microsoft/vcpkg.git C:\vcpkg
             C:\vcpkg\bootstrap-vcpkg.bat
           )
-          C:\vcpkg\vcpkg install libsodium:x64-windows
+          C:\vcpkg\vcpkg install libsodium:x64-windows sqlite3:x64-windows
 
       - name: Download Npcap SDK
         run: |
@@ -160,6 +160,11 @@ jobs:
           ctest -C Release --output-on-failure 2>&1 | tee test_output.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
+            # Log tail as ONE annotation first — a fastfail/abort crash is
+            # visible only here (last "[ RUN ]" line = the crashing test).
+            tail -40 test_output.log | sed -e "s/%/%25/g" -e "s/\\r\$//" \
+              | awk "BEGIN{ORS=\"%0A\"} {print}" \
+              | while IFS= read -r blob; do echo "::error::LOGTAIL $blob"; done
             grep -E "FAILED|Timeout|timeout|Exit code|not run|Subprocess" test_output.log \
               | head -60 \
               | sed -e "s/%/%25/g" -e "s/\\r/%0D/g" \

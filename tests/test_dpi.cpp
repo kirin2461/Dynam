@@ -5,6 +5,14 @@
 
 using namespace ncp::DPI;
 
+// apply_preset() intentionally selects DPIMode::DRIVER on Windows (WinDivert)
+// and DPIMode::PROXY elsewhere — tests must expect the platform value.
+#ifdef _WIN32
+static constexpr DPIMode kPresetMode = DPIMode::DRIVER;
+#else
+static constexpr DPIMode kPresetMode = DPIMode::PROXY;
+#endif
+
 // Forward declaration of internal helper for SNI parsing tests
 namespace ncp::DPI {
 int find_sni_hostname_offset(const uint8_t* data, size_t len);
@@ -27,7 +35,7 @@ TEST(DPIPresetTest, RunetSoftPresetAppliesExpectedFlags) {
 
     apply_preset(DPIPreset::RUNET_SOFT, cfg);
 
-    EXPECT_EQ(cfg.mode, DPIMode::PROXY);
+    EXPECT_EQ(cfg.mode, kPresetMode);
     EXPECT_TRUE(cfg.enable_tcp_split);
     EXPECT_TRUE(cfg.split_at_sni);
     EXPECT_GE(cfg.fragment_size, 1);
@@ -42,8 +50,8 @@ TEST(DPIPresetTest, RunetStrongPresetIsMoreAggressive) {
     apply_preset(DPIPreset::RUNET_SOFT, cfg_soft);
     apply_preset(DPIPreset::RUNET_STRONG, cfg_strong);
 
-    EXPECT_EQ(cfg_soft.mode, DPIMode::PROXY);
-    EXPECT_EQ(cfg_strong.mode, DPIMode::PROXY);
+    EXPECT_EQ(cfg_soft.mode, kPresetMode);
+    EXPECT_EQ(cfg_strong.mode, kPresetMode);
 
     EXPECT_LE(cfg_strong.fragment_size, cfg_soft.fragment_size);
     EXPECT_TRUE(cfg_strong.enable_fake_packet);
