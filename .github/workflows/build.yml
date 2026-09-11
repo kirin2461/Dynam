@@ -72,7 +72,22 @@ jobs:
 
       - name: Run tests
         working-directory: build
-        run: ctest --output-on-failure -C Release
+        run: |
+          set +e
+          ctest --output-on-failure -C Release 2>&1 | tee test_output.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            last_run=$(grep "\[ RUN" test_output.log | tail -1 | sed -e "s/%/%25/g" -e "s/\\r//g")
+            echo "::error::LAST_RUNNING_TEST $last_run"
+            grep -B 12 "The following tests FAILED" test_output.log | head -12 \
+              | sed -e "s/%/%25/g" -e "s/\\r//g" \
+              | while IFS= read -r line; do echo "::notice::CTX $line"; done
+            grep -E "FAILED|Timeout|timeout|Exit code|not run|Subprocess" test_output.log \
+              | head -60 \
+              | sed -e "s/%/%25/g" -e "s/\\r/%0D/g" \
+              | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit $rc
 
   build-windows:
     runs-on: windows-latest
