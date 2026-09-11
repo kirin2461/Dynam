@@ -41,7 +41,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build testbed images
-        run: docker compose build --parallel
+        run: |
+          # apt on the runners is occasionally flaky; retry the build.
+          for i in 1 2 3; do
+            docker compose build --parallel && exit 0
+            echo "::warning::docker compose build failed (attempt $i), retrying"
+            sleep 10
+          done
+          exit 1
 
       - name: Start DPI midbox and target server
         run: docker compose up -d --wait dpi server
