@@ -9,14 +9,88 @@
 
 #include <sodium.h>
 
+#include "ncp_winsock_init.hpp"  // socket_t + winsock_init + winsock2 on _WIN32
+
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <unistd.h>
+#endif
 
 #include "ncp_reality.hpp"
 
 namespace {
 
 constexpr const char* kGateway = "cdn.example.com";
+
+// ---- portable socket helpers (Winsock has no socketpair/read/write on fds) ----
+
+#ifdef _WIN32
+
+// Winsock lacks socketpair(2): emulate a connected pair via a throwaway
+// loopback TCP listener (the classic BSD-compatible trick).
+bool test_socketpair(ncp::socket_t out[2]) {
+    out[0] = out[1] = ncp::kInvalidSocket;
+    int addr_len = 0;
+    ncp::socket_t listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == ncp::kInvalidSocket) return false;
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;  // ephemeral
+    bool ok = ::bind(listener, reinterpret_cast<sockaddr*>(&addr),
+                     sizeof(addr)) != SOCKET_ERROR &&
+              ::listen(listener, 1) != SOCKET_ERROR;
+    addr_len = sizeof(addr);
+    if (ok && ::getsockname(listener, reinterpret_cast<sockaddr*>(&addr),
+                            &addr_len) == SOCKET_ERROR) {
+        ok = false;
+    }
+    if (ok) {
+        out[0] = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        ok = out[0] != ncp::kInvalidSocket;
+    }
+    if (ok && ::connect(out[0], reinterpret_cast<sockaddr*>(&addr),
+                        addr_len) == SOCKET_ERROR) {
+        ok = false;
+    }
+    if (ok) {
+        out[1] = ::accept(listener, nullptr, nullptr);
+        ok = out[1] != ncp::kInvalidSocket;
+    }
+    ::closesocket(listener);
+    if (!ok) {
+        if (out[0] != ncp::kInvalidSocket) ::closesocket(out[0]);
+        if (out[1] != ncp::kInvalidSocket) ::closesocket(out[1]);
+        out[0] = out[1] = ncp::kInvalidSocket;
+    }
+    return ok;
+}
+
+int test_read(ncp::socket_t fd, char* buf, size_t n) {
+    return ::recv(fd, buf, static_cast<int>(n), 0);
+}
+int test_write(ncp::socket_t fd, const char* buf, size_t n) {
+    return ::send(fd, buf, static_cast<int>(n), 0);
+}
+void test_close(ncp::socket_t fd) { ::closesocket(fd); }
+int test_shutdown_write(ncp::socket_t fd) { return ::shutdown(fd, SD_SEND); }
+
+#else  // POSIX
+
+bool test_socketpair(ncp::socket_t out[2]) {
+    return ::socketpair(AF_UNIX, SOCK_STREAM, 0, out) == 0;
+}
+ssize_t test_read(ncp::socket_t fd, char* buf, size_t n) {
+    return ::read(fd, buf, n);
+}
+ssize_t test_write(ncp::socket_t fd, const char* buf, size_t n) {
+    return ::write(fd, buf, n);
+}
+void test_close(ncp::socket_t fd) { ::close(fd); }
+int test_shutdown_write(ncp::socket_t fd) { return ::shutdown(fd, SHUT_WR); }
+
+#endif
 
 struct ClientKeys {
     std::array<uint8_t, 32> pk{};
@@ -81,10 +155,10 @@ std::vector<uint8_t> make_client_hello(const std::string& sni) {
 }
 
 // Read exactly n bytes (looping over short reads); false on EOF/error.
-bool read_full(int fd, char* buf, size_t n) {
+bool read_full(ncp::socket_t fd, char* buf, size_t n) {
     size_t off = 0;
     while (off < n) {
-        const ssize_t r = ::read(fd, buf + off, n - off);
+        const auto r = test_read(fd, buf + off, n - off);
         if (r <= 0) return false;
         off += static_cast<size_t>(r);
     }
@@ -183,45 +257,46 @@ TEST_F(RealityTest, ExtractSniRoundtrip) {
 }
 
 TEST(SpliceTest, PassesBytesBothWaysAndTerminatesOnEof) {
-    int a[2] = {-1, -1};
-    int b[2] = {-1, -1};
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, a), 0);
-    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, b), 0);
+    ASSERT_TRUE(ncp::winsock_init());
+    ncp::socket_t a[2] = {ncp::kInvalidSocket, ncp::kInvalidSocket};
+    ncp::socket_t b[2] = {ncp::kInvalidSocket, ncp::kInvalidSocket};
+    ASSERT_TRUE(test_socketpair(a));
+    ASSERT_TRUE(test_socketpair(b));
 
     std::thread worker([fds_a = a[0], fds_b = b[0]] {
         ncp::RealityServer::splice(fds_a, fds_b);
-        ::close(fds_a);
-        ::close(fds_b);
+        test_close(fds_a);
+        test_close(fds_b);
     });
 
     // a[1] = "client" endpoint, b[1] = "target" endpoint.
     const char* fwd = "client-to-target payload";
-    ASSERT_EQ(::write(a[1], fwd, std::strlen(fwd)),
-              static_cast<ssize_t>(std::strlen(fwd)));
+    ASSERT_EQ(test_write(a[1], fwd, std::strlen(fwd)),
+              static_cast<long>(std::strlen(fwd)));
     char buf[128];
     ASSERT_TRUE(read_full(b[1], buf, std::strlen(fwd)));
     EXPECT_EQ(std::string(buf, std::strlen(fwd)), fwd);
 
     const char* bwd = "target-to-client reply";
-    ASSERT_EQ(::write(b[1], bwd, std::strlen(bwd)),
-              static_cast<ssize_t>(std::strlen(bwd)));
+    ASSERT_EQ(test_write(b[1], bwd, std::strlen(bwd)),
+              static_cast<long>(std::strlen(bwd)));
     ASSERT_TRUE(read_full(a[1], buf, std::strlen(bwd)));
     EXPECT_EQ(std::string(buf, std::strlen(bwd)), bwd);
 
     // Half-close the client side: target must observe EOF after splice
-    // propagates shutdown(SHUT_WR).
-    ASSERT_EQ(::shutdown(a[1], SHUT_WR), 0);
-    EXPECT_EQ(::read(b[1], buf, sizeof(buf)), 0);
+    // propagates shutdown of the write direction.
+    ASSERT_EQ(test_shutdown_write(a[1]), 0);
+    EXPECT_EQ(test_read(b[1], buf, sizeof(buf)), 0);
 
     // The reverse direction must still work after the half-close.
-    ASSERT_EQ(::write(b[1], "x", 1), 1);
-    ASSERT_EQ(::read(a[1], buf, 1), 1);
+    ASSERT_EQ(test_write(b[1], "x", 1), 1);
+    ASSERT_EQ(test_read(a[1], buf, 1), 1);
     EXPECT_EQ(buf[0], 'x');
 
     // Close the target side: splice must terminate.
-    ::close(b[1]);
+    test_close(b[1]);
     worker.join();
-    ::close(a[1]);
+    test_close(a[1]);
 }
 
 } // anonymous namespace

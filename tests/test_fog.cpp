@@ -12,10 +12,14 @@
 #include <string>
 #include <vector>
 
+#include "ncp_winsock_init.hpp"  // socket_t + winsock_init + winsock2 on _WIN32
+
+#ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#endif
 
 using namespace ncp;
 
@@ -46,16 +50,24 @@ FogPeerInfo make_peer(const FogPeerId& id, uint16_t port, double trust = 0.5,
 
 // Send raw bytes via a throwaway UDP socket (test-side frame injection).
 bool raw_udp_send(uint16_t dst_port, const std::vector<uint8_t>& bytes) {
-    int s = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (s < 0) return false;
+    if (!winsock_init()) return false;  // no-op on POSIX
+    socket_t s = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (s == kInvalidSocket) return false;
     sockaddr_in dst{};
     dst.sin_family = AF_INET;
     dst.sin_addr.s_addr = htonl(kLoopback);
     dst.sin_port = htons(dst_port);
-    bool ok = ::sendto(s, bytes.data(), bytes.size(), 0,
+    // Winsock sendto takes const char*/int; POSIX takes const void*/size_t —
+    // the char*/int form converts cleanly on both.
+    bool ok = ::sendto(s, reinterpret_cast<const char*>(bytes.data()),
+                       static_cast<int>(bytes.size()), 0,
                        reinterpret_cast<sockaddr*>(&dst), sizeof(dst)) ==
-              static_cast<ssize_t>(bytes.size());
+              static_cast<int>(bytes.size());
+#ifdef _WIN32
+    ::closesocket(s);
+#else
     ::close(s);
+#endif
     return ok;
 }
 
