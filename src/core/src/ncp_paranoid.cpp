@@ -13,6 +13,7 @@
 #include "ncp_paranoid.hpp"
 #include <algorithm>
 #include <thread>
+#include <atomic>
 #include <chrono>
 #include <sodium.h>
 #include <fstream>
@@ -150,7 +151,9 @@ static bool is_safe_shred_directory(const std::string& dir) {
 struct ParanoidMode::Impl {
     std::vector<std::string> active_circuits;
     std::thread cover_traffic_thread;
-    bool cover_traffic_running = false;
+    // Written by stop_cover_traffic() on the owner thread while the worker
+    // reads it every loop iteration — must be atomic (TSan: data race).
+    std::atomic<bool> cover_traffic_running{false};
     std::chrono::system_clock::time_point last_rotation;
     std::vector<std::string> bridge_nodes;
     bool kill_switch_active = false;

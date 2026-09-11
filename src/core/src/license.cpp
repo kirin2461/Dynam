@@ -18,7 +18,6 @@
 #include <set>
 #include <map>
 #include <mutex>
-#include <condition_variable>
 #include <thread>
 #include <atomic>
 #include <chrono>
@@ -172,8 +171,6 @@ struct License::Impl {
     // Periodic validation thread
     std::atomic<bool> periodic_active{false};
     std::thread periodic_thread;
-    std::mutex periodic_mutex;              // pairs with periodic_cv
-    std::condition_variable periodic_cv;    // lets stop() interrupt the wait
 
     // License cache (encrypted blob)
     mutable std::mutex cache_mutex;
@@ -191,11 +188,7 @@ struct License::Impl {
     }
     ~Impl() {
         if (periodic_active.load()) {
-            {
-                std::lock_guard<std::mutex> lk(periodic_mutex);
-                periodic_active.store(false);
-            }
-            periodic_cv.notify_all();
+            periodic_active.store(false);
             if (periodic_thread.joinable()) periodic_thread.join();
         }
     }
@@ -1707,30 +1700,29 @@ void License::start_periodic_validation(int interval_minutes) {
     validation_interval_ = std::chrono::minutes(interval_minutes);
     impl_->periodic_active.store(true);
     impl_->periodic_thread = std::thread([this]() {
-        std::unique_lock<std::mutex> lk(impl_->periodic_mutex);
+        // Wait in 100 ms slices instead of one full-interval sleep: a plain
+        // sleep_for(validation_interval_) made stop_periodic_validation()
+        // block join() for the whole interval (60 s in tests), which
+        // exceeded the tsan CI job's ctest timeout. Sliced waiting keeps
+        // stop latency at ~100 ms without extra synchronization.
+        const auto slice = std::chrono::milliseconds(100);
         while (impl_->periodic_active.load()) {
-            // Interruptible wait: stop() notifies periodic_cv, so shutdown
-            // is immediate instead of blocking join() for a full interval
-            // (a plain sleep_for made stop take up to `interval_minutes`,
-            // which timed out the tsan CI job at ctest --timeout 120).
-            if (impl_->periodic_cv.wait_for(lk, validation_interval_,
-                    [this] { return !impl_->periodic_active.load(); }))
-                break;  // stop requested
-            lk.unlock();  // don't hold periodic_mutex during validation work
+            auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                validation_interval_);
+            while (remaining > std::chrono::milliseconds(0) &&
+                   impl_->periodic_active.load()) {
+                const auto step = std::min(remaining, slice);
+                std::this_thread::sleep_for(step);
+                remaining -= step;
+            }
+            if (!impl_->periodic_active.load()) break;
             schedule_next_validation();
-            lk.lock();
         }
     });
 }
 
 void License::stop_periodic_validation() {
-    {
-        // Hold the mutex around the flag store so the worker's wait_for
-        // predicate can't miss the notification.
-        std::lock_guard<std::mutex> lk(impl_->periodic_mutex);
-        impl_->periodic_active.store(false);
-    }
-    impl_->periodic_cv.notify_all();
+    impl_->periodic_active.store(false);
     if (impl_->periodic_thread.joinable())
         impl_->periodic_thread.join();
 }
