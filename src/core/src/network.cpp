@@ -224,8 +224,22 @@ void Network::start_capture(PacketCallback callback, int timeout_ms) {
 #ifdef HAVE_PCAP
     if (!pcap_handle_) return;
 
+    // Idempotent: a second start_capture() without stop_capture() must not
+    // overwrite a joinable capture_thread_ (std::thread assignment to a
+    // joinable thread calls std::terminate). Reuse the running session and
+    // just swap the callback.
+    bool expected = false;
+    if (!is_capturing_.compare_exchange_strong(expected, true)) {
+        packet_cb_ = callback;
+        return;
+    }
+    // Defensive: if a previous thread object is somehow still joinable
+    // (e.g. flag reset raced with thread exit), join it before replacing.
+    if (capture_thread_.joinable()) {
+        capture_thread_.join();
+    }
+
     packet_cb_ = callback;
-    is_capturing_ = true;
 
     capture_thread_ = std::thread([this, timeout_ms]() {
 #ifndef _WIN32
@@ -920,102 +934,180 @@ std::string Network::resolve_dns(const std::string& hostname, bool use_doh) {
     return std::string(ip_str);
 }
 
-std::string Network::resolve_dns_over_https(const std::string& hostname) {
-    // Simple DoH implementation using HTTPS POST
-    // In production, use a proper HTTP client library
-    
 #ifdef _WIN32
-    // Windows: Use WinHTTP for HTTPS requests
-    HINTERNET hSession = WinHttpOpen(L"Dynam DoH Client/1.0",
-                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                      WINHTTP_NO_PROXY_NAME,
-                                      WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) {
+namespace {
+// RAII wrapper so every exit path releases WinHTTP handles exactly once.
+struct WinHttpHandle {
+    HINTERNET h = nullptr;
+    WinHttpHandle() = default;
+    explicit WinHttpHandle(HINTERNET handle) : h(handle) {}
+    ~WinHttpHandle() { if (h) WinHttpCloseHandle(h); }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    HINTERNET get() const { return h; }
+    HINTERNET release() { HINTERNET t = h; h = nullptr; return t; }
+};
+} // namespace
+#endif
+
+std::string Network::resolve_dns_over_https(const std::string& hostname) {
+#ifdef _WIN32
+    if (hostname.empty() || hostname.size() > 253) {
+        last_error_ = "DoH: invalid hostname";
+        return "";
+    }
+
+    // Build a real DNS wire query (RFC 1035) from the requested hostname.
+    std::vector<uint8_t> dns_query;
+    const uint16_t txid = static_cast<uint16_t>(
+        (std::chrono::steady_clock::now().time_since_epoch().count()) & 0xFFFF);
+    dns_query.push_back(static_cast<uint8_t>(txid >> 8));
+    dns_query.push_back(static_cast<uint8_t>(txid & 0xFF));
+    dns_query.push_back(0x01); dns_query.push_back(0x00);  // Flags: RD
+    dns_query.push_back(0x00); dns_query.push_back(0x01);  // QDCOUNT: 1
+    dns_query.push_back(0x00); dns_query.push_back(0x00);  // ANCOUNT
+    dns_query.push_back(0x00); dns_query.push_back(0x00);  // NSCOUNT
+    dns_query.push_back(0x00); dns_query.push_back(0x00);  // ARCOUNT
+    {
+        std::istringstream iss(hostname);
+        std::string label;
+        while (std::getline(iss, label, '.')) {
+            if (label.empty()) continue;
+            if (label.size() > 63) {
+                last_error_ = "DoH: DNS label too long";
+                return "";
+            }
+            dns_query.push_back(static_cast<uint8_t>(label.size()));
+            dns_query.insert(dns_query.end(), label.begin(), label.end());
+        }
+    }
+    dns_query.push_back(0x00);                              // root label
+    dns_query.push_back(0x00); dns_query.push_back(0x01);   // QTYPE: A
+    dns_query.push_back(0x00); dns_query.push_back(0x01);   // QCLASS: IN
+
+    WinHttpHandle hSession(WinHttpOpen(L"Dynam DoH Client/1.0",
+                                       WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                       WINHTTP_NO_PROXY_NAME,
+                                       WINHTTP_NO_PROXY_BYPASS, 0));
+    if (!hSession.get()) {
         last_error_ = "WinHttpOpen failed";
         return "";
     }
+    // Bound all WinHTTP operations (resolve/connect/send/receive, ms).
+    WinHttpSetTimeouts(hSession.get(), 5000, 5000, 5000, 5000);
 
-    // Use Cloudflare DoH (1.1.1.1)
-    HINTERNET hConnect = WinHttpConnect(hSession, L"cloudflare-dns.com",
-                                         INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) {
-        WinHttpCloseHandle(hSession);
+    WinHttpHandle hConnect(WinHttpConnect(hSession.get(), L"cloudflare-dns.com",
+                                          INTERNET_DEFAULT_HTTPS_PORT, 0));
+    if (!hConnect.get()) {
+        last_error_ = "WinHttpConnect failed";
         return "";
     }
 
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"POST",
-                                             L"/dns-query", nullptr,
-                                             WINHTTP_NO_REFERER,
-                                             WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                             WINHTTP_FLAG_SECURE);
-    if (!hRequest) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+    WinHttpHandle hRequest(WinHttpOpenRequest(hConnect.get(), L"POST",
+                                              L"/dns-query", nullptr,
+                                              WINHTTP_NO_REFERER,
+                                              WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                              WINHTTP_FLAG_SECURE));
+    if (!hRequest.get()) {
+        last_error_ = "WinHttpOpenRequest failed";
         return "";
     }
 
-    // Build DNS query (simplified - A record query)
-    std::vector<uint8_t> dns_query = {
-        0x00, 0x01,  // Transaction ID
-        0x01, 0x00,  // Flags: standard query
-        0x00, 0x01,  // Questions: 1
-        0x00, 0x00,  // Answer RRs: 0
-        0x00, 0x00,  // Authority RRs: 0
-        0x00, 0x00,  // Additional RRs: 0
-        // Query: hostname
-        0x09, 'c', 'l', 'o', 'u', 'd', 'f', 'l', 'a', 'r', 'e',
-        0x03, 'c', 'o', 'm',
-        0x00,        // Root label
-        0x00, 0x01,  // Type: A
-        0x00, 0x01   // Class: IN
-    };
-
-    // Send request
-    BOOL bResult = WinHttpSendRequest(hRequest,
-                                       L"Content-Type: application/dns-message\r\n", -1,
-                                       dns_query.data(), dns_query.size(),
-                                       dns_query.size(), 0);
-    
-    if (!bResult) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+    if (!WinHttpSendRequest(hRequest.get(),
+                            L"Content-Type: application/dns-message\r\n", -1,
+                            dns_query.data(),
+                            static_cast<DWORD>(dns_query.size()),
+                            static_cast<DWORD>(dns_query.size()), 0)) {
+        last_error_ = "WinHttpSendRequest failed";
+        return "";
+    }
+    if (!WinHttpReceiveResponse(hRequest.get(), nullptr)) {
+        last_error_ = "WinHttpReceiveResponse failed";
         return "";
     }
 
-    WinHttpReceiveResponse(hRequest, nullptr);
+    DWORD status = 0;
+    DWORD status_len = sizeof(status);
+    if (WinHttpQueryHeaders(hRequest.get(),
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &status_len,
+                            WINHTTP_NO_HEADER_INDEX) && status != 200) {
+        last_error_ = "DoH: HTTP error";
+        return "";
+    }
 
-    // Read response
-    DWORD dwSize = 0;
-    WinHttpQueryDataAvailable(hRequest, &dwSize);
-    
-    if (dwSize > 0 && dwSize < 65536) {
-        std::vector<BYTE> response(dwSize + 1);
-        DWORD dwRead = 0;
-        WinHttpReadData(hRequest, response.data(), dwSize, &dwRead);
-        
-        // Parse DNS response (simplified - extract first A record)
-        if (dwRead >= 12) {
-            // Skip DNS header (12 bytes) and question section
-            // Look for A record in answer section
-            // This is a simplified parser - production needs full DNS parser
-            const char* ip_str = reinterpret_cast<const char*>(response.data());
-            // Return dummy IP for now (production: parse actual DNS response)
-            return "1.1.1.1";
+    // Read the whole body (a single QueryDataAvailable/ReadData pair may
+    // return only the first chunk).
+    std::vector<uint8_t> response;
+    for (;;) {
+        DWORD avail = 0;
+        if (!WinHttpQueryDataAvailable(hRequest.get(), &avail)) break;
+        if (avail == 0) break;
+        size_t old = response.size();
+        response.resize(old + avail);
+        DWORD read = 0;
+        if (!WinHttpReadData(hRequest.get(), response.data() + old, avail, &read)) {
+            response.resize(old);
+            break;
         }
+        response.resize(old + read);
     }
 
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-    
+    // Parse the DNS wire response: find the first A record answer.
+    if (response.size() < 12) {
+        last_error_ = "DoH: short DNS response";
+        return "";
+    }
+    const uint16_t resp_id = static_cast<uint16_t>((response[0] << 8) | response[1]);
+    const uint16_t flags   = static_cast<uint16_t>((response[2] << 8) | response[3]);
+    const uint16_t qdcount = static_cast<uint16_t>((response[4] << 8) | response[5]);
+    const uint16_t ancount = static_cast<uint16_t>((response[6] << 8) | response[7]);
+    if (resp_id != txid || (flags & 0x000F) != 0 || ancount == 0 || ancount > 256) {
+        last_error_ = "DoH: DNS error or mismatched response";
+        return "";
+    }
+
+    size_t off = 12;
+    auto skip_name = [&]() -> bool {
+        // Compression-aware: a 0xC0-pointer terminates the name here.
+        while (off < response.size()) {
+            uint8_t b = response[off];
+            if ((b & 0xC0) == 0xC0) { off += 2; return true; }
+            if (b == 0) { ++off; return true; }
+            off += b + 1;
+        }
+        return false;
+    };
+    for (uint16_t q = 0; q < qdcount; ++q) {
+        if (!skip_name() || off + 4 > response.size()) {
+            last_error_ = "DoH: malformed question section";
+            return "";
+        }
+        off += 4;
+    }
+    for (uint16_t a = 0; a < ancount; ++a) {
+        if (!skip_name() || off + 10 > response.size()) break;
+        const uint16_t rtype = static_cast<uint16_t>((response[off] << 8) | response[off + 1]);
+        const uint16_t rdlen = static_cast<uint16_t>((response[off + 8] << 8) | response[off + 9]);
+        off += 10;
+        if (off + rdlen > response.size()) break;
+        if (rtype == 0x0001 && rdlen == 4) {
+            char ip[INET_ADDRSTRLEN];
+            snprintf(ip, sizeof(ip), "%d.%d.%d.%d",
+                     response[off], response[off + 1],
+                     response[off + 2], response[off + 3]);
+            return std::string(ip);
+        }
+        off += rdlen;
+    }
+    last_error_ = "DoH: no A record in response";
+    return "";
 #else
     // Linux: Use curl or direct HTTPS
     (void)hostname;
-#endif
-
     last_error_ = "DoH resolution failed";
     return "";
+#endif
 }
 
 // ==================== Statistics ====================

@@ -180,7 +180,9 @@ private:
     std::string last_error_;
 
     // Additional members used in implementation
-    bool is_capturing_ = false;
+    // std::atomic: the capture thread reads this in its loop while
+    // start_capture()/stop_capture() write it from other threads.
+    std::atomic<bool> is_capturing_{false};
     bool bypass_enabled_ = false;
     std::string current_interface_;
     std::function<void(const std::vector<uint8_t>&, time_t)> packet_cb_;
