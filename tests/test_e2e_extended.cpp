@@ -329,14 +329,6 @@ TEST_F(E2EExtendedTest, ProtocolMismatch) {
     std::vector<uint8_t> x448_public(x448_keys.public_key.data(),
                                      x448_keys.public_key.data() + x448_keys.public_key.size());
 
-    // KNOWN CORE GAP (reported to src/ maintainers): the X25519 branch of
-    // ratchet_dh() in src/core/src/e2e.cpp does not validate the peer key
-    // size — crypto_scalarmult() silently consumes the first 32 bytes of the
-    // 56-byte X448 key instead of throwing. The OpenSSL-backed X448/P-256
-    // branches do reject wrong sizes (see *_InvalidKeySize tests above).
-    // Re-enable this check once the core validates peer key length.
-    GTEST_SKIP() << "core accepts oversized peer key for X25519 "
-                    "(e2e.cpp ratchet_dh default branch lacks size check)";
 
     // This should throw because x25519_keys is X25519 but x448_public is X448 (56 bytes)
     EXPECT_THROW({
