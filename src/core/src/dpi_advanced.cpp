@@ -675,13 +675,17 @@ std::vector<uint8_t> TrafficObfuscator::deobfuscate(const uint8_t* data, size_t 
         return std::vector<uint8_t>(data, data + len);
     }
     case ObfuscationMode::XOR_ROLLING: {
-        // R7-DPI-12: XOR_ROLLING needs separate RX offset for proper deobfuscation
-        // The obfuscate and deobfuscate streams must maintain independent offsets
-        auto saved_offset = impl_->xor_rx_offset;
-        impl_->xor_rx_offset = 0;
-        auto result = obfuscate(data, len);
-        impl_->xor_rx_offset = saved_offset;
-        // Advance RX offset after successful deobfuscation
+        // AUDIT-FIX: the previous implementation zeroed xor_rx_offset (which
+        // nothing read) and then called obfuscate(), which used AND ADVANCED
+        // xor_tx_offset — decryption ran at the wrong key position and the
+        // rolling TX stream was corrupted on every deobfuscate() call.
+        // Rolling XOR is self-inverse per position; decryption must use an
+        // independent RX offset that mirrors the peer's TX stream.
+        std::vector<uint8_t> result(len);
+        for (size_t i = 0; i < len; ++i) {
+            size_t ki = (impl_->xor_rx_offset + i) % impl_->key.size();
+            result[i] = data[i] ^ impl_->key[ki];
+        }
         impl_->xor_rx_offset = (impl_->xor_rx_offset + len) % impl_->key.size();
         return result;
     }
@@ -738,7 +742,10 @@ AdvancedDPIBypass::AdvancedDPIBypass() : impl_(std::make_unique<Impl>()) {}
 AdvancedDPIBypass::~AdvancedDPIBypass() { stop(); }
 
 bool AdvancedDPIBypass::initialize(const AdvancedDPIConfig& config) {
-    impl_->config = config;
+    {
+        std::lock_guard<std::mutex> lock(impl_->config_mutex);
+        impl_->config = config;
+    }
     impl_->base_bypass = std::make_unique<DPIBypass>();
     // Mark the inner DPIBypass as base-only so it does NOT recursively
     // create another AdvancedDPIBypass (which would cause infinite recursion).
@@ -829,7 +836,20 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     if (!data || len == 0) return {};
     std::vector<std::vector<uint8_t>> result;
     std::vector<uint8_t> working_data(data, data + len);
-    const auto& cfg = impl_->config;
+
+    // AUDIT-FIX (data race): apply_preset()/set_technique_enabled() write
+    // impl_->config under config_mutex while process_outgoing() read it
+    // unlocked.  Take a snapshot under the same mutex (also covers the ECH
+    // config fields written by set_ech_config()).
+    AdvancedDPIConfig cfg;
+    ECH::ECHConfig ech_cfg;
+    bool ech_valid = false;
+    {
+        std::lock_guard<std::mutex> lock(impl_->config_mutex);
+        cfg = impl_->config;
+        ech_cfg = impl_->ech_config_;
+        ech_valid = impl_->ech_config_valid_;
+    }
 
     // Check if this is TLS ClientHello (single definition)
     bool is_client_hello = (len > 5 && data[0] == 0x16 &&
@@ -848,8 +868,8 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
 
     // === ECH application (after GREASE, before splits) ===
     if (!cfg.mimicry_managed_tls &&
-        cfg.enable_ech && is_client_hello && impl_->ech_config_valid_) {
-        auto ech_hello = ECH::apply_ech(working_data, impl_->ech_config_);
+        cfg.enable_ech && is_client_hello && ech_valid) {
+        auto ech_hello = ECH::apply_ech(working_data, ech_cfg);
         if (ech_hello.size() > working_data.size()) {
             working_data = std::move(ech_hello);
             std::lock_guard<std::mutex> lock(impl_->stats_mutex);
@@ -965,6 +985,7 @@ void AdvancedDPIBypass::set_technique_enabled(EvasionTechnique technique, bool e
 }
 
 std::vector<EvasionTechnique> AdvancedDPIBypass::get_active_techniques() const {
+    std::lock_guard<std::mutex> lock(impl_->config_mutex);
     return impl_->config.techniques;
 }
 
@@ -975,6 +996,9 @@ void AdvancedDPIBypass::set_mimicry_managed_tls(bool managed) {
 }
 
 void AdvancedDPIBypass::apply_preset(BypassPreset preset) {
+    // AUDIT-FIX (data race): config is read concurrently by
+    // process_outgoing() — all writes must hold config_mutex.
+    std::lock_guard<std::mutex> lock(impl_->config_mutex);
     auto& cfg = impl_->config.base_config;
     auto& techniques = impl_->config.techniques;
     techniques.clear();
