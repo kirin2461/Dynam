@@ -403,8 +403,13 @@ public:
         std::lock_guard<std::mutex> lk(socks_mu);
         open_socks.erase(s);
     }
+    // Single-owner socket close. The fd is removed from open_socks FIRST
+    // (atomically, under socks_mu): from that moment on DesyncProxy::stop()
+    // is guaranteed not to touch this fd, so closing it here cannot race
+    // with stop()'s shutdown sweep and cannot close a reused fd.
     void close_sock(ncp_socket_t s) {
         if (s == NCP_INVALID_SOCK) return;
+        untrack(s);
 #ifdef _WIN32
         {
             std::lock_guard<std::mutex> lk(tfo_mu_);
@@ -417,7 +422,6 @@ public:
         ::shutdown(s, SHUT_RDWR);
 #endif
         NCP_CLOSE_SOCKET(s);
-        untrack(s);
     }
 
     // ── Chain → desync plan ──
@@ -1492,23 +1496,29 @@ void DesyncProxy::stop() {
         impl_->listen_sock = NCP_INVALID_SOCK;
     }
     if (impl_->accept_thread.joinable()) impl_->accept_thread.join();
-    std::set<ncp_socket_t> copy;
+    // Double-close fix: previously this loop close()d every tracked fd while
+    // detached worker threads still owned those same fds via their RAII
+    // guards (Guard/UpGuard/UdpGuard -> close_sock). On Linux the kernel can
+    // immediately reuse the fd number, so the thread's later close() hit an
+    // unrelated socket. Now stop() only shutdown()s tracked fds (waking any
+    // blocked recv/send so workers exit); ownership and close() stay with
+    // the worker threads' guards.
+    //
+    // The whole sweep runs under socks_mu: close_sock() removes the fd from
+    // open_socks BEFORE closing it, so while we hold the mutex no tracked fd
+    // can be closed (and possibly reused) underneath us.
     {
         std::lock_guard<std::mutex> lk(impl_->socks_mu);
-        copy = impl_->open_socks;
-    }
-    for (ncp_socket_t s : copy) {
+        for (ncp_socket_t s : impl_->open_socks) {
 #ifdef _WIN32
-        ::shutdown(s, SD_BOTH);
+            ::shutdown(s, SD_BOTH);
 #else
-        ::shutdown(s, SHUT_RDWR);
+            ::shutdown(s, SHUT_RDWR);
 #endif
-        NCP_CLOSE_SOCKET(s);
+        }
     }
-    {
-        std::lock_guard<std::mutex> lk(impl_->socks_mu);
-        impl_->open_socks.clear();
-    }
+    // Do NOT close() or clear open_socks here: workers untrack+close their
+    // own fds as they finish (see close_sock).
     if (impl_->stats_thread.joinable()) impl_->stats_thread.join();
     {
         std::lock_guard<std::mutex> lk(impl_->events_mu);
