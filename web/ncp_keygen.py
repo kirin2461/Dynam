@@ -42,6 +42,7 @@ ALL_MODULES = [
     "e2e_encryption",
     "i2p",
     "geneva_basic",
+    "geneva_full",
     "self_test",
     "pipeline",
     "dns_leak",
@@ -138,7 +139,9 @@ def cmd_issue(args):
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    check = verify_license_key(key_string, pub_raw)
+    # self-check с тем же hwid, что попал в payload (иначе hwid-bound
+    # ключ не прошёл бы проверку на машине генератора)
+    check = verify_license_key(key_string, pub_raw, expected_hwid=args.hwid)
     if check is None:
         print("ОШИБКА: выпущенный ключ не прошёл самопроверку", file=sys.stderr)
         sys.exit(1)

@@ -84,7 +84,9 @@ def parse_key(key_string: str) -> bytes:
 
 def verify_license_key(
     key_string: str,
-    public_key_bytes: bytes
+    public_key_bytes: bytes,
+    expected_hwid: Optional[str] = None,
+    enforce_hwid: bool = True
 ) -> Optional[dict]:
     """
     Верифицирует лицензионный ключ NCP.
@@ -99,10 +101,16 @@ def verify_license_key(
     Параметры:
         key_string:       Строка ключа в формате NCP-XXXXX-...
         public_key_bytes: Публичный ключ Ed25519 (32 байта, raw)
+        expected_hwid:    HWID текущей машины. Если payload ключа содержит
+                          непустой "hwid", он обязан совпасть с этим значением
+                          (без учёта регистра/пробелов); несовпадение или
+                          отсутствие expected_hwid -> None.
+        enforce_hwid:     False отключает проверку привязки (только для
+                          диагностики; не использовать для активации).
 
     Возвращает:
         Словарь с полями payload + {valid, expired, days_remaining}
-        или None при неверной подписи/формате
+        или None при неверной подписи/формате/HWID
     """
     # 1. Разбираем ключ
     try:
@@ -133,6 +141,16 @@ def verify_license_key(
         payload = json.loads(payload_bytes.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
+
+    # 4.5 Проверяем HWID-привязку: непустой hwid в payload обязан
+    # совпадать с идентификатором текущей машины.
+    if enforce_hwid:
+        bound_hwid = str(payload.get("hwid") or "").strip().lower()
+        if bound_hwid:
+            if expected_hwid is None:
+                return None
+            if bound_hwid != str(expected_hwid).strip().lower():
+                return None
 
     # 5. Проверяем срок действия
     today = date.today()
