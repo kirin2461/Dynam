@@ -137,12 +137,22 @@ TEST_F(IntegrationTest, ErrorHandlingIntegration) {
 
 // Test: Resource cleanup
 TEST_F(IntegrationTest, ResourceCleanup) {
+    std::string active_before;
     {
         ncp::NetworkManager nm;
         // PacketCapture disabled - class not yet implemented
         // ncp::PacketCapture pc;
+        // A fresh NetworkManager must expose the system interface list
+        // (loopback exists on every supported platform).
+        auto ifaces = nm.get_interfaces();
+        EXPECT_FALSE(ifaces.empty()) << "at least one network interface expected";
+        active_before = nm.get_active_interface_name();
         // Objects go out of scope
     }
-    // No memory leaks expected (use valgrind for verification)
-    EXPECT_TRUE(true);
+    // After destruction the process must remain usable: a second instance
+    // enumerates the same interfaces (no leaked global state/handles).
+    ncp::NetworkManager nm2;
+    EXPECT_FALSE(nm2.get_interfaces().empty());
+    EXPECT_EQ(nm2.get_active_interface_name(), active_before);
+    (void)nm2;
 }

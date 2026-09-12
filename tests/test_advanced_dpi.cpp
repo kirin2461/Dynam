@@ -113,6 +113,13 @@ static void test_non_client_hello_passthrough() {
 static void test_grease_injection() {
     std::cout << "[TEST] GREASE injection..." << std::flush;
 
+    // MED-9: pipeline GREASE injection was removed from the core — the old
+    // implementation corrupted TLS records by writing GREASE at arbitrary
+    // offsets. Proper RFC 8701 GREASE is now added by
+    // TLSFingerprint::insert_grease() when generating (fake) ClientHellos.
+    // Current contract: process_outgoing() must NOT touch grease_injected,
+    // and TLSManipulator::inject_grease() is a documented no-op passthrough.
+
     AdvancedDPIConfig cfg;
     cfg.base_config.mode = DPIMode::PROXY;
     cfg.base_config.enable_tcp_split = true;
@@ -127,10 +134,25 @@ static void test_grease_injection() {
     bypass.process_outgoing(ch.data(), ch.size());
 
     auto stats = bypass.get_stats();
-    assert(stats.grease_injected > 0);
+    assert(stats.grease_injected == 0);  // pipeline GREASE disabled (MED-9)
 
     bypass.stop();
-    std::cout << " OK (injected=" << stats.grease_injected << ")" << std::endl;
+
+    // TLSManipulator::inject_grease is a passthrough no-op (MED-9)
+    TLSManipulator manip;
+    auto out = manip.inject_grease(ch.data(), ch.size());
+    assert(out == ch);
+
+    // Proper GREASE comes from the TLS fingerprint layer (Chromium profiles)
+    ncp::TLSFingerprint chrome_fp(ncp::BrowserType::CHROME);
+    auto exts = chrome_fp.get_extensions();
+    bool has_grease = false;
+    for (uint16_t e : exts) {
+        if ((e & 0x0F0F) == 0x0A0A) { has_grease = true; break; }
+    }
+    assert(has_grease);
+
+    std::cout << " OK (pipeline GREASE disabled per MED-9; fingerprint GREASE present)" << std::endl;
 }
 
 static void test_decoy_sni() {

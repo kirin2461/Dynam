@@ -34,12 +34,12 @@ echo ""
 echo "[2] Generating fake ClientHello from NCP..."
 echo ""
 
-# Build and run test
+# Build and run test (target test_dpi_fixes lives in tests/integration,
+# wired into the main build via add_subdirectory under ENABLE_TESTS)
 if [ ! -f "./build/tests/integration/test_dpi_fixes" ]; then
     echo "Building tests..."
-    mkdir -p build && cd build
-    cmake .. && make test_dpi_fixes
-    cd ..
+    cmake -S . -B build -DENABLE_TESTS=ON -DENABLE_CLI=ON -DENABLE_GUI=OFF
+    cmake --build build --target test_dpi_fixes
 fi
 
 ./build/tests/integration/test_dpi_fixes \

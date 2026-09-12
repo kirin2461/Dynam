@@ -183,7 +183,4 @@ TEST_F(ECHCacheTest, ECHRetryMechanism) {
     EXPECT_TRUE(last.has_value());
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// main() is provided by gtest_main via the ncp_tests target.

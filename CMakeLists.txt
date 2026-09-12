@@ -358,6 +358,8 @@ endif()
 if(ENABLE_TESTS)
     enable_testing()
     add_subdirectory(tests)
+    # Integration tests (loopback-only; labelled "integration" in ctest)
+    add_subdirectory(tests/integration)
 endif()
 
 if(ENABLE_FUZZING)

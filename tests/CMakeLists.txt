@@ -59,6 +59,10 @@ add_executable(ncp_tests
     test_spa.cpp            # Enterprise SPA (Ed25519 + ipset) tests
     test_awg31_hardening.cpp  # AWG 3.1: header protection, padding, timers, CPS
     test_scoped_trust.cpp     # Scoped trust (NUЦ containment) tests
+    # --- Zone F: previously unconnected gtest files ---
+    test_e2e_extended.cpp    # X448 / ECDH_P256 E2E encryption tests
+    test_ech.cpp             # HPKE-based ECH unit tests
+    test_ech_cache.cpp       # ECH config cache / retry tests
 )
 
 target_link_libraries(ncp_tests
@@ -89,6 +93,42 @@ set_target_properties(ncp_functional_check PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
 )
+
+# Register ncp_functional_check in CTest (it was previously build-only).
+# It performs live DoH lookups, so label it: CI sandboxes without internet
+# can exclude it via `ctest -LE network`.
+add_test(NAME ncp_functional_check COMMAND ncp_functional_check)
+set_tests_properties(ncp_functional_check PROPERTIES
+    TIMEOUT 180
+    LABELS "functional;network"
+)
+
+# ==================== Standalone assert-based tests ====================
+# Zone F: these test files predate the gtest suite and use assert()-style
+# checks with their own main(). Build each as a separate ctest target.
+set(NCP_STANDALONE_TESTS
+    test_advanced_dpi
+    test_ech_pipeline
+    test_l3_stealth
+    test_mimicry_roundtrip
+    test_dpi_advanced_integration
+)
+foreach(t IN LISTS NCP_STANDALONE_TESTS)
+    add_executable(${t} ${t}.cpp)
+    target_link_libraries(${t} PRIVATE ncp_core)
+    add_dependencies(${t} ncp_core)
+    target_include_directories(${t} PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/core/include
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src
+    )
+    set_target_properties(${t} PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+    )
+    add_test(NAME ${t} COMMAND ${t})
+    set_tests_properties(${t} PROPERTIES TIMEOUT 120)
+endforeach()
 
 # ==================== Compiler Warning Suppression ====================
 if(MSVC)

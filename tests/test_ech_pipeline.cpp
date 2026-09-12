@@ -89,20 +89,64 @@ static std::vector<uint8_t> make_test_client_hello(const std::string& sni) {
     return ch;
 }
 
-// Helper: build a test ECH config blob
+// Helper: build a test ECH config blob in full ECHConfig wire format
+// (draft-ietf-tls-esni): version(2), contents_length(2), config_id(1),
+// kem_id(2), public_key(2+len), cipher_suites(2 + N*4),
+// maximum_name_length(1), public_name(1+len), extensions(2).
+// This is the format parsed by the fallback (non-HPKE) build.
 static std::vector<uint8_t> make_test_ech_config_blob() {
-    std::vector<uint8_t> blob;
-
-    // Version: 0xfe0d (draft ECH)
-    blob.push_back(0xfe); blob.push_back(0x0d);
+    std::vector<uint8_t> body;
 
     // Config ID
-    blob.push_back(0x42);
+    body.push_back(0x42);
 
     // KEM ID: DHKEM_X25519_HKDF_SHA256 = 0x0020
-    blob.push_back(0x00); blob.push_back(0x20);
+    body.push_back(0x00); body.push_back(0x20);
 
     // Public key: 32 random bytes
+    std::vector<uint8_t> pk(32);
+    randombytes_buf(pk.data(), pk.size());
+    uint16_t pk_len = static_cast<uint16_t>(pk.size());
+    body.push_back(static_cast<uint8_t>(pk_len >> 8));
+    body.push_back(static_cast<uint8_t>(pk_len & 0xFF));
+    body.insert(body.end(), pk.begin(), pk.end());
+
+    // Cipher suites: 1 entry — HKDF_SHA256(0x0001) + AES_128_GCM(0x0001)
+    body.push_back(0x00); body.push_back(0x04);
+    body.push_back(0x00); body.push_back(0x01);
+    body.push_back(0x00); body.push_back(0x01);
+
+    // maximum_name_length = 0
+    body.push_back(0x00);
+
+    // public_name = "example.com"
+    const std::string pname = "example.com";
+    body.push_back(static_cast<uint8_t>(pname.size()));
+    body.insert(body.end(), pname.begin(), pname.end());
+
+    // extensions: empty
+    body.push_back(0x00); body.push_back(0x00);
+
+    std::vector<uint8_t> blob;
+    // Version: 0xfe0d (draft ECH)
+    blob.push_back(0xfe); blob.push_back(0x0d);
+    uint16_t clen = static_cast<uint16_t>(body.size());
+    blob.push_back(static_cast<uint8_t>(clen >> 8));
+    blob.push_back(static_cast<uint8_t>(clen & 0xFF));
+    blob.insert(blob.end(), body.begin(), body.end());
+
+    return blob;
+}
+
+// Legacy simplified layout (no contents_length) parsed by the HPKE build:
+// version(2), config_id(1), kem_id(2), public_key(2+len).
+static std::vector<uint8_t> make_test_ech_config_blob_legacy() {
+    std::vector<uint8_t> blob;
+
+    blob.push_back(0xfe); blob.push_back(0x0d);
+    blob.push_back(0x42);
+    blob.push_back(0x00); blob.push_back(0x20);
+
     std::vector<uint8_t> pk(32);
     randombytes_buf(pk.data(), pk.size());
     uint16_t pk_len = static_cast<uint16_t>(pk.size());
@@ -113,12 +157,28 @@ static std::vector<uint8_t> make_test_ech_config_blob() {
     return blob;
 }
 
+// Parse with the full wire format; fall back to the legacy simplified
+// layout for HPKE builds whose parser expects that layout. The parsed
+// fields are validated to detect which layout the build's parser used.
+static bool parse_test_ech_config(ECHConfig& config, std::vector<uint8_t>& used_blob) {
+    used_blob = make_test_ech_config_blob();
+    if (parse_ech_config(used_blob, config) &&
+        config.config_id == 0x42 &&
+        config.public_key.size() == 32 &&
+        !config.cipher_suites.empty() &&
+        config.cipher_suites[0].kem_id == HPKEKem::DHKEM_X25519_HKDF_SHA256) {
+        return true;
+    }
+    used_blob = make_test_ech_config_blob_legacy();
+    return parse_ech_config(used_blob, config);
+}
+
 static void test_parse_ech_config() {
     std::cout << "[TEST] parse_ech_config..." << std::flush;
 
-    auto blob = make_test_ech_config_blob();
+    std::vector<uint8_t> blob;
     ECHConfig config;
-    bool ok = parse_ech_config(blob, config);
+    bool ok = parse_test_ech_config(config, blob);
     assert(ok);
     assert(config.version == 0xfe0d);
     assert(config.config_id == 0x42);
@@ -149,9 +209,9 @@ static void test_apply_ech_to_client_hello() {
     assert(ch[0] == 0x16);
     assert(ch[5] == 0x01);
 
-    auto blob = make_test_ech_config_blob();
+    std::vector<uint8_t> blob;
     ECHConfig config;
-    bool parsed = parse_ech_config(blob, config);
+    bool parsed = parse_test_ech_config(config, blob);
     assert(parsed);
 
     auto result = apply_ech(ch, config);
@@ -182,7 +242,10 @@ static void test_dpi_evasion_apply_ech_wrapper() {
     std::cout << "[TEST] DPIEvasion::apply_ech wrapper..." << std::flush;
 
     auto ch = make_test_client_hello("test.org");
-    auto blob = make_test_ech_config_blob();
+    ECHConfig parsed_cfg;
+    std::vector<uint8_t> blob;
+    bool parsed = parse_test_ech_config(parsed_cfg, blob);
+    assert(parsed);
 
     auto result = DPIEvasion::apply_ech(ch, blob);
     assert(result.size() >= ch.size());
@@ -194,7 +257,11 @@ static void test_dpi_evasion_apply_ech_wrapper() {
 static void test_advanced_bypass_ech_pipeline() {
     std::cout << "[TEST] AdvancedDPIBypass ECH pipeline..." << std::flush;
 
-    auto ech_blob = make_test_ech_config_blob();
+    // Use the blob layout accepted by this build's parser
+    ECHConfig parsed_cfg;
+    std::vector<uint8_t> ech_blob;
+    bool ech_parsed = parse_test_ech_config(parsed_cfg, ech_blob);
+    assert(ech_parsed);
 
     AdvancedDPIConfig cfg;
     cfg.base_config.mode = DPIMode::PROXY;
@@ -250,8 +317,11 @@ static void test_set_ech_config_runtime() {
     ok = bypass.start();
     assert(ok);
 
-    // Enable ECH at runtime
-    auto ech_blob = make_test_ech_config_blob();
+    // Enable ECH at runtime (blob layout accepted by this build's parser)
+    ECHConfig parsed_cfg;
+    std::vector<uint8_t> ech_blob;
+    bool ech_parsed = parse_test_ech_config(parsed_cfg, ech_blob);
+    assert(ech_parsed);
     bypass.set_ech_config(ech_blob);
 
     auto ch = make_test_client_hello("dynamic.example.com");

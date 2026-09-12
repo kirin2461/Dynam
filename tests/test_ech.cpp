@@ -215,7 +215,4 @@ TEST_F(ECHTest, LargePayloadEncryption) {
     EXPECT_EQ(decrypted, large_inner);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// main() is provided by gtest_main via the ncp_tests target.
