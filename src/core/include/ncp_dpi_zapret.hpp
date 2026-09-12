@@ -341,6 +341,10 @@ struct ZapretDPIOverrides {
     // Split
     int split_position = 1;
     int seqovl = 0;
+    // AUDIT-FIX: full split-position list preserved from the chain
+    // (numeric + named markers like MIDSLD) so apply_chain_overrides()
+    // can map them onto DPIConfig instead of silently dropping them.
+    std::vector<ZSplitPos> split_positions;
 
     // Fake type
     bool use_quic_fake = false;

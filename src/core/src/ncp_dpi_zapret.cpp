@@ -1,7 +1,12 @@
 #include "ncp_dpi_zapret.hpp"
+#include "ncp_hostlist.hpp"
 #include <algorithm>
 #include <cctype>
+#include <fstream>
+#include <memory>
+#include <mutex>
 #include <sstream>
+#include <unordered_map>
 
 namespace ncp {
 namespace DPI {
@@ -721,14 +726,46 @@ bool match_hostname(const std::string& sni, const std::string& pattern) {
     return false;
 }
 
-// R12-M01: Load hostlist from file (one hostname per line)
+// R12-M01/R13-FIX: Load hostlist from file (one hostname per line,
+// '#' comments allowed; matching is case-insensitive).
 std::vector<std::string> load_hostlist(const std::string& filepath) {
     std::vector<std::string> hosts;
     if (filepath.empty()) return hosts;
-    
-    // TODO(R13): Implement file loading for hostlist
-    // For now, hostlist is expected to be pre-loaded into ZapretChain
+
+    std::ifstream f(filepath);
+    if (!f.is_open()) return hosts;
+    std::string line;
+    while (std::getline(f, line)) {
+        const size_t hash = line.find('#');
+        if (hash != std::string::npos) line.erase(hash);
+        const size_t b = line.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos) continue;
+        const size_t e = line.find_last_not_of(" \t\r\n");
+        hosts.push_back(to_lower(line.substr(b, e - b + 1)));
+    }
     return hosts;
+}
+
+// Cached per-path HostlistMatcher so chain matching does not re-read and
+// re-parse the hostlist file for every packet.  A matcher that failed to
+// load (missing file) is cached with load_failed=true so we never hammer the
+// disk but can still distinguish "missing file" from "empty list".
+struct CachedHostlist {
+    std::shared_ptr<HostlistMatcher> matcher;
+    bool load_failed = false;
+};
+
+CachedHostlist get_hostlist_cached(const std::string& filepath) {
+    static std::mutex mu;
+    static std::unordered_map<std::string, CachedHostlist> cache;
+    std::lock_guard<std::mutex> lk(mu);
+    auto it = cache.find(filepath);
+    if (it != cache.end()) return it->second;
+    CachedHostlist entry;
+    entry.matcher = std::make_shared<HostlistMatcher>();
+    entry.load_failed = (entry.matcher->load(filepath) < 0);
+    cache.emplace(filepath, entry);
+    return entry;
 }
 
 } // anonymous namespace
@@ -755,45 +792,67 @@ bool chain_matches_packet(const ZapretChain& chain, ZProto proto, uint16_t dst_p
         }
     }
     
-    // R12-M01: Check SNI against hostlist patterns (wildcard support)
-    // Note: hostlist is expected to be pre-parsed into a vector of patterns
-    // TODO(R13): Add hostlist_patterns field to ZapretChain for efficiency
-    if (!chain.hostlist.empty() && !sni.empty()) {
-        // For now, treat hostlist as a single pattern or comma-separated list
-        std::istringstream ss(chain.hostlist);
-        std::string pattern;
+    // R12-M01/R13-FIX: chain.hostlist is a FILE PATH (zapret --hostlist=<file>,
+    // e.g. "list-general.txt") — match the SNI against the file CONTENTS, not
+    // against the file name.  zapret semantics: a chain with a hostlist only
+    // matches packets whose hostname is listed; packets without a hostname
+    // (empty SNI) do NOT match (previously they matched ALL traffic).
+    if (!chain.hostlist.empty()) {
         bool hostlist_match = false;
-        while (std::getline(ss, pattern, ',')) {
-            // Trim whitespace
-            size_t start = pattern.find_first_not_of(" \t\r\n");
-            size_t end = pattern.find_last_not_of(" \t\r\n");
-            if (start != std::string::npos && end != std::string::npos) {
-                pattern = pattern.substr(start, end - start + 1);
+        if (!sni.empty()) {
+            CachedHostlist hl = get_hostlist_cached(chain.hostlist);
+            if (!hl.load_failed && hl.matcher && !hl.matcher->empty()) {
+                // File loaded: exact / subdomain / *.wildcard matching
+                hostlist_match = hl.matcher->contains(sni);
+            } else if (hl.load_failed) {
+                // File not found: fall back to treating the field as an
+                // inline comma-separated pattern list (legacy behavior).
+                std::istringstream ss(chain.hostlist);
+                std::string pattern;
+                while (std::getline(ss, pattern, ',')) {
+                    size_t start = pattern.find_first_not_of(" \t\r\n");
+                    size_t end = pattern.find_last_not_of(" \t\r\n");
+                    if (start != std::string::npos && end != std::string::npos) {
+                        pattern = pattern.substr(start, end - start + 1);
+                    }
+                    if (match_hostname(sni, pattern)) {
+                        hostlist_match = true;
+                        break;
+                    }
+                }
             }
-            if (match_hostname(sni, pattern)) {
-                hostlist_match = true;
-                break;
-            }
+            // File present but empty -> nothing listed -> no match.
         }
         if (!hostlist_match) {
             return false;
         }
     }
     
-    // R12-M01: Check hostlist_exclude (negative match)
+    // R12-M01/R13-FIX: Check hostlist_exclude (negative match) — also a file
+    // path; match against the file contents with the same fallback as above.
     if (!chain.hostlist_exclude.empty() && !sni.empty()) {
-        std::istringstream ss(chain.hostlist_exclude);
-        std::string pattern;
-        while (std::getline(ss, pattern, ',')) {
-            size_t start = pattern.find_first_not_of(" \t\r\n");
-            size_t end = pattern.find_last_not_of(" \t\r\n");
-            if (start != std::string::npos && end != std::string::npos) {
-                pattern = pattern.substr(start, end - start + 1);
+        bool excluded = false;
+        CachedHostlist hl = get_hostlist_cached(chain.hostlist_exclude);
+        if (!hl.load_failed && hl.matcher && !hl.matcher->empty()) {
+            excluded = hl.matcher->contains(sni);
+        } else if (hl.load_failed) {
+            std::istringstream ss(chain.hostlist_exclude);
+            std::string pattern;
+            while (std::getline(ss, pattern, ',')) {
+                size_t start = pattern.find_first_not_of(" \t\r\n");
+                size_t end = pattern.find_last_not_of(" \t\r\n");
+                if (start != std::string::npos && end != std::string::npos) {
+                    pattern = pattern.substr(start, end - start + 1);
+                }
+                if (match_hostname(sni, pattern)) {
+                    excluded = true;
+                    break;
+                }
             }
-            if (match_hostname(sni, pattern)) {
-                // Excluded host matches — reject this chain
-                return false;
-            }
+        }
+        if (excluded) {
+            // Excluded host matches — reject this chain
+            return false;
         }
     }
     
@@ -854,6 +913,11 @@ ZapretDPIOverrides chain_to_overrides(const ZapretChain& chain) {
     }
 
     ov.seqovl = chain.split_seqovl;
+
+    // AUDIT-FIX: preserve ALL split positions (numeric + named markers such as
+    // MIDSLD) so apply_chain_overrides() can map them onto DPIConfig instead
+    // of silently dropping them.
+    ov.split_positions = chain.split_positions;
 
     // Fake type mapping
     switch (chain.fake_type) {
