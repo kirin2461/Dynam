@@ -12,6 +12,7 @@ import time
 import uuid
 import hashlib
 import platform
+import secrets
 import subprocess
 import threading
 import logging
@@ -46,7 +47,40 @@ LICENSE_FILE = Path(os.environ.get("APPDATA", str(Path.home()))) / "ncp" / "lice
 # ── Пробный период (7 дней, автовыдача при первом запуске) ──────────────────
 TRIAL_DAYS = 7
 TRIAL_FILE = Path(os.environ.get("APPDATA", str(Path.home()))) / "ncp" / "trial.json"
-TRIAL_SECRET = "ncp7d-tr14l-5ecr3t-k3y"  # anti-casual MAC key (same literal in C++)
+# Anti-casual MAC-ключ для подписи trial.json. Защищает только от
+# «casual» сброса триала, не от целенаправленного RE.
+# Порядок: env NCP_TRIAL_SECRET -> per-install случайный секрет в
+# TRIAL_SECRET_FILE (права 600, вне git) -> исторический литерал (последний
+# резерв, совпадает с C++ src/cli/main.cpp NCP_TRIAL_SECRET).
+# ВНИМАНИЕ: C++ CLI пока использует встроенный литерал; для interop
+# trial.json между CLI и панелью задайте NCP_TRIAL_SECRET обеим сторонам
+# или обновите C++ (вне зоны этого фикса).
+TRIAL_SECRET_FILE = TRIAL_FILE.parent / "trial_secret"
+TRIAL_SECRET_LEGACY = "ncp7d-tr14l-5ecr3t-k3y"
+
+
+def _load_trial_secret() -> str:
+    env = os.environ.get("NCP_TRIAL_SECRET", "").strip()
+    if env:
+        return env
+    try:
+        if TRIAL_SECRET_FILE.exists():
+            s = TRIAL_SECRET_FILE.read_text(encoding="utf-8").strip()
+            if s:
+                return s
+        TRIAL_SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        s = secrets.token_hex(32)
+        TRIAL_SECRET_FILE.write_text(s, encoding="utf-8")
+        try:
+            os.chmod(TRIAL_SECRET_FILE, 0o600)
+        except OSError:
+            pass  # Windows: POSIX-права условны, %APPDATA% и так per-user
+        return s
+    except Exception:
+        return TRIAL_SECRET_LEGACY
+
+
+TRIAL_SECRET = _load_trial_secret()
 TRIAL_MODULES = [
     "dpi_bypass", "e2e_encryption", "i2p", "geneva_basic", "geneva_full",
     "self_test", "pipeline", "dns_leak", "session_frag", "cross_layer",
@@ -1642,12 +1676,22 @@ def _activate_license(key_string: str) -> dict:
 
     try:
         pub_bytes = load_public_key_from_b64(NCP_LICENSE_PUBLIC_KEY_B64)
-        result = verify_license_key(key_string, pub_bytes)
+        # HWID-привязка: если ключ выпущен с payload["hwid"], он обязан
+        # совпасть с идентификатором текущей машины.
+        result = verify_license_key(key_string, pub_bytes,
+                                    expected_hwid=_machine_id())
     except Exception as e:
         logger.error(f"License verification error: {e}")
         return {"ok": False, "error": "Key verification error"}
 
     if result is None:
+        # Отличаем «ключ привязан к другой машине» от прочих ошибок:
+        # диагностический проход без проверки HWID (подпись всё равно
+        # проверяется, поэтому это безопасно).
+        probe = verify_license_key(key_string, pub_bytes, enforce_hwid=False)
+        if probe is not None and str(probe.get("hwid") or "").strip():
+            return {"ok": False,
+                    "error": "Ключ привязан к другому устройству (HWID mismatch)"}
         return {"ok": False, "error": "Invalid key or signature verification failed"}
 
     if result.get("expired"):
