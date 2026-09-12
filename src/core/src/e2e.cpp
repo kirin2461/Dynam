@@ -7,6 +7,10 @@
 #include <cstring>
 #include <algorithm>
 #include <fstream>
+#include <cstdio>
+#ifndef _WIN32
+#include <sys/stat.h>  // chmod for restrictive key-file permissions
+#endif
 
 // OpenSSL for X448 and ECDH_P256
 #include <openssl/evp.h>
@@ -707,18 +711,24 @@ bool E2ESession::complete_key_exchange(const std::vector<uint8_t>& response, con
         size_t hash_offset = 4 + pk_len;
 
         // For Kyber1024, skip past ciphertext to find hash
-        if (local_keys.protocol == KeyExchangeProtocol::Kyber1024 &&
-            response.size() >= hash_offset + 2) {
+        if (local_keys.protocol == KeyExchangeProtocol::Kyber1024) {
+            // A Kyber1024 response MUST carry the KEM ciphertext before the
+            // transcript hash; a truncated response cannot be verified, so
+            // fail closed instead of silently skipping the hash check.
+            if (response.size() < hash_offset + 2) return false;
             uint16_t ct_len = read_u16(response.data() + hash_offset);
             hash_offset += 2 + ct_len;
         }
 
-        if (response.size() >= hash_offset + 32) {
-            uint8_t received_hash[32];
-            std::memcpy(received_hash, response.data() + hash_offset, 32);
-            if (sodium_memcmp(received_hash, pImpl_->last_kx_request_hash.data(), 32) != 0) {
-                return false; // Hash mismatch
-            }
+        // Truncated response: the transcript hash is missing entirely.
+        // Fail closed — skipping verification here would let an attacker
+        // bypass tamper detection by simply cutting the response short.
+        if (response.size() < hash_offset + 32) return false;
+
+        uint8_t received_hash[32];
+        std::memcpy(received_hash, response.data() + hash_offset, 32);
+        if (sodium_memcmp(received_hash, pImpl_->last_kx_request_hash.data(), 32) != 0) {
+            return false; // Hash mismatch
         }
     }
 
@@ -933,7 +943,15 @@ EncryptedMessage E2ESession::encrypt(const std::vector<uint8_t>& plaintext, cons
 
     msg.ciphertext.resize(padded.size() + crypto_aead_xchacha20poly1305_ietf_ABYTES);
     unsigned long long ct_len = 0;
-    crypto_aead_xchacha20poly1305_ietf_encrypt(msg.ciphertext.data(), &ct_len, padded.data(), padded.size(), aad.data(), aad.size(), nullptr, msg.nonce.data(), message_key.data());
+    if (crypto_aead_xchacha20poly1305_ietf_encrypt(
+            msg.ciphertext.data(), &ct_len,
+            padded.data(), padded.size(),
+            aad.data(), aad.size(),
+            nullptr, msg.nonce.data(), message_key.data()) != 0) {
+        // Encryption failed — never emit a partially-filled/empty ciphertext.
+        sodium_memzero(msg.ciphertext.data(), msg.ciphertext.size());
+        throw std::runtime_error("E2ESession::encrypt: encryption failed");
+    }
     msg.ciphertext.resize(static_cast<size_t>(ct_len));
     msg.timestamp = std::chrono::system_clock::now();
 
@@ -1160,27 +1178,163 @@ void E2EManager::rotate_all_keys() {
     for (auto& [id, s] : pImpl_->sessions) if (s->is_established() && !s->is_expired()) s->rotate_keys();
 }
 
-// ... export/import implementation ...
-void E2EManager::export_keys(const std::string& filepath, const SecureString& password) {
-    std::lock_guard<std::mutex> lock(pImpl_->mutex);
-    std::vector<uint8_t> payload;
-    uint32_t count = 0;
-    for (auto& [id, s] : pImpl_->sessions) if (s->is_established() && !s->is_expired()) count++;
-    append_u32(payload, count);
-    for (auto& [id, s] : pImpl_->sessions) {
-        if (!s->is_established() || s->is_expired()) continue;
-        append_u16(payload, static_cast<uint16_t>(id.size()));
-        payload.insert(payload.end(), id.begin(), id.end());
-        auto state = s->serialize_session_state();
-        append_u32(payload, static_cast<uint32_t>(state.size()));
-        payload.insert(payload.end(), state.begin(), state.end());
+// export/import: password-encrypted session key backup.
+//
+// File format (version 1):
+//   magic[8]                                 = "NCPE2EK1"
+//   salt[crypto_pwhash_SALTBYTES]            — random, for crypto_pwhash
+//   nonce[crypto_secretbox_NONCEBYTES]       — random, for crypto_secretbox
+//   ciphertext = crypto_secretbox_easy(payload, nonce, key)
+// where key = crypto_pwhash(password, salt) and payload is the serialized
+// session list. The file is written atomically (tmp file + rename) with
+// restrictive permissions (0600 on POSIX).
+namespace {
+constexpr char kKeyExportMagic[8] = {'N','C','P','E','2','E','K','1'};
+
+bool write_file_atomic_0600(const std::string& filepath, const std::vector<uint8_t>& data) {
+    const std::string tmp = filepath + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        if (!f.is_open()) return false;
+#ifndef _WIN32
+        // Restrict permissions before writing sensitive key material.
+        ::chmod(tmp.c_str(), 0600);
+#endif
+        f.write(reinterpret_cast<const char*>(data.data()),
+                static_cast<std::streamsize>(data.size()));
+        f.flush();
+        if (!f.good()) { f.close(); std::remove(tmp.c_str()); return false; }
     }
-    // (Derivation and Encryption logic as before, but with version check)
-    // ...
+    if (std::rename(tmp.c_str(), filepath.c_str()) != 0) {
+        std::remove(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+}  // namespace
+
+void E2EManager::export_keys(const std::string& filepath, const SecureString& password) {
+    std::vector<uint8_t> payload;
+    {
+        std::lock_guard<std::mutex> lock(pImpl_->mutex);
+        uint32_t count = 0;
+        for (auto& [id, s] : pImpl_->sessions) if (s->is_established() && !s->is_expired()) count++;
+        append_u32(payload, count);
+        for (auto& [id, s] : pImpl_->sessions) {
+            if (!s->is_established() || s->is_expired()) continue;
+            append_u16(payload, static_cast<uint16_t>(id.size()));
+            payload.insert(payload.end(), id.begin(), id.end());
+            auto state = s->serialize_session_state();
+            append_u32(payload, static_cast<uint32_t>(state.size()));
+            payload.insert(payload.end(), state.begin(), state.end());
+        }
+    }
+    if (filepath.empty() || password.empty()) {
+        sodium_memzero(payload.data(), payload.size());
+        return;
+    }
+
+    // Derive encryption key from password (libsodium Argon2id).
+    uint8_t salt[crypto_pwhash_SALTBYTES];
+    randombytes_buf(salt, sizeof(salt));
+    SecureMemory key(crypto_secretbox_KEYBYTES);
+    if (crypto_pwhash(key.data(), key.size(),
+                      password.data(), password.size(),
+                      salt,
+                      crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                      crypto_pwhash_MEMLIMIT_INTERACTIVE,
+                      crypto_pwhash_ALG_DEFAULT) != 0) {
+        sodium_memzero(payload.data(), payload.size());
+        return;  // out of memory / KDF failure — do not write a partial file
+    }
+
+    uint8_t nonce[crypto_secretbox_NONCEBYTES];
+    randombytes_buf(nonce, sizeof(nonce));
+    std::vector<uint8_t> ciphertext(payload.size() + crypto_secretbox_MACBYTES);
+    if (crypto_secretbox_easy(ciphertext.data(),
+                              payload.data(), payload.size(),
+                              nonce, key.data()) != 0) {
+        sodium_memzero(payload.data(), payload.size());
+        return;
+    }
+    sodium_memzero(payload.data(), payload.size());
+
+    std::vector<uint8_t> file;
+    file.reserve(sizeof(kKeyExportMagic) + sizeof(salt) + sizeof(nonce) + ciphertext.size());
+    file.insert(file.end(), kKeyExportMagic, kKeyExportMagic + sizeof(kKeyExportMagic));
+    file.insert(file.end(), salt, salt + sizeof(salt));
+    file.insert(file.end(), nonce, nonce + sizeof(nonce));
+    file.insert(file.end(), ciphertext.begin(), ciphertext.end());
+    sodium_memzero(ciphertext.data(), ciphertext.size());
+
+    write_file_atomic_0600(filepath, file);
 }
 
 bool E2EManager::import_keys(const std::string& filepath, const SecureString& password) {
-    // ...
+    if (filepath.empty() || password.empty()) return false;
+
+    std::ifstream f(filepath, std::ios::binary);
+    if (!f.is_open()) return false;
+    std::vector<uint8_t> file((std::istreambuf_iterator<char>(f)),
+                              std::istreambuf_iterator<char>());
+    f.close();
+
+    constexpr size_t kHeader = sizeof(kKeyExportMagic) + crypto_pwhash_SALTBYTES +
+                               crypto_secretbox_NONCEBYTES;
+    if (file.size() < kHeader + crypto_secretbox_MACBYTES) return false;
+    if (std::memcmp(file.data(), kKeyExportMagic, sizeof(kKeyExportMagic)) != 0)
+        return false;  // bad magic / unsupported version
+
+    const uint8_t* salt  = file.data() + sizeof(kKeyExportMagic);
+    const uint8_t* nonce = salt + crypto_pwhash_SALTBYTES;
+    const uint8_t* ct    = nonce + crypto_secretbox_NONCEBYTES;
+    const size_t ct_len  = file.size() - kHeader;
+
+    SecureMemory key(crypto_secretbox_KEYBYTES);
+    if (crypto_pwhash(key.data(), key.size(),
+                      password.data(), password.size(),
+                      salt,
+                      crypto_pwhash_OPSLIMIT_INTERACTIVE,
+                      crypto_pwhash_MEMLIMIT_INTERACTIVE,
+                      crypto_pwhash_ALG_DEFAULT) != 0) {
+        return false;
+    }
+
+    std::vector<uint8_t> payload(ct_len - crypto_secretbox_MACBYTES);
+    if (crypto_secretbox_open_easy(payload.data(), ct, ct_len, nonce, key.data()) != 0) {
+        sodium_memzero(payload.data(), payload.size());
+        return false;  // wrong password or corrupted file
+    }
+
+    // Parse payload: u32 count, then per session: u16 id_len, id, u32 state_len, state
+    size_t pos = 0;
+    auto safe_read = [&](size_t n) { return pos + n <= payload.size(); };
+    if (!safe_read(4)) { sodium_memzero(payload.data(), payload.size()); return false; }
+    uint32_t count = read_u32(payload.data() + pos); pos += 4;
+    if (count > 65536) { sodium_memzero(payload.data(), payload.size()); return false; }
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (!safe_read(2)) { sodium_memzero(payload.data(), payload.size()); return false; }
+        uint16_t id_len = read_u16(payload.data() + pos); pos += 2;
+        if (!safe_read(id_len + 4)) { sodium_memzero(payload.data(), payload.size()); return false; }
+        std::string peer_id(reinterpret_cast<const char*>(payload.data() + pos), id_len);
+        pos += id_len;
+        uint32_t state_len = read_u32(payload.data() + pos); pos += 4;
+        if (!safe_read(state_len)) { sodium_memzero(payload.data(), payload.size()); return false; }
+        std::vector<uint8_t> state(payload.begin() + pos, payload.begin() + pos + state_len);
+        pos += state_len;
+
+        auto session = create_session(peer_id);
+        if (!session || !session->restore_session_state(state)) {
+            sodium_memzero(payload.data(), payload.size());
+            return false;
+        }
+    }
+    if (pos != payload.size()) {  // trailing garbage — reject
+        sodium_memzero(payload.data(), payload.size());
+        return false;
+    }
+    sodium_memzero(payload.data(), payload.size());
     return true;
 }
 
