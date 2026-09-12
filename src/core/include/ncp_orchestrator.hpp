@@ -319,8 +319,15 @@ private:
     // Phase 2+: TLS Fingerprint component
     ncp::TLSFingerprint tls_fingerprint_;
 
-    // Phase 4A: Advanced DPI bypass component (owned)
-    std::unique_ptr<AdvancedDPIBypass> advanced_dpi_;
+    // Phase 4A: Advanced DPI bypass component.
+    // shared_ptr + snapshot pattern: the send/receive paths copy the
+    // shared_ptr under strategy_mutex_ and then use the snapshot WITHOUT
+    // holding the lock. rebuild_advanced_dpi_() swaps in a new instance
+    // (under strategy_mutex_) and stops the old one; in-flight senders keep
+    // the old object alive via their snapshot, so stop()/reset() can no
+    // longer destroy an object that send()/send_async()/receive() is using
+    // (fixes UAF/data race on escalation-triggered rebuild).
+    std::shared_ptr<AdvancedDPIBypass> advanced_dpi_;
 
     // Phase 3D: ECH state
     ECH::ECHConfig ech_config_;
