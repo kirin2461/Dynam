@@ -68,6 +68,7 @@
 #  include <openssl/bio.h>
 #  include <openssl/ssl.h>
 #  include <openssl/err.h>
+#  include <openssl/x509v3.h>  // X509_VERIFY_PARAM_set1_host, X509_CHECK_FLAG_*
 #endif
 
 namespace ncp {
@@ -180,6 +181,9 @@ struct License::Impl {
     // Obfuscation XOR key (8 bytes, populated from HWID)
     std::array<uint8_t, 8> obf_key{};
     std::string obfuscated_data;
+    // SHA-256 digest (hex) of obfuscated_data, computed at obfuscation time.
+    // Used by check_memory_integrity() to detect in-memory tampering.
+    std::string obfuscated_digest;
 
     Impl() {
         telemetry.validation_attempts = 0;
@@ -278,12 +282,33 @@ static std::string http_post(const std::string& url,
 
         SSL* ssl = nullptr;
         BIO_get_ssl(bio, &ssl);
-        if (ssl) {
-            SSL_set_tlsext_host_name(ssl, host.c_str());  // SNI
-            SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
+        if (!ssl) { BIO_free_all(bio); SSL_CTX_free(ctx); return ""; }
+
+        SSL_set_tlsext_host_name(ssl, host.c_str());  // SNI
+        SSL_set_mode(ssl, SSL_MODE_AUTO_RETRY);
+
+        // Hostname verification: without this, any certificate chains to a
+        // trusted CA would be accepted for any host (MITM). Mirror the
+        // X509_VERIFY_PARAM_set1_host pattern used in ncp_scoped_trust.cpp.
+        {
+            X509_VERIFY_PARAM* param = SSL_get0_param(ssl);
+            if (!param) { BIO_free_all(bio); SSL_CTX_free(ctx); return ""; }
+            X509_VERIFY_PARAM_set_hostflags(param,
+                                            X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+            if (X509_VERIFY_PARAM_set1_host(param, host.c_str(), host.size()) != 1) {
+                BIO_free_all(bio);
+                SSL_CTX_free(ctx);
+                return "";
+            }
         }
 
         if (BIO_do_connect(bio) <= 0 || BIO_do_handshake(bio) <= 0) {
+            BIO_free_all(bio);
+            SSL_CTX_free(ctx);
+            return "";
+        }
+        // Fail closed if certificate chain/hostname verification failed.
+        if (SSL_get_verify_result(ssl) != X509_V_OK) {
             BIO_free_all(bio);
             SSL_CTX_free(ctx);
             return "";
@@ -858,6 +883,12 @@ bool License::is_expired(const std::chrono::system_clock::time_point& expiry_dat
 License::ValidationResult License::validate_offline(
     const std::string& hwid,
     const std::string& license_file) {
+    // Honest contract: without an imported vendor keypair this instance only
+    // holds a freshly generated random keypair, so vendor-signed licenses will
+    // (correctly) fail with INVALID_SIGNATURE. This overload is valid for
+    // licenses signed by this instance's own key (self-signed / test flow).
+    // Client-side validation of vendor licenses must use the 3-arg overload
+    // with the vendor public key — see ncp_license.hpp.
     return validate_offline(hwid, license_file, export_public_key_hex());
 }
 
@@ -1610,13 +1641,17 @@ bool License::check_code_integrity() {
 }
 
 bool License::check_memory_integrity() {
-    // Verify that the obfuscated license data (if any) hasn't changed unexpectedly
-    if (impl_->obfuscated_data.empty()) return true;
-    // Re-compute XOR and compare — if xor key is zero the data is pristine
-    const auto& key = impl_->obf_key;
-    for (size_t i = 0; i < impl_->obfuscated_data.size(); ++i) {
-        uint8_t b = static_cast<uint8_t>(impl_->obfuscated_data[i]) ^ key[i % key.size()];
-        (void)b; // just exercise; in a real scenario compare to known digest
+    // Verify that the obfuscated license data (if any) hasn't changed in memory.
+    std::lock_guard<std::mutex> lk(impl_->cache_mutex);
+    if (impl_->obfuscated_data.empty()) return true;   // nothing cached — nothing to check
+    if (impl_->obfuscated_digest.empty()) return true; // no baseline — cannot judge, don't false-positive
+
+    const std::string& obf = impl_->obfuscated_data;
+    SecureMemory mem(reinterpret_cast<const uint8_t*>(obf.data()), obf.size());
+    std::string current = to_hex(crypto_->hash_sha256(mem));
+    if (current != impl_->obfuscated_digest) {
+        invoke_tamper_callback("memory_integrity_failed");
+        return false;
     }
     return true;
 }
@@ -1643,6 +1678,9 @@ void License::obfuscate_license_data() {
     for (size_t i = 0; i < obf.size(); ++i)
         obf[i] ^= static_cast<char>(key[i % key.size()]);
     impl_->obfuscated_data = obf;
+    // Record integrity baseline: SHA-256 of the obfuscated blob.
+    SecureMemory mem(reinterpret_cast<const uint8_t*>(obf.data()), obf.size());
+    impl_->obfuscated_digest = to_hex(crypto_->hash_sha256(mem));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1824,6 +1862,7 @@ void License::clear_license_cache() {
     impl_->secure_cache.clear();
     impl_->secure_cache_hwid.clear();
     impl_->obfuscated_data.clear();
+    impl_->obfuscated_digest.clear();
     impl_->obf_key.fill(0);
     validation_cache_.clear();
 }
