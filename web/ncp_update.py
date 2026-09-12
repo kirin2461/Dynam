@@ -32,7 +32,7 @@ import subprocess
 import sys
 import tempfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 REPO = "kirin2461/Dynam"
 RELEASES_API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -48,8 +48,15 @@ _UA = {"User-Agent": "NCP-Updater/1.5"}
 
 
 def _platform_key() -> str:
-    if platform.system() == "Windows":
+    system = platform.system()
+    if system == "Windows":
         return "windows-x64"
+    if system == "Darwin":
+        # make_manifest не публикует macOS-ассеты, поэтому для этого ключа
+        # в манифесте никогда не будет записи -> check_for_update честно
+        # сообщит «нет сборки для macos-x64», а download_and_install не
+        # найдёт ассет. Главное: НИКОГДА не ставить linux-бинарь на macOS.
+        return "macos-x64"
     return "linux-x64"
 
 
@@ -212,17 +219,45 @@ def sign_asset_sha256(sha256_hex: str, private_key_b64: str) -> str:
     return base64.b64encode(priv.sign(sha256_hex.encode("ascii"))).decode("ascii")
 
 
+def _is_safe_member_name(name: str) -> bool:
+    """Reject absolute paths and ..-traversal in archive member names."""
+    if not name or name.startswith(("/", "\\")):
+        return False
+    if ":" in name:  # Windows drive letters / ADS streams
+        return False
+    p = PurePosixPath(name.replace("\\", "/"))
+    if p.is_absolute():
+        return False
+    return ".." not in p.parts
+
+
 def _extract_archive(archive: Path, dest: Path) -> Path:
     """Extract a release archive; return the directory holding app files."""
     dest.mkdir(parents=True, exist_ok=True)
     if archive.name.lower().endswith(".zip"):
         import zipfile
         with zipfile.ZipFile(archive) as z:
+            for info in z.infolist():
+                if not _is_safe_member_name(info.filename):
+                    raise ValueError(
+                        f"unsafe path in archive: {info.filename!r}")
             z.extractall(dest)
     else:
         import tarfile
         with tarfile.open(archive) as t:
-            t.extractall(dest)
+            try:
+                # Python 3.12+: встроенная защита (пути, ссылки, dev-файлы).
+                t.extractall(dest, filter="data")
+            except TypeError:
+                # Старые версии Python: ручная проверка членов архива.
+                for m in t.getmembers():
+                    if not _is_safe_member_name(m.name):
+                        raise ValueError(
+                            f"unsafe path in archive: {m.name!r}")
+                    if m.issym() or m.islnk() or m.isdev():
+                        raise ValueError(
+                            f"unsafe member in archive: {m.name!r}")
+                t.extractall(dest)
     entries = [p for p in dest.iterdir()]
     if len(entries) == 1 and entries[0].is_dir():
         return entries[0]
