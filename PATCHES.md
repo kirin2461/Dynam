@@ -139,4 +139,36 @@ cmake --build . && ctest --output-on-failure
 
 ---
 
+## Phase R16 — External Audit Wave (2026-09-12)
+
+**Goal**: Fix every finding of the external audit (~90K LOC): **11 critical, ~20 high, ~14 minor**.
+
+Six parallel fix branches (`fix/zone-a` .. `fix/zone-f`) merged into `integration`,
+plus one additional e2e hardening commit.
+
+- **Zone A** (DPI core): WinDivert `stop()` deadlock, SNI offset misinterpretation
+  (hostlist/selective desync dead), zapret hostlist loading, half-close propagation,
+  NFQUEUE driver-mode honest failure, WFP inject (WDK) fixes.
+- **Zone B** (security/crypto): X509 UAF, license online-validation hostname check
+  (MITM closed), e2e key export/import (Argon2id + secretbox), ECH HPKE, unified
+  SPKI pin format, `ratchet_dh` strict key sizes.
+- **Zone C** (networking): DoH async counter underflow, real Windows DoH
+  implementation, DoH cert pinning fail-closed, ConnectionMonitor thread safety,
+  i2p garlic-layer fail-closed.
+- **Zone D** (orchestrator/CLI): `advanced_dpi_` UAF/race (shared_ptr snapshot),
+  thread pool `ActiveGuard`, Geneva strategy actually applied, real cover traffic.
+- **Zone E** (web/CI): `ncp_tray.py` SyntaxError, HWID license enforcement,
+  `ncp_update.py` path traversal, `git_full_push.py` removed, `TRIAL_SECRET` from env.
+- **Zone F** (tests): 8 orphaned test files wired in (43 TESTs), integration
+  CMake harness rewritten, stub tests filled — **812 tests passed, 8/8 ctest green**, TSan clean.
+
+`AUDIT.md` items #1/#2 (`apply_tcp_split`, `process_tls_client_hello`) marked
+**OBSOLETE** — functions no longer exist under those names; modern analogues
+(`send_with_fragmentation`, `find_sni_hostname_offset`) are bounds-checked and
+fuzzed (2.5M iterations, ASan/UBSan).
+
+**Full details**: [r16.md](r16.md)
+
+---
+
 For questions, open a [GitHub Issue](https://github.com/kirin2461/Dynam/issues).
