@@ -338,8 +338,13 @@ void ProtocolOrchestrator::start(OrchestratorSendCallback send_cb) {
 void ProtocolOrchestrator::stop() {
     running_.store(false);
     flow_shaper_.stop();
-    if (advanced_dpi_) {
-        advanced_dpi_->stop();
+    std::shared_ptr<AdvancedDPIBypass> dpi;
+    {
+        std::lock_guard<std::mutex> lock(strategy_mutex_);
+        dpi = advanced_dpi_;
+    }
+    if (dpi) {
+        dpi->stop();
     }
     if (health_thread_.joinable()) {
         health_thread_.join();
@@ -421,11 +426,20 @@ std::vector<OrchestratedPacket> ProtocolOrchestrator::send(
     OrchestratorStrategy snapshot;
     std::vector<uint8_t> data = prepare_payload(payload, snapshot);
 
+    // Snapshot the advanced_dpi_ shared_ptr under the lock; the object can be
+    // swapped out by rebuild_advanced_dpi_() at any time (escalation path).
+    // Using the snapshot keeps the instance alive for the whole pipeline.
+    std::shared_ptr<AdvancedDPIBypass> dpi;
+    {
+        std::lock_guard<std::mutex> lock(strategy_mutex_);
+        dpi = advanced_dpi_;
+    }
+
     // Step 2.5: Advanced DPI processing (segmentation/obfuscation)
     // process_outgoing() may split data into multiple segments for evasion.
     // Each segment is then individually flow-shaped or sent directly.
-    if (snapshot.enable_advanced_dpi && advanced_dpi_ && advanced_dpi_->is_running()) {
-        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+    if (snapshot.enable_advanced_dpi && dpi && dpi->is_running()) {
+        auto segments = dpi->process_outgoing(data.data(), data.size());
         if (!segments.empty() && segments.size() > 1) {
             // Multiple segments -- each becomes an OrchestratedPacket
             std::vector<OrchestratedPacket> result;
@@ -489,9 +503,17 @@ void ProtocolOrchestrator::send_async(const std::vector<uint8_t>& payload) {
     OrchestratorStrategy snapshot;
     std::vector<uint8_t> data = prepare_payload(payload, snapshot);
 
+    // See send(): snapshot the shared_ptr so a concurrent rebuild cannot
+    // destroy the instance mid-call.
+    std::shared_ptr<AdvancedDPIBypass> dpi;
+    {
+        std::lock_guard<std::mutex> lock(strategy_mutex_);
+        dpi = advanced_dpi_;
+    }
+
     // Step 2.5: Advanced DPI processing for async path
-    if (snapshot.enable_advanced_dpi && advanced_dpi_ && advanced_dpi_->is_running()) {
-        auto segments = advanced_dpi_->process_outgoing(data.data(), data.size());
+    if (snapshot.enable_advanced_dpi && dpi && dpi->is_running()) {
+        auto segments = dpi->process_outgoing(data.data(), data.size());
         if (!segments.empty()) {
             for (auto& seg : segments) {
                 if (snapshot.enable_flow_shaping && flow_shaper_.is_running()) {
@@ -611,8 +633,15 @@ std::vector<uint8_t> ProtocolOrchestrator::receive(
     // Step 4.5: Advanced DPI deobfuscation (Phase 4)
     // Reverse any obfuscation applied by the sender's advanced DPI pipeline.
     // Must happen after mimicry unwrap but before adversarial unpad.
-    if (snapshot.enable_advanced_dpi && advanced_dpi_ && advanced_dpi_->is_running()) {
-        auto deobf = advanced_dpi_->process_incoming(data.data(), data.size());
+    // Snapshot the shared_ptr (see send()): rebuild_advanced_dpi_() may swap
+    // the instance concurrently; the snapshot keeps it alive during the call.
+    std::shared_ptr<AdvancedDPIBypass> dpi;
+    {
+        std::lock_guard<std::mutex> lock(strategy_mutex_);
+        dpi = advanced_dpi_;
+    }
+    if (snapshot.enable_advanced_dpi && dpi && dpi->is_running()) {
+        auto deobf = dpi->process_incoming(data.data(), data.size());
         if (!deobf.empty()) {
             data = std::move(deobf);
         }
@@ -861,7 +890,9 @@ void ProtocolOrchestrator::init_advanced_dpi_() {
         return;
     }
 
-    advanced_dpi_ = std::make_unique<AdvancedDPIBypass>();
+    // Build and configure the new instance BEFORE publishing it into
+    // advanced_dpi_, so readers never observe a half-initialized object.
+    auto dpi = std::make_shared<AdvancedDPIBypass>();
 
     AdvancedDPIConfig adv_cfg;
     adv_cfg.base_config.target_host = "";
@@ -900,30 +931,37 @@ void ProtocolOrchestrator::init_advanced_dpi_() {
         adv_cfg.ech_config_list = config_.ech_config_data;
     }
 
-    advanced_dpi_->set_tls_fingerprint(&tls_fingerprint_);
+    dpi->set_tls_fingerprint(&tls_fingerprint_);
 
-    if (advanced_dpi_->initialize(adv_cfg)) {
-        advanced_dpi_->set_tls_fingerprint(&tls_fingerprint_);
+    if (dpi->initialize(adv_cfg)) {
+        dpi->set_tls_fingerprint(&tls_fingerprint_);
         if (ech_initialized_) {
-            advanced_dpi_->set_ech_config(config_.ech_config_data);
+            dpi->set_ech_config(config_.ech_config_data);
         }
-        advanced_dpi_->start();
+        dpi->start();
+        advanced_dpi_ = std::move(dpi);
     } else {
         advanced_dpi_.reset();
     }
 }
 
 void ProtocolOrchestrator::rebuild_advanced_dpi_() {
+    // Caller holds strategy_mutex_. Detach the current instance first; the
+    // shared_ptr keeps it alive while in-flight send()/receive() snapshots
+    // still reference it, so stop() below cannot destroy an object in use.
+    std::shared_ptr<AdvancedDPIBypass> old = advanced_dpi_;
+
     if (current_strategy_.enable_advanced_dpi) {
-        if (advanced_dpi_) {
-            advanced_dpi_->stop();
-        }
         init_advanced_dpi_();
     } else {
-        if (advanced_dpi_) {
-            advanced_dpi_->stop();
-            advanced_dpi_.reset();
-        }
+        advanced_dpi_.reset();
+    }
+
+    // Stop the old instance only after the swap. Destruction happens once the
+    // last snapshot is released (AdvancedDPIBypass::~AdvancedDPIBypass calls
+    // stop() again, which is idempotent).
+    if (old) {
+        old->stop();
     }
 }
 
@@ -942,8 +980,16 @@ const TrafficMimicry& ProtocolOrchestrator::mimicry() const { return mimicry_; }
 ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() { return tls_fingerprint_; }
 const ncp::TLSFingerprint& ProtocolOrchestrator::tls_fingerprint() const { return tls_fingerprint_; }
 
-AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() { return advanced_dpi_.get(); }
-const AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() const { return advanced_dpi_.get(); }
+AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() {
+    // NOTE: the returned raw pointer is only valid until the next strategy
+    // rebuild — callers must not cache it across apply_strategy()/escalation.
+    std::lock_guard<std::mutex> lock(strategy_mutex_);
+    return advanced_dpi_.get();
+}
+const AdvancedDPIBypass* ProtocolOrchestrator::advanced_dpi() const {
+    std::lock_guard<std::mutex> lock(strategy_mutex_);
+    return advanced_dpi_.get();
+}
 
 const ECH::ECHConfig& ProtocolOrchestrator::ech_config() const { return ech_config_; }
 bool ProtocolOrchestrator::is_ech_initialized() const { return ech_initialized_; }

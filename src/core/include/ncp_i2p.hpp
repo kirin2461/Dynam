@@ -168,6 +168,9 @@ private:
     void maintain_tunnel_pool();
     
     // Encryption helpers
+    // FAIL-CLOSED: returns an empty vector on any error (bad key, failed
+    // DH/AEAD). Callers MUST check for empty and must NOT send `data`
+    // unencrypted in that case.
     std::vector<uint8_t> encrypt_garlic_layer(const std::vector<uint8_t>& data,
                                               const std::string& hop_pubkey);
     std::vector<uint8_t> create_session_tag();

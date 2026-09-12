@@ -216,8 +216,23 @@ bool NetworkManager::test_connection(const std::string& host, int port, int time
     tv.tv_usec = (timeout_ms % 1000) * 1000;
 
     int result = select(0, nullptr, &writefds, nullptr, &tv);
+    if (result <= 0) {
+        closesocket(sock);
+        return false;
+    }
+    // select() writability only means the connect() finished — not that it
+    // succeeded. ECONNREFUSED also signals POLLOUT/writable, so check the
+    // actual outcome via SO_ERROR.
+    int so_error = 0;
+    int opt_len = sizeof(so_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR,
+                   reinterpret_cast<char*>(&so_error), &opt_len) != 0 ||
+        so_error != 0) {
+        closesocket(sock);
+        return false;
+    }
     closesocket(sock);
-    return result > 0;
+    return true;
 #else
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock < 0) return false;
@@ -240,9 +255,22 @@ bool NetworkManager::test_connection(const std::string& host, int port, int time
     pfd.fd = sock;
     pfd.events = POLLOUT;
     int result = poll(&pfd, 1, timeout_ms);
-
+    if (result <= 0 || !(pfd.revents & POLLOUT)) {
+        close(sock);
+        return false;
+    }
+    // POLLOUT alone is not success: a refused connection signals
+    // POLLOUT|POLLERR. Read the pending socket error to learn the real
+    // outcome of the non-blocking connect().
+    int so_error = 0;
+    socklen_t opt_len = sizeof(so_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &opt_len) != 0 ||
+        so_error != 0) {
+        close(sock);
+        return false;
+    }
     close(sock);
-    return result > 0 && (pfd.revents & POLLOUT);
+    return true;
 #endif
 }
 

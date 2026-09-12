@@ -37,6 +37,11 @@ public:
         // Layer 3: Traffic obfuscation
         bool enable_constant_rate_traffic = true;
         size_t cover_traffic_rate_kbps = 128;
+        // Cover traffic destinations ("host:port", UDP). Random-padding
+        // datagrams are sent to these addresses at cover_traffic_rate_kbps.
+        // Empty (default) = cover traffic stays OFF: start_cover_traffic()
+        // then logs that it is disabled instead of pretending to work.
+        std::vector<std::string> cover_traffic_targets;
         bool enable_traffic_morphing = true;
         bool randomize_packet_sizes = true;
         

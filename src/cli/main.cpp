@@ -102,10 +102,15 @@ struct AppState {
     std::unique_ptr<DPI::GenevaEngine> geneva;
     std::unique_ptr<DPI::GenevaGA> geneva_ga;
     // Hot-apply slot: latest winning strategy from the GA. Guarded by mutex
-    // because on_new_best fires from the GA evolution thread.
+    // because on_new_best fires from the GA evolution thread. The GA thread
+    // only stores the strategy and sets geneva_best_pending; the main run
+    // loop picks it up and applies it to dpi_bypass via update_config()
+    // (dpi_bypass is owned by the main thread — applying from the loop
+    // avoids racing module teardown on shutdown).
     std::mutex geneva_best_mutex;
     DPI::GenevaStrategy geneva_best_strategy;
     bool geneva_best_valid = false;
+    std::atomic<bool> geneva_best_pending{false};
     std::unique_ptr<CovertChannelManager> covert_channel;
     // Transport modules
     std::unique_ptr<ProtocolRotationSchedule> protocol_rotation;
@@ -1342,6 +1347,67 @@ static bool trial_check_or_issue(const std::string& path) {
     return true;
 }
 
+// ── Geneva GA → DPI bypass translation ─────────────────────────────────────
+// Maps the actions of a Geneva strategy (GA winner) onto DPIConfig knobs so
+// the evolved strategy actually shapes intercepted traffic via
+// DPIBypass::update_config(). Actions without a DPIConfig equivalent
+// (DROP, TAMPER_FLAGS) are skipped and reported in `skipped`.
+static DPI::DPIConfig geneva_to_dpi_config(DPI::DPIConfig cfg,
+                                           const DPI::GenevaStrategy& strat,
+                                           std::string* skipped = nullptr) {
+    std::vector<int> frag_positions;
+    for (const auto& step : strat.steps) {
+        switch (step.action) {
+            case DPI::GenevaAction::FRAGMENT:
+                cfg.enable_tcp_split = true;
+                if (step.param > 0) {
+                    frag_positions.push_back(
+                        static_cast<int>(std::min<size_t>(step.param, 64)));
+                }
+                break;
+            case DPI::GenevaAction::TAMPER_TTL:
+                // Geneva "tamper TTL" == send a fake copy with a low TTL
+                cfg.enable_fake_packet = true;
+                cfg.fake_ttl = step.param > 0
+                    ? static_cast<int>(std::min<size_t>(step.param, 8)) : 1;
+                break;
+            case DPI::GenevaAction::TAMPER_CHECKSUM:
+                cfg.enable_fake_packet = true;
+                cfg.fake_fooling |= 1;  // badsum
+                break;
+            case DPI::GenevaAction::TAMPER_SEQ:
+                cfg.enable_fake_packet = true;
+                cfg.fake_fooling |= 2;  // badseq
+                break;
+            case DPI::GenevaAction::DUPLICATE:
+                // Closest DPIConfig analog: repeat the fake packet N times
+                cfg.enable_fake_packet = true;
+                cfg.fake_repeats = step.param > 0
+                    ? static_cast<int>(std::min<size_t>(step.param, 8)) : 2;
+                break;
+            case DPI::GenevaAction::DISORDER:
+                cfg.enable_disorder = true;
+                break;
+            case DPI::GenevaAction::DROP:
+            case DPI::GenevaAction::TAMPER_FLAGS:
+                if (skipped) {
+                    if (!skipped->empty()) *skipped += ", ";
+                    *skipped += step.description.empty()
+                        ? (step.action == DPI::GenevaAction::DROP ? "drop" : "tamper-flags")
+                        : step.description;
+                }
+                break;
+        }
+    }
+    if (frag_positions.size() > 1) {
+        cfg.enable_multi_layer_split = true;
+        cfg.split_positions = frag_positions;
+    } else if (frag_positions.size() == 1) {
+        cfg.split_position = frag_positions[0];
+    }
+    return cfg;
+}
+
 void handle_run(const std::vector<std::string>& args) {
     try {
         // ── License gate ──────────────────────────────────────────────────────
@@ -1867,8 +1933,9 @@ void handle_run(const std::vector<std::string>& args) {
                                                  "has nothing to learn from (fitness pinned to 0).\n"
                                                  "[!] What to do: use an IP-literal target, e.g.\n"
                                                  "[!]   --geneva-target 162.159.138.232:443\n"
-                                                 "[!] or restore DNS first (ncp dns set 1.1.1.1 / "
-                                                 "web UI Network section).\n"
+                                                 "[!] or restore DNS first (set 1.1.1.1 in OS network "
+                                                 "settings; `ncp run` applies working resolvers "
+                                                 "automatically unless --no-spoof is used).\n"
                                               << std::flush;
                                     if (g_app.geneva_ga) g_app.geneva_ga->request_stop();
                                 }
@@ -1883,9 +1950,13 @@ void handle_run(const std::vector<std::string>& args) {
                             g_app.geneva_best_strategy = best.strategy;
                             g_app.geneva_best_valid = true;
                         }
-                        std::cout << "[+] New best Geneva strategy applied for future connections: "
+                        // Hand over to the main loop, which applies the
+                        // strategy to dpi_bypass via update_config().
+                        g_app.geneva_best_pending.store(true);
+                        std::cout << "[+] New best Geneva strategy found: "
                                   << best.strategy.description
-                                  << " (fitness=" << best.fitness.score() << ")\n" << std::flush;
+                                  << " (fitness=" << best.fitness.score()
+                                  << ") — queuing for DPI bypass apply\n" << std::flush;
                     });
                     g_app.geneva_ga->initialize_population();
                     g_app.geneva_ga->inject_preset_strategies();
@@ -2116,6 +2187,37 @@ void handle_run(const std::vector<std::string>& args) {
         // Wait loop
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
+
+            // Hot-apply the latest Geneva GA winner to the DPI bypass.
+            // Runs on the main thread: dpi_bypass is owned here, so there is
+            // no race with module teardown, and update_config() is safe to
+            // call while the interception backend is running.
+            if (g_app.geneva_best_pending.exchange(false)) {
+                DPI::GenevaStrategy best;
+                {
+                    std::lock_guard<std::mutex> lk(g_app.geneva_best_mutex);
+                    best = g_app.geneva_best_strategy;
+                }
+                if (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) {
+                    std::string skipped;
+                    auto new_cfg = geneva_to_dpi_config(
+                        g_app.dpi_bypass->get_config(), best, &skipped);
+                    if (g_app.dpi_bypass->update_config(new_cfg)) {
+                        std::cout << "[+] Geneva best strategy applied to DPI bypass: "
+                                  << best.description;
+                        if (!skipped.empty())
+                            std::cout << " (no DPI equivalent, skipped: " << skipped << ")";
+                        std::cout << "\n" << std::flush;
+                    } else {
+                        std::cerr << "[!] Failed to apply Geneva strategy to DPI bypass\n";
+                    }
+                } else {
+                    std::cerr << "[!] Geneva best strategy NOT applied: DPI bypass is not "
+                                 "running (passive/proxy-less mode). Strategy: "
+                              << best.description << "\n" << std::flush;
+                }
+            }
+
             if (!stats_file.empty() && ++stats_tick >= 2) {
                 stats_tick = 0;
                 write_module_stats_json(stats_file);
@@ -3044,6 +3146,13 @@ void handle_dpi(const std::vector<std::string>& args) {
     std::string preset = get_option(args, "--preset");
     if (!preset.empty()) {
         DPI::DPIPreset p = DPI::preset_from_string(preset);
+        if (p == DPI::DPIPreset::NONE) {
+            // Same behaviour as `ncp proxy --preset`: fail loudly instead of
+            // silently "applying" an unrecognized preset name.
+            std::cerr << "[!] Unknown preset: " << preset
+                      << ". Valid: tspu, beeline, mts, megafon, tele2, mobile, auto\n";
+            return;
+        }
         DPI::apply_preset(p, config);
         std::cout << "[+] Applied preset: " << preset << "\n";
     }
@@ -4070,7 +4179,11 @@ void handle_reality(const std::vector<std::string>& args) {
         std::cerr << "[!] WSAStartup failed\n";
         return;
     }
-    ncp::RealityServer server(cfg);
+    // Shared ownership: detached client threads capture this shared_ptr, so
+    // the server object stays alive until the last connection thread exits —
+    // even after Ctrl-C unwinds this function's stack frame (fixes UAF where
+    // detached threads dereferenced the destroyed stack object).
+    auto server = std::make_shared<ncp::RealityServer>(cfg);
 
     const SOCKET listen_fd = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (listen_fd == INVALID_SOCKET) {
@@ -4102,9 +4215,9 @@ void handle_reality(const std::vector<std::string>& args) {
         int clen = sizeof(caddr);
         const SOCKET cfd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
         if (cfd == INVALID_SOCKET) continue;
-        std::thread([&server, cfd]() {
+        std::thread([server, cfd]() {
             const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
-            server.handle_client(cfd, now);
+            server->handle_client(cfd, now);
             ::shutdown(cfd, SD_BOTH);
             ::closesocket(cfd);
         }).detach();
@@ -4112,7 +4225,8 @@ void handle_reality(const std::vector<std::string>& args) {
     ::closesocket(listen_fd);
     std::cout << "[*] Reality server stopped\n";
 #else
-    ncp::RealityServer server(cfg);
+    // Shared ownership for detached client threads (see _WIN32 branch above).
+    auto server = std::make_shared<ncp::RealityServer>(cfg);
 
     const int listen_fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd < 0) {
@@ -4141,9 +4255,9 @@ void handle_reality(const std::vector<std::string>& args) {
         socklen_t clen = sizeof(caddr);
         const int cfd = ::accept(listen_fd, reinterpret_cast<sockaddr*>(&caddr), &clen);
         if (cfd < 0) continue;
-        std::thread([&server, cfd]() {
+        std::thread([server, cfd]() {
             const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
-            server.handle_client(cfd, now);
+            server->handle_client(cfd, now);
             ::shutdown(cfd, SHUT_RDWR);
             ::close(cfd);
         }).detach();
