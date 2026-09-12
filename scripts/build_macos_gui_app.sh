@@ -36,6 +36,25 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
+# ─── Qt6 prefix ──────────────────────────────────────────────────────────────
+# CI (.github/workflows/macos.yml) exports QT_PREFIX=$(brew --prefix qt@6).
+# qt@6 is keg-only, so /opt/homebrew/opt/qt and /opt/homebrew/bin/macdeployqt
+# usually do NOT exist — honour QT_PREFIX and fall back to `brew --prefix qt@6`.
+QT_PREFIX="${QT_PREFIX:-}"
+if [[ -z "${QT_PREFIX}" ]]; then
+    QT_PREFIX="$(brew --prefix qt@6 2>/dev/null || true)"
+fi
+if [[ -z "${QT_PREFIX}" || ! -d "${QT_PREFIX}" ]]; then
+    echo "error: Qt6 not found; set QT_PREFIX (e.g. export QT_PREFIX=$(brew --prefix qt@6))" >&2
+    exit 1
+fi
+MACDEPLOYQT="${QT_PREFIX}/bin/macdeployqt"
+if [[ ! -x "${MACDEPLOYQT}" ]]; then
+    echo "error: macdeployqt not found/executable at ${MACDEPLOYQT} (QT_PREFIX=${QT_PREFIX})" >&2
+    exit 1
+fi
+echo "==> Using QT_PREFIX=${QT_PREFIX}"
+
 # ─── Build GUI (Qt6) ─────────────────────────────────────────────────────────
 echo "==> Configuring GUI build"
 cmake -S "${PROJECT_ROOT}" -B "${GUI_BUILD}" \
@@ -45,7 +64,7 @@ cmake -S "${PROJECT_ROOT}" -B "${GUI_BUILD}" \
     -DENABLE_CLI=OFF \
     -DENABLE_TESTS=OFF \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
-    -DCMAKE_PREFIX_PATH=/opt/homebrew/opt/qt > /dev/null
+    -DCMAKE_PREFIX_PATH="${QT_PREFIX}" > /dev/null
 echo "==> Building GUI"
 cmake --build "${GUI_BUILD}" --config Release --parallel
 
@@ -104,9 +123,21 @@ cat > "${STAGE}/Dynam.app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Qt frameworks + dylib path rewriting
-echo "==> macdeployqt"
-/opt/homebrew/bin/macdeployqt "${STAGE}/Dynam.app" 2>&1 | grep -vE "Cannot resolve|using QList" | tail -5 || true
+# Qt frameworks + dylib path rewriting. Без macdeployqt бандл получается
+# без Qt и не запустится у пользователя — это фатальная ошибка, а не warning.
+echo "==> macdeployqt (${MACDEPLOYQT})"
+set +o pipefail
+"${MACDEPLOYQT}" "${STAGE}/Dynam.app" 2>&1 | grep -vE "Cannot resolve|using QList" | tail -5
+md_status=${PIPESTATUS[0]}
+set -o pipefail
+if [[ ${md_status} -ne 0 ]]; then
+    echo "error: macdeployqt failed (exit ${md_status}) — Qt frameworks NOT bundled" >&2
+    exit 1
+fi
+if [[ ! -d "${STAGE}/Dynam.app/Contents/Frameworks" ]]; then
+    echo "error: macdeployqt finished but ${STAGE}/Dynam.app has no bundled Qt Frameworks" >&2
+    exit 1
+fi
 
 # Sign in /tmp where xattrs aren't reintroduced
 ditto --noextattr --norsrc "${STAGE}/Dynam.app" "${FINAL}"
