@@ -24,6 +24,12 @@
     #include <ws2tcpip.h>
     #pragma comment(lib, "ws2_32.lib")
     #define CLOSE_SOCKET closesocket
+    // POSIX-style shutdown() how constants for Winsock (SD_* equivalents)
+    #ifndef SHUT_RD
+        #define SHUT_RD   SD_RECEIVE
+        #define SHUT_WR   SD_SEND
+        #define SHUT_RDWR SD_BOTH
+    #endif
     #ifdef HAVE_WINDIVERT
         #include <windivert.h>
     #endif
@@ -63,6 +69,25 @@ std::string to_lower_copy(const std::string& s) {
 }
 
 } // namespace
+
+/**
+ * @brief Offset (within a hostname) of the middle of the second-level domain.
+ *
+ * zapret "midsld" marker: for "www.example.com" the SLD is "example" and the
+ * split point is its middle. Returns 0 when the hostname is empty/degenerate.
+ */
+static size_t midsld_offset_in_hostname(const std::string& host) {
+    if (host.empty()) return 0;
+    const size_t last_dot = host.rfind('.');
+    size_t sld_start = 0;
+    if (last_dot != std::string::npos && last_dot > 0) {
+        const size_t prev_dot = host.rfind('.', last_dot - 1);
+        sld_start = (prev_dot == std::string::npos) ? 0 : prev_dot + 1;
+    }
+    const size_t sld_end = (last_dot == std::string::npos) ? host.size() : last_dot;
+    if (sld_end <= sld_start) return 0;
+    return sld_start + (sld_end - sld_start) / 2;
+}
 
 // Using libsodium CSPRNG (randombytes_uniform) instead of mt19937
 
@@ -313,6 +338,25 @@ public:
 
         if (ov.split_position > 0) cfg.split_position = ov.split_position;
 
+        // AUDIT-FIX: preserve the chain's split positions instead of dropping
+        // them. Numeric markers go into cfg.split_positions (multi-split);
+        // the named "midsld" marker maps to split_at_midsld so windivert_loop
+        // splits in the middle of the SLD (zapret --split-pos=...,midsld).
+        for (const auto& sp : ov.split_positions) {
+            if (sp.type == ZSplitPosType::NUMERIC) {
+                if (sp.offset > 0) {
+                    cfg.split_positions.push_back(sp.offset);
+                }
+            } else if (sp.type == ZSplitPosType::MIDSLD) {
+                cfg.split_at_midsld = true;
+            }
+            // Other named markers (host/endhost/sld+N/sniext) are not
+            // supported by the windivert_loop splitter; skip them.
+        }
+        if (!cfg.split_positions.empty() || cfg.split_at_midsld) {
+            cfg.enable_multi_layer_split = true;
+        }
+
         if (ov.ttl > 0) cfg.fake_ttl = ov.ttl;
         if (ov.auto_ttl) {
             cfg.enable_autottl = true;
@@ -380,18 +424,21 @@ public:
             if (tls_fingerprint_) {
                 advanced_bypass_->set_tls_fingerprint(tls_fingerprint_.get());
             }
-#if defined(_WIN32)
-            // On Windows DRIVER mode the main WinDivert loop handles all
-            // packet interception.  Do NOT start the Advanced child's own
-            // base_bypass (which would open a second WinDivert handle on the
-            // same filter and break connectivity).  Advanced is used only for
-            // its process_outgoing()/process_incoming() transformations.
-            if (config.mode != DPIMode::DRIVER) {
+            // AUDIT-FIX (double-bind): when the outer DPIBypass runs its own
+            // interception loop, the inner base DPIBypass must NOT start its
+            // own listener:
+            //  - DRIVER (Windows): the main WinDivert loop handles all packet
+            //    interception; a second WinDivert handle on the same filter
+            //    breaks connectivity.
+            //  - PROXY: the outer proxy_listen_loop already binds listen_port
+            //    (default 8881); the inner base_bypass would bind the SAME
+            //    port -> bind failure / accept race, and advanced transforms
+            //    may silently never be applied.
+            // In both modes Advanced is used only via
+            // process_outgoing()/process_incoming() transformations.
+            if (config.mode != DPIMode::DRIVER && config.mode != DPIMode::PROXY) {
                 advanced_bypass_->start();
             }
-#else
-            advanced_bypass_->start();
-#endif
             advanced_enabled_ = true;
             log("Advanced DPI bypass layer initialized with " +
                 std::to_string(adv_config.techniques.size()) + " techniques" +
@@ -647,6 +694,12 @@ public:
             std::lock_guard<std::mutex> lock(active_threads_mutex_);
             active_thread_ids_.erase(t_cs_id);
         }
+        // AUDIT-FIX (half-close): the client->server direction has finished;
+        // make sure the reverse pipe is awake even if propagate_close() in the
+        // pipe was skipped (e.g. thread creation races). shutdown() is
+        // idempotent for our purposes and does not destroy the socket.
+        propagate_close(server_sock);
+        propagate_close(client_sock);
         if (t_sc.joinable()) {
             t_sc.join();
             std::lock_guard<std::mutex> lock(active_threads_mutex_);
@@ -655,6 +708,17 @@ public:
 
         CLOSE_SOCKET(client_sock);
         CLOSE_SOCKET(server_sock);
+    }
+
+    // AUDIT-FIX (half-close): when one pipe direction hits EOF, shut down the
+    // OTHER socket in both directions.  The SHUT_WR half propagates the FIN to
+    // the peer; the SHUT_RD half makes the sibling pipe's poll()/recv() wake
+    // up immediately instead of lingering until global stop() — otherwise
+    // connection threads and active_connections_ slots (limit 256) leak
+    // whenever a client closes but the server keeps the connection open.
+    static void propagate_close(SOCKET other_sock) {
+        if (other_sock == INVALID_SOCKET) return;
+        ::shutdown(other_sock, SHUT_RDWR);  // errors ignored (may already be closed)
     }
 
     // FIX #39: pipe_server_to_client -- simple relay
@@ -708,6 +772,9 @@ public:
                 send_raw(client_sock, buffer.data(), static_cast<size_t>(received));
             }
         }
+        // EOF/error from server: wake pipe_client_to_server (it polls
+        // client_sock) so the connection terminates promptly.
+        propagate_close(client_sock);
     }
 
     // FIX #39: cfg_snap passed by value -- no concurrent access to shared config
@@ -831,6 +898,9 @@ public:
             }
         }
 #endif
+        // EOF/error from client: wake pipe_server_to_client (it polls
+        // server_sock) and propagate FIN upstream so the server closes too.
+        propagate_close(server_sock);
     }
 
     // FIX #39: 5-arg send_with_fragmentation with cfg snapshot
@@ -882,6 +952,20 @@ public:
 
         if (sni_offset > 0 && static_cast<size_t>(sni_offset) < len) {
             first_len = static_cast<size_t>(sni_offset);
+            // zapret "midsld": split in the MIDDLE of the second-level domain
+            // so the SLD itself is broken across TCP segments (per-packet SNI
+            // string matching fails even if the DPI reassembles at SNI start).
+            if (cfg.split_at_midsld && sni_offset >= 2) {
+                uint16_t host_len = (static_cast<uint16_t>(data[sni_offset - 2]) << 8) |
+                                    static_cast<uint16_t>(data[sni_offset - 1]);
+                if (static_cast<size_t>(sni_offset) + host_len <= len) {
+                    std::string host(reinterpret_cast<const char*>(data + sni_offset),
+                                     host_len);
+                    size_t mid = static_cast<size_t>(sni_offset) +
+                                 midsld_offset_in_hostname(host);
+                    if (mid > first_len && mid < len) first_len = mid;
+                }
+            }
         } else if (cfg.split_position > 0 &&
                    static_cast<size_t>(cfg.split_position) < len) {
             first_len = static_cast<size_t>(cfg.split_position);
@@ -909,7 +993,13 @@ public:
                 // R11-FIX-02: Saturating add to prevent overflow
                 size_t jitter = randombytes_uniform(3);
                 size_t current_frag = base_frag_size;
-                if (jitter < remaining - offset - base_frag_size) {
+                // AUDIT-FIX: the old condition `jitter < remaining - offset -
+                // base_frag_size` underflowed to ~2^64 whenever the unsent
+                // tail was smaller than base_frag_size (size_t arithmetic),
+                // so jitter was effectively always applied.  Only add jitter
+                // when there is room for more than the base fragment.
+                if (remaining - offset > base_frag_size &&
+                    jitter < remaining - offset - base_frag_size) {
                     current_frag += jitter;
                 }
                 current_frag = std::min(current_frag, remaining - offset);
@@ -2048,13 +2138,19 @@ public:
             std::string sni_hostname;
             if (is_client_hello && tcp_payload && payload_len > 0) {
                 int sni_off = find_sni_hostname_offset(tcp_payload, payload_len);
-                if (sni_off > 0 && static_cast<size_t>(sni_off) < payload_len) {
-                    // Extract hostname from ClientHello
-                    uint16_t host_len = (static_cast<uint16_t>(tcp_payload[sni_off]) << 8) |
-                                        static_cast<uint16_t>(tcp_payload[sni_off + 1]);
-                    if (static_cast<size_t>(sni_off + 2 + host_len) <= payload_len) {
+                // AUDIT-FIX: find_sni_hostname_offset() returns the offset of
+                // the hostname ITSELF (see its contract and test_dpi.cpp), so
+                // the 2-byte length field is immediately BEFORE it.  The old
+                // code read host_len from the first two hostname characters
+                // (e.g. "ex" -> 25976) -> bounds check always failed ->
+                // sni_hostname stayed empty -> hostlist/zapret matching dead.
+                if (sni_off >= 2 && static_cast<size_t>(sni_off) < payload_len) {
+                    uint16_t host_len = (static_cast<uint16_t>(tcp_payload[sni_off - 2]) << 8) |
+                                        static_cast<uint16_t>(tcp_payload[sni_off - 1]);
+                    if (host_len > 0 &&
+                        static_cast<size_t>(sni_off) + host_len <= payload_len) {
                         sni_hostname.assign(
-                            reinterpret_cast<const char*>(tcp_payload + sni_off + 2),
+                            reinterpret_cast<const char*>(tcp_payload + sni_off),
                             host_len);
                     }
                 }
@@ -2127,11 +2223,35 @@ public:
             uint8_t orig_ttl = ip_header->TTL;
             uint32_t orig_seq = ntohl(tcp_header->SeqNum);
 
+            // zapret --dpi-desync-autottl: derive the fake-packet TTL from the
+            // observed hop count (estimated as <nearest common initial TTL> -
+            // <observed TTL>) plus autottl_delta, clamped to
+            // [autottl_min, autottl_max].  Without this enable_autottl and
+            // autottl_delta were write-only config fields.
+            uint8_t eff_fake_ttl =
+                static_cast<uint8_t>(std::min(std::max(effective_cfg.fake_ttl, 1), 255));
+            if (effective_cfg.enable_autottl) {
+                int init_ttl = (orig_ttl <= 64) ? 64 : (orig_ttl <= 128) ? 128 : 255;
+                int hops = init_ttl - static_cast<int>(orig_ttl);
+                int t = hops + effective_cfg.autottl_delta;
+                t = std::max(effective_cfg.autottl_min,
+                             std::min(effective_cfg.autottl_max, t));
+                eff_fake_ttl = static_cast<uint8_t>(std::min(std::max(t, 1), 255));
+            }
+
             // --- Determine split positions ---
             // Default: split at position 1 (before SNI)
             int sni_off = -1;
             if (effective_cfg.split_at_sni) {
                 sni_off = find_sni_hostname_offset(tcp_payload, payload_len);
+            }
+
+            // zapret "midsld": split in the middle of the second-level domain
+            // of the SNI hostname (audit: split_at_midsld was never read here).
+            size_t midsld_pos = 0;
+            if (effective_cfg.split_at_midsld && sni_off > 0 && !sni_hostname.empty()) {
+                size_t m = static_cast<size_t>(sni_off) + midsld_offset_in_hostname(sni_hostname);
+                if (m > 0 && m < payload_len) midsld_pos = m;
             }
 
             // Build list of split positions (sorted, unique, within range)
@@ -2142,6 +2262,9 @@ public:
                 if (sni_off > 1 && static_cast<size_t>(sni_off) < payload_len) {
                     splits.push_back(static_cast<size_t>(sni_off));
                 }
+                if (midsld_pos > 0) {
+                    splits.push_back(midsld_pos);
+                }
                 // Add any user-specified positions
                 for (int p : effective_cfg.split_positions) {
                     if (p > 0 && static_cast<size_t>(p) < payload_len) {
@@ -2151,7 +2274,9 @@ public:
             } else {
                 // Single split
                 size_t sp = 0;
-                if (sni_off > 0 && static_cast<size_t>(sni_off) < payload_len) {
+                if (midsld_pos > 0) {
+                    sp = midsld_pos;
+                } else if (sni_off > 0 && static_cast<size_t>(sni_off) < payload_len) {
                     sp = static_cast<size_t>(sni_off);
                 } else if (effective_cfg.split_position > 0 &&
                            static_cast<size_t>(effective_cfg.split_position) < payload_len) {
@@ -2252,7 +2377,7 @@ public:
                 PWINDIVERT_IPHDR ip = (PWINDIVERT_IPHDR)pkt.data();
                 ip->Length = htons(static_cast<uint16_t>(total));
                 ip->Id = htons(MAGIC_IP_ID);
-                ip->TTL = static_cast<uint8_t>(effective_cfg.fake_ttl); // low TTL: dies before server
+                ip->TTL = eff_fake_ttl; // low TTL (or autottl-derived): dies before server
 
                 PWINDIVERT_TCPHDR tcp = (PWINDIVERT_TCPHDR)(pkt.data() + ip_hdr_len);
                 tcp->SeqNum = htonl(seq_num);
@@ -2539,15 +2664,19 @@ public:
     }
 
     void cleanup_windivert() {
+        // Close BOTH handles BEFORE joining any thread: WinDivertClose() is
+        // what unblocks the WinDivertRecv() calls in windivert_loop and
+        // kill_switch_loop (running=false alone does NOT wake a blocked
+        // recv).  Joining while the handle is still open deadlocks.
+        if (wd_handle_ && wd_handle_ != INVALID_HANDLE_VALUE) {
+            WinDivertClose(wd_handle_);  // unblocks windivert_loop Recv
+            wd_handle_ = nullptr;
+        }
         if (wd_ks_handle_ && wd_ks_handle_ != INVALID_HANDLE_VALUE) {
             WinDivertClose(wd_ks_handle_);  // unblocks kill_switch_loop Recv
             wd_ks_handle_ = nullptr;
         }
         if (ks_thread_.joinable()) ks_thread_.join();
-        if (wd_handle_ && wd_handle_ != INVALID_HANDLE_VALUE) {
-            WinDivertClose(wd_handle_);
-            wd_handle_ = nullptr;
-        }
     }
 #endif // HAVE_WINDIVERT && _WIN32
 
@@ -2642,7 +2771,8 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.fragment_offset = 2;
         config.enable_fake_packet = false;
         config.enable_disorder = false;
-        config.enable_oob_data = false;
+        // enable_oob_data intentionally not set: OOB/URG injection is not
+        // implemented anywhere in the packet path (dead preset flag).
         break;
     case DPIPreset::RUNET_STRONG:
 #ifdef _WIN32
@@ -2657,7 +2787,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.fragment_offset = 1;
         config.enable_fake_packet = true;
         config.enable_disorder = true;
-        config.enable_oob_data = true;
         config.enable_noise = true;
         config.noise_size = 256;
         config.enable_host_case = true;
@@ -2686,7 +2815,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.enable_disorder = true;  // send segments in reverse order
         config.disorder_delay_ms = 0;
         config.enable_multi_layer_split = true; // split at pos 1 AND midsld
-        config.enable_oob_data = false;
         config.enable_noise = false;
         config.enable_host_case = false;
         config.fake_host.clear();
@@ -2722,7 +2850,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.disorder_delay_ms = 0;
         config.enable_multi_layer_split = true;
         config.enable_reverse_frag = true;  // KEY: reverse fragment order
-        config.enable_oob_data = false;
         config.enable_noise = false;
         config.enable_host_case = false;
         config.fake_host.clear();
@@ -2756,7 +2883,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.disorder_delay_ms = 0;
         config.enable_multi_layer_split = true;
         config.enable_reverse_frag = false;
-        config.enable_oob_data = false;
         config.enable_noise = false;
         config.enable_host_case = false;
         config.fake_host.clear();
@@ -2769,7 +2895,8 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         break;
 
     case DPIPreset::MEGAFON_MOBILE:
-        // Megafon mobile: uses OOB data + split + fake.
+        // Megafon mobile: split + fake + autottl (OOB data is not implemented
+        // in the packet path, so the old OOB flag was dropped from presets).
         // Based on: Megafon reports with multi-split strategies,
         //   "-n google.com -Qr ... -s1:5+sm" patterns.
 #ifdef _WIN32
@@ -2790,7 +2917,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.disorder_delay_ms = 0;
         config.enable_multi_layer_split = true;
         config.enable_reverse_frag = false;
-        config.enable_oob_data = true;   // OOB data effective on Megafon
         config.enable_noise = false;
         config.enable_host_case = false;
         config.fake_host.clear();
@@ -2823,7 +2949,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.disorder_delay_ms = 0;
         config.enable_multi_layer_split = true;
         config.enable_reverse_frag = false;
-        config.enable_oob_data = false;
         config.enable_noise = false;
         config.enable_host_case = false;
         config.fake_host.clear();
@@ -2859,7 +2984,6 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
         config.disorder_delay_ms = 0;
         config.enable_multi_layer_split = true;
         config.enable_reverse_frag = true;
-        config.enable_oob_data = false;
         config.enable_noise = false;
         config.enable_host_case = false;
         config.fake_host.clear();
@@ -2971,13 +3095,18 @@ bool DPIBypass::initialize(const DPIConfig& config) {
 bool DPIBypass::start() {
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     if (impl_->snapshot_config().mode == DPIMode::DRIVER) {
-        if (!impl_->init_nfqueue()) return false;
-        impl_->running = true;
-        impl_->intercept_active = true;
-        impl_->worker_thread = std::thread(&Impl::nfqueue_loop, impl_.get());
-        impl_->log("DPI bypass started (driver mode via nfqueue, queue=" +
-                  std::to_string(impl_->snapshot_config().nfqueue_num) + ")");
-        return true;
+        // AUDIT-FIX (CRIT): the NFQUEUE backend was a silent stub —
+        // nfq_callback() only bumped a counter and issued NF_ACCEPT without
+        // any desync, and init_nfqueue() never installed the iptables NFQUEUE
+        // rule (compare NFQUEUEBackend in ncp_packet_interceptor.cpp), so
+        // DRIVER mode "ran" while doing absolutely nothing.  Fail the start
+        // honestly instead of pretending to work.  The init/loop/cleanup
+        // helpers are kept for a future real implementation.
+        impl_->log("ERROR: DRIVER mode (NFQUEUE) is not functional in this "
+                   "build: no iptables NFQUEUE rule is installed and the queue "
+                   "callback performs no desync. Use PROXY mode (`ncp proxy`) "
+                   "instead.");
+        return false;
     }
 #endif
 
@@ -3071,6 +3200,16 @@ void DPIBypass::stop() {
     if (impl_->advanced_bypass_) {
         impl_->advanced_bypass_->stop();
     }
+
+#if defined(HAVE_WINDIVERT) && defined(_WIN32)
+    // AUDIT-FIX (CRIT, stop() deadlock in DRIVER mode): close the WinDivert
+    // handles BEFORE joining worker_thread.  worker_thread is blocked in
+    // WinDivertRecv(wd_handle_); running=false does not wake it, only
+    // WinDivertClose() does.  The old order (join, then cleanup_windivert
+    // below) deadlocked stop() forever.
+    impl_->cleanup_windivert();
+#endif
+
     if (impl_->worker_thread.joinable()) impl_->worker_thread.join();
 
     // HIGH-7: Wait for all active proxy connection threads to finish before
@@ -3101,9 +3240,6 @@ void DPIBypass::stop() {
         }
     }
 
-#if defined(HAVE_WINDIVERT) && defined(_WIN32)
-    impl_->cleanup_windivert();
-#endif
 #if defined(HAVE_NFQUEUE) && !defined(_WIN32)
     impl_->cleanup_nfqueue();
 #endif

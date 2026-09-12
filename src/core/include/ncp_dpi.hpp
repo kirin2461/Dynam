@@ -75,6 +75,9 @@ struct DPIConfig {
     int fake_ttl = 1;
 
     bool enable_disorder = true;
+    // DEPRECATED / unimplemented: OOB (URG pointer) data injection is not
+    // implemented in any packet path. The field is kept only for
+    // serialization/backward compatibility; no preset sets it anymore.
     bool enable_oob_data = false;
     int disorder_delay_ms = 15;
 
