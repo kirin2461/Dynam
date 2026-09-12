@@ -45,7 +45,7 @@ jobs:
 
       - name: Run tests
         working-directory: build
-        run: ctest --output-on-failure -C ${{ matrix.build_type }}
+        run: ctest --output-on-failure -C ${{ matrix.build_type }} -LE network
 
   build-macos:
     runs-on: macos-latest
@@ -74,7 +74,7 @@ jobs:
         working-directory: build
         run: |
           set +e
-          ctest --output-on-failure -C Release 2>&1 | tee test_output.log
+           ctest --output-on-failure -C Release -LE network 2>&1 | tee test_output.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             last_run=$(grep "\[ RUN" test_output.log | tail -1 | sed -e "s/%/%25/g" -e "s/\\r//g")
@@ -172,7 +172,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          ctest -C Release --output-on-failure 2>&1 | tee test_output.log
+           ctest -C Release --output-on-failure -LE network 2>&1 | tee test_output.log
           rc=${PIPESTATUS[0]}
           if [ "$rc" -ne 0 ]; then
             # Pinpoint a fastfail/abort crash: the last "[ RUN ]" line in
