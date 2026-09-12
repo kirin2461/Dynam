@@ -288,6 +288,11 @@ size_t pub_len = 0;
 SecureMemory ratchet_dh(const KeyPair& local_kp, const std::vector<uint8_t>& remote_pub) {
     switch (local_kp.protocol) {
         case KeyExchangeProtocol::X448: {
+            // Strict group-size check: an X448 peer key is exactly 56 bytes.
+            // Accepting anything else here is protocol confusion.
+            if (remote_pub.size() != 56) {
+                throw std::runtime_error("X448 ratchet DH: peer public key must be 56 bytes");
+            }
             auto local_pkey = UniqueEVP_PKEY(EVP_PKEY_new_raw_private_key(
                 EVP_PKEY_X448, nullptr, local_kp.private_key.data(), local_kp.private_key.size()));
             auto peer_pkey = UniqueEVP_PKEY(EVP_PKEY_new_raw_public_key(
@@ -319,6 +324,18 @@ SecureMemory ratchet_dh(const KeyPair& local_kp, const std::vector<uint8_t>& rem
             return out;
         }
         default: {
+            // Strict group-size check: crypto_scalarmult reads exactly 32
+            // bytes from both inputs — without this check it would silently
+            // use the first 32 bytes of an oversized (e.g. 56-byte X448)
+            // peer key, a protocol-confusion bug. Reject instead.
+            if (remote_pub.size() != crypto_scalarmult_BYTES) {
+                throw std::runtime_error(
+                    "X25519 ratchet DH: peer public key must be exactly 32 bytes");
+            }
+            if (local_kp.private_key.size() != crypto_scalarmult_SCALARBYTES) {
+                throw std::runtime_error(
+                    "X25519 ratchet DH: local private key must be exactly 32 bytes");
+            }
             SecureMemory out(crypto_scalarmult_BYTES);
             if (crypto_scalarmult(out.data(), local_kp.private_key.data(), remote_pub.data()) != 0) {
                 throw std::runtime_error("X25519 ratchet DH failed");
