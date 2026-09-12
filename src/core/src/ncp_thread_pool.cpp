@@ -27,17 +27,23 @@ ThreadPool::ThreadPool(size_t num_threads) {
                     tasks_.pop();
                 }
                 ++active_;
+                // RAII guard: exactly one decrement per increment, even when
+                // the task throws. A previous version also decremented in the
+                // catch handlers, underflowing active_ (atomic<size_t>) to
+                // SIZE_MAX on the first exception and permanently corrupting
+                // the active_threads() metric.
+                struct ActiveGuard {
+                    std::atomic<size_t>& counter;
+                    ~ActiveGuard() { --counter; }
+                } guard{active_};
                 try {
                     task();
                 } catch (const std::exception& e) {
-                    --active_;
                     // R16-H01: Use proper logging instead of std::cerr
                     NCP_LOG_ERROR(std::string("[ThreadPool] Task exception: ") + e.what());
                 } catch (...) {
-                    --active_;
                     NCP_LOG_ERROR("[ThreadPool] Task unknown exception");
                 }
-                --active_;
             }
         });
     }
