@@ -45,6 +45,11 @@
 #include <dirent.h>
 #include <glob.h>
 #include <pwd.h>
+// Cover traffic (real UDP padding datagrams)
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 // macOS has no fdatasync — fsync gives the strongest guarantee available.
 #if defined(__APPLE__) && !defined(fdatasync)
 #  define fdatasync(fd) fsync(fd)
@@ -154,6 +159,8 @@ struct ParanoidMode::Impl {
     // Written by stop_cover_traffic() on the owner thread while the worker
     // reads it every loop iteration — must be atomic (TSan: data race).
     std::atomic<bool> cover_traffic_running{false};
+    // Bytes of cover traffic actually put on the wire (sendto() successes).
+    std::atomic<uint64_t> cover_bytes_sent{0};
     std::chrono::system_clock::time_point last_rotation;
     std::vector<std::string> bridge_nodes;
     bool kill_switch_active = false;
@@ -553,11 +560,25 @@ std::vector<ParanoidMode::HopChain> ParanoidMode::get_active_chains() const {
 void ParanoidMode::start_cover_traffic() {
     if (impl_->cover_traffic_running) return;
 
+    // Honest behaviour: without configured cover destinations there is
+    // nowhere to send padding to. Refuse to run a fake generator that only
+    // burns CPU on random bytes which are then thrown away.
+    if (layered_config_.cover_traffic_targets.empty()) {
+        std::cerr << "[Paranoid] Cover traffic NOT started: no cover targets configured "
+                     "(LayeredConfig::cover_traffic_targets is empty). "
+                     "Set cover_traffic_targets (\"host:port\") to enable real UDP "
+                     "padding traffic.\n";
+        return;
+    }
+
     impl_->cover_traffic_running = true;
     impl_->cover_traffic_thread = std::thread([this]() {
         while (impl_->cover_traffic_running) {
             inject_dummy_traffic(layered_config_.cover_traffic_rate_kbps);
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+            // Sleep in short slices so stop_cover_traffic() joins promptly.
+            for (int i = 0; i < 20 && impl_->cover_traffic_running; ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
         }
     });
 }
@@ -568,15 +589,91 @@ void ParanoidMode::stop_cover_traffic() {
         impl_->cover_traffic_thread.join();
     }
 }
-            
-void ParanoidMode::inject_dummy_traffic(size_t bytes_per_second) {
-    if (bytes_per_second == 0) return;
-    
-    size_t chunk_size = std::min(bytes_per_second, static_cast<size_t>(1024));
-    std::vector<uint8_t> dummy_data(chunk_size);
-    randombytes_buf(dummy_data.data(), dummy_data.size());
-    
-    // In real implementation: send to cover traffic socket
+
+namespace {
+
+// One-time Winsock initialization for the cover-traffic sender (no-op on POSIX).
+bool cover_net_init() {
+#ifdef _WIN32
+    static const bool ok = [] {
+        WSADATA wsa;
+        return ::WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+    }();
+    return ok;
+#else
+    return true;
+#endif
+}
+
+} // namespace
+
+void ParanoidMode::inject_dummy_traffic(size_t rate_kbps) {
+    if (rate_kbps == 0) return;
+
+    const auto& targets = layered_config_.cover_traffic_targets;
+    if (targets.empty()) return;  // nowhere to send — never fake the work
+    if (!cover_net_init()) return;
+
+    // kbps -> bytes/sec, budget shared evenly across targets
+    const size_t bps_total = (std::max)(static_cast<size_t>(1), (rate_kbps * 1024) / 8);
+    const size_t bps = (std::max)(static_cast<size_t>(1), bps_total / targets.size());
+    const size_t chunk = (std::min)(bps, static_cast<size_t>(1200));  // under common MTU
+    const size_t chunks = (bps + chunk - 1) / chunk;
+
+    std::vector<uint8_t> payload(chunk);
+
+    for (const auto& target : targets) {
+        const auto colon = target.find_last_of(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= target.size()) continue;
+        const std::string host = target.substr(0, colon);
+        const std::string port_str = target.substr(colon + 1);
+        int port = 0;
+        try {
+            port = std::stoi(port_str);
+        } catch (...) {
+            continue;
+        }
+        if (port <= 0 || port > 65535) continue;
+
+        addrinfo hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_DGRAM;
+        addrinfo* res = nullptr;
+        if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0) continue;
+
+        for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+#ifdef _WIN32
+            SOCKET fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd == INVALID_SOCKET) continue;
+#else
+            int fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+            if (fd < 0) continue;
+#endif
+            for (size_t c = 0; c < chunks; ++c) {
+                // Fresh CSPRNG padding per datagram (constant content is
+                // itself a fingerprint).
+                randombytes_buf(payload.data(), payload.size());
+                const auto sent = ::sendto(
+                    fd,
+                    reinterpret_cast<const char*>(payload.data()),
+#ifdef _WIN32
+                    static_cast<int>(payload.size()),
+#else
+                    payload.size(),
+#endif
+                    0, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
+                if (sent > 0) {
+                    impl_->cover_bytes_sent.fetch_add(static_cast<uint64_t>(sent));
+                }
+            }
+#ifdef _WIN32
+            ::closesocket(fd);
+#else
+            ::close(fd);
+#endif
+        }
+        ::freeaddrinfo(res);
+    }
 }
 
 void ParanoidMode::enable_constant_rate_shaping(size_t rate_kbps) {
@@ -1281,6 +1378,7 @@ double ParanoidMode::estimate_anonymity_bits() {
 ParanoidMode::ParanoidStats ParanoidMode::get_statistics() const {
     ParanoidStats stats;
     stats.circuits_created = impl_->active_circuits.size();
+    stats.cover_traffic_sent = impl_->cover_bytes_sent.load();
     return stats;
 }
 
