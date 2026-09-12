@@ -282,8 +282,15 @@ private:
             ebtables_setup_ = false;
         }
         if (vlan_created_ && !config_.vlan_interface_name.empty()) {
-            delete_vlan_interface(config_.vlan_interface_name);
-            vlan_created_ = false;
+            // Only clear the flag when the interface was actually deleted;
+            // otherwise a failed delete would silently leak the VLAN
+            // interface (and lose track of it for future cleanup).
+            if (delete_vlan_interface(config_.vlan_interface_name)) {
+                vlan_created_ = false;
+            } else if (parent_) {
+                parent_->log("[L2Stealth] Warning: failed to delete VLAN interface '" +
+                             config_.vlan_interface_name + "' — it may leak");
+            }
         }
     }
 
@@ -442,23 +449,43 @@ public:
         };
         return safe_exec(up_argv) == 0;
 #elif defined(_WIN32)
-        // Windows: PowerShell VLAN management
+        // Windows: VLANs are created as NICs on an existing LBFO team.
+        // `parent` is the LBFO team name (the parent interface on Windows),
+        // `vlan_name` is the desired name for the new team NIC.
         if (vlan_id == 0 || vlan_id > 4094) return false;
+        if (parent.empty()) return false;
 
-        // Validate parent for safety
-        for (char c : parent) {
-            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                  (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_')) {
-                return false;
+        // Validate names for safety: they are interpolated into a PowerShell
+        // single-quoted string, so reject quotes/semicolons etc. outright.
+        auto valid_ps_name = [](const std::string& s) {
+            if (s.empty() || s.size() > 64) return false;
+            for (char c : s) {
+                if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                      (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_')) {
+                    return false;
+                }
             }
-        }
+            return true;
+        };
+        if (!valid_ps_name(parent)) return false;
+        if (!vlan_name.empty() && !valid_ps_name(vlan_name)) return false;
 
-        std::string vid_str = std::to_string(vlan_id);
+        // Create the team NIC, then rename it to the requested vlan_name.
+        // Add-NetLbfoTeamNic auto-names the interface "<Team> - VLAN <id>";
+        // -PassThru lets us rename the exact object we just created.
+        std::string cmd =
+            "$ErrorActionPreference='Stop'; "
+            "$t = Add-NetLbfoTeamNic -Team '" + parent + "' -VlanID " +
+            std::to_string(vlan_id) + " -PassThru -Confirm:$false; ";
+        if (!vlan_name.empty()) {
+            cmd += "Rename-NetAdapter -Name $t.Name -NewName '" + vlan_name + "'";
+        } else {
+            cmd += "$t | Out-Null";
+        }
 
         const char* argv[] = {
             "powershell", "-NoProfile", "-NonInteractive", "-Command",
-            "Add-NetLbfoTeamNic", "-Team", "NIC_Team",
-            "-VlanID", vid_str.c_str(),
+            cmd.c_str(),
             nullptr
         };
         return safe_exec(argv) == 0;
@@ -477,7 +504,28 @@ public:
         };
         return safe_exec(argv) == 0;
 #elif defined(_WIN32)
-        return false; // Not implemented
+        // Inverse of create_vlan_interface(): locate the LBFO team NIC by its
+        // adapter name and remove it from its team.
+        if (vlan_name.empty() || vlan_name.size() > 64) return false;
+        for (char c : vlan_name) {
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == ' ' || c == '-' || c == '_')) {
+                return false;
+            }
+        }
+
+        std::string cmd =
+            "$ErrorActionPreference='Stop'; "
+            "$nic = Get-NetLbfoTeamNic | Where-Object { $_.Name -eq '" + vlan_name + "' }; "
+            "if ($null -eq $nic) { exit 1 }; "
+            "$nic | Remove-NetLbfoTeamNic -Confirm:$false";
+
+        const char* argv[] = {
+            "powershell", "-NoProfile", "-NonInteractive", "-Command",
+            cmd.c_str(),
+            nullptr
+        };
+        return safe_exec(argv) == 0;
 #else
         return false;
 #endif
