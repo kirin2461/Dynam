@@ -1,11 +1,35 @@
 #include "../src/core/include/ncp_l3_stealth.hpp"
+// Winsock2 bootstrap + <ws2tcpip.h> on _WIN32 (provides inet_pton,
+// htons/htonl/ntohs there); no-op include elsewhere.
+#include "../src/core/include/ncp_winsock_init.hpp"
 #include <cassert>
 #include <iostream>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <sodium.h>
 
+// TEST_CHECK: like assert(), but ALWAYS evaluated. Plain assert() is
+// compiled out under NDEBUG (Release), which silently disabled every check
+// in this file and dropped side-effecting calls (initialize()/start()),
+// letting tests run against uninitialized objects.
+#define TEST_CHECK(cond)                                                     \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::cerr << "FAIL: " << __FILE__ << ":" << __LINE__             \
+                      << ": check failed: " << #cond << std::endl;           \
+            std::exit(1);                                                    \
+        }                                                                    \
+    } while (0)
+
+// TEST_SKIP: graceful skip for environment/feature-dependent prerequisites
+// (ctest maps exit code 77 to SKIP via SKIP_RETURN_CODE).
+[[noreturn]] static void test_skip(const std::string& reason) {
+    std::cout << "SKIP: " << reason << std::endl;
+    std::exit(77);
+}
+
 #ifdef _WIN32
-#include <winsock2.h>
 #pragma comment(lib, "ws2_32.lib")
 #else
 #include <arpa/inet.h>
@@ -153,7 +177,7 @@ static void test_ipid_randomization() {
     cfg.enable_mss_clamping = false;
     cfg.enable_tcp_timestamp_normalization = false;
     cfg.enable_df_normalization = false;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     auto pkt = build_ipv4_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 443, 64, 0x1234, 1460, false);
     uint16_t original_id;
@@ -174,10 +198,10 @@ static void test_ipid_randomization() {
         std::memcpy(&id, &p[4], 2);
         if (id != original_id) { changed = true; break; }
     }
-    assert(changed);
+    TEST_CHECK(changed);
 
     auto stats = stealth.get_stats();
-    assert(stats.ipid_rewritten.load() > 0);
+    TEST_CHECK(stats.ipid_rewritten.load() > 0);
 
     std::cout << "PASS" << std::endl;
 }
@@ -193,7 +217,7 @@ static void test_ipid_per_destination() {
     cfg.enable_mss_clamping = false;
     cfg.enable_tcp_timestamp_normalization = false;
     cfg.enable_df_normalization = false;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     // Send two packets to same dest — IDs should be sequential
     auto p1 = build_ipv4_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 443, 64, 0, 1460, false);
@@ -208,8 +232,8 @@ static void test_ipid_per_destination() {
     id2 = ntohs(id2);
 
     // id2 should be slightly greater than id1 (increment 1-8)
-    assert(id2 > id1);
-    assert((id2 - id1) <= 8);
+    TEST_CHECK(id2 > id1);
+    TEST_CHECK((id2 - id1) <= 8);
 
     std::cout << "PASS" << std::endl;
 }
@@ -225,17 +249,17 @@ static void test_ttl_normalization() {
     cfg.enable_mss_clamping = false;
     cfg.enable_tcp_timestamp_normalization = false;
     cfg.enable_df_normalization = false;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     // Packet with TTL=64 (Linux default)
     auto pkt = build_ipv4_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 443, 64, 0, 1460, false);
     stealth.process_ipv4_packet(pkt);
 
     // Should be normalized to 128 (Windows 10)
-    assert(pkt[8] == 128);
+    TEST_CHECK(pkt[8] == 128);
 
     auto stats = stealth.get_stats();
-    assert(stats.ttl_normalized.load() > 0);
+    TEST_CHECK(stats.ttl_normalized.load() > 0);
 
     std::cout << "PASS" << std::endl;
 }
@@ -252,7 +276,7 @@ static void test_mss_clamping() {
     cfg.clamp_only_syn = true;
     cfg.enable_tcp_timestamp_normalization = false;
     cfg.enable_df_normalization = false;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     // SYN with MSS=1460 — should be clamped to 1400
     auto pkt = build_ipv4_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 443, 64, 0, 1460, false);
@@ -263,14 +287,14 @@ static void test_mss_clamping() {
     uint16_t new_mss;
     std::memcpy(&new_mss, &pkt[mss_value_off], 2);
     new_mss = ntohs(new_mss);
-    assert(new_mss == 1400);
+    TEST_CHECK(new_mss == 1400);
 
     // MSS=1300 should NOT be clamped (already below target)
     auto pkt2 = build_ipv4_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 443, 64, 0, 1300, false);
     stealth.process_ipv4_packet(pkt2);
     std::memcpy(&new_mss, &pkt2[mss_value_off], 2);
     new_mss = ntohs(new_mss);
-    assert(new_mss == 1300);
+    TEST_CHECK(new_mss == 1300);
 
     std::cout << "PASS" << std::endl;
 }
@@ -286,7 +310,7 @@ static void test_tcp_timestamp_normalization() {
     cfg.enable_tcp_timestamp_normalization = true;
     cfg.randomize_timestamp_offset = true;
     cfg.enable_df_normalization = false;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     auto pkt = build_ipv4_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 443, 64, 0, 1460, true);
 
@@ -295,7 +319,7 @@ static void test_tcp_timestamp_normalization() {
     uint32_t original_ts;
     std::memcpy(&original_ts, &pkt[48], 4); // 40+6+2 = 48 (kind+len+TSval)
     original_ts = ntohl(original_ts);
-    assert(original_ts == 123456789);
+    TEST_CHECK(original_ts == 123456789);
 
     stealth.process_ipv4_packet(pkt);
 
@@ -303,10 +327,10 @@ static void test_tcp_timestamp_normalization() {
     std::memcpy(&new_ts, &pkt[48], 4);
     new_ts = ntohl(new_ts);
     // Should be different (normalized to our clock + offset)
-    assert(new_ts != 123456789);
+    TEST_CHECK(new_ts != 123456789);
 
     auto stats = stealth.get_stats();
-    assert(stats.timestamps_normalized.load() > 0);
+    TEST_CHECK(stats.timestamps_normalized.load() > 0);
 
     std::cout << "PASS" << std::endl;
 }
@@ -321,7 +345,7 @@ static void test_ipv6_flow_label() {
     cfg.enable_ttl_normalization = false;
     cfg.enable_mss_clamping = false;
     cfg.enable_tcp_timestamp_normalization = false;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     auto pkt = build_ipv6_tcp_syn(12345, 443, 64, 0xABCDE);
 
@@ -344,7 +368,7 @@ static void test_ipv6_flow_label() {
         new_label = vtf & 0xFFFFF;
         changed = (new_label != 0xABCDE);
     }
-    assert(changed);
+    TEST_CHECK(changed);
 
     // Same 5-tuple should get same label (per_flow_label=true)
     auto pkt3 = build_ipv6_tcp_syn(12345, 443, 64, 0x11111);
@@ -358,10 +382,10 @@ static void test_ipv6_flow_label() {
     vtf3 = ntohl(vtf3) & 0xFFFFF;
     vtf4 = ntohl(vtf4) & 0xFFFFF;
     // Same ports → same flow hash → same label
-    assert(vtf3 == vtf4);
+    TEST_CHECK(vtf3 == vtf4);
 
     auto stats = stealth.get_stats();
-    assert(stats.flow_labels_randomized.load() > 0);
+    TEST_CHECK(stats.flow_labels_randomized.load() > 0);
 
     std::cout << "PASS" << std::endl;
 }
@@ -379,7 +403,7 @@ static void test_fragmentation() {
     cfg.enable_fragment_normalization = true;
     cfg.enforce_mtu = 100; // Small MTU for testing
     cfg.clear_df_for_tunneled = true;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     // Build a larger packet (200+ bytes)
     std::vector<uint8_t> big_pkt(250, 0);
@@ -396,21 +420,21 @@ static void test_fragmentation() {
     auto fragments = stealth.fragment_ipv4(big_pkt, 100);
 
     // Should produce multiple fragments
-    assert(fragments.size() > 1);
+    TEST_CHECK(fragments.size() > 1);
 
     // Verify first fragment has MF flag
     uint16_t f0_frag;
     std::memcpy(&f0_frag, &fragments[0][6], 2);
     f0_frag = ntohs(f0_frag);
-    assert((f0_frag & 0x2000) != 0); // MF set
-    assert((f0_frag & 0x4000) == 0); // DF cleared
+    TEST_CHECK((f0_frag & 0x2000) != 0); // MF set
+    TEST_CHECK((f0_frag & 0x4000) == 0); // DF cleared
 
     // Last fragment should NOT have MF
     auto& last = fragments.back();
     uint16_t fl_frag;
     std::memcpy(&fl_frag, &last[6], 2);
     fl_frag = ntohs(fl_frag);
-    assert((fl_frag & 0x2000) == 0); // No MF
+    TEST_CHECK((fl_frag & 0x2000) == 0); // No MF
 
     std::cout << "PASS" << std::endl;
 }
@@ -426,7 +450,7 @@ static void test_df_normalization() {
     cfg.enable_tcp_timestamp_normalization = false;
     cfg.enable_df_normalization = true;
     cfg.force_df = true;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     // Packet WITHOUT DF set
     auto pkt = build_ipv4_tcp_syn("10.0.0.1", "10.0.0.2", 12345, 443, 64, 0, 1460, false);
@@ -442,7 +466,7 @@ static void test_df_normalization() {
     // DF should now be set
     std::memcpy(&frag, &pkt[6], 2);
     frag = ntohs(frag);
-    assert((frag & 0x4000) != 0);
+    TEST_CHECK((frag & 0x4000) != 0);
 
     std::cout << "PASS" << std::endl;
 }
@@ -453,14 +477,14 @@ static void test_os_detection() {
     auto profile = L3Stealth::detect_os_profile();
 
 #ifdef _WIN32
-    assert(profile == L3Stealth::OSProfile::WINDOWS_10);
-    assert(L3Stealth::default_ttl_for_profile(profile) == 128);
+    TEST_CHECK(profile == L3Stealth::OSProfile::WINDOWS_10);
+    TEST_CHECK(L3Stealth::default_ttl_for_profile(profile) == 128);
 #elif defined(__APPLE__)
-    assert(profile == L3Stealth::OSProfile::MACOS_14);
-    assert(L3Stealth::default_ttl_for_profile(profile) == 64);
+    TEST_CHECK(profile == L3Stealth::OSProfile::MACOS_14);
+    TEST_CHECK(L3Stealth::default_ttl_for_profile(profile) == 64);
 #else
-    assert(profile == L3Stealth::OSProfile::LINUX_6X);
-    assert(L3Stealth::default_ttl_for_profile(profile) == 64);
+    TEST_CHECK(profile == L3Stealth::OSProfile::LINUX_6X);
+    TEST_CHECK(L3Stealth::default_ttl_for_profile(profile) == 64);
 #endif
 
     std::cout << "PASS" << std::endl;
@@ -480,15 +504,15 @@ static void test_combined_processing() {
     cfg.enable_tcp_timestamp_normalization = true;
     cfg.enable_df_normalization = true;
     cfg.force_df = true;
-    assert(stealth.initialize(cfg));
+    TEST_CHECK(stealth.initialize(cfg));
 
     auto pkt = build_ipv4_tcp_syn("192.168.1.1", "8.8.8.8", 54321, 443, 55, 0xBEEF, 1460, true);
 
     bool modified = stealth.process_ipv4_packet(pkt);
-    assert(modified);
+    TEST_CHECK(modified);
 
     // Check TTL = 128
-    assert(pkt[8] == 128);
+    TEST_CHECK(pkt[8] == 128);
 
     // Check IPID changed
     uint16_t new_id;
@@ -500,21 +524,21 @@ static void test_combined_processing() {
     uint16_t frag;
     std::memcpy(&frag, &pkt[6], 2);
     frag = ntohs(frag);
-    assert((frag & 0x4000) != 0);
+    TEST_CHECK((frag & 0x4000) != 0);
 
     // Check MSS clamped to 1400
     size_t mss_off = 20 + 20 + 2;
     uint16_t mss;
     std::memcpy(&mss, &pkt[mss_off], 2);
     mss = ntohs(mss);
-    assert(mss == 1400);
+    TEST_CHECK(mss == 1400);
 
     auto stats = stealth.get_stats();
-    assert(stats.packets_processed.load() == 1);
-    assert(stats.ipid_rewritten.load() > 0);
-    assert(stats.ttl_normalized.load() > 0);
-    assert(stats.mss_clamped.load() > 0);
-    assert(stats.timestamps_normalized.load() > 0);
+    TEST_CHECK(stats.packets_processed.load() == 1);
+    TEST_CHECK(stats.ipid_rewritten.load() > 0);
+    TEST_CHECK(stats.ttl_normalized.load() > 0);
+    TEST_CHECK(stats.mss_clamped.load() > 0);
+    TEST_CHECK(stats.timestamps_normalized.load() > 0);
 
     std::cout << "PASS" << std::endl;
 }
@@ -522,10 +546,9 @@ static void test_combined_processing() {
 // ==================== Main ====================
 
 int main() {
-    if (sodium_init() < 0) {
-        std::cerr << "Failed to initialize libsodium" << std::endl;
-        return 1;
-    }
+    ncp::winsock_init();  // no-op on POSIX; WSAStartup on Windows
+    if (sodium_init() < 0)
+        test_skip("libsodium initialization failed");
 
     std::cout << "=== L3 Stealth Phase 1 Tests ===" << std::endl;
 

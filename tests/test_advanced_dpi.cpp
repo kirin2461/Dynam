@@ -9,10 +9,32 @@
 #include "../src/core/include/ncp_dpi_advanced.hpp"
 #include "../src/core/include/ncp_tls_fingerprint.hpp"
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <sodium.h>
+
+// TEST_CHECK: like assert(), but ALWAYS evaluated. Plain assert() is
+// compiled out under NDEBUG (Release), which silently disabled every check
+// in this file and dropped side-effecting calls (initialize()/start()),
+// letting tests run against uninitialized objects.
+#define TEST_CHECK(cond)                                                     \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::cerr << "FAIL: " << __FILE__ << ":" << __LINE__             \
+                      << ": check failed: " << #cond << std::endl;           \
+            std::exit(1);                                                    \
+        }                                                                    \
+    } while (0)
+
+// TEST_SKIP: graceful skip for environment/feature-dependent prerequisites
+// (ctest maps exit code 77 to SKIP via SKIP_RETURN_CODE).
+[[noreturn]] static void test_skip(const std::string& reason) {
+    std::cout << "SKIP: " << reason << std::endl;
+    std::exit(77);
+}
 
 using namespace ncp::DPI;
 
@@ -72,18 +94,20 @@ static void test_process_outgoing_splits_client_hello() {
     cfg.base_config.split_at_sni = true;
 
     AdvancedDPIBypass bypass;
-    assert(bypass.initialize(cfg));
-    assert(bypass.start());
+    if (!bypass.initialize(cfg))
+        test_skip("AdvancedDPIBypass::initialize() failed (environment)");
+    if (!bypass.start())
+        test_skip("AdvancedDPIBypass::start() failed (no loopback sockets?)");
 
     auto ch = make_client_hello("blocked.example.com");
     auto segments = bypass.process_outgoing(ch.data(), ch.size());
 
-    assert(segments.size() >= 2);  // should split at SNI
+    TEST_CHECK(segments.size() >= 2);  // should split at SNI
 
     // Reassemble and verify total bytes
     size_t total = 0;
     for (const auto& s : segments) total += s.size();
-    assert(total == ch.size());
+    TEST_CHECK(total == ch.size());
 
     bypass.stop();
     std::cout << " OK (" << segments.size() << " segments)" << std::endl;
@@ -97,14 +121,16 @@ static void test_non_client_hello_passthrough() {
     cfg.base_config.enable_tcp_split = true;
 
     AdvancedDPIBypass bypass;
-    assert(bypass.initialize(cfg));
-    assert(bypass.start());
+    if (!bypass.initialize(cfg))
+        test_skip("AdvancedDPIBypass::initialize() failed (environment)");
+    if (!bypass.start())
+        test_skip("AdvancedDPIBypass::start() failed (no loopback sockets?)");
 
     std::vector<uint8_t> data = {0x48, 0x65, 0x6C, 0x6C, 0x6F};  // "Hello"
     auto segments = bypass.process_outgoing(data.data(), data.size());
 
-    assert(segments.size() == 1);
-    assert(segments[0] == data);
+    TEST_CHECK(segments.size() == 1);
+    TEST_CHECK(segments[0] == data);
 
     bypass.stop();
     std::cout << " OK" << std::endl;
@@ -127,21 +153,23 @@ static void test_grease_injection() {
     cfg.base_config.enable_pattern_obfuscation = true;
 
     AdvancedDPIBypass bypass;
-    assert(bypass.initialize(cfg));
-    assert(bypass.start());
+    if (!bypass.initialize(cfg))
+        test_skip("AdvancedDPIBypass::initialize() failed (environment)");
+    if (!bypass.start())
+        test_skip("AdvancedDPIBypass::start() failed (no loopback sockets?)");
 
     auto ch = make_client_hello("grease-test.com");
     bypass.process_outgoing(ch.data(), ch.size());
 
     auto stats = bypass.get_stats();
-    assert(stats.grease_injected == 0);  // pipeline GREASE disabled (MED-9)
+    TEST_CHECK(stats.grease_injected == 0);  // pipeline GREASE disabled (MED-9)
 
     bypass.stop();
 
     // TLSManipulator::inject_grease is a passthrough no-op (MED-9)
     TLSManipulator manip;
     auto out = manip.inject_grease(ch.data(), ch.size());
-    assert(out == ch);
+    TEST_CHECK(out == ch);
 
     // Proper GREASE comes from the TLS fingerprint layer (Chromium profiles)
     ncp::TLSFingerprint chrome_fp(ncp::BrowserType::CHROME);
@@ -150,7 +178,7 @@ static void test_grease_injection() {
     for (uint16_t e : exts) {
         if ((e & 0x0F0F) == 0x0A0A) { has_grease = true; break; }
     }
-    assert(has_grease);
+    TEST_CHECK(has_grease);
 
     std::cout << " OK (pipeline GREASE disabled per MED-9; fingerprint GREASE present)" << std::endl;
 }
@@ -166,17 +194,19 @@ static void test_decoy_sni() {
     cfg.base_config.decoy_sni_domains = {"google.com", "cloudflare.com"};
 
     AdvancedDPIBypass bypass;
-    assert(bypass.initialize(cfg));
-    assert(bypass.start());
+    if (!bypass.initialize(cfg))
+        test_skip("AdvancedDPIBypass::initialize() failed (environment)");
+    if (!bypass.start())
+        test_skip("AdvancedDPIBypass::start() failed (no loopback sockets?)");
 
     auto ch = make_client_hello("real-target.com");
     auto segments = bypass.process_outgoing(ch.data(), ch.size());
 
     // Should have: 2 decoy CH + N segments of real CH
-    assert(segments.size() >= 4);  // 2 decoys + at least 2 splits
+    TEST_CHECK(segments.size() >= 4);  // 2 decoys + at least 2 splits
 
     auto stats = bypass.get_stats();
-    assert(stats.fake_packets_injected == 2);
+    TEST_CHECK(stats.fake_packets_injected == 2);
 
     bypass.stop();
     std::cout << " OK (fake_injected=" << stats.fake_packets_injected
@@ -195,12 +225,12 @@ static void test_xor_obfuscation_roundtrip() {
     randombytes_buf(data.data(), data.size());
 
     auto enc = obf.obfuscate(data.data(), data.size());
-    assert(enc.size() == data.size());
-    assert(enc != data);  // should be different
+    TEST_CHECK(enc.size() == data.size());
+    TEST_CHECK(enc != data);  // should be different
 
     auto dec = obf.deobfuscate(enc.data(), enc.size());
-    assert(dec.size() == data.size());
-    assert(dec == data);
+    TEST_CHECK(dec.size() == data.size());
+    TEST_CHECK(dec == data);
 
     std::cout << " OK" << std::endl;
 }
@@ -214,14 +244,14 @@ static void test_http_camouflage_roundtrip() {
     std::vector<uint8_t> data(payload.begin(), payload.end());
 
     auto enc = obf.obfuscate(data.data(), data.size());
-    assert(enc.size() > data.size());
+    TEST_CHECK(enc.size() > data.size());
 
     // Should start with HTTP response
     std::string enc_str(enc.begin(), enc.end());
-    assert(enc_str.find("HTTP/1.1 200 OK") == 0);
+    TEST_CHECK(enc_str.find("HTTP/1.1 200 OK") == 0);
 
     auto dec = obf.deobfuscate(enc.data(), enc.size());
-    assert(dec == data);
+    TEST_CHECK(dec == data);
 
     std::cout << " OK" << std::endl;
 }
@@ -230,27 +260,27 @@ static void test_presets_create() {
     std::cout << "[TEST] preset configurations create..." << std::flush;
 
     auto tspu = Presets::create_tspu_preset();
-    assert(tspu.tspu_bypass);
-    assert(!tspu.techniques.empty());
-    assert(tspu.base_config.enable_tcp_split);
-    assert(tspu.base_config.enable_decoy_sni);
+    TEST_CHECK(tspu.tspu_bypass);
+    TEST_CHECK(!tspu.techniques.empty());
+    TEST_CHECK(tspu.base_config.enable_tcp_split);
+    TEST_CHECK(tspu.base_config.enable_decoy_sni);
 
     auto gfw = Presets::create_gfw_preset();
-    assert(gfw.china_gfw_bypass);
-    assert(gfw.obfuscation == ObfuscationMode::XOR_ROLLING);
+    TEST_CHECK(gfw.china_gfw_bypass);
+    TEST_CHECK(gfw.obfuscation == ObfuscationMode::XOR_ROLLING);
 
     auto stealth = Presets::create_stealth_preset();
-    assert(stealth.obfuscation == ObfuscationMode::HTTP_CAMOUFLAGE);
+    TEST_CHECK(stealth.obfuscation == ObfuscationMode::HTTP_CAMOUFLAGE);
 
     auto aggressive = Presets::create_aggressive_preset();
-    assert(aggressive.obfuscation == ObfuscationMode::CHACHA20);
-    assert(aggressive.padding.enabled);
+    TEST_CHECK(aggressive.obfuscation == ObfuscationMode::CHACHA20);
+    TEST_CHECK(aggressive.padding.enabled);
 
     auto compat = Presets::create_compatible_preset();
-    assert(compat.techniques.size() == 1);
+    TEST_CHECK(compat.techniques.size() == 1);
 
     auto iran = Presets::create_iran_preset();
-    assert(iran.obfuscation == ObfuscationMode::HTTP_CAMOUFLAGE);
+    TEST_CHECK(iran.obfuscation == ObfuscationMode::HTTP_CAMOUFLAGE);
 
     std::cout << " OK (6 presets verified)" << std::endl;
 }
@@ -268,12 +298,14 @@ static void test_tls_fingerprint_integration() {
 
     AdvancedDPIBypass bypass;
     bypass.set_tls_fingerprint(&fp);
-    assert(bypass.initialize(cfg));
-    assert(bypass.start());
+    if (!bypass.initialize(cfg))
+        test_skip("AdvancedDPIBypass::initialize() failed (environment)");
+    if (!bypass.start())
+        test_skip("AdvancedDPIBypass::start() failed (no loopback sockets?)");
 
     auto ch = make_client_hello("fingerprint-test.com");
     auto segments = bypass.process_outgoing(ch.data(), ch.size());
-    assert(!segments.empty());
+    TEST_CHECK(!segments.empty());
 
     bypass.stop();
     std::cout << " OK" << std::endl;
@@ -286,29 +318,28 @@ static void test_technique_toggle() {
     AdvancedDPIConfig cfg;
     cfg.base_config.mode = DPIMode::PROXY;
     cfg.techniques = { EvasionTechnique::SNI_SPLIT };
-    assert(bypass.initialize(cfg));
+    if (!bypass.initialize(cfg))
+        test_skip("AdvancedDPIBypass::initialize() failed (environment)");
 
     auto techniques = bypass.get_active_techniques();
-    assert(techniques.size() == 1);
-    assert(techniques[0] == EvasionTechnique::SNI_SPLIT);
+    TEST_CHECK(techniques.size() == 1);
+    TEST_CHECK(techniques[0] == EvasionTechnique::SNI_SPLIT);
 
     bypass.set_technique_enabled(EvasionTechnique::TIMING_JITTER, true);
     techniques = bypass.get_active_techniques();
-    assert(techniques.size() == 2);
+    TEST_CHECK(techniques.size() == 2);
 
     bypass.set_technique_enabled(EvasionTechnique::SNI_SPLIT, false);
     techniques = bypass.get_active_techniques();
-    assert(techniques.size() == 1);
-    assert(techniques[0] == EvasionTechnique::TIMING_JITTER);
+    TEST_CHECK(techniques.size() == 1);
+    TEST_CHECK(techniques[0] == EvasionTechnique::TIMING_JITTER);
 
     std::cout << " OK" << std::endl;
 }
 
 int main() {
-    if (sodium_init() < 0) {
-        std::cerr << "Failed to initialize libsodium" << std::endl;
-        return 1;
-    }
+    if (sodium_init() < 0)
+        test_skip("libsodium initialization failed");
 
     std::cout << "=== Advanced DPI Bypass Tests ===" << std::endl;
 

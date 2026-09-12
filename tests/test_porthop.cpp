@@ -308,7 +308,23 @@ TEST_F(PortHopLoopbackTest, LossTriggersShouldHopThenHopRecovers) {
     for (int i = 0; i < 4; ++i)
         ASSERT_TRUE(client_->send(payload, PH_FLAG_ACK_REQUEST));
 
-    auto recvd = server_->poll(500);
+    // PortHopServer::poll() performs a single select() and drains only the
+    // sockets ready at that instant. On loaded CI runners the loopback
+    // datagrams may not all be queued when the first select() fires, so a
+    // single poll can return a partial batch (observed as an instant
+    // failure on ubuntu/macOS Release). Accumulate across polls with an
+    // overall deadline — the assertions on the *content* stay unchanged.
+    auto recv_all = [&](size_t want, std::chrono::milliseconds budget) {
+        std::vector<PortHopReceived> all;
+        auto deadline = std::chrono::steady_clock::now() + budget;
+        while (all.size() < want && std::chrono::steady_clock::now() < deadline) {
+            auto batch = server_->poll(200);
+            all.insert(all.end(), batch.begin(), batch.end());
+        }
+        return all;
+    };
+
+    auto recvd = recv_all(4, std::chrono::milliseconds(2000));
     EXPECT_EQ(recvd.size(), 4u);
     EXPECT_EQ(client_->session().unacked_count(), 4u);
     EXPECT_TRUE(client_->session().should_hop(std::chrono::steady_clock::now()));
@@ -316,7 +332,7 @@ TEST_F(PortHopLoopbackTest, LossTriggersShouldHopThenHopRecovers) {
     // Hop and keep talking on the same session.
     client_->hop();
     ASSERT_TRUE(client_->send(payload));
-    auto after = server_->poll(500);
+    auto after = recv_all(1, std::chrono::milliseconds(2000));
     ASSERT_EQ(after.size(), 1u);
     EXPECT_EQ(after[0].frame.epoch, 1u);
     EXPECT_EQ(server_->session_frame_count(kSessionId), 5u);

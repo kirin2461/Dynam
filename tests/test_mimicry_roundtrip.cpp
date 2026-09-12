@@ -12,10 +12,32 @@
 
 #include "../src/core/include/ncp_mimicry.hpp"
 #include <cassert>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <vector>
 #include <sodium.h>
+
+// TEST_CHECK: like assert(), but ALWAYS evaluated. Plain assert() is
+// compiled out under NDEBUG (Release), which silently disabled every check
+// in this file and dropped side-effecting calls (initialize()/start()),
+// letting tests run against uninitialized objects.
+#define TEST_CHECK(cond)                                                     \
+    do {                                                                     \
+        if (!(cond)) {                                                       \
+            std::cerr << "FAIL: " << __FILE__ << ":" << __LINE__             \
+                      << ": check failed: " << #cond << std::endl;           \
+            std::exit(1);                                                    \
+        }                                                                    \
+    } while (0)
+
+// TEST_SKIP: graceful skip for environment/feature-dependent prerequisites
+// (ctest maps exit code 77 to SKIP via SKIP_RETURN_CODE).
+[[noreturn]] static void test_skip(const std::string& reason) {
+    std::cout << "SKIP: " << reason << std::endl;
+    std::exit(77);
+}
 
 using MimicProfile = ncp::TrafficMimicry::MimicProfile;
 
@@ -47,7 +69,7 @@ static void test_basic_roundtrip() {
 
     // Sync keys: bob uses alice's key
     auto key = alice.get_tls_session_key();
-    assert(key.size() == 32);
+    TEST_CHECK(key.size() == 32);
     bob.set_tls_session_key(key);
 
     // Test payload
@@ -56,16 +78,16 @@ static void test_basic_roundtrip() {
 
     // Alice wraps
     auto wrapped = wrap_as_tls(alice, data.data(), data.size());
-    assert(!wrapped.empty());
-    assert(wrapped.size() > data.size());  // overhead from TLS record framing
+    TEST_CHECK(!wrapped.empty());
+    TEST_CHECK(wrapped.size() > data.size());  // overhead from TLS record framing
 
     // Bob unwraps
     auto unwrapped = unwrap_tls(bob, wrapped.data(), wrapped.size());
-    assert(!unwrapped.empty());
+    TEST_CHECK(!unwrapped.empty());
 
     // Verify payload integrity
-    assert(unwrapped.size() == data.size());
-    assert(std::memcmp(unwrapped.data(), data.data(), data.size()) == 0);
+    TEST_CHECK(unwrapped.size() == data.size());
+    TEST_CHECK(std::memcmp(unwrapped.data(), data.data(), data.size()) == 0);
 
     std::cout << " OK" << std::endl;
 }
@@ -79,11 +101,11 @@ static void test_empty_data() {
     // Unwrap of the wrapped empty payload must not crash and must
     // yield an empty payload back.
     auto unwrapped = unwrap_tls(m, wrapped.data(), wrapped.size());
-    assert(unwrapped.empty());
+    TEST_CHECK(unwrapped.empty());
 
     // Unwrap of empty input must also not crash
     auto unwrapped_empty = unwrap_tls(m, nullptr, 0);
-    assert(unwrapped_empty.empty());
+    TEST_CHECK(unwrapped_empty.empty());
 
     std::cout << " OK" << std::endl;
 }
@@ -102,11 +124,11 @@ static void test_large_payload() {
     randombytes_buf(big_data.data(), big_data.size());
 
     auto wrapped = wrap_as_tls(alice, big_data.data(), big_data.size());
-    assert(!wrapped.empty());
+    TEST_CHECK(!wrapped.empty());
 
     auto unwrapped = unwrap_tls(bob, wrapped.data(), wrapped.size());
-    assert(unwrapped.size() == big_data.size());
-    assert(std::memcmp(unwrapped.data(), big_data.data(), big_data.size()) == 0);
+    TEST_CHECK(unwrapped.size() == big_data.size());
+    TEST_CHECK(std::memcmp(unwrapped.data(), big_data.data(), big_data.size()) == 0);
 
     std::cout << " OK" << std::endl;
 }
@@ -121,7 +143,7 @@ static void test_key_mismatch_fails() {
     std::vector<uint8_t> data(payload.begin(), payload.end());
 
     auto wrapped = wrap_as_tls(alice, data.data(), data.size());
-    assert(!wrapped.empty());
+    TEST_CHECK(!wrapped.empty());
 
     // Bob with different key — unwrap should fail or return different data
     auto unwrapped = unwrap_tls(bob, wrapped.data(), wrapped.size());
@@ -129,7 +151,7 @@ static void test_key_mismatch_fails() {
     bool mismatch = unwrapped.empty() ||
                     unwrapped.size() != data.size() ||
                     std::memcmp(unwrapped.data(), data.data(), data.size()) != 0;
-    assert(mismatch);
+    TEST_CHECK(mismatch);
 
     std::cout << " OK" << std::endl;
 }
@@ -143,22 +165,22 @@ static void test_set_key_validation() {
     std::vector<uint8_t> good_key(32, 0xAB);
     m.set_tls_session_key(good_key);
     auto got = m.get_tls_session_key();
-    assert(got.size() == 32);
-    assert(std::memcmp(got.data(), good_key.data(), 32) == 0);
+    TEST_CHECK(got.size() == 32);
+    TEST_CHECK(std::memcmp(got.data(), good_key.data(), 32) == 0);
 
     // Invalid key sizes should be silently rejected
     std::vector<uint8_t> bad_key_16(16, 0xCC);
     m.set_tls_session_key(bad_key_16);
     got = m.get_tls_session_key();
     // Should still have the previous valid key
-    assert(got.size() == 32);
-    assert(std::memcmp(got.data(), good_key.data(), 32) == 0);
+    TEST_CHECK(got.size() == 32);
+    TEST_CHECK(std::memcmp(got.data(), good_key.data(), 32) == 0);
 
     std::vector<uint8_t> bad_key_0;
     m.set_tls_session_key(bad_key_0);
     got = m.get_tls_session_key();
-    assert(got.size() == 32);
-    assert(std::memcmp(got.data(), good_key.data(), 32) == 0);
+    TEST_CHECK(got.size() == 32);
+    TEST_CHECK(std::memcmp(got.data(), good_key.data(), 32) == 0);
 
     std::cout << " OK" << std::endl;
 }
@@ -178,11 +200,11 @@ static void test_multiple_messages() {
         randombytes_buf(msg.data(), msg.size());
 
         auto wrapped = wrap_as_tls(alice, msg.data(), msg.size());
-        assert(!wrapped.empty());
+        TEST_CHECK(!wrapped.empty());
 
         auto unwrapped = unwrap_tls(bob, wrapped.data(), wrapped.size());
-        assert(unwrapped.size() == msg.size());
-        assert(std::memcmp(unwrapped.data(), msg.data(), msg.size()) == 0);
+        TEST_CHECK(unwrapped.size() == msg.size());
+        TEST_CHECK(std::memcmp(unwrapped.data(), msg.data(), msg.size()) == 0);
     }
 
     std::cout << " OK (100 messages)" << std::endl;
@@ -197,26 +219,24 @@ static void test_tls_record_structure() {
     std::vector<uint8_t> data(payload.begin(), payload.end());
 
     auto wrapped = wrap_as_tls(m, data.data(), data.size());
-    assert(wrapped.size() >= 5);
+    TEST_CHECK(wrapped.size() >= 5);
 
     // TLS Application Data record: ContentType = 0x17
-    assert(wrapped[0] == 0x17);
+    TEST_CHECK(wrapped[0] == 0x17);
     // TLS version 0x0303 (TLS 1.2 record layer)
-    assert(wrapped[1] == 0x03);
-    assert(wrapped[2] == 0x03);
+    TEST_CHECK(wrapped[1] == 0x03);
+    TEST_CHECK(wrapped[2] == 0x03);
     // Length field should match remaining data
     uint16_t rec_len = (static_cast<uint16_t>(wrapped[3]) << 8) |
                        static_cast<uint16_t>(wrapped[4]);
-    assert(rec_len == wrapped.size() - 5);
+    TEST_CHECK(rec_len == wrapped.size() - 5);
 
     std::cout << " OK" << std::endl;
 }
 
 int main() {
-    if (sodium_init() < 0) {
-        std::cerr << "Failed to initialize libsodium" << std::endl;
-        return 1;
-    }
+    if (sodium_init() < 0)
+        test_skip("libsodium initialization failed");
 
     std::cout << "=== TrafficMimicry Roundtrip Tests ===" << std::endl;
 
