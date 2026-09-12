@@ -101,10 +101,25 @@ void InterfaceSelector::enumerate_interfaces() {
     interfaces_.clear();
     
 #ifdef _WIN32
+    // Grow the buffer until GetAdaptersAddresses fits (same pattern as the
+    // fixed NetworkManager): each ERROR_BUFFER_OVERFLOW reports the required
+    // size in bufferSize and we realloc() upwards; allocation failure is
+    // checked and bails out cleanly.
     ULONG bufferSize = 15000;
-    PIP_ADAPTER_ADDRESSES addresses = (PIP_ADAPTER_ADDRESSES)malloc(bufferSize);
-    
-    if (GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX, nullptr, addresses, &bufferSize) == NO_ERROR) {
+    PIP_ADAPTER_ADDRESSES addresses = nullptr;
+    DWORD ret = ERROR_BUFFER_OVERFLOW;
+    for (int attempt = 0; attempt < 4 && ret == ERROR_BUFFER_OVERFLOW; ++attempt) {
+        PIP_ADAPTER_ADDRESSES next =
+            static_cast<PIP_ADAPTER_ADDRESSES>(realloc(addresses, bufferSize));
+        if (!next) {
+            free(addresses);
+            return;
+        }
+        addresses = next;
+        ret = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_PREFIX,
+                                   nullptr, addresses, &bufferSize);
+    }
+    if (ret == NO_ERROR && addresses) {
         for (PIP_ADAPTER_ADDRESSES addr = addresses; addr != nullptr; addr = addr->Next) {
             InterfaceInfo info;
             
