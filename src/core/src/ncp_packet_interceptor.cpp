@@ -699,6 +699,23 @@ public:
         if (!running_) return;
         running_ = false;
 
+#ifdef HAVE_WDK
+        // Free the injection NBL pool (all outstanding NBLs must already be
+        // freed — injection completion callbacks free them synchronously
+        // before any further inject can happen after running_=false).
+        {
+            std::lock_guard<std::mutex> lk(inject_mutex_);
+            if (nbl_pool_ != nullptr) {
+                NdisFreeNetBufferListPool(nbl_pool_);
+                nbl_pool_ = nullptr;
+            }
+            if (inject_handle_ != nullptr) {
+                FwpsInjectionHandleDestroy0(inject_handle_);
+                inject_handle_ = nullptr;
+            }
+        }
+#endif
+
         if (!engine_handle_) return;
 
         // Remove filter and sublayer inside a transaction.
@@ -742,13 +759,14 @@ public:
             if (inject_handle_ == nullptr) {
 #ifdef HAVE_WDK
                 // AF_INET = IPv4, injection at network layer
-                DWORD r = FwpsInjectionHandleCreate0(
+                NTSTATUS st = FwpsInjectionHandleCreate0(
                     AF_INET,
                     FWPS_INJECTION_TYPE_NETWORK,
                     &inject_handle_
                 );
-                if (r != ERROR_SUCCESS) {
-                    parent->log_from_backend("[WFP] FwpsInjectionHandleCreate0 failed: " + wfp_err(r));
+                if (!NT_SUCCESS(st)) {
+                    parent->log_from_backend("[WFP] FwpsInjectionHandleCreate0 failed: " +
+                        wfp_err(static_cast<DWORD>(st)));
                     inject_handle_ = nullptr;
                     return false;
                 }
@@ -761,37 +779,64 @@ public:
 
         // Allocate a NET_BUFFER_LIST, copy packet, inject via WFP
 #ifdef HAVE_WDK
+        // AUDIT-FIX: FwpsAllocateNetBufferAndNetBufferList0 requires a VALID
+        // pool handle (nullptr poolHandle is invalid).  Lazily create an NDIS
+        // net-buffer-list pool once per backend instance.
+        {
+            std::lock_guard<std::mutex> lk(inject_mutex_);
+            if (nbl_pool_ == nullptr) {
+                NET_BUFFER_LIST_POOL_PARAMETERS pool_params;
+                NdisZeroMemory(&pool_params, sizeof(pool_params));
+                pool_params.Header.Type = NDIS_OBJECT_TYPE_DEFAULT;
+                pool_params.Header.Revision = NET_BUFFER_LIST_POOL_PARAMETERS_REVISION_1;
+                pool_params.Header.Size = sizeof(pool_params);
+                pool_params.ProtocolId = NDIS_PROTOCOL_ID_DEFAULT;
+                pool_params.fAllocateNetBuffer = TRUE;
+                pool_params.ContextSize = 0;
+                pool_params.PoolTag = 'WPCN';  // 'NCPW' little-endian tag
+                pool_params.DataSize = 0;
+                nbl_pool_ = NdisAllocateNetBufferListPool(nullptr, &pool_params);
+                if (nbl_pool_ == nullptr) {
+                    parent->log_from_backend("[WFP] NdisAllocateNetBufferListPool failed");
+                    return false;
+                }
+            }
+        }
+
         NET_BUFFER_LIST* nbl = nullptr;
-        DWORD r = FwpsAllocateNetBufferAndNetBufferList0(
-            /* poolHandle   */ nullptr,  // use default pool
-            /* contextSize  */ 0,
+        NTSTATUS status = FwpsAllocateNetBufferAndNetBufferList0(
+            /* poolHandle      */ nbl_pool_,
+            /* contextSize     */ 0,
             /* contextBackFill */ 0,
-            /* mdlChain     */ nullptr,
-            /* dataOffset   */ 0,
-            /* dataLength   */ static_cast<ULONG>(packet_len),
+            /* mdlChain        */ nullptr,
+            /* dataOffset      */ 0,
+            /* dataLength      */ static_cast<SIZE_T>(packet_len),
             &nbl
         );
-        if (r != ERROR_SUCCESS || !nbl) {
-            parent->log_from_backend("[WFP] FwpsAllocateNetBufferAndNetBufferList0 failed: " + wfp_err(r));
+        if (!NT_SUCCESS(status) || !nbl) {
+            parent->log_from_backend("[WFP] FwpsAllocateNetBufferAndNetBufferList0 failed: " +
+                wfp_err(static_cast<DWORD>(status)));
             return false;
         }
 
-        // Copy packet bytes into the NET_BUFFER_LIST data
-        PUCHAR dest = nullptr;
-        r = NdisGetDataBuffer(
-            NET_BUFFER_LIST_FIRST_NB(nbl),
+        // Copy packet bytes into the NET_BUFFER_LIST data.
+        // AUDIT-FIX: NdisGetDataBuffer returns PUCHAR (a data pointer), NOT an
+        // NTSTATUS — the old code assigned it to DWORD and compared against
+        // STATUS_SUCCESS, so the fallback path was effectively dead and the
+        // "success" pointer was re-fetched instead of used.
+        NET_BUFFER* nb = NET_BUFFER_LIST_FIRST_NB(nbl);
+        PUCHAR dest = NdisGetDataBuffer(
+            nb,
             static_cast<ULONG>(packet_len),
             nullptr, 1, 0
         );
-        if (r != STATUS_SUCCESS) {
-            // Fallback: write to MDL-mapped memory
+        if (!dest) {
+            // Fallback: map the current MDL into system address space
             dest = static_cast<PUCHAR>(MmGetSystemAddressForMdlSafe(
-                NET_BUFFER_LIST_FIRST_NB(nbl)->CurrentMdl,
+                nb->CurrentMdl,
                 NormalPagePriority | MdlMappingNoExecute
             ));
-        } else {
-            dest = static_cast<PUCHAR>(NdisGetDataBuffer(
-                NET_BUFFER_LIST_FIRST_NB(nbl), static_cast<ULONG>(packet_len), nullptr, 1, 0));
+            if (dest) dest += nb->CurrentMdlOffset;
         }
 
         if (dest) {
@@ -802,7 +847,7 @@ public:
         }
 
         // Inject the packet asynchronously at the outbound network layer
-        r = FwpsInjectNetworkSendAsync0(
+        status = FwpsInjectNetworkSendAsync0(
             inject_handle_,
             nullptr,              // injection context
             0,                    // injection flags
@@ -815,8 +860,9 @@ public:
             nullptr               // completion context
         );
 
-        if (r != ERROR_SUCCESS && r != STATUS_PENDING) {
-            parent->log_from_backend("[WFP] FwpsInjectNetworkSendAsync0 failed: " + wfp_err(r));
+        if (!NT_SUCCESS(status) && status != STATUS_PENDING) {
+            parent->log_from_backend("[WFP] FwpsInjectNetworkSendAsync0 failed: " +
+                wfp_err(static_cast<DWORD>(status)));
             FwpsFreeNetBufferList0(nbl);
             return false;
         }
@@ -840,6 +886,11 @@ private:
     // Injection handle (lazy, one per WFPBackend instance)
     HANDLE inject_handle_  = nullptr;
     std::mutex inject_mutex_;
+#ifdef HAVE_WDK
+    // NDIS net-buffer-list pool for packet injection (lazy, freed in stop()).
+    // FwpsAllocateNetBufferAndNetBufferList0 requires a valid pool handle.
+    NDIS_HANDLE nbl_pool_ = nullptr;
+#endif
 
     std::atomic<bool> running_{false};
     Config config_;
