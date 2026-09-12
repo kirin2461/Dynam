@@ -113,10 +113,23 @@ set(NCP_STANDALONE_TESTS
     test_mimicry_roundtrip
     test_dpi_advanced_integration
 )
+# The core compiles one of two ECHConfig parser variants: HPKE builds
+# (OpenSSL >= 3.2, HAVE_ECH_HPKE is PRIVATE to ncp_core) parse a simplified
+# layout, fallback builds parse the full wire format. Mirror the version
+# check so test_ech_pipeline feeds the parser its native blob layout.
+find_package(OpenSSL QUIET)
+if(OPENSSL_VERSION AND OPENSSL_VERSION VERSION_GREATER_EQUAL "3.2")
+    set(NCP_TEST_ECH_HPKE_PARSER ON)
+else()
+    set(NCP_TEST_ECH_HPKE_PARSER OFF)
+endif()
 foreach(t IN LISTS NCP_STANDALONE_TESTS)
     add_executable(${t} ${t}.cpp)
     target_link_libraries(${t} PRIVATE ncp_core)
     add_dependencies(${t} ncp_core)
+    if(${t} STREQUAL "test_ech_pipeline" AND NCP_TEST_ECH_HPKE_PARSER)
+        target_compile_definitions(${t} PRIVATE NCP_TEST_ECH_HPKE_PARSER)
+    endif()
     target_include_directories(${t} PRIVATE
         ${CMAKE_SOURCE_DIR}/src/core/include
         ${CMAKE_SOURCE_DIR}/src/core

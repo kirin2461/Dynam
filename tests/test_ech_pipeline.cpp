@@ -179,20 +179,56 @@ static std::vector<uint8_t> make_test_ech_config_blob_legacy() {
     return blob;
 }
 
-// Parse with the full wire format; fall back to the legacy simplified
-// layout for HPKE builds whose parser expects that layout. The parsed
-// fields are validated to detect which layout the build's parser used.
+// Validate the fields both blob layouts share.
+static bool ech_config_fields_ok(const ECHConfig& config) {
+    return config.config_id == 0x42 &&
+           config.public_key.size() == 32 &&
+           !config.cipher_suites.empty() &&
+           config.cipher_suites[0].kem_id == HPKEKem::DHKEM_X25519_HKDF_SHA256;
+}
+
+// Parse an ECHConfig blob with the layout this build's parser expects.
+// Core gap (reported): the HPKE build (OpenSSL >= 3.2, HAVE_ECH_HPKE —
+// e.g. macOS CI with brew OpenSSL) parses the legacy simplified layout
+// (version, config_id, kem_id, pk_len, pk), while the fallback build
+// parses the full ECHConfig wire format (with contents_length etc.).
+// The variant is detected at configure time (NCP_TEST_ECH_HPKE_PARSER is
+// set from OPENSSL_VERSION in tests/CMakeLists.txt); a field-validated
+// runtime probe with the other layout serves as a safety net.
+// IMPORTANT: each attempt uses a FRESH ECHConfig — the HPKE-branch parser
+// does cipher_suites.push_back() without clear(), so reusing one config
+// across attempts leaks the garbage suite from a misparsed blob into
+// cipher_suites[0] (this was the macOS CI failure).
 static bool parse_test_ech_config(ECHConfig& config, std::vector<uint8_t>& used_blob) {
+#ifdef NCP_TEST_ECH_HPKE_PARSER
+    used_blob = make_test_ech_config_blob_legacy();
+    ECHConfig primary;
+    if (parse_ech_config(used_blob, primary) && ech_config_fields_ok(primary)) {
+        config = std::move(primary);
+        return true;
+    }
     used_blob = make_test_ech_config_blob();
-    if (parse_ech_config(used_blob, config) &&
-        config.config_id == 0x42 &&
-        config.public_key.size() == 32 &&
-        !config.cipher_suites.empty() &&
-        config.cipher_suites[0].kem_id == HPKEKem::DHKEM_X25519_HKDF_SHA256) {
+    ECHConfig probe;
+    if (parse_ech_config(used_blob, probe) && ech_config_fields_ok(probe)) {
+        config = std::move(probe);
+        return true;
+    }
+    return false;
+#else
+    used_blob = make_test_ech_config_blob();
+    ECHConfig primary;
+    if (parse_ech_config(used_blob, primary) && ech_config_fields_ok(primary)) {
+        config = std::move(primary);
         return true;
     }
     used_blob = make_test_ech_config_blob_legacy();
-    return parse_ech_config(used_blob, config);
+    ECHConfig probe;
+    if (parse_ech_config(used_blob, probe) && ech_config_fields_ok(probe)) {
+        config = std::move(probe);
+        return true;
+    }
+    return false;
+#endif
 }
 
 static void test_parse_ech_config() {
