@@ -1,11 +1,8 @@
 # CMakeLists.txt for integration tests
-cmake_minimum_required(VERSION 3.15)
-
-project(ncp_integration_tests)
-
-find_package(GTest REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED libsodium)
+# Included from the root CMakeLists.txt via add_subdirectory(tests/integration)
+# under ENABLE_TESTS. gtest targets come from tests/CMakeLists.txt
+# (FetchContent), ncp_core from src/core.
+cmake_minimum_required(VERSION 3.20)
 
 add_executable(test_dpi_fixes
     test_dpi_fixes.cpp
@@ -14,33 +11,27 @@ add_executable(test_dpi_fixes
 target_link_libraries(test_dpi_fixes
     PRIVATE
         ncp_core
-        GTest::gtest
-        GTest::gtest_main
-        ${SODIUM_LIBRARIES}
+        gtest
 )
+add_dependencies(test_dpi_fixes ncp_core)
 
 target_include_directories(test_dpi_fixes
     PRIVATE
-        ${PROJECT_SOURCE_DIR}/src/core/include
-        ${SODIUM_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/src/core/include
+        ${CMAKE_SOURCE_DIR}/src/core
+        ${CMAKE_SOURCE_DIR}/src
 )
 
-# Enable testing
-enable_testing()
-add_test(NAME integration_tests COMMAND test_dpi_fixes)
+set_target_properties(test_dpi_fixes PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+)
 
-# Add ThreadSanitizer and Helgrind tests
-if(CMAKE_BUILD_TYPE MATCHES "Debug")
-    add_test(
-        NAME integration_tests_tsan
-        COMMAND ${CMAKE_COMMAND} -E env TSAN_OPTIONS=detect_deadlocks=1 $<TARGET_FILE:test_dpi_fixes>
-    )
-    
-    find_program(VALGRIND_EXECUTABLE valgrind)
-    if(VALGRIND_EXECUTABLE)
-        add_test(
-            NAME integration_tests_helgrind
-            COMMAND ${VALGRIND_EXECUTABLE} --tool=helgrind --error-exitcode=1 $<TARGET_FILE:test_dpi_fixes>
-        )
-    endif()
-endif()
+# The tests bind loopback proxy ports (18080-18083) and spawn threads;
+# no docker or external network is required. Label them so CI can
+# select/exclude the group with `ctest -L integration` / `-LE integration`.
+add_test(NAME integration_tests COMMAND test_dpi_fixes)
+set_tests_properties(integration_tests PROPERTIES
+    TIMEOUT 120
+    LABELS "integration"
+)

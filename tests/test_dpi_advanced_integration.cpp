@@ -28,7 +28,8 @@
 
 using namespace ncp::DPI;
 
-// Minimal TLS ClientHello stub for tests
+// Minimal TLS ClientHello stub for tests (kept for future pipeline tests)
+[[maybe_unused]]
 static std::vector<uint8_t> make_stub_client_hello(const std::string& sni = "example.com") {
     std::vector<uint8_t> ch;
     ch.push_back(0x16); ch.push_back(0x03); ch.push_back(0x01);

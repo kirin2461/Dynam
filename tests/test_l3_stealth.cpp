@@ -522,7 +522,10 @@ static void test_combined_processing() {
 // ==================== Main ====================
 
 int main() {
-    sodium_init();
+    if (sodium_init() < 0) {
+        std::cerr << "Failed to initialize libsodium" << std::endl;
+        return 1;
+    }
 
     std::cout << "=== L3 Stealth Phase 1 Tests ===" << std::endl;
 
