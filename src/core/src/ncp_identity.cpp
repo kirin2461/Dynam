@@ -110,30 +110,58 @@ struct IdentityRotation::Impl {
     }
 
     // ── Perform rotation ────────────────────────────────────────────────────
+    //
+    // This class rotates the ACTIVE IDENTITY PROFILE only. It deliberately
+    // does NOT touch the operating system (no ioctl/ip-link MAC changes, no
+    // sethostname) — applying the new identity to the OS is the documented
+    // responsibility of the on_change consumer (NetworkSpoofer/ARPController,
+    // DHCP client). Statistics below therefore count only mutations that were
+    // actually performed on the identity handed to the callback.
     void do_rotate() {
         std::lock_guard<std::mutex> lock(mu);
 
         if (pool.empty()) return;
 
         // Advance to next identity (round-robin with shuffle)
+        const size_t prev_index = current_index;
         current_index = (current_index + 1) % pool.size();
 
         DeviceIdentity& next = pool[current_index];
 
-        // Optionally randomize the last 3 bytes of MAC
+        // Optionally randomize the MAC of the new active identity
         if (config.rotate_mac) {
             if (config.keep_vendor) {
-                // Keep OUI prefix (first 3 bytes), randomize rest
+                // Keep OUI prefix (first 3 bytes), randomize NIC part
                 for (size_t i = 3; i < 6; ++i) {
                     next.mac[i] = static_cast<uint8_t>(randombytes_uniform(256));
                 }
+            } else {
+                // Full randomization, keeping locally-administered/unicast bits
+                for (size_t i = 0; i < 6; ++i) {
+                    next.mac[i] = static_cast<uint8_t>(randombytes_uniform(256));
+                }
+                next.mac[0] = (next.mac[0] & 0xFC) | 0x02;
             }
-            stats.mac_changes++;
         }
 
+        // Optionally rotate the hostname of the new active identity
         if (config.rotate_host) {
-            stats.hostname_changes++;
+            static const char* prefixes[] = {"PC", "Device", "Host", "Node", "Station"};
+            next.hostname = std::string(prefixes[randombytes_uniform(5)]) + "-" +
+                            std::to_string(randombytes_uniform(9000) + 1000);
         }
+
+        // Count only REAL changes: the new active identity actually differs
+        // from the previously active one (or was mutated above).
+        const bool mac_changed =
+            config.rotate_mac ||
+            (pool.size() > 1 && next.mac != pool[prev_index].mac);
+        const bool host_changed =
+            config.rotate_host ||
+            (pool.size() > 1 && next.hostname != pool[prev_index].hostname);
+
+        if (mac_changed) stats.mac_changes++;
+        if (host_changed) stats.hostname_changes++;
 
         stats.rotations_total++;
         stats.current_identity = current_index;

@@ -130,6 +130,16 @@ public:
 
     // License Validation
     bool is_expired(const std::chrono::system_clock::time_point& expiry_date);
+    /// Validate a license file against THIS instance's current keypair.
+    ///
+    /// Honest contract: signature verification needs the vendor public key,
+    /// and this overload can only use the keypair held by this object. It is
+    /// therefore correct only for licenses signed by this same instance (or by
+    /// the keypair imported via License(secret_key_hex) / import_keypair()).
+    /// A default-constructed License holds a freshly generated random keypair,
+    /// so a vendor-signed file verified this way will correctly fail with
+    /// INVALID_SIGNATURE — to validate vendor licenses on a client, use the
+    /// 3-argument overload with the vendor public key (hex).
     ValidationResult validate_offline(
         const std::string& hwid,
         const std::string& license_file

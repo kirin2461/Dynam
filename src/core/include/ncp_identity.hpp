@@ -71,6 +71,13 @@ using IdentityChangeCallback = std::function<void(const DeviceIdentity&)>;
  *
  * Manages a pool of device identities and rotates through them
  * on a configurable schedule to prevent tracking.
+ *
+ * NOTE: this class rotates the active identity PROFILE and reports it via
+ * the change callback. It never modifies the operating system (no MAC
+ * ioctl/ip-link changes, no sethostname) — applying the new identity to the
+ * OS is the responsibility of the callback consumer (NetworkSpoofer,
+ * ARPController, DHCP client). Rotation statistics count only identity
+ * mutations actually performed here.
  */
 class IdentityRotation {
 public:

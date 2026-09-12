@@ -14,6 +14,140 @@ namespace ncp {
 namespace DPI {
 namespace ECH {
 
+namespace {
+
+// Disk cache format version 2 (little-endian, all ECHConfig fields).
+// v1 lost cipher_suites/raw_config, making restored configs unusable.
+constexpr uint32_t kDiskCacheVersion = 2;
+
+// Sanity caps for untrusted on-disk sizes (prevent OOM from corrupt files)
+constexpr uint32_t kMaxDomainLen     = 253;      // DNS name limit
+constexpr uint32_t kMaxPublicNameLen = 253;
+constexpr uint32_t kMaxPublicKeyLen  = 4096;     // generous for HPKE keys
+constexpr uint32_t kMaxCipherSuites  = 16;
+constexpr uint32_t kMaxRawConfigLen  = 65535;
+constexpr uint32_t kMaxEntryCount    = 100000;
+constexpr uint64_t kMaxTtlSecs       = 30ULL * 24 * 3600;  // 30 days
+
+void write_u8(std::ofstream& o, uint8_t v) {
+    o.write(reinterpret_cast<const char*>(&v), 1);
+}
+void write_u16(std::ofstream& o, uint16_t v) {
+    char b[2] = {static_cast<char>(v & 0xFF), static_cast<char>((v >> 8) & 0xFF)};
+    o.write(b, 2);
+}
+void write_u32(std::ofstream& o, uint32_t v) {
+    char b[4] = {static_cast<char>(v & 0xFF), static_cast<char>((v >> 8) & 0xFF),
+                 static_cast<char>((v >> 16) & 0xFF), static_cast<char>((v >> 24) & 0xFF)};
+    o.write(b, 4);
+}
+void write_u64(std::ofstream& o, uint64_t v) {
+    char b[8];
+    for (int i = 0; i < 8; i++) b[i] = static_cast<char>((v >> (8 * i)) & 0xFF);
+    o.write(b, 8);
+}
+
+bool read_u8(std::ifstream& i, uint8_t& v) {
+    i.read(reinterpret_cast<char*>(&v), 1);
+    return i.good();
+}
+bool read_u16(std::ifstream& i, uint16_t& v) {
+    char b[2];
+    i.read(b, 2);
+    if (!i.good()) return false;
+    v = static_cast<uint16_t>(static_cast<uint8_t>(b[0]) |
+        (static_cast<uint16_t>(static_cast<uint8_t>(b[1])) << 8));
+    return true;
+}
+bool read_u32(std::ifstream& i, uint32_t& v) {
+    char b[4];
+    i.read(b, 4);
+    if (!i.good()) return false;
+    v = static_cast<uint32_t>(static_cast<uint8_t>(b[0])) |
+        (static_cast<uint32_t>(static_cast<uint8_t>(b[1])) << 8) |
+        (static_cast<uint32_t>(static_cast<uint8_t>(b[2])) << 16) |
+        (static_cast<uint32_t>(static_cast<uint8_t>(b[3])) << 24);
+    return true;
+}
+bool read_u64(std::ifstream& i, uint64_t& v) {
+    char b[8];
+    i.read(b, 8);
+    if (!i.good()) return false;
+    v = 0;
+    for (int k = 0; k < 8; k++)
+        v |= static_cast<uint64_t>(static_cast<uint8_t>(b[k])) << (8 * k);
+    return true;
+}
+
+void write_bytes(std::ofstream& o, const uint8_t* data, uint32_t len) {
+    write_u32(o, len);
+    if (len) o.write(reinterpret_cast<const char*>(data), len);
+}
+
+// Read a length-prefixed byte blob with a hard cap. Returns false on
+// malformed input (bad read or length above cap) — never allocates
+// attacker-controlled sizes.
+bool read_bytes(std::ifstream& i, std::vector<uint8_t>& out, uint32_t cap) {
+    uint32_t len;
+    if (!read_u32(i, len) || len > cap) return false;
+    out.resize(len);
+    if (len) {
+        i.read(reinterpret_cast<char*>(out.data()), len);
+        if (!i.good()) return false;
+    }
+    return true;
+}
+
+bool read_string(std::ifstream& i, std::string& out, uint32_t cap) {
+    uint32_t len;
+    if (!read_u32(i, len) || len > cap) return false;
+    out.assign(len, '\0');
+    if (len) {
+        i.read(&out[0], len);
+        if (!i.good()) return false;
+    }
+    return true;
+}
+
+void write_ech_config(std::ofstream& o, const ECHConfig& c) {
+    write_u16(o, c.version);
+    write_u8(o, c.config_id);
+    write_u16(o, c.maximum_name_length);
+    write_bytes(o, c.public_key.data(), static_cast<uint32_t>(c.public_key.size()));
+    write_u32(o, static_cast<uint32_t>(c.public_name.size()));
+    if (!c.public_name.empty()) o.write(c.public_name.data(), c.public_name.size());
+    write_u32(o, static_cast<uint32_t>(c.cipher_suites.size()));
+    for (const auto& cs : c.cipher_suites) {
+        write_u16(o, static_cast<uint16_t>(cs.kem_id));
+        write_u16(o, static_cast<uint16_t>(cs.kdf_id));
+        write_u16(o, static_cast<uint16_t>(cs.aead_id));
+    }
+    write_bytes(o, c.raw_config.data(), static_cast<uint32_t>(c.raw_config.size()));
+}
+
+bool read_ech_config(std::ifstream& i, ECHConfig& c) {
+    if (!read_u16(i, c.version)) return false;
+    if (!read_u8(i, c.config_id)) return false;
+    if (!read_u16(i, c.maximum_name_length)) return false;
+    if (!read_bytes(i, c.public_key, kMaxPublicKeyLen)) return false;
+    if (!read_string(i, c.public_name, kMaxPublicNameLen)) return false;
+    uint32_t suite_count;
+    if (!read_u32(i, suite_count) || suite_count > kMaxCipherSuites) return false;
+    c.cipher_suites.clear();
+    c.cipher_suites.reserve(suite_count);
+    for (uint32_t s = 0; s < suite_count; s++) {
+        uint16_t kem, kdf, aead;
+        if (!read_u16(i, kem) || !read_u16(i, kdf) || !read_u16(i, aead)) return false;
+        c.cipher_suites.emplace_back(static_cast<HPKEKem>(kem),
+                                     static_cast<HPKEKDF>(kdf),
+                                     static_cast<HPKEAEAD>(aead));
+    }
+    if (!read_bytes(i, c.raw_config, kMaxRawConfigLen)) return false;
+    return true;
+}
+
+}  // namespace
+
 // LRU cache implementation using hash map + doubly-linked list
 struct ECHConfigCache::Impl {
     CacheConfig config;
@@ -90,11 +224,12 @@ struct ECHConfigCache::Impl {
             std::ofstream ofs(config.disk_cache_path, std::ios::binary);
             if (!ofs) return false;
 
-            // Write header: version + entry count
-            uint32_t version = 1;
-            uint32_t count = static_cast<uint32_t>(lru_list.size());
-            ofs.write(reinterpret_cast<const char*>(&version), sizeof(version));
-            ofs.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            // Write header: version + entry count (only non-expired entries)
+            uint32_t live = 0;
+            for (const auto& item : lru_list)
+                if (!is_expired(item.second)) live++;
+            write_u32(ofs, kDiskCacheVersion);
+            write_u32(ofs, live);
 
             // Write entries
             for (const auto& item : lru_list) {
@@ -105,26 +240,18 @@ struct ECHConfigCache::Impl {
                 if (is_expired(entry)) continue;
 
                 // Domain length + domain
-                uint32_t domain_len = static_cast<uint32_t>(domain.size());
-                ofs.write(reinterpret_cast<const char*>(&domain_len), sizeof(domain_len));
-                ofs.write(domain.data(), domain_len);
+                write_u32(ofs, static_cast<uint32_t>(domain.size()));
+                ofs.write(domain.data(), domain.size());
 
                 // TTL (as seconds)
-                uint64_t ttl_secs = entry.ttl.count();
-                ofs.write(reinterpret_cast<const char*>(&ttl_secs), sizeof(ttl_secs));
+                write_u64(ofs, static_cast<uint64_t>(entry.ttl.count()));
 
-                // ECHConfig serialization (simplified)
-                uint32_t pk_len = static_cast<uint32_t>(entry.config.public_key.size());
-                ofs.write(reinterpret_cast<const char*>(&pk_len), sizeof(pk_len));
-                ofs.write(reinterpret_cast<const char*>(entry.config.public_key.data()), pk_len);
-
-                uint32_t pn_len = static_cast<uint32_t>(entry.config.public_name.size());
-                ofs.write(reinterpret_cast<const char*>(&pn_len), sizeof(pn_len));
-                ofs.write(entry.config.public_name.data(), pn_len);
-
-                ofs.write(reinterpret_cast<const char*>(&entry.config.config_id), sizeof(entry.config.config_id));
+                // Full ECHConfig serialization (v2: includes cipher_suites and
+                // raw_config so restored configs are usable by ECHClientContext)
+                write_ech_config(ofs, entry.config);
             }
 
+            if (!ofs.good()) return false;
             stats.disk_saves++;
             return true;
 
@@ -142,40 +269,25 @@ struct ECHConfigCache::Impl {
 
             // Read header
             uint32_t version, count;
-            ifs.read(reinterpret_cast<char*>(&version), sizeof(version));
-            ifs.read(reinterpret_cast<char*>(&count), sizeof(count));
-
-            if (version != 1) return 0;
+            if (!read_u32(ifs, version) || !read_u32(ifs, count)) return 0;
+            if (version != kDiskCacheVersion) return 0;  // v1 was lossy — discard
+            if (count > kMaxEntryCount) return 0;        // corrupt header
 
             size_t loaded = 0;
             for (uint32_t i = 0; i < count; ++i) {
-                // Read domain
-                uint32_t domain_len;
-                ifs.read(reinterpret_cast<char*>(&domain_len), sizeof(domain_len));
-                std::string domain(domain_len, '\0');
-                ifs.read(&domain[0], domain_len);
+                std::string domain;
+                if (!read_string(ifs, domain, kMaxDomainLen)) break;
+                if (domain.empty()) break;
 
-                // Read TTL
                 uint64_t ttl_secs;
-                ifs.read(reinterpret_cast<char*>(&ttl_secs), sizeof(ttl_secs));
+                if (!read_u64(ifs, ttl_secs) || ttl_secs > kMaxTtlSecs) break;
 
-                // Read ECHConfig
-                ECHConfig config;
-                uint32_t pk_len;
-                ifs.read(reinterpret_cast<char*>(&pk_len), sizeof(pk_len));
-                config.public_key.resize(pk_len);
-                ifs.read(reinterpret_cast<char*>(config.public_key.data()), pk_len);
-
-                uint32_t pn_len;
-                ifs.read(reinterpret_cast<char*>(&pn_len), sizeof(pn_len));
-                config.public_name.resize(pn_len);
-                ifs.read(&config.public_name[0], pn_len);
-
-                ifs.read(reinterpret_cast<char*>(&config.config_id), sizeof(config.config_id));
+                ECHConfig cfg;
+                if (!read_ech_config(ifs, cfg)) break;   // malformed — stop
 
                 // Create entry
                 CacheEntry entry;
-                entry.config = config;
+                entry.config = std::move(cfg);
                 entry.timestamp = std::chrono::steady_clock::now();
                 entry.ttl = std::chrono::seconds(ttl_secs);
                 entry.from_disk = true;

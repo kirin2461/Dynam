@@ -283,16 +283,12 @@ bool ECHClientContext::encrypt(
         info.push_back(static_cast<uint8_t>(static_cast<uint16_t>(cs.aead_id) & 0xFF));
     }
 
-    // Setup HPKE encapsulation (client side)
-    // First call to get required enc size
-    size_t enc_len = 0;
-    if (OSSL_HPKE_encap(
-            impl_->hpke_ctx,
-            nullptr, &enc_len,  // Get required enc size
-            impl_->config.public_key.data(),
-            impl_->config.public_key.size(),
-            info.data(), info.size()
-        ) != 1) {
+    // Setup HPKE encapsulation (client side).
+    // OSSL_HPKE_encap() may only be called ONCE per context — a second call on
+    // the same ctx is an API violation. Determine the encapsulated-key size
+    // upfront via OSSL_HPKE_get_public_encap_size() and encap exactly once.
+    size_t enc_len = OSSL_HPKE_get_public_encap_size(impl_->suite);
+    if (enc_len == 0) {
         return false;
     }
 
@@ -526,55 +522,85 @@ ECHConfig create_test_ech_config(
     switch (cipher_suite.kem_id) {
         case HPKEKem::DHKEM_X25519_HKDF_SHA256: {
             // X25519: 32-byte private key, 32-byte public key
-            private_key.resize(32);
-            config.public_key.resize(32);
-            
 #ifdef HAVE_OPENSSL
-            EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-                EVP_PKEY_X25519, nullptr,
-                private_key.data(), private_key.size());
-            if (!pkey) {
-                // Generate new keypair if import fails
-                EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr);
-                EVP_PKEY_keygen_init(ctx);
-                EVP_PKEY_keygen(ctx, &pkey);
-                size_t priv_key_len = private_key.size();
-                size_t pub_key_len = config.public_key.size();
-                EVP_PKEY_get_raw_private_key(pkey, private_key.data(), &priv_key_len);
-                EVP_PKEY_get_raw_public_key(pkey, config.public_key.data(), &pub_key_len);
-                EVP_PKEY_CTX_free(ctx);
+            EVP_PKEY* pkey = nullptr;
+            if (private_key.empty()) {
+                // No caller-supplied key: ALWAYS generate a fresh random
+                // keypair. (Previously private_key was resized to 32 zero
+                // bytes first — a valid deterministic X25519 key — making
+                // this keygen branch unreachable and every "test" config
+                // share the same all-zero private key.)
+                EVP_PKEY_CTX* kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr);
+                if (!kctx) break;
+                if (EVP_PKEY_keygen_init(kctx) != 1 ||
+                    EVP_PKEY_keygen(kctx, &pkey) != 1) {
+                    pkey = nullptr;
+                }
+                EVP_PKEY_CTX_free(kctx);
+                if (!pkey) break;
             } else {
-                size_t pub_key_len = config.public_key.size();
-                EVP_PKEY_get_raw_public_key(pkey, config.public_key.data(), &pub_key_len);
+                pkey = EVP_PKEY_new_raw_private_key(
+                    EVP_PKEY_X25519, nullptr,
+                    private_key.data(), private_key.size());
+                if (!pkey) break;  // invalid caller-supplied key
+            }
+            {
+                size_t priv_len = 32, pub_len = 32;
+                private_key.resize(priv_len);
+                config.public_key.resize(pub_len);
+                if (EVP_PKEY_get_raw_private_key(pkey, private_key.data(), &priv_len) != 1 ||
+                    EVP_PKEY_get_raw_public_key(pkey, config.public_key.data(), &pub_len) != 1) {
+                    EVP_PKEY_free(pkey);
+                    private_key.clear();
+                    config.public_key.clear();
+                    break;
+                }
+                private_key.resize(priv_len);
+                config.public_key.resize(pub_len);
                 EVP_PKEY_free(pkey);
             }
 #else
             // Fallback: use libsodium for X25519
+            private_key.resize(32);
+            config.public_key.resize(32);
             crypto_box_keypair(config.public_key.data(), private_key.data());
 #endif
             break;
         }
         case HPKEKem::DHKEM_X448_HKDF_SHA512: {
             // X448: 56-byte private key, 56-byte public key
-            private_key.resize(56);
-            config.public_key.resize(56);
-            
 #ifdef HAVE_OPENSSL
-            EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(
-                EVP_PKEY_X448, nullptr,
-                private_key.data(), private_key.size());
-            if (!pkey) {
-                EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X448, nullptr);
-                EVP_PKEY_keygen_init(ctx);
-                EVP_PKEY_keygen(ctx, &pkey);
-                size_t priv_key_len2 = private_key.size();
-                size_t pub_key_len2 = config.public_key.size();
-                EVP_PKEY_get_raw_private_key(pkey, private_key.data(), &priv_key_len2);
-                EVP_PKEY_get_raw_public_key(pkey, config.public_key.data(), &pub_key_len2);
-                EVP_PKEY_CTX_free(ctx);
+            EVP_PKEY* pkey = nullptr;
+            if (private_key.empty()) {
+                // No caller-supplied key: ALWAYS generate a fresh random
+                // keypair (same unreachable-keygen fix as X25519 above).
+                EVP_PKEY_CTX* kctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X448, nullptr);
+                if (!kctx) break;
+                if (EVP_PKEY_keygen_init(kctx) != 1 ||
+                    EVP_PKEY_keygen(kctx, &pkey) != 1) {
+                    pkey = nullptr;
+                }
+                EVP_PKEY_CTX_free(kctx);
+                if (!pkey) break;
             } else {
-                size_t pub_key_len2 = config.public_key.size();
-                EVP_PKEY_get_raw_public_key(pkey, config.public_key.data(), &pub_key_len2);
+                pkey = EVP_PKEY_new_raw_private_key(
+                    EVP_PKEY_X448, nullptr,
+                    private_key.data(), private_key.size());
+                if (!pkey) break;  // invalid caller-supplied key
+            }
+            {
+                size_t priv_len = 56, pub_len = 56;
+                private_key.resize(priv_len);
+                config.public_key.resize(pub_len);
+                if (EVP_PKEY_get_raw_private_key(pkey, private_key.data(), &priv_len) != 1 ||
+                    EVP_PKEY_get_raw_public_key(pkey, config.public_key.data(), &pub_len) != 1) {
+                    EVP_PKEY_free(pkey);
+                    private_key.clear();
+                    config.public_key.clear();
+                    break;
+                }
+                private_key.resize(priv_len);
+                config.public_key.resize(pub_len);
                 EVP_PKEY_free(pkey);
             }
 #else

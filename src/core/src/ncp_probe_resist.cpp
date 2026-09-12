@@ -394,13 +394,41 @@ bool ProbeResist::verify_auth(const uint8_t* data, size_t data_len) {
     size_t required = cfg.nonce_length + 4 + cfg.auth_length;
     if (data_len < required) return false;
 
-    const uint8_t* hmac_received = data + cfg.nonce_length + 4;
+    const uint8_t* nonce = data;
+    const uint8_t* timestamp_bytes = nonce + cfg.nonce_length;
+    const uint8_t* hmac_received = timestamp_bytes + 4;
+
+    // Timestamp window check (mirrors process_connection) — reject stale or
+    // future-dated auth blobs to limit the replay window.
+    uint32_t pkt_timestamp = (static_cast<uint32_t>(timestamp_bytes[0]) << 24) |
+                             (static_cast<uint32_t>(timestamp_bytes[1]) << 16) |
+                             (static_cast<uint32_t>(timestamp_bytes[2]) << 8) |
+                              static_cast<uint32_t>(timestamp_bytes[3]);
+    uint32_t now_ts = static_cast<uint32_t>(std::time(nullptr));
+    uint32_t diff = (pkt_timestamp > now_ts) ? (pkt_timestamp - now_ts) : (now_ts - pkt_timestamp);
+    if (diff > cfg.timestamp_tolerance_sec) {
+        return false;
+    }
 
     size_t msg_len = cfg.nonce_length + 4;
     auto expected = compute_hmac(data, msg_len,
         cfg.shared_secret.data(), cfg.shared_secret.size());
 
-    return (sodium_memcmp(hmac_received, expected.data(), 32) == 0);
+    // Compare only min(32, auth_length) bytes: a hard 32-byte comparison reads
+    // past the end of the caller's buffer when auth_length < 32 (OOB read).
+    size_t cmp_len = (std::min)(size_t(32), cfg.auth_length);
+    if (sodium_memcmp(hmac_received, expected.data(), cmp_len) != 0) {
+        return false;
+    }
+
+    // Replay protection: reject already-seen nonces (mirrors process_connection).
+    if (cfg.enable_replay_protection) {
+        if (!check_and_record_nonce(nonce, cfg.nonce_length)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // FIX #21: compute_hmac — fallback uses crypto_auth_hmacsha256 from libsodium

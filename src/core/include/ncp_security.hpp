@@ -14,6 +14,11 @@
 #include <algorithm>
 #include "ncp_csprng.hpp"
 
+// Make OPENSSL_VERSION_NUMBER visible so the OpenSSL-gated APIs below are
+// actually declared/compiled (previously the guard used OPENSSL_VERSION,
+// which no OpenSSL header ever defines, silently compiling the code out).
+#include <openssl/opensslv.h>
+
 // Windows defines ERROR as a macro, which conflicts with enum values
 #ifdef ERROR
 #undef ERROR
@@ -81,7 +86,7 @@ public:
     bool verify_certificate(const std::string& hostname, const std::string& cert_hash) const;
 
     // R10-C01: Verify certificate with SSL* (checks chain depth, expiry, revocation)
-#ifdef OPENSSL_VERSION
+#ifdef OPENSSL_VERSION_NUMBER  // OpenSSL available (was OPENSSL_VERSION — never defined by any header)
     bool verify_certificate_ssl(void* ssl, const std::string& hostname) const;
 #endif
 
