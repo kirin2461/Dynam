@@ -26,6 +26,7 @@
 #include <ctime>
 #include <cctype>
 #include <cstdlib>
+#include <cstdint>
 #include <sodium.h>
 
 #ifdef __linux__
@@ -146,17 +147,94 @@ bool CertificatePinner::trust_on_first_use(const std::string& hostname,
     return true;
 }
 
+namespace {
+
+// Decode a standard base64 string (with '=' padding) to raw bytes.
+// Returns false on malformed input.
+bool base64_decode(const std::string& in, std::vector<unsigned char>& out) {
+    static const int8_t table[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,
+        52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-2,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+        15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+        41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    out.clear();
+    if (in.empty() || (in.size() % 4) != 0) return false;
+    size_t padding = 0;
+    if (!in.empty() && in[in.size() - 1] == '=') padding++;
+    if (in.size() > 1 && in[in.size() - 2] == '=') padding++;
+    out.reserve((in.size() / 4) * 3);
+    for (size_t i = 0; i < in.size(); i += 4) {
+        int8_t a = table[static_cast<unsigned char>(in[i])];
+        int8_t b = table[static_cast<unsigned char>(in[i + 1])];
+        int8_t c = table[static_cast<unsigned char>(in[i + 2])];
+        int8_t d = table[static_cast<unsigned char>(in[i + 3])];
+        if (a < 0 || b < 0 || c < 0 || d < 0) return false;
+        uint32_t v = (static_cast<uint32_t>(a) << 18) |
+                     (static_cast<uint32_t>(b) << 12) |
+                     (static_cast<uint32_t>(c) << 6) |
+                     static_cast<uint32_t>(d);
+        out.push_back(static_cast<unsigned char>((v >> 16) & 0xFF));
+        if (c != -2) out.push_back(static_cast<unsigned char>((v >> 8) & 0xFF));
+        if (d != -2) out.push_back(static_cast<unsigned char>(v & 0xFF));
+    }
+    (void)padding;
+    return true;
+}
+
+std::string bytes_to_lower_hex(const unsigned char* data, size_t len) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < len; i++) {
+        oss << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(data[i]);
+    }
+    return oss.str();
+}
+
+// Convert a base64-encoded SHA-256 pin to the canonical pin format:
+// lowercase hex of SHA-256(SPKI). Returns empty string on bad input.
+std::string base64_pin_to_hex(const std::string& b64) {
+    std::vector<unsigned char> raw;
+    if (!base64_decode(b64, raw) || raw.size() != 32) return {};
+    return bytes_to_lower_hex(raw.data(), raw.size());
+}
+
+}  // namespace
+
 void CertificatePinner::load_default_pins() {
-    // Default pins use 0 max_age (no expiry) — these are well-known providers
-    // Cloudflare DNS
-    add_pin("cloudflare-dns.com", "GP8Knf7qBae+aIfythytMbYnL+yowaWVeD6MoLHkVRg=");
-    add_pin("cloudflare-dns.com", "RQeZkB42znUfsDIIFWIRiYEcKl7nHwNFwWCrnMMJbVc=", true);
-    // Google DNS
-    add_pin("dns.google", "WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=");
-    add_pin("dns.google", "lCppFqbkrlJ3EcVFAkeip0+44VaoJUymbnOaEUk7tEU=", true);
-    // Quad9 DNS
-    add_pin("dns9.quad9.net", "yioEpqeR4WtDwE9YxNVnCEkTxIjx6EEIwFSQW+lJsbc=");
-    add_pin("dns9.quad9.net", "Wg+cUJTh+h6OwLd0NWW7R7IlMBuEMkzh/x2IG0S/VLg=", true);
+    // Default pins use 0 max_age (no expiry) — these are well-known providers.
+    // The literals below are the widely published base64 HPKP SPKI pins; they are
+    // converted at load time to the canonical pin format (lowercase hex of
+    // SHA-256 over the DER SPKI) so that verification can actually match.
+    struct DefaultPin { const char* host; const char* b64; bool backup; };
+    static const DefaultPin kDefaultPins[] = {
+        // Cloudflare DNS
+        {"cloudflare-dns.com", "GP8Knf7qBae+aIfythytMbYnL+yowaWVeD6MoLHkVRg=", false},
+        {"cloudflare-dns.com", "RQeZkB42znUfsDIIFWIRiYEcKl7nHwNFwWCrnMMJbVc=", true},
+        // Google DNS
+        {"dns.google", "WoiWRyIOVNa9ihaBciRSC7XHjliYS9VwUGOIud4PB18=", false},
+        {"dns.google", "lCppFqbkrlJ3EcVFAkeip0+44VaoJUymbnOaEUk7tEU=", true},
+        // Quad9 DNS
+        {"dns9.quad9.net", "yioEpqeR4WtDwE9YxNVnCEkTxIjx6EEIwFSQW+lJsbc=", false},
+        {"dns9.quad9.net", "Wg+cUJTh+h6OwLd0NWW7R7IlMBuEMkzh/x2IG0S/VLg=", true},
+    };
+    for (const auto& p : kDefaultPins) {
+        std::string hex = base64_pin_to_hex(p.b64);
+        if (hex.empty()) continue;  // malformed literal — skip rather than store garbage
+        add_pin(p.host, hex, p.backup);
+    }
 }
 
 bool CertificatePinner::verify_certificate(const std::string& hostname, const std::string& cert_hash) const {
@@ -217,10 +295,16 @@ bool CertificatePinner::is_pin_expired(const PinnedCert& pin) const {
 }
 
 // R10-C01: Full certificate validation with OpenSSL
-#ifdef OPENSSL_VERSION
+// (guard fixed: OPENSSL_VERSION is never defined by OpenSSL headers — the
+// correct macro from <openssl/opensslv.h> is OPENSSL_VERSION_NUMBER)
+#ifdef OPENSSL_VERSION_NUMBER
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
+#include <openssl/x509v3.h>  // X509_PURPOSE_SSL_SERVER
+#include <openssl/evp.h>
+#include <openssl/sha.h>
+#include <vector>
 
 bool CertificatePinner::verify_certificate_ssl(void* ssl_ptr, const std::string& hostname) const {
     if (!ssl_ptr) return false;
@@ -282,9 +366,36 @@ bool CertificatePinner::verify_certificate_ssl(void* ssl_ptr, const std::string&
     // Set purpose for SSL client/server verification
     X509_STORE_CTX_set_purpose(store_ctx, X509_PURPOSE_SSL_SERVER);
 
+    // 6. Compute pin hash BEFORE releasing the certificate (fixes use-after-free:
+    // X509_digest() was previously called on `cert` after X509_free()).
+    // Pin format contract: lowercase hex SHA-256 over the DER-encoded SPKI
+    // (SubjectPublicKeyInfo), matching DoHCertificatePinner::extract_spki_hash().
+    std::string cert_hash;
+    {
+        EVP_PKEY* pkey = X509_get_pubkey(cert);
+        if (pkey) {
+            int key_len = i2d_PUBKEY(pkey, nullptr);
+            if (key_len > 0) {
+                std::vector<unsigned char> key_buf(static_cast<size_t>(key_len));
+                unsigned char* key_ptr = key_buf.data();
+                i2d_PUBKEY(pkey, &key_ptr);
+                unsigned char hash[SHA256_DIGEST_LENGTH];
+                SHA256(key_buf.data(), key_buf.size(), hash);
+                std::ostringstream hex_stream;
+                for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+                    hex_stream << std::hex << std::setw(2) << std::setfill('0')
+                               << static_cast<int>(hash[i]);
+                }
+                cert_hash = hex_stream.str();
+            }
+            EVP_PKEY_free(pkey);
+        }
+    }
+
     int verify_result = X509_verify_cert(store_ctx);
     X509_STORE_CTX_free(store_ctx);
     X509_free(cert);
+    cert = nullptr;
 
     if (verify_result != 1) {
         // Chain verification failed (self-signed, untrusted CA, etc.)
@@ -298,26 +409,14 @@ bool CertificatePinner::verify_certificate_ssl(void* ssl_ptr, const std::string&
     // Note: This is a basic check - full revocation requires OCSP stapling or CRL fetch
 
     // 6. Verify pin match
-    // Compute SHA256 hash of the certificate's public key
-    unsigned char hash[EVP_MAX_MD_SIZE];
-    unsigned int hash_len = 0;
-
-    if (!X509_digest(cert, EVP_sha256(), hash, &hash_len)) {
-        return false;  // Failed to compute hash
+    if (cert_hash.empty()) {
+        return false;  // Failed to compute SPKI hash
     }
-
-    // Convert to hex string for comparison
-    std::ostringstream hex_stream;
-    for (unsigned int i = 0; i < hash_len; i++) {
-        hex_stream << std::hex << std::setw(2) << std::setfill('0')
-                   << static_cast<int>(hash[i]);
-    }
-    std::string cert_hash = hex_stream.str();
 
     // Verify against pinned hash
     return verify_certificate(hostname, cert_hash);
 }
-#endif  // OPENSSL_VERSION
+#endif  // OPENSSL_VERSION_NUMBER
 
 void CertificatePinner::report_mismatch(const std::string& hostname, const std::string& expected,
                                          const std::string& actual, bool backup_matched) const {
