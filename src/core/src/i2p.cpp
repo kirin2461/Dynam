@@ -69,6 +69,33 @@ struct I2PManager::Impl {
         return true;
     }
     
+    // Send raw bytes (command line + optional binary payload) in one go and
+    // read exactly one reply line. Needed for STREAM SEND, where binary data
+    // immediately follows the command — send_sam_command() would append an
+    // extra '\n' after the payload and corrupt the stream.
+    bool send_sam_raw(const std::string& bytes, std::string& response) {
+        if (sam_socket == INVALID_SOCK) return false;
+        size_t off = 0;
+        while (off < bytes.size()) {
+            ssize_t sent = send(sam_socket, bytes.data() + off,
+                                static_cast<int>(bytes.size() - off), 0);
+            if (sent <= 0) return false;
+            off += static_cast<size_t>(sent);
+        }
+        char buffer[4096];
+        response.clear();
+        while (true) {
+            ssize_t received = recv(sam_socket, buffer, sizeof(buffer) - 1, 0);
+            if (received <= 0) {
+                return !response.empty();
+            }
+            buffer[received] = '\0';
+            response.append(buffer, received);
+            if (response.find('\n') != std::string::npos) break;
+        }
+        return true;
+    }
+
     void close_sam() {
         if (sam_socket != INVALID_SOCK) {
 #ifdef _WIN32
@@ -250,9 +277,18 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
     
     std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     
-    std::string style = (type == TunnelType::CLIENT) ? "STREAM" : "STREAM";
-    std::string direction = (type == TunnelType::SERVER) ? "FORWARD" : "CONNECT";
-    (void)direction;
+    // SAM v3 has no distinct "server" session STYLE — STREAM is the only
+    // stream style and serves both directions. The client/server distinction
+    // is expressed through the DESTINATION below: TRANSIENT for outbound-only
+    // client tunnels, our persistent destination for SERVER/BIDIRECTIONAL
+    // tunnels that must accept inbound streams.
+    const std::string style = "STREAM";
+    if (type != TunnelType::CLIENT && current_dest_.empty()) {
+        // A server tunnel without a persistent destination can never be
+        // reached — fail honestly instead of creating a client-style
+        // TRANSIENT tunnel masquerading as a server tunnel.
+        return false;
+    }
     
     std::ostringstream cmd;
     cmd << "SESSION CREATE STYLE=" << style
@@ -528,21 +564,29 @@ void I2PManager::inject_dummy_message() {
     // Pad to 512-byte block boundary (consistent with pad_message())
     std::vector<uint8_t> padded = pad_message(dummy, 512);
 
-    // Send through SAM — use the tunnel's session ID
-    // SAM v3 STREAM SEND: sends raw bytes through an established stream session
+    // Send through SAM — use the tunnel's session ID.
+    // SAM v3.2 STREAM SEND: the command line is immediately followed by
+    // exactly SIZE bytes of payload on the same connection, then the bridge
+    // replies "STREAM STATUS RESULT=OK ..." (or an error).
     std::ostringstream cmd;
     cmd << "STREAM SEND ID=" << first_tunnel.tunnel_id
-        << " SIZE=" << padded.size();
+        << " SIZE=" << padded.size() << "\n";
+    std::string wire = cmd.str();
+    wire.append(reinterpret_cast<const char*>(padded.data()), padded.size());
 
     std::string response;
-    impl_->send_sam_command(cmd.str(), response);
+    if (!impl_->send_sam_raw(wire, response)) {
+        // Send/receive failed — delivery unconfirmed.
+        return;
+    }
 
-    // If send succeeded, also push the actual dummy bytes to the socket.
-    // SAM expects the payload immediately after the command on the same connection.
-    if (impl_->sam_socket != INVALID_SOCK) {
-        send(impl_->sam_socket,
-             reinterpret_cast<const char*>(padded.data()),
-             static_cast<int>(padded.size()), 0);
+    // Consume and validate the STREAM STATUS reply. The old code never read
+    // it, so the status line was misinterpreted as the reply to the NEXT SAM
+    // command, desynchronizing the session. A non-OK result means the dummy
+    // was rejected; cover traffic is best-effort, so just drop it — but the
+    // status line has been consumed either way, keeping SAM in sync.
+    if (response.find("STREAM STATUS RESULT=OK") == std::string::npos) {
+        return;
     }
 }
 
@@ -1047,7 +1091,11 @@ std::vector<uint8_t> I2PManager::encrypt_garlic_layer(
     //
     // The hop_pubkey is expected to be a 32-byte raw X25519 public key,
     // either raw binary (32 bytes) or base64-encoded (44 chars).
-    // If the key is unavailable or malformed, fall back to returning data unchanged.
+    //
+    // FAIL-CLOSED contract: on ANY error (malformed key, failed DH, failed
+    // AEAD) an EMPTY vector is returned. Returning the plaintext input on
+    // error would silently send it unencrypted — callers must treat an
+    // empty result as "encryption failed, do not transmit".
 
     // --- 1. Decode recipient public key ---------------------------------
     std::vector<uint8_t> recipient_pk;
@@ -1067,12 +1115,12 @@ std::vector<uint8_t> I2PManager::encrypt_garlic_layer(
             nullptr, &decoded_len, &end_ptr,
             sodium_base64_VARIANT_ORIGINAL);
         if (rc != 0 || decoded_len != crypto_box_PUBLICKEYBYTES) {
-            // Decoding failed — return plaintext unchanged
-            return data;
+            // Decoding failed — fail closed, never leak plaintext
+            return {};
         }
     } else {
-        // Unknown key format — cannot encrypt
-        return data;
+        // Unknown key format — cannot encrypt; fail closed
+        return {};
     }
 
     // --- 2. Generate ephemeral X25519 keypair ---------------------------
@@ -1086,10 +1134,10 @@ std::vector<uint8_t> I2PManager::encrypt_garlic_layer(
     uint8_t shared_secret[crypto_scalarmult_BYTES];
     if (crypto_scalarmult(shared_secret, ephemeral_sk,
                           recipient_pk.data()) != 0) {
-        // DH failed (e.g. low-order point) — zero keys and bail
+        // DH failed (e.g. low-order point) — zero keys and fail closed
         sodium_memzero(ephemeral_sk, sizeof(ephemeral_sk));
         sodium_memzero(shared_secret, sizeof(shared_secret));
-        return data;
+        return {};
     }
 
     // Wipe the ephemeral secret key immediately after DH
@@ -1157,7 +1205,7 @@ std::vector<uint8_t> I2PManager::encrypt_garlic_layer(
     sodium_memzero(enc_key, sizeof(enc_key));
 
     if (rc != 0) {
-        return data;  // Encryption failed — return unchanged
+        return {};  // AEAD failure — fail closed, never return plaintext
     }
 
     // --- 7. Assemble output: [ephemeral_pk][nonce][ciphertext] ----------
