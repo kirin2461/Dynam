@@ -965,12 +965,22 @@ def register_bypass_routes(app, ctx):
                        if l.strip() and not l.startswith("#")]
         return jsonify({"entries": entries, "path": str(autohl_path)})
 
+    # hostname или wildcard вида *.example.com (без пробелов/слешей/переводов
+    # строк — иначе возможна инъекция строк в autohostlist.txt)
+    _HOST_RE = re.compile(
+        r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+        r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+
     @app.route("/api/hostlist/add", methods=["POST"])
     def api_hostlist_add():
         body = request.get_json(force=True) or {}
         host = (body.get("host") or "").strip().lower()
         if not host:
             return jsonify({"ok": False, "error": "empty host"}), 400
+        if len(host) > 253 or not _HOST_RE.match(host):
+            return jsonify({"ok": False,
+                            "error": "invalid host: ожидается hostname или "
+                                     "wildcard (*.example.com)"}), 400
         existing = set()
         if autohl_path.exists():
             existing = {l.strip() for l in autohl_path.read_text().splitlines()}
