@@ -278,9 +278,17 @@ public:
 private:
     Config config_;
     std::map<std::string, int> provider_latency_;
+    std::mutex latency_mutex_;      // guards provider_latency_
+    size_t rr_index_ = 0;           // ROUND_ROBIN strategy cursor
 
     DoHClient::DNSResult query_with_fronting(const std::string& hostname);
     DoHClient::DNSResult parallel_query(const std::string& hostname);
+    // Ordered cascade: try each server in `ordered` until one resolves.
+    DoHClient::DNSResult cascade_resolve(const std::vector<std::string>& ordered,
+                                         const std::string& hostname);
+    // Servers in strategy-dependent order (round-robin / fastest-first /
+    // randomized / plain config order).
+    std::vector<std::string> ordered_servers();
 };
 /**
  * @brief Secure DNS cache with anti-poisoning measures

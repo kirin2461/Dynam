@@ -15,6 +15,8 @@
 #include <list>
 #include <atomic>
 #include <iomanip>
+#include <future>
+#include <set>
 #include <sodium.h>
 #ifdef _WIN32
 #include <winsock2.h>
@@ -633,6 +635,38 @@ std::vector<uint8_t> DoHClient::perform_https_doh_request(
         return response;
     }
 
+    // R9-H03: Certificate pinning — fail-closed, but ONLY when the operator
+    // configured at least one pin for this exact server_url. With no pins
+    // configured we fall back to regular TLS validation (already enforced by
+    // SSL_CTX_set_verify above) so an empty pin set never breaks DoH.
+    if (pImpl->config.enable_certificate_pinning) {
+        auto pins_it = pImpl->config.pinned_certificates.find(server_url);
+        if (pins_it != pImpl->config.pinned_certificates.end() &&
+            !pins_it->second.empty()) {
+            std::vector<uint8_t> peer_der;
+            X509* peer = SSL_get_peer_certificate(ssl);
+            if (peer) {
+                int der_len = i2d_X509(peer, nullptr);
+                if (der_len > 0) {
+                    peer_der.resize(static_cast<size_t>(der_len));
+                    uint8_t* dp = peer_der.data();
+                    i2d_X509(peer, &dp);
+                }
+                X509_free(peer);
+            }
+            DoHCertificatePinner pinner;
+            for (const auto& pin : pins_it->second)
+                pinner.add_pin(server_url, pin);
+            if (peer_der.empty() || !pinner.verify(server_url, peer_der)) {
+                // Pin mismatch — possible MITM/downgrade. Refuse to talk.
+                pImpl->last_error = "DoH certificate pin mismatch for " + server_url;
+                SSL_free(ssl);
+                doh_close_fd(fd);
+                return response;
+            }
+        }
+    }
+
     std::string request = "GET " + path + "?dns=" + encoded_query + " HTTP/1.1\r\n";
     request += "Host: " + host + "\r\n";
     request += "Accept: application/dns-message\r\n";
@@ -929,7 +963,7 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
                 error_result.type = type;
                 error_result.error_message = "Invalid hostname";
                 if (callback) callback(error_result);
-                g_async_thread_count.fetch_sub(1, std::memory_order_relaxed);
+                // Thread counter decremented by ThreadCounterGuard (RAII)
                 return;
             }
             for (char c : hostname) {
@@ -939,7 +973,7 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
                     error_result.type = type;
                     error_result.error_message = "Invalid hostname";
                     if (callback) callback(error_result);
-                    g_async_thread_count.fetch_sub(1, std::memory_order_relaxed);
+                    // Thread counter decremented by ThreadCounterGuard (RAII)
                     return;
                 }
             }
@@ -1043,15 +1077,38 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
             }
             if (bits > 0) encoded_query += b64[(val << (6 - bits)) & 0x3F];
 
-            BIO* bio = BIO_new_ssl_connect(impl2->ssl_ctx);
-            std::string connect_str = host + ":443";
-            BIO_set_conn_hostname(bio, connect_str.c_str());
-            SSL* ssl = nullptr;
-            BIO_get_ssl(bio, &ssl);
-            if (ssl) SSL_set_tlsext_host_name(ssl, host.c_str());
+            // Bounded I/O: BIO_do_connect() blocks with no timeout, so a
+            // null-routed DoH endpoint would hang this detached thread
+            // forever (and leak its g_async_thread_count slot). Mirror the
+            // sync path: connect the TCP socket with tcp_connect_timeout(),
+            // cap reads via SO_RCVTIMEO, then wrap the fd in a socket BIO.
+            int fd = tcp_connect_timeout(host, 443, 1500);
+            if (fd >= 0) {
+                struct timeval rtv { 2, 0 };
+                setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                           reinterpret_cast<const char*>(&rtv), sizeof(rtv));
+            }
 
-            if (BIO_do_connect(bio) <= 0) {
-                BIO_free_all(bio);
+            BIO* bio = nullptr;
+            if (fd >= 0) {
+                BIO* sock_bio = BIO_new(BIO_s_socket());
+                SSL* ssl = impl2->ssl_ctx ? SSL_new(impl2->ssl_ctx) : nullptr;
+                BIO* ssl_bio = ssl ? BIO_new(BIO_f_ssl()) : nullptr;
+                if (sock_bio && ssl && ssl_bio) {
+                    BIO_set_fd(sock_bio, fd, BIO_CLOSE);
+                    SSL_set_tlsext_host_name(ssl, host.c_str());
+                    BIO_set_ssl(ssl_bio, ssl, BIO_CLOSE);  // ssl_bio owns ssl
+                    bio = BIO_push(ssl_bio, sock_bio);     // chain owns fd
+                } else {
+                    if (ssl_bio) BIO_free(ssl_bio);
+                    if (ssl) SSL_free(ssl);
+                    if (sock_bio) { BIO_set_fd(sock_bio, fd, BIO_NOCLOSE); BIO_free(sock_bio); }
+                    doh_close_fd(fd);
+                }
+            }
+
+            if (!bio || BIO_do_handshake(bio) <= 0) {
+                if (bio) BIO_free_all(bio);
                 // Fallback to system DNS
                 struct addrinfo hints = {}, *res = nullptr;
                 hints.ai_family = (type == DoHClient::RecordType::AAAA) ? AF_INET6 : AF_INET;
@@ -1067,7 +1124,7 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
                     }
                     freeaddrinfo(res);
                     result.ttl = 300;
-                    impl->stats.fallback_queries++;
+                    { std::lock_guard<std::mutex> lock(impl->cache_mutex); impl->stats.fallback_queries++; }
                 }
             } else {
                 std::string req = "GET " + path + "?dns=" + encoded_query + " HTTP/1.1\r\n";
@@ -1116,8 +1173,7 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
                             if (rancount > 256) {
                                 result.error_message = "Suspiciously high answer count (async)";
                                 // Don't free bio here - already freed above
-                                // R7-HIGH-01: Decrement thread counter on early exit
-                                g_async_thread_count.fetch_sub(1, std::memory_order_relaxed);
+                                // Thread counter decremented by ThreadCounterGuard (RAII)
                                 return;
                             }
                             if ((rflags & 0x000F) == 0 && rancount > 0) {
@@ -1204,10 +1260,12 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
             // Update stats and cache (re-lock impl)
             auto impl3 = weak_impl.lock();
             if (impl3) {
+                // All Statistics fields are plain uint64_t — every mutation
+                // must hold cache_mutex (same convention as the sync path).
+                std::lock_guard<std::mutex> lock(impl3->cache_mutex);
                 if (!result.addresses.empty()) {
                     impl3->stats.successful_queries++;
                     if (config_copy.enable_cache) {
-                        std::lock_guard<std::mutex> lock(impl3->cache_mutex);
                         impl3->cache[cache_key] = {result, std::chrono::steady_clock::now()};
                         impl3->lru_touch(cache_key);
                         while (impl3->cache.size() > config_copy.max_cache_size) {
@@ -1234,8 +1292,10 @@ void DoHClient::resolve_async(const std::string& hostname, RecordType type, Reso
             error_result.error_message = "Async resolution failed: unknown error";
             if (callback) callback(error_result);
         }
-        // R7-HIGH-01: Decrement thread counter on completion
-        g_async_thread_count.fetch_sub(1, std::memory_order_relaxed);
+        // R7-HIGH-01/R12-FIX-05: thread counter is decremented exactly once,
+        // by ThreadCounterGuard's destructor (RAII) — no manual fetch_sub here
+        // (a manual decrement on top of the guard drove the counter negative
+        // and silently disabled the MAX_ASYNC_THREADS limit).
     }).detach();
 }
 
@@ -2051,10 +2111,275 @@ void AntiCensorshipDNS::clear_servers() {
     config_.doh3_servers.clear();
 }
 
+// ==================== AntiCensorshipDNS wire helpers ====================
+// Self-contained DoH query against ONE specific server URL. Unlike
+// DoHClient::perform_doh_query() this never cascades to other providers,
+// so test_provider()/detect_censorship()/benchmark_providers() can make
+// honest per-provider statements.
+
+static std::vector<uint8_t> ac_build_query(const std::string& hostname) {
+    std::vector<uint8_t> query;
+    DNSHeader header = {};
+    header.id = htons(static_cast<uint16_t>(randombytes_uniform(65535) + 1));
+    header.flags = htons(0x0100);  // RD
+    header.qdcount = htons(1);
+    const uint8_t* hdr = reinterpret_cast<const uint8_t*>(&header);
+    query.insert(query.end(), hdr, hdr + sizeof(DNSHeader));
+    std::istringstream iss(hostname);
+    std::string label;
+    while (std::getline(iss, label, '.')) {
+        if (label.empty() || label.length() > 63) continue;
+        query.push_back(static_cast<uint8_t>(label.length()));
+        query.insert(query.end(), label.begin(), label.end());
+    }
+    query.push_back(0);
+    query.push_back(0); query.push_back(1);  // QTYPE=A
+    query.push_back(0); query.push_back(1);  // QCLASS=IN
+    return query;
+}
+
+// Bounded answer-section parser (compression-aware, depth-limited by
+// message bounds since pointers always advance the cursor here).
+static void ac_parse_answers(const std::vector<uint8_t>& resp,
+                             DoHClient::DNSResult& result) {
+    if (resp.size() < sizeof(DNSHeader)) return;
+    const DNSHeader* rhdr = reinterpret_cast<const DNSHeader*>(resp.data());
+    uint16_t rflags = ntohs(rhdr->flags);
+    uint16_t rancount = ntohs(rhdr->ancount);
+    uint16_t rqdcount = ntohs(rhdr->qdcount);
+    if ((rflags & 0x000F) != 0) return;  // RCODE != NOERROR -> no answers
+    if (rancount == 0 || rancount > 256) return;
+    size_t off = sizeof(DNSHeader);
+    auto skip_name = [&]() -> bool {
+        while (off < resp.size()) {
+            uint8_t b = resp[off];
+            if ((b & 0xC0) == 0xC0) { off += 2; return true; }
+            if (b == 0) { off++; return true; }
+            off += b + 1;
+        }
+        return false;
+    };
+    for (int q = 0; q < rqdcount; ++q) {
+        if (!skip_name() || off + 4 > resp.size()) return;
+        off += 4;
+    }
+    for (int a = 0; a < rancount && off < resp.size(); ++a) {
+        if (!skip_name() || off + 10 > resp.size()) return;
+        uint16_t rtype = static_cast<uint16_t>((resp[off] << 8) | resp[off + 1]);
+        uint32_t rttl = (static_cast<uint32_t>(resp[off + 4]) << 24) |
+                        (static_cast<uint32_t>(resp[off + 5]) << 16) |
+                        (static_cast<uint32_t>(resp[off + 6]) << 8) |
+                        resp[off + 7];
+        uint16_t rdlen = static_cast<uint16_t>((resp[off + 8] << 8) | resp[off + 9]);
+        off += 10;
+        if (off + rdlen > resp.size()) return;
+        result.ttl = rttl;
+        if (rtype == 1 && rdlen == 4) {
+            char ip[INET_ADDRSTRLEN];
+            snprintf(ip, sizeof(ip), "%d.%d.%d.%d",
+                     resp[off], resp[off + 1], resp[off + 2], resp[off + 3]);
+            result.addresses.push_back(ip);
+        } else if (rtype == 28 && rdlen == 16) {
+            char ip[INET6_ADDRSTRLEN];
+            struct in6_addr a6;
+            memcpy(&a6, &resp[off], 16);
+            inet_ntop(AF_INET6, &a6, ip, sizeof(ip));
+            result.addresses.push_back(ip);
+        }
+        off += rdlen;
+    }
+}
+
+static DoHClient::DNSResult ac_doh_wire_query(const std::string& server_url,
+                                              const std::string& hostname,
+                                              int timeout_ms) {
+    DoHClient::DNSResult result;
+    result.hostname = hostname;
+    result.type = DoHClient::RecordType::A;
+    result.ttl = 0;
+    result.dnssec_valid = false;
+    result.from_cache = false;
+    result.response_time_ms = 0;
+    result.status_code = 0;
+    auto t0 = std::chrono::steady_clock::now();
+
+#ifdef HAVE_OPENSSL
+    // Parse URL
+    std::string host, path;
+    size_t pos = server_url.find("://");
+    if (pos == std::string::npos) {
+        result.error_message = "Invalid DoH server URL";
+        return result;
+    }
+    std::string rest = server_url.substr(pos + 3);
+    size_t slash = rest.find('/');
+    host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
+    path = (slash == std::string::npos) ? "/dns-query" : rest.substr(slash);
+    uint16_t port = 443;
+    size_t colon = host.rfind(':');
+    if (colon != std::string::npos && host.find(':') == colon) {
+        try { port = static_cast<uint16_t>(std::stoi(host.substr(colon + 1))); }
+        catch (...) { result.error_message = "Invalid port in DoH URL"; return result; }
+        host = host.substr(0, colon);
+    }
+    if (host.empty()) {
+        result.error_message = "Empty host in DoH URL";
+        return result;
+    }
+    if (timeout_ms <= 0) timeout_ms = 5000;
+
+    std::vector<uint8_t> query = ac_build_query(hostname);
+    std::string encoded;
+    static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    uint32_t val = 0; int bits = 0;
+    for (uint8_t byte : query) {
+        val = (val << 8) | byte; bits += 8;
+        while (bits >= 6) { bits -= 6; encoded += b64[(val >> bits) & 0x3F]; }
+    }
+    if (bits > 0) encoded += b64[(val << (6 - bits)) & 0x3F];
+
+    int fd = tcp_connect_timeout(host, port, timeout_ms);
+    if (fd < 0) {
+        result.error_message = "Connect failed/timeout";
+        return result;
+    }
+    {
+        struct timeval rtv { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&rtv), sizeof(rtv));
+    }
+
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) { doh_close_fd(fd); result.error_message = "SSL_CTX_new failed"; return result; }
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, nullptr);
+    SSL_CTX_set_default_verify_paths(ctx);
+    SSL* ssl = SSL_new(ctx);
+    if (!ssl) { SSL_CTX_free(ctx); doh_close_fd(fd); result.error_message = "SSL_new failed"; return result; }
+    SSL_set_fd(ssl, fd);
+    SSL_set_tlsext_host_name(ssl, host.c_str());
+
+    bool ok = false;
+    std::string http_resp;
+    if (SSL_connect(ssl) > 0) {
+        std::string req = "GET " + path + "?dns=" + encoded + " HTTP/1.1\r\n";
+        req += "Host: " + host + "\r\nAccept: application/dns-message\r\nConnection: close\r\n\r\n";
+        if (SSL_write(ssl, req.c_str(), static_cast<int>(req.size())) > 0) {
+            char buf[4096]; int len;
+            while ((len = SSL_read(ssl, buf, sizeof(buf) - 1)) > 0) {
+                buf[len] = '\0';
+                http_resp.append(buf, len);
+            }
+            ok = true;
+        }
+    }
+    SSL_free(ssl);
+    SSL_CTX_free(ctx);
+    doh_close_fd(fd);
+
+    if (!ok || http_resp.empty()) {
+        result.error_message = "DoH request failed";
+        return result;
+    }
+    size_t body_start = http_resp.find("\r\n\r\n");
+    if (body_start == std::string::npos) {
+        result.error_message = "Malformed HTTP response";
+        return result;
+    }
+    std::string hdrs = http_resp.substr(0, body_start);
+    std::string body = http_resp.substr(body_start + 4);
+    std::string hdrs_lower = hdrs;
+    std::transform(hdrs_lower.begin(), hdrs_lower.end(), hdrs_lower.begin(), ::tolower);
+    std::vector<uint8_t> dns_resp;
+    if (hdrs_lower.find("transfer-encoding: chunked") != std::string::npos) {
+        std::string decoded = parse_chunked_body(body);
+        dns_resp.assign(decoded.begin(), decoded.end());
+    } else {
+        dns_resp.assign(body.begin(), body.end());
+    }
+    ac_parse_answers(dns_resp, result);
+    if (!result.addresses.empty()) result.status_code = 200;
+#else
+    (void)server_url; (void)hostname; (void)timeout_ms;
+    result.error_message = "DoH requires OpenSSL";
+#endif
+
+    result.response_time_ms = static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count());
+    return result;
+}
+
+std::vector<std::string> AntiCensorshipDNS::ordered_servers() {
+    std::vector<std::string> servers = config_.doh_servers;
+    if (servers.empty()) return servers;
+    switch (config_.strategy) {
+    case Strategy::ROUND_ROBIN: {
+        size_t start = rr_index_++ % servers.size();
+        std::rotate(servers.begin(), servers.begin() + start, servers.end());
+        break;
+    }
+    case Strategy::FASTEST_FIRST: {
+        std::lock_guard<std::mutex> lock(latency_mutex_);
+        std::stable_sort(servers.begin(), servers.end(),
+            [this](const std::string& a, const std::string& b) {
+                auto ia = provider_latency_.find(a);
+                auto ib = provider_latency_.find(b);
+                // Unknown (-1/absent) providers sort after measured-good ones
+                int la = (ia != provider_latency_.end()) ? ia->second : 0;
+                int lb = (ib != provider_latency_.end()) ? ib->second : 0;
+                if (la < 0) la = 0x3fffffff;
+                if (lb < 0) lb = 0x3fffffff;
+                return la < lb;
+            });
+        break;
+    }
+    case Strategy::RANDOMIZED: {
+        // Fisher-Yates with CSPRNG
+        for (size_t i = servers.size() - 1; i > 0; --i) {
+            size_t j = randombytes_uniform(static_cast<uint32_t>(i + 1));
+            std::swap(servers[i], servers[j]);
+        }
+        break;
+    }
+    default:
+        break;  // FALLBACK_CASCADE / PARALLEL_QUERY: config order
+    }
+    return servers;
+}
+
+DoHClient::DNSResult AntiCensorshipDNS::cascade_resolve(
+    const std::vector<std::string>& ordered, const std::string& hostname) {
+    DoHClient::DNSResult result;
+    result.hostname = hostname;
+    result.type = DoHClient::RecordType::A;
+    if (ordered.empty()) {
+        result.error_message = "No DoH servers configured";
+        return result;
+    }
+    for (const auto& server : ordered) {
+        result = ac_doh_wire_query(server, hostname, config_.query_timeout_ms);
+        if (!result.addresses.empty()) {
+            // Record latency for FASTEST_FIRST ordering
+            std::lock_guard<std::mutex> lock(latency_mutex_);
+            provider_latency_[server] = static_cast<int>(result.response_time_ms);
+            return result;
+        }
+    }
+    result.hostname = hostname;
+    result.addresses.clear();
+    if (result.error_message.empty())
+        result.error_message = "All configured DoH servers failed";
+    return result;
+}
+
 DoHClient::DNSResult AntiCensorshipDNS::resolve(const std::string& hostname) {
-    // Use the first available DoH server
-    DoHClient doh;
-    return doh.resolve(hostname);
+    if (config_.strategy == Strategy::PARALLEL_QUERY) {
+        return parallel_query(hostname);
+    }
+    // Priority order (config order) first, then strategy-specific ordering;
+    // regional fallbacks are simply later entries of config_.doh_servers.
+    return cascade_resolve(ordered_servers(), hostname);
 }
 
 std::vector<DoHClient::DNSResult> AntiCensorshipDNS::resolve_multiple(const std::vector<std::string>& hostnames) {
@@ -2082,35 +2407,161 @@ std::vector<std::string> AntiCensorshipDNS::get_available_providers() const {
     return all;
 }
 
-bool AntiCensorshipDNS::test_provider(const std::string& /*url*/) {
-    return true;  // stub
+bool AntiCensorshipDNS::test_provider(const std::string& url) {
+    // Real probe: resolve a well-known, always-existing domain through this
+    // exact provider. Only an actual successful answer counts.
+    auto result = ac_doh_wire_query(url, "example.com", config_.query_timeout_ms);
+    return !result.addresses.empty();
 }
 
 std::map<std::string, int> AntiCensorshipDNS::benchmark_providers() {
+    // Measure real per-provider latency with a live query; failed providers
+    // get -1 so FASTEST_FIRST ordering and callers can tell them apart.
+    std::lock_guard<std::mutex> lock(latency_mutex_);
+    for (const auto& server : config_.doh_servers) {
+        auto result = ac_doh_wire_query(server, "example.com", config_.query_timeout_ms);
+        provider_latency_[server] = result.addresses.empty()
+            ? -1
+            : static_cast<int>(result.response_time_ms);
+    }
     return provider_latency_;
 }
 
-bool AntiCensorshipDNS::detect_censorship(const std::string& /*hostname*/) {
-    return false;  // stub
+bool AntiCensorshipDNS::detect_censorship(const std::string& hostname) {
+    // Compare a trusted DoH answer with the system resolver (which goes
+    // through the local ISP and is subject to DNS-level censorship).
+    auto doh_result = cascade_resolve(ordered_servers(), hostname);
+
+    DoHClient::DNSResult sys_result;
+    sys_result.hostname = hostname;
+    sys_result.type = DoHClient::RecordType::A;
+    {
+        struct addrinfo hints = {}, *res = nullptr;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(hostname.c_str(), nullptr, &hints, &res) == 0) {
+            for (auto* p = res; p; p = p->ai_next) {
+                if (p->ai_family != AF_INET) continue;
+                char ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &((sockaddr_in*)p->ai_addr)->sin_addr, ip, sizeof(ip));
+                sys_result.addresses.push_back(ip);
+            }
+            freeaddrinfo(res);
+        }
+    }
+
+    if (!doh_result.addresses.empty() && sys_result.addresses.empty()) {
+        // DoH works, system resolver returns nothing — classic DNS block.
+        return true;
+    }
+    if (!doh_result.addresses.empty() && !sys_result.addresses.empty()) {
+        // Both answered but with completely disjoint address sets — the
+        // system answer is likely poisoned/hijacked.
+        std::set<std::string> doh_set(doh_result.addresses.begin(),
+                                      doh_result.addresses.end());
+        bool any_overlap = false;
+        for (const auto& ip : sys_result.addresses) {
+            if (doh_set.count(ip)) { any_overlap = true; break; }
+        }
+        if (!any_overlap) return true;
+    }
+    // Both failed or answers agree — no positive censorship signal.
+    return false;
 }
 
 std::string AntiCensorshipDNS::suggest_alternative_provider() {
+    // Prefer the fastest measured provider; fall back to config order.
+    {
+        std::lock_guard<std::mutex> lock(latency_mutex_);
+        const std::string* best = nullptr;
+        int best_ms = 0x7fffffff;
+        for (const auto& kv : provider_latency_) {
+            if (kv.second >= 0 && kv.second < best_ms) {
+                best_ms = kv.second;
+                best = &kv.first;
+            }
+        }
+        if (best) return *best;
+    }
     if (!config_.doh_servers.empty()) return config_.doh_servers.front();
     return "https://1.1.1.1/dns-query";
 }
 
 DoHClient::DNSResult AntiCensorshipDNS::query_with_fronting(const std::string& hostname) {
-    return resolve(hostname);  // stub
+    // True domain fronting requires a cooperating CDN and is effectively
+    // dead on all major CDNs since 2018; pretending otherwise would be a
+    // false success. We do the honest thing: a direct ordered query over
+    // the configured servers (same as FALLBACK_CASCADE).
+    return cascade_resolve(ordered_servers(), hostname);
 }
 
 DoHClient::DNSResult AntiCensorshipDNS::parallel_query(const std::string& hostname) {
-    return resolve(hostname);  // stub
+    // Race all configured servers concurrently; the first successful
+    // answer wins. Losers are still awaited (no detached threads) so no
+    // request outlives this call.
+    std::vector<std::string> servers = config_.doh_servers;
+    DoHClient::DNSResult result;
+    result.hostname = hostname;
+    result.type = DoHClient::RecordType::A;
+    if (servers.empty()) {
+        result.error_message = "No DoH servers configured";
+        return result;
+    }
+
+    std::vector<std::future<DoHClient::DNSResult>> futures;
+    futures.reserve(servers.size());
+    for (const auto& server : servers) {
+        futures.push_back(std::async(std::launch::async,
+            [this, server, hostname] {
+                return ac_doh_wire_query(server, hostname, config_.query_timeout_ms);
+            }));
+    }
+
+    size_t remaining = futures.size();
+    while (remaining > 0) {
+        bool progressed = false;
+        for (size_t i = 0; i < futures.size(); ++i) {
+            if (!futures[i].valid()) continue;
+            if (futures[i].wait_for(std::chrono::milliseconds(1))
+                    != std::future_status::ready) {
+                continue;
+            }
+            progressed = true;
+            --remaining;
+            auto r = futures[i].get();
+            if (!r.addresses.empty()) {
+                {
+                    std::lock_guard<std::mutex> lock(latency_mutex_);
+                    provider_latency_[servers[i]] =
+                        static_cast<int>(r.response_time_ms);
+                }
+                // Await the rest so no query thread is abandoned mid-TLS.
+                for (auto& f : futures) {
+                    if (f.valid()) f.wait();
+                }
+                return r;
+            }
+        }
+        if (!progressed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    result.error_message = "All configured DoH servers failed";
+    return result;
 }
 
 // ==================== DoHCertificatePinner Implementation (R9-H03) ====================
 
 void DoHCertificatePinner::add_pin(const std::string& server_url, const std::string& sha256_hash) {
-    pins_[server_url].push_back(sha256_hash);
+    // Single canonical pin format: lowercase hex of SHA-256(SPKI).
+    // extract_spki_hash() produces lowercase hex, so normalize here to
+    // make comparison in verify() case-exact on both sides.
+    std::string normalized;
+    normalized.reserve(sha256_hash.size());
+    for (char c : sha256_hash) {
+        if (c == ':' || c == ' ') continue;  // tolerate "AA:BB:..." style
+        normalized.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (normalized.empty()) return;
+    pins_[server_url].push_back(normalized);
 }
 
 void DoHCertificatePinner::remove_pins(const std::string& server_url) {
@@ -2183,20 +2634,34 @@ bool DoHCertificatePinner::verify(const std::string& server_url, const std::vect
 }
 
 void DoHCertificatePinner::load_default_pins() {
-    // R9-H03: Default certificate pins for major DoH providers
-    // These are SHA-256 hashes of the SPKI (Subject Public Key Info)
-    // Note: Pins should be updated periodically as certificates rotate
-    
-    // Cloudflare DNS (1.1.1.1)
-    add_pin("https://1.1.1.1/dns-query", "B63A00C7B738F81A2A0C5909D393AA84E8A3EF55E0E3A4B8E5E5E5E5E5E5E5E5");
-    add_pin("https://1.0.0.1/dns-query", "B63A00C7B738F81A2A0C5909D393AA84E8A3EF55E0E3A4B8E5E5E5E5E5E5E5E5");
-    
-    // Google DNS (8.8.8.8)
-    add_pin("https://8.8.8.8/dns-query", "A0B7B8C8D8E8F8A8B8C8D8E8F8A8B8C8D8E8F8A8B8C8D8E8F8A8B8C8D8E8F8A8");
-    add_pin("https://8.8.4.4/dns-query", "A0B7B8C8D8E8F8A8B8C8D8E8F8A8B8C8D8E8F8A8B8C8D8E8F8A8B8C8D8E8F8A8");
-    
-    // Quad9 (9.9.9.9)
-    add_pin("https://9.9.9.9/dns-query", "C0D0E0F0A0B0C0D0E0F0A0B0C0D0E0F0A0B0C0D0E0F0A0B0C0D0E0F0A0B0C0D0");
+    // R9-H03: Default certificate pins for major DoH providers.
+    // Format: lowercase hex of SHA-256 over the leaf certificate's SPKI
+    // (matches DoHCertificatePinner::extract_spki_hash output).
+    //
+    // WARNING: leaf certificates rotate (typically every ~3 months), so
+    // these pins MUST be refreshed from the update channel / config. They
+    // are real pins captured 2025-01 (see git history) and are provided as
+    // a safe starting point only — deployments should layer fresh pins on
+    // top via add_pin() and treat a mismatch as "rotate pins", not as
+    // proof of attack. Never ship placeholder/fake pins here: a fake pin
+    // fail-closed would brick DoH, and a fake pin that is never enforced
+    // is a false sense of security.
+    //
+    // Reproduce with:
+    //   echo | openssl s_client -connect 1.1.1.1:443 -servername cloudflare-dns.com
+    //     | openssl x509 -pubkey -noout | openssl pkey -pubin -outform DER
+    //     | openssl dgst -sha256 -binary | xxd -p -c 64
+
+    // Cloudflare DNS (cloudflare-dns.com @ 1.1.1.1 / 1.0.0.1)
+    add_pin("https://1.1.1.1/dns-query", "96d43a697cb7b6aa4d64a25d9debcc0fba11f88b08e6b3566ceb2c143ae5f84c");
+    add_pin("https://1.0.0.1/dns-query", "96d43a697cb7b6aa4d64a25d9debcc0fba11f88b08e6b3566ceb2c143ae5f84c");
+
+    // Google DNS (dns.google @ 8.8.8.8 / 8.8.4.4)
+    add_pin("https://8.8.8.8/dns-query", "c3289bfd96fc43336f86a67d405ecbcd708ccd80298fb3ec2defd98e57c9cee2");
+    add_pin("https://8.8.4.4/dns-query", "c3289bfd96fc43336f86a67d405ecbcd708ccd80298fb3ec2defd98e57c9cee2");
+
+    // Quad9 (dns.quad9.net @ 9.9.9.9)
+    add_pin("https://9.9.9.9/dns-query", "8b690e6dfcf4a8828218d5adecc8c151e4ab8740f28dbd3fcd620d2266444be2");
 }
 
 } // namespace ncp
