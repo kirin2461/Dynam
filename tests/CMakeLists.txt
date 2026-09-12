@@ -127,7 +127,11 @@ foreach(t IN LISTS NCP_STANDALONE_TESTS)
         CXX_STANDARD_REQUIRED ON
     )
     add_test(NAME ${t} COMMAND ${t})
-    set_tests_properties(${t} PROPERTIES TIMEOUT 120)
+    # Exit code 77 = graceful skip (environment/feature unavailable)
+    set_tests_properties(${t} PROPERTIES
+        TIMEOUT 120
+        SKIP_RETURN_CODE 77
+    )
 endforeach()
 
 # ==================== Compiler Warning Suppression ====================
