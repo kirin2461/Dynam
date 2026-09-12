@@ -182,12 +182,7 @@ TEST_F(CryptoTest, RandomBytesUnique) {
 
 #endif // HAVE_SODIUM
 
-// ==================== Non-Sodium Tests ====================
-// These tests run regardless of libsodium availability
-
-TEST(CryptoBasicTest, PlaceholderTest) {
-    // Basic sanity check that test framework works
-    EXPECT_TRUE(true);
-}
-
 } // anonymous namespace
+
+// NOTE: the former CryptoBasicTest.PlaceholderTest (EXPECT_TRUE(true)) was
+// removed — it tested nothing; real coverage is provided by the suites above.

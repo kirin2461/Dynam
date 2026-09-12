@@ -146,8 +146,8 @@ TEST_F(OrchestratorTest, Receive_EmptyDataReturnsEmpty) {
     ProtocolOrchestrator orch(make_client_config());
     std::vector<uint8_t> empty;
     auto result = orch.receive(empty, "127.0.0.1", 12345);
-    // Empty input should result in empty or error output
-    (void)result;
+    // Empty input must yield empty output (no phantom payload)
+    EXPECT_TRUE(result.empty());
 }
 
 TEST_F(OrchestratorTest, GenerateCoverResponse_NotEmpty) {

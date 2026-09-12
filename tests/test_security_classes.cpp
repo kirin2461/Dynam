@@ -325,18 +325,20 @@ protected:
 };
 
 TEST_F(MonitoringDetectorTest, IsNetworkMonitored_ReturnsBool) {
-    bool result = detector.is_network_monitored();
-    (void)result; // may be false in test env
+    // Environment-dependent; require no-crash and determinism.
+    bool first = detector.is_network_monitored();
+    EXPECT_EQ(first, detector.is_network_monitored());
 }
 
 TEST_F(MonitoringDetectorTest, IsDebuggerPresent_ReturnsBool) {
-    bool result = detector.is_debugger_present();
-    (void)result;
+    // No debugger is attached under ctest.
+    EXPECT_FALSE(detector.is_debugger_present());
 }
 
 TEST_F(MonitoringDetectorTest, IsRunningInVM_ReturnsBool) {
-    bool result = detector.is_running_in_vm();
-    (void)result;
+    // Environment-dependent (CI often runs on VMs); require determinism.
+    bool first = detector.is_running_in_vm();
+    EXPECT_EQ(first, detector.is_running_in_vm());
 }
 
 TEST_F(MonitoringDetectorTest, ScanThreats_NoThrow) {
@@ -345,9 +347,11 @@ TEST_F(MonitoringDetectorTest, ScanThreats_NoThrow) {
 
 TEST_F(MonitoringDetectorTest, ScanThreats_StructHasFields) {
     auto info = detector.scan_threats();
-    // In normal test env, should not detect debugger/sandbox
-    (void)info.debugger_detected;
-    (void)info.vm_detected;
+    // Under ctest no debugger is attached to the test process.
+    EXPECT_FALSE(info.debugger_detected);
+    // VM/sandbox verdicts are environment-dependent; verify consistency
+    // with the individual detectors.
+    EXPECT_EQ(info.vm_detected, detector.is_running_in_vm());
     (void)info.sandbox_detected;
 }
 

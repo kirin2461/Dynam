@@ -232,39 +232,42 @@ TEST_F(LicenseTest, EnableAntiTamper) {
 
 TEST_F(LicenseTest, CheckAntiDebug) {
     auto info = license.check_anti_debug();
-    // In a test runner environment, debugger_present may or may not be true.
-    // Just check the struct is populated.
-    (void)info.debugger_present;
-    (void)info.vm_detected;
-    (void)info.sandbox_detected;
-    (void)info.memory_tampering;
+    // Under ctest no debugger is attached to the test process.
+    EXPECT_FALSE(info.debugger_present);
+    // VM/sandbox/memory-tampering verdicts are environment-dependent;
+    // verify they are consistent with the individual detectors.
+    EXPECT_EQ(info.vm_detected, license.detect_vm());
+    EXPECT_EQ(info.sandbox_detected, license.detect_sandbox());
+    EXPECT_EQ(info.memory_tampering, !license.check_memory_integrity());
 }
 
 TEST_F(LicenseTest, DetectDebugger) {
-    // Should not throw regardless of environment
-    bool result = license.detect_debugger();
-    (void)result;
+    // No debugger is attached under ctest; result must be false.
+    EXPECT_FALSE(license.detect_debugger());
+    // Must not throw and must be deterministic across calls.
+    EXPECT_EQ(license.detect_debugger(), license.detect_debugger());
 }
 
 TEST_F(LicenseTest, DetectVM) {
-    // Just ensure it runs without crash
-    bool result = license.detect_vm();
-    (void)result;
+    // Environment-dependent (CI often runs on VMs): only require
+    // no-throw and a deterministic verdict within the same process.
+    bool first = license.detect_vm();
+    EXPECT_EQ(first, license.detect_vm());
 }
 
 TEST_F(LicenseTest, DetectSandbox) {
-    bool result = license.detect_sandbox();
-    (void)result;
+    bool first = license.detect_sandbox();
+    EXPECT_EQ(first, license.detect_sandbox());
 }
 
 TEST_F(LicenseTest, CheckCodeIntegrity) {
-    bool ok = license.check_code_integrity();
-    (void)ok;
+    // Unmodified test binary: integrity check must pass.
+    EXPECT_TRUE(license.check_code_integrity());
 }
 
 TEST_F(LicenseTest, CheckMemoryIntegrity) {
-    bool ok = license.check_memory_integrity();
-    (void)ok;
+    // No tampering in the test process: must pass.
+    EXPECT_TRUE(license.check_memory_integrity());
 }
 
 TEST_F(LicenseTest, ObfuscateLicenseData) {

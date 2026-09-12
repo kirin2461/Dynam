@@ -43,23 +43,41 @@ TEST_F(PacketInterceptorTest, DetectBackend_ReturnsValidEnum) {
 }
 
 TEST_F(PacketInterceptorTest, IsElevated_ReturnsBool) {
-    bool result = PacketInterceptor::is_elevated();
-    (void)result; // just ensure no crash; may be true or false in test env
+    // Environment-dependent (root vs. user); must not crash and must be
+    // deterministic within the same process.
+    bool first = PacketInterceptor::is_elevated();
+    EXPECT_EQ(first, PacketInterceptor::is_elevated());
 }
 
 TEST_F(PacketInterceptorTest, IsNfqueueAvailable_ReturnsBool) {
-    bool result = PacketInterceptor::is_nfqueue_available();
-    (void)result;
+#ifdef _WIN32
+    // NFQUEUE is Linux-only; must be unavailable on Windows.
+    EXPECT_FALSE(PacketInterceptor::is_nfqueue_available());
+#else
+    // Depends on kernel module availability; only require determinism.
+    bool first = PacketInterceptor::is_nfqueue_available();
+    EXPECT_EQ(first, PacketInterceptor::is_nfqueue_available());
+#endif
 }
 
 TEST_F(PacketInterceptorTest, IsWindivertAvailable_ReturnsBool) {
-    bool result = PacketInterceptor::is_windivert_available();
-    (void)result;
+#ifndef _WIN32
+    // WinDivert is Windows-only; must report unavailable elsewhere.
+    EXPECT_FALSE(PacketInterceptor::is_windivert_available());
+#else
+    bool first = PacketInterceptor::is_windivert_available();
+    EXPECT_EQ(first, PacketInterceptor::is_windivert_available());
+#endif
 }
 
 TEST_F(PacketInterceptorTest, IsWfpAvailable_ReturnsBool) {
-    bool result = PacketInterceptor::is_wfp_available();
-    (void)result;
+#ifndef _WIN32
+    // WFP is Windows-only; must report unavailable elsewhere.
+    EXPECT_FALSE(PacketInterceptor::is_wfp_available());
+#else
+    bool first = PacketInterceptor::is_wfp_available();
+    EXPECT_EQ(first, PacketInterceptor::is_wfp_available());
+#endif
 }
 
 // ── Construction ──────────────────────────────────────────────────────────────
