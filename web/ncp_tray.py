@@ -97,45 +97,45 @@ def start_tray(tooltip: str, on_open, on_quit) -> bool:
         shell32 = ctypes.windll.shell32
         kernel32 = ctypes.windll.kernel32
 
-# Explicit 64-bit-safe prototypes (ctypes defaults to c_int and truncates
-# pointers on Win64 -> OverflowError / corrupted HWND).
-user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
-                                  wintypes.WPARAM, wintypes.LPARAM]
-user32.DefWindowProcW.restype = ctypes.c_ssize_t
-user32.RegisterClassW.argtypes = [ctypes.c_void_p]
-user32.RegisterClassW.restype = wintypes.ATOM if hasattr(wintypes, "ATOM") else ctypes.c_ushort
-user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
-                                   wintypes.DWORD, ctypes.c_int, ctypes.c_int,
-                                   ctypes.c_int, ctypes.c_int, wintypes.HWND,
-                                   wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
-user32.CreateWindowExW.restype = wintypes.HWND
-user32.CreatePopupMenu.argtypes = []
-user32.CreatePopupMenu.restype = wintypes.HMENU
-user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
-user32.AppendMenuW.restype = wintypes.BOOL
-user32.GetCursorPos.argtypes = [ctypes.c_void_p]
-user32.GetCursorPos.restype = wintypes.BOOL
-user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-user32.SetForegroundWindow.restype = wintypes.BOOL
-user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
-                                  ctypes.c_int, wintypes.HWND, ctypes.c_void_p]
-user32.TrackPopupMenu.restype = wintypes.BOOL
-user32.DestroyMenu.argtypes = [wintypes.HMENU]
-user32.DestroyMenu.restype = wintypes.BOOL
-user32.PostQuitMessage.argtypes = [ctypes.c_int]
-user32.PostQuitMessage.restype = None
-user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
-user32.LoadIconW.restype = wintypes.HICON if hasattr(wintypes, "HICON") else ctypes.c_void_p
-user32.GetMessageW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.UINT]
-user32.GetMessageW.restype = wintypes.BOOL
-user32.TranslateMessage.argtypes = [ctypes.c_void_p]
-user32.TranslateMessage.restype = wintypes.BOOL
-user32.DispatchMessageW.argtypes = [ctypes.c_void_p]
-user32.DispatchMessageW.restype = ctypes.c_ssize_t
-shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.c_void_p]
-shell32.Shell_NotifyIconW.restype = wintypes.BOOL
-kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
-kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        # Explicit 64-bit-safe prototypes (ctypes defaults to c_int and truncates
+        # pointers on Win64 -> OverflowError / corrupted HWND).
+        user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                          wintypes.WPARAM, wintypes.LPARAM]
+        user32.DefWindowProcW.restype = ctypes.c_ssize_t
+        user32.RegisterClassW.argtypes = [ctypes.c_void_p]
+        user32.RegisterClassW.restype = wintypes.ATOM if hasattr(wintypes, "ATOM") else ctypes.c_ushort
+        user32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                           wintypes.DWORD, ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int, wintypes.HWND,
+                                           wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+        user32.CreateWindowExW.restype = wintypes.HWND
+        user32.CreatePopupMenu.argtypes = []
+        user32.CreatePopupMenu.restype = wintypes.HMENU
+        user32.AppendMenuW.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+        user32.AppendMenuW.restype = wintypes.BOOL
+        user32.GetCursorPos.argtypes = [ctypes.c_void_p]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.restype = wintypes.BOOL
+        user32.TrackPopupMenu.argtypes = [wintypes.HMENU, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                                          ctypes.c_int, wintypes.HWND, ctypes.c_void_p]
+        user32.TrackPopupMenu.restype = wintypes.BOOL
+        user32.DestroyMenu.argtypes = [wintypes.HMENU]
+        user32.DestroyMenu.restype = wintypes.BOOL
+        user32.PostQuitMessage.argtypes = [ctypes.c_int]
+        user32.PostQuitMessage.restype = None
+        user32.LoadIconW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR]
+        user32.LoadIconW.restype = wintypes.HICON if hasattr(wintypes, "HICON") else ctypes.c_void_p
+        user32.GetMessageW.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.UINT]
+        user32.GetMessageW.restype = wintypes.BOOL
+        user32.TranslateMessage.argtypes = [ctypes.c_void_p]
+        user32.TranslateMessage.restype = wintypes.BOOL
+        user32.DispatchMessageW.argtypes = [ctypes.c_void_p]
+        user32.DispatchMessageW.restype = ctypes.c_ssize_t
+        shell32.Shell_NotifyIconW.argtypes = [wintypes.DWORD, ctypes.c_void_p]
+        shell32.Shell_NotifyIconW.restype = wintypes.BOOL
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 
 
         state = {"hwnd": None, "nid": None}
