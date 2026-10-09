@@ -42,11 +42,28 @@ MANIFEST_RAW_URL = f"https://raw.githubusercontent.com/{REPO}/master/update-mani
 
 NCP_UPDATE_PUBLIC_KEY_B64 = "FT2FWdlm6rGldWix5fDJBuZmrHIR+73CuRpWszs/Hog="
 
-# Replaced by .github/workflows/release.yml with the release tag version at
-# build time. The fallback below is used only for dev runs from a source tree.
-CURRENT_VERSION = "__NCP_VERSION__"
-if CURRENT_VERSION.startswith("__"):
-    CURRENT_VERSION = "1.7.2-dev"
+
+def _load_current_version() -> str:
+    """Product version, written by CMake into web/static/version.txt at
+    configure time (release packaging copies web/ verbatim, and PyInstaller
+    bundles web/static via --add-data). Falls back for dev runs from a
+    source tree that was never configured."""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(
+            Path(getattr(sys, "_MEIPASS", "")) / "static" / "version.txt")
+    candidates.append(Path(__file__).resolve().parent / "static" / "version.txt")
+    for cand in candidates:
+        try:
+            text = cand.read_text(encoding="utf-8").strip()
+        except Exception:
+            continue
+        if text and text[0].isdigit():
+            return text
+    return "1.7.2-dev"
+
+
+CURRENT_VERSION = _load_current_version()
 
 _UA = {"User-Agent": "NCP-Updater/1.5"}
 
