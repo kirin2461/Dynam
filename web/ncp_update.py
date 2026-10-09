@@ -42,7 +42,11 @@ MANIFEST_RAW_URL = f"https://raw.githubusercontent.com/{REPO}/master/update-mani
 
 NCP_UPDATE_PUBLIC_KEY_B64 = "FT2FWdlm6rGldWix5fDJBuZmrHIR+73CuRpWszs/Hog="
 
-CURRENT_VERSION = "1.6.0"
+# Replaced by .github/workflows/release.yml with the release tag version at
+# build time. The fallback below is used only for dev runs from a source tree.
+CURRENT_VERSION = "__NCP_VERSION__"
+if CURRENT_VERSION.startswith("__"):
+    CURRENT_VERSION = "1.7.2-dev"
 
 _UA = {"User-Agent": "NCP-Updater/1.5"}
 
@@ -221,7 +225,9 @@ def sign_asset_sha256(sha256_hex: str, private_key_b64: str) -> str:
 
 def _is_safe_member_name(name: str) -> bool:
     """Reject absolute paths and ..-traversal in archive member names."""
-    if not name or name.startswith(("/", "\\")):
+    if not name:
+        return False
+    if name.startswith(("/", "\\")):
         return False
     if ":" in name:  # Windows drive letters / ADS streams
         return False
