@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(ncp-cpp
-    VERSION 1.7.0
+    VERSION 1.7.2
     DESCRIPTION "Network Control Protocol - C++ Implementation"
     LANGUAGES CXX
 )
@@ -35,6 +35,14 @@ option(ENABLE_LIBOQS "Enable post-quantum cryptography via liboqs" OFF)
 option(ENABLE_TOR_PROXY "Enable Tor proxy support" OFF)
 option(ENABLE_FUZZING "Enable fuzzing tests (requires Clang with LibFuzzer)" OFF)
 option(BUILD_PORTABLE_MACOS "Build a relocatable macOS layout (bin/ + lib/ with bundled dylibs)" OFF)
+
+# ==================== Web updater version stamp ====================
+# web/ncp_update.py learns the product version from web/static/version.txt.
+# Written at configure time so release packaging (which copies web/ verbatim)
+# always carries the real version. See _load_current_version() in ncp_update.py.
+if(EXISTS "${CMAKE_SOURCE_DIR}/web/static")
+    file(WRITE "${CMAKE_SOURCE_DIR}/web/static/version.txt" "${PROJECT_VERSION}\n")
+endif()
 
 # ==================== Portable macOS layout ====================
 # When BUILD_PORTABLE_MACOS=ON, the install tree is laid out so the binary
@@ -183,7 +191,7 @@ elseif(UNIX)
     set(CMAKE_CXX_FLAGS_RELEASE "-O3")
     set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -Wall -Wextra -Wpedantic")
     find_package(Threads REQUIRED)
-    
+
     # Linux: Check for libnetfilter_queue
     find_package(PkgConfig QUIET)
     if(PKG_CONFIG_FOUND)
@@ -326,7 +334,7 @@ if(ENABLE_DOCS)
     if(DOXYGEN_FOUND)
         set(DOXYGEN_IN ${CMAKE_SOURCE_DIR}/docs/Doxyfile.in)
         set(DOXYGEN_OUT ${CMAKE_BINARY_DIR}/Doxyfile)
-        
+
         if(EXISTS ${DOXYGEN_IN})
             configure_file(${DOXYGEN_IN} ${DOXYGEN_OUT} @ONLY)
             add_custom_target(docs ALL
