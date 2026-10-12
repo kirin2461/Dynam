@@ -1219,7 +1219,15 @@ static void write_module_stats_json(const std::string& path) {
 // ── Trial license (7 days, auto-issued on first run) ─────────────────────────
 // MAC string (must match web/server.py exactly):
 //   sha256_hex(TRIAL_SECRET + "|" + first_run + "|" + expires + "|" + machine_lower)
-static const char* NCP_TRIAL_SECRET = "ncp7d-tr14l-5ecr3t-k3y";
+// The Web UI signs trial.json with a per-install random secret (see
+// TRIAL_SECRET_FILE in web/server.py) and passes it to the engine via the
+// NCP_TRIAL_SECRET env var. Standalone CLI falls back to the legacy literal.
+static const char* NCP_TRIAL_SECRET_DEFAULT = "ncp7d-tr14l-5ecr3t-k3y";
+static std::string trial_secret() {
+    const char* env = std::getenv("NCP_TRIAL_SECRET");
+    if (env && *env) return std::string(env);
+    return std::string(NCP_TRIAL_SECRET_DEFAULT);
+}
 static const int NCP_TRIAL_DAYS = 7;
 
 static std::string trial_machine_id() {
@@ -1262,7 +1270,7 @@ static std::string trial_date_plus(int days) {
 }
 
 static std::string trial_sig(const std::string& fr, const std::string& exp, const std::string& mach) {
-    std::string in = std::string(NCP_TRIAL_SECRET) + "|" + fr + "|" + exp + "|" + mach;
+    std::string in = trial_secret() + "|" + fr + "|" + exp + "|" + mach;
     Crypto crypto;
     SecureMemory sm(reinterpret_cast<const uint8_t*>(in.data()), in.size());
     SecureMemory h = crypto.hash_sha256(sm);

@@ -1092,6 +1092,10 @@ def api_start():
             binary_dir = str(Path(binary_path).parent)
             push_log("INFO", f"Launching: {' '.join(args)}")
             push_log("INFO", f"Working dir: {binary_dir}")
+            engine_env = dict(os.environ)
+            # Trial.json is signed with this install's TRIAL_SECRET — the CLI
+            # validates it with the same value from NCP_TRIAL_SECRET.
+            engine_env["NCP_TRIAL_SECRET"] = TRIAL_SECRET
             proc = subprocess.Popen(
                 args,
                 stdout=subprocess.PIPE,
@@ -1099,6 +1103,7 @@ def api_start():
                 text=True,
                 bufsize=1,
                 cwd=binary_dir,
+                env=engine_env,
             )
             state["process"] = proc
             state["pid"] = proc.pid
