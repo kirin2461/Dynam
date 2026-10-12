@@ -378,8 +378,18 @@ static void test_tls_padding_rfc7685() {
     size_t new_el = (static_cast<size_t>(padded[ep]) << 8) | padded[ep + 1];
     TEST_CHECK(old_el == 9 + sni_len);            // sanity: located the field
     TEST_CHECK(new_el == old_el + 4 + pad);
+    // Record and handshake length fields grow by exactly 4 + pad as well.
+    size_t old_rl = (static_cast<size_t>(ch[3]) << 8) | ch[4];
+    size_t new_rl = (static_cast<size_t>(padded[3]) << 8) | padded[4];
+    TEST_CHECK(new_rl == old_rl + 4 + pad);
+    size_t old_hs = (static_cast<size_t>(ch[6]) << 16) |
+                    (static_cast<size_t>(ch[7]) << 8) | ch[8];
+    size_t new_hs = (static_cast<size_t>(padded[6]) << 16) |
+                    (static_cast<size_t>(padded[7]) << 8) | padded[8];
+    TEST_CHECK(new_hs == old_hs + 4 + pad);
+    // Every other byte of the original ClientHello stays at its offset.
     for (size_t i = 0; i < orig_len; ++i) {
-        if (i == ep || i == ep + 1) continue;
+        if (i <= 8 || i == ep || i == ep + 1) continue;  // length fields
         TEST_CHECK(padded[i] == ch[i]);
     }
 
