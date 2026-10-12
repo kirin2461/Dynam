@@ -40,7 +40,23 @@ jobs:
           cp scripts/out/Dynam.icns resources/Dynam.icns
 
       - name: Build everything (CLI + GUI + bundle + DMG)
-        run: ./scripts/build_macos_gui_app.sh
+        run: |
+          set +e
+          ./scripts/build_macos_gui_app.sh 2>&1 | tee /tmp/build.log
+          exit ${PIPESTATUS[0]}
+
+      # CI-DEBUG: on failure, push the captured build log to a branch so it
+      # can be read via git (log API/UI requires interactive auth).
+      - name: Publish build log on failure
+        if: failure()
+        run: |
+          git config user.name "ci-debug"
+          git config user.email "actions@github.com"
+          { grep -n -iE 'error' /tmp/build.log | head -150 > build-errors.txt; } || true
+          { tail -400 /tmp/build.log > build-log-tail.txt; } || true
+          git add build-errors.txt build-log-tail.txt
+          git commit -m "ci debug: macOS build failure log (run ${{ github.run_id }})" || true
+          git push origin HEAD:refs/heads/ci-logs/mac-${{ github.run_id }} || true
 
       - name: Smoke test (GUI launches and survives 15s)
         run: |
