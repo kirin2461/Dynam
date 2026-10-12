@@ -5,6 +5,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QSysInfo>
 
 #include <sodium.h>
 
@@ -74,6 +75,19 @@ LicenseCheck verifyLicenseKey(const QString& keyString) {
         return res;
     }
     QJsonObject o = doc.object();
+
+    // HWID binding: if the key payload carries a non-empty "hwid", it must
+    // match this machine. Unified with web/server.py (_machine_id) and the
+    // CLI (License::get_hwid) — all three use the lowercase hostname.
+    const QString bound = o.value("hwid").toString().trimmed();
+    if (!bound.isEmpty()) {
+        const QString local = QSysInfo::machineHostName().trimmed().toLower();
+        if (bound.compare(local, Qt::CaseInsensitive) != 0) {
+            res.error = QStringLiteral("Ключ привязан к другому устройству (HWID mismatch)");
+            return res;
+        }
+    }
+
     res.plan = o.value("plan").toString();
     for (const auto& m : o.value("modules").toArray())
         res.modules << m.toString();

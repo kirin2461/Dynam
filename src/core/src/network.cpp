@@ -115,6 +115,22 @@ std::vector<Network::InterfaceInfo> Network::get_interfaces() {
         }
         pcap_freealldevs(alldevs);
     }
+#else
+    // No libpcap: plain getifaddrs(3) enumeration — always available on
+    // POSIX. Previously this branch silently returned an EMPTY list when
+    // the build lacked libpcap, making `ncp network interfaces` useless.
+    struct ifaddrs* ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) == 0) {
+        std::vector<std::string> seen;
+        for (const struct ifaddrs* ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_name) continue;
+            if (std::find(seen.begin(), seen.end(), ifa->ifa_name) != seen.end())
+                continue;
+            seen.push_back(ifa->ifa_name);
+            interfaces.push_back(get_interface_info(ifa->ifa_name));
+        }
+        freeifaddrs(ifaddr);
+    }
 #endif
 #endif
 
@@ -160,7 +176,8 @@ Network::InterfaceInfo Network::get_interface_info([[maybe_unused]] const std::s
         }
     }
 #else
-#ifdef HAVE_PCAP
+    // getifaddrs(3) needs no libpcap — keep it unconditional on POSIX so
+    // interface info works in every build configuration.
     struct ifaddrs* ifaddr = nullptr;
     if (getifaddrs(&ifaddr) == 0) {
         for (struct ifaddrs* ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
@@ -182,7 +199,6 @@ Network::InterfaceInfo Network::get_interface_info([[maybe_unused]] const std::s
         }
         freeifaddrs(ifaddr);
     }
-#endif
 #endif
 
     return info;
