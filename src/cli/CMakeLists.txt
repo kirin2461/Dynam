@@ -13,6 +13,7 @@ endif()
 
 target_include_directories(ncp-cli PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_BINARY_DIR}/generated
 )
 
 set_target_properties(ncp-cli PROPERTIES

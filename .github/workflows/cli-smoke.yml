@@ -1,0 +1,57 @@
+name: CLI Smoke Matrix
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # ci-logs debug branches (temporary) + annotations
+
+jobs:
+  smoke:
+    name: CLI functional smoke (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake build-essential pkg-config \
+            libssl-dev libsodium-dev curl
+
+      - name: Build CLI
+        run: |
+          cmake -S . -B build-smoke -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF -DENABLE_CLI=ON -DENABLE_GUI=OFF \
+            -DENABLE_WEBSOCKETS=OFF
+          cmake --build build-smoke --parallel --target ncp-cli
+
+      - name: Run smoke matrix
+        run: |
+          chmod +x scripts/smoke_cli.sh
+          set +e
+          ./scripts/smoke_cli.sh "$PWD/build-smoke/bin/ncp" 2>&1 | tee smoke-report.txt
+          rc=${PIPESTATUS[0]}
+          echo "smoke_rc=$rc" >> "$GITHUB_ENV"
+          exit 0
+
+      # CI-DEBUG (temporary): publish the report to a ci-logs branch so it is
+      # readable via git while Actions logs require interactive auth.
+      - name: Publish smoke report
+        if: always()
+        run: |
+          git config user.name "ci-debug"
+          git config user.email "actions@github.com"
+          cp smoke-report.txt "smoke-${{ github.run_id }}.txt"
+          git add "smoke-${{ github.run_id }}.txt"
+          git commit -m "ci: smoke report (run ${{ github.run_id }}, rc=${{ env.smoke_rc }})" || true
+          git push origin HEAD:refs/heads/ci-logs/smoke-${{ github.run_id }} || true
+
+      - name: Evaluate result
+        run: |
+          grep -E '^ SMOKE SUMMARY' smoke-report.txt
+          [ "${{ env.smoke_rc }}" = "0" ]
