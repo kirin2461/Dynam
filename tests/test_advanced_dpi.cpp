@@ -368,20 +368,20 @@ static void test_tls_padding_rfc7685() {
     for (size_t i = 0; i < pad; ++i)
         TEST_CHECK(padded[ext_pos + 4 + i] == 0x00);
 
-    // The padding extension replaces the old extensions-length value: exactly
-    // two consecutive bytes differ, and the delta equals 4 + pad.
-    size_t diffs = 0, first_diff = 0;
-    for (size_t i = 0; i < orig_len; ++i) {
-        if (padded[i] != ch[i]) {
-            if (diffs == 0) first_diff = i;
-            ++diffs;
-        }
-    }
-    TEST_CHECK(diffs == 2);
-    TEST_CHECK(padded[first_diff + 1] != ch[first_diff + 1]);
-    size_t old_el = (static_cast<size_t>(ch[first_diff]) << 8) | ch[first_diff + 1];
-    size_t new_el = (static_cast<size_t>(padded[first_diff]) << 8) | padded[first_diff + 1];
+    // Only the 2-byte extensions-length field may change; every other byte
+    // of the original ClientHello must stay at the same offset. The field
+    // sits right before the extensions block: ep = orig_len - 2 - ext_body,
+    // where make_client_hello emits a single SNI extension of 9 + sni bytes.
+    const size_t sni_len = std::string("example.com").size();
+    const size_t ep = orig_len - 2 - (9 + sni_len);
+    size_t old_el = (static_cast<size_t>(ch[ep]) << 8) | ch[ep + 1];
+    size_t new_el = (static_cast<size_t>(padded[ep]) << 8) | padded[ep + 1];
+    TEST_CHECK(old_el == 9 + sni_len);            // sanity: located the field
     TEST_CHECK(new_el == old_el + 4 + pad);
+    for (size_t i = 0; i < orig_len; ++i) {
+        if (i == ep || i == ep + 1) continue;
+        TEST_CHECK(padded[i] == ch[i]);
+    }
 
     // Non-ClientHello input passes through unchanged
     std::vector<uint8_t> other = {0x17, 0x03, 0x03, 0x00, 0x04,
