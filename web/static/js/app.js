@@ -1443,7 +1443,17 @@ async function init() {
   navigateTo('overview');
 }
 
+// Version badge: filled from /api/version (single source of truth =
+// CMake-stamped web/static/version.txt via server.py).
+async function loadVersionBadge() {
+  try {
+    const v = await apiFetch('/version');
+    document.querySelectorAll('.js-version').forEach(e => { e.textContent = 'v' + v.version; });
+  } catch (e) { /* leave placeholder */ }
+}
+
 document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', loadVersionBadge);
 
 // ─── Telegram MTProto Proxies ──────────────────────────────────────────────
 
