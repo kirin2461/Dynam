@@ -248,6 +248,28 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          name: Dynam NCP ${{ github.ref_name }}
+          body: |
+            ## Dynam NCP ${{ github.ref_name }}
+
+            Полноценный релиз с поддержкой **Windows 10/11**, Linux и macOS.
+
+            ### Состав пакетов
+            - **ncp-windows-x64.zip** — Windows 10/11 (x64): CLI `ncp.exe`, Web GUI `ncp-gui.exe` (порт 8085), Qt GUI `ncp-qt.exe`. WinDivert.dll/WinDivert64.sys в комплекте; **Npcap устанавливается отдельно** (https://npcap.com) — нужен для ARP/DHCP-функций.
+            - **ncp-linux-x64.tar.gz** — CLI + Web GUI.
+            - **ncp-macos-x64.tar.gz** — CLI + Web GUI (arm64 .app бандл — в артефактах macOS workflow).
+            - **manifest.json** — подписанный Ed25519 манифест автообновления (прилагается, когда задан секрет NCP_SIGNING_KEY).
+
+            ### Windows: быстрый старт
+            1. Распаковать архив, например в `C:\ncp`.
+            2. `ncp-gui.exe` — Web GUI (панель на http://localhost:8085), либо `ncp-qt.exe` — десктопный Qt-интерфейс.
+            3. CLI: `ncp.exe run` / `ncp.exe dpi` требуют прав администратора (WinDivert driver mode).
+
+            ### Изменения с v1.7.1
+            - Апдейтер больше не сообщает неверную версию: версия штампуется из CMake (`web/static/version.txt`)
+            - Совместимость с OpenSSL 4.x (macOS, brew openssl@4)
+            - Полная Windows-поддержка стека (Winsock2, WinDivert), паритет Qt/Web GUI
+          generate_release_notes: true
           files: |
             ncp-linux-x64/ncp-linux-x64.tar.gz
             ncp-macos-x64/ncp-macos-x64.tar.gz
