@@ -355,7 +355,12 @@ bool generate_local_ca(const std::string& key_out_path,
                     60L * 60 * 24 * 365 * 10);  // 10 years
     X509_set_pubkey(cert, pkey);
     {
-        X509_NAME* name = X509_get_subject_name(cert);
+        // OpenSSL 4.x made X509_get_subject_name() return const X509_NAME*
+        // (3.x and older return a mutable X509_NAME*). The certificate — and
+        // therefore its subject name — is fully mutable here: we just created
+        // it and immediately set issuer = subject below. The const_cast is a
+        // no-op on OpenSSL <= 3.x and keeps one code path for 1.1/3.x/4.x.
+        X509_NAME* name = const_cast<X509_NAME*>(X509_get_subject_name(cert));
         X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
             reinterpret_cast<const unsigned char*>(common_name.c_str()),
             -1, -1, 0);
