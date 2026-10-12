@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # ci-logs debug branches (temporary) + annotations
+  contents: read
 
 jobs:
   smoke:
@@ -41,15 +41,13 @@ jobs:
 
       # CI-DEBUG (temporary): publish the report to a ci-logs branch so it is
       # readable via git while Actions logs require interactive auth.
-      - name: Publish smoke report
+      - name: Upload smoke report artifact
         if: always()
-        run: |
-          git config user.name "ci-debug"
-          git config user.email "actions@github.com"
-          cp smoke-report.txt "smoke-${{ github.run_id }}.txt"
-          git add "smoke-${{ github.run_id }}.txt"
-          git commit -m "ci: smoke report (run ${{ github.run_id }}, rc=${{ env.smoke_rc }})" || true
-          git push origin HEAD:refs/heads/ci-logs/smoke-${{ github.run_id }} || true
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-report
+          path: smoke-report.txt
+          retention-days: 30
 
       - name: Evaluate result
         run: |
