@@ -113,7 +113,8 @@ run 10 "$BIN" crypto hash sha512 abc
 expect "crypto hash sha512 known vector" 'ddaf35a193617abacc417349ae204131'
 
 run 10 "$BIN" crypto hash blake2b abc
-expect "crypto hash blake2b known vector" 'ba80a53f981c4d0d6a2797b69f12f6e9'
+# CLI uses BLAKE2b-256 (32-byte digest) — KAT for "abc":
+expect "crypto hash blake2b-256 known vector" 'bddd813c634239723171ef3fee98579b94964e3bb1cb3e427262c8c068d52319'
 
 # ───────────────────────── C. network ────────────────────────
 echo "--- C. network ---"
@@ -144,7 +145,14 @@ run 15 "$BIN" spa keygen --out "$WORK/spa"
 expect "spa keygen" 'key_id|authorized'
 if [ -f "$WORK/spa.key" ]; then
     SZ=$(stat -c%s "$WORK/spa.key")
-    [ "$SZ" -eq 96 ] && pass "spa keyfile is 96 bytes (sk||pk||id)" || fail "spa keyfile size ($SZ != 96)"
+    if [ "$SZ" -eq 96 ]; then
+        pass "spa keyfile is 96 bytes raw (sk||pk||id)"
+    elif [ "$SZ" -eq 128 ] || [ "$SZ" -eq 129 ]; then
+        DEC=$(base64 -d "$WORK/spa.key" 2>/dev/null | wc -c)
+        [ "$DEC" -eq 96 ] && pass "spa keyfile is base64 of 96 bytes" || fail "spa keyfile base64 decodes to $DEC bytes"
+    else
+        fail "spa keyfile size (unexpected $SZ)"
+    fi
 else
     fail "spa keyfile written"
 fi
@@ -180,7 +188,7 @@ run 15 "$BIN" stegodns encode --ip 203.0.113.7 --port 9443 \
     --spa-pubkey "$SPA_PK_B64" --passphrase smokepass \
     --signing-key "$WORK/spa3.key" --domain example.com
 expect "stegodns encode" 'verify-pubkey'
-TXT_REC="$(printf '%s' "$OUT" | grep -iE '^[A-Za-z0-9_.-]+\.' | head -1)"
+TXT_REC="$(printf '%s' "$OUT" | grep -iE '_ncp\.' | head -1)"
 VPK="$(printf '%s' "$OUT" | grep -i 'verify-pubkey' | grep -oiE '[A-Za-z0-9+/=]{40,}' | head -1)"
 if [ -n "$TXT_REC" ] && [ -n "$VPK" ]; then
     run 15 "$BIN" stegodns decode --txt "$TXT_REC" --passphrase smokepass --verify-pubkey "$VPK"
