@@ -383,12 +383,83 @@ std::vector<std::vector<uint8_t>> TLSManipulator::split_tls_record(
 
 std::vector<uint8_t> TLSManipulator::add_tls_padding(
     const uint8_t* data, size_t len, size_t padding_size) {
-    // DISABLED: Appending padding after TLS record without updating
-    // the record length field corrupts the TLS record.
-    // TODO(R13): Implement proper TLS 1.3 padding extension (RFC 7685)
-    // or send padding as a separate TCP segment.
-    (void)padding_size;
-    return std::vector<uint8_t>(data, data + len);
+    // RFC 7685 padding extension for TLS ClientHello (R13).
+    //
+    // Inserts a zero-filled `padding` extension (type 21) as the LAST
+    // extension of the ClientHello and fixes up all three length fields
+    // (TLS record, handshake message, extensions block). Only a complete,
+    // single-record ClientHello is transformed; anything else (fragmented,
+    // coalesced or malformed input) is returned unchanged so the pipeline
+    // can never emit a corrupted record.
+    std::vector<uint8_t> unchanged(data, data + len);
+    if (!data || padding_size == 0 || len < 9) return unchanged;
+
+    // Record header: content_type = handshake(22), version 0x03xx,
+    // record length must cover the whole input (single complete record).
+    if (data[0] != 0x16 || data[1] != 0x03) return unchanged;
+    const size_t record_len = (static_cast<size_t>(data[3]) << 8) | data[4];
+    if (record_len != len - 5) return unchanged;
+
+    // Handshake header: msg_type = client_hello(1), and the handshake
+    // message must span the entire record (no coalesced messages).
+    if (data[5] != 0x01) return unchanged;
+    const size_t hs_len = (static_cast<size_t>(data[6]) << 16) |
+                          (static_cast<size_t>(data[7]) << 8) | data[8];
+    if (hs_len != record_len - 4) return unchanged;
+
+    // Walk the ClientHello body down to the extensions block, which is
+    // the tail of the handshake message.
+    const size_t body_end = 9 + hs_len;   // 5 record + 4 handshake headers
+    size_t off = 9;
+    auto need = [&](size_t n) { return off <= body_end && n <= body_end - off; };
+    if (!need(2 + 32)) return unchanged;
+    off += 2 + 32;                        // client_version + random
+    if (!need(1)) return unchanged;
+    off += 1 + data[off];                 // legacy_session_id
+    if (!need(2)) return unchanged;
+    off += 2 + ((static_cast<size_t>(data[off]) << 8) | data[off + 1]);  // cipher_suites
+    if (!need(1)) return unchanged;
+    off += 1 + data[off];                 // legacy_compression_methods
+    if (!need(2)) return unchanged;
+
+    const size_t ext_len_off = off;
+    const size_t ext_len = (static_cast<size_t>(data[off]) << 8) | data[off + 1];
+    off += 2;
+    if (off + ext_len != body_end) return unchanged;  // malformed / trailing data
+
+    // Cap padding so the record stays within the TLS maximum (2^14) and
+    // every length field remains representable.
+    const size_t overhead = 4;            // ext type(2) + ext length(2)
+    size_t pad = padding_size;
+    if (len + overhead + pad > 16384)
+        pad = (len + overhead < 16384) ? (16384 - len - overhead) : 0;
+    if (pad == 0 || ext_len + overhead + pad > 0xFFFF ||
+        hs_len + overhead + pad > 0xFFFFFF) {
+        return unchanged;
+    }
+
+    const size_t new_ext_len = ext_len + overhead + pad;
+    const size_t new_hs_len = hs_len + overhead + pad;
+    const size_t new_record_len = record_len + overhead + pad;
+
+    std::vector<uint8_t> out;
+    out.reserve(len + overhead + pad);
+    out.insert(out.end(), data, data + ext_len_off);
+    out.push_back(static_cast<uint8_t>(new_ext_len >> 8));
+    out.push_back(static_cast<uint8_t>(new_ext_len & 0xFF));
+    out.insert(out.end(), data + ext_len_off + 2, data + body_end);
+    out.push_back(0x00);
+    out.push_back(0x15);                  // extension_type = padding(21)
+    out.push_back(static_cast<uint8_t>(pad >> 8));
+    out.push_back(static_cast<uint8_t>(pad & 0xFF));
+    out.insert(out.end(), pad, 0x00);     // RFC 7685: zero-filled padding
+    // Fix up the enclosing length fields.
+    out[3] = static_cast<uint8_t>(new_record_len >> 8);
+    out[4] = static_cast<uint8_t>(new_record_len & 0xFF);
+    out[6] = static_cast<uint8_t>(new_hs_len >> 16);
+    out[7] = static_cast<uint8_t>(new_hs_len >> 8);
+    out[8] = static_cast<uint8_t>(new_hs_len & 0xFF);
+    return out;
 }
 
 std::vector<uint8_t> TLSManipulator::inject_grease(
@@ -825,10 +896,10 @@ AdvancedDPIStats AdvancedDPIBypass::get_stats() const {
 // =====================================================================
 // process_outgoing — unified pipeline (FIX #57 cleanup)
 //
-// All TLS-level manipulations (GREASE, ECH, decoy SNI, splitting) are
-// guarded by !cfg.mimicry_managed_tls to prevent corrupting records
+// All TLS-level manipulations (GREASE, ECH, padding, decoy SNI, splitting)
+// are guarded by !cfg.mimicry_managed_tls to prevent corrupting records
 // already framed by the mimicry layer.
-// Transport-level ops (padding, obfuscation, timing) always apply.
+// Transport-level ops (obfuscation, timing) always apply.
 // =====================================================================
 
 std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
@@ -875,6 +946,28 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
             std::lock_guard<std::mutex> lock(impl_->stats_mutex);
             impl_->stats.ech_applied.fetch_add(1, std::memory_order_relaxed);
             impl_->log("ECH applied to ClientHello");
+        }
+    }
+
+    // === RFC 7685 ClientHello padding (before splitting) ===
+    // TLS-level op: rewrites the record, so it is gated on
+    // !mimicry_managed_tls like the other TLS manipulations.
+    if (!cfg.mimicry_managed_tls &&
+        cfg.padding.enabled && is_client_hello && cfg.padding.max_padding > 0) {
+        size_t ps = cfg.padding.max_padding;
+        if (cfg.padding.random_padding && cfg.padding.max_padding > cfg.padding.min_padding) {
+            ps = secure_random(static_cast<uint32_t>(
+                     cfg.padding.max_padding - cfg.padding.min_padding + 1)) +
+                 cfg.padding.min_padding;
+        }
+        auto padded = impl_->tls_manip->add_tls_padding(
+            working_data.data(), working_data.size(), ps);
+        if (padded.size() > working_data.size()) {
+            const size_t applied = padded.size() - working_data.size();
+            working_data = std::move(padded);
+            std::lock_guard<std::mutex> lock(impl_->stats_mutex);
+            impl_->stats.packets_padded.fetch_add(1, std::memory_order_relaxed);
+            impl_->stats.bytes_padding.fetch_add(applied, std::memory_order_relaxed);
         }
     }
 
@@ -927,21 +1020,6 @@ std::vector<std::vector<uint8_t>> AdvancedDPIBypass::process_outgoing(
     } else {
         result.push_back(working_data);
     }
-
-    // === Padding (DISABLED: add_tls_padding is now a no-op because appending
-    // padding without updating the TLS record length field corrupts records.
-    // See ADV-FIX-1 / add_tls_padding for details.) ===
-    // if (cfg.padding.enabled && cfg.padding.max_padding > 0) {
-    //     for (auto& segment : result) {
-    //         size_t ps = cfg.padding.random_padding
-    //             ? secure_random(static_cast<uint32_t>(cfg.padding.max_padding - cfg.padding.min_padding + 1)) + cfg.padding.min_padding
-    //             : cfg.padding.max_padding;
-    //         segment = impl_->tls_manip->add_tls_padding(segment.data(), segment.size(), ps);
-    //         std::lock_guard<std::mutex> lock(impl_->stats_mutex);
-    //         impl_->stats.packets_padded++;
-    //         impl_->stats.bytes_padding += ps;
-    //     }
-    // }
 
     // === Obfuscation (transport-level — always safe) ===
     if (impl_->obfuscator) {

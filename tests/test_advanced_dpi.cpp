@@ -337,6 +337,65 @@ static void test_technique_toggle() {
     std::cout << " OK" << std::endl;
 }
 
+
+static void test_tls_padding_rfc7685() {
+    std::cout << "Testing RFC 7685 ClientHello padding..." << std::endl;
+
+    TLSManipulator manip;
+    auto ch = make_client_hello("example.com");
+    const size_t orig_len = ch.size();
+    const size_t pad = 100;
+
+    auto padded = manip.add_tls_padding(ch.data(), ch.size(), pad);
+
+    // Grows by exactly extension header (4) + pad bytes
+    TEST_CHECK(padded.size() == orig_len + 4 + pad);
+
+    // Record length field covers the whole record
+    size_t rec_len = (static_cast<size_t>(padded[3]) << 8) | padded[4];
+    TEST_CHECK(rec_len == padded.size() - 5);
+
+    // Handshake length (3 bytes) spans the whole record
+    size_t hs_len = (static_cast<size_t>(padded[6]) << 16) |
+                    (static_cast<size_t>(padded[7]) << 8) | padded[8];
+    TEST_CHECK(hs_len == rec_len - 4);
+
+    // Last extension is padding (type 21), zero-filled per RFC 7685
+    size_t ext_pos = padded.size() - 4 - pad;
+    TEST_CHECK(padded[ext_pos] == 0x00 && padded[ext_pos + 1] == 0x15);
+    size_t ext_pad_len = (static_cast<size_t>(padded[ext_pos + 2]) << 8) | padded[ext_pos + 3];
+    TEST_CHECK(ext_pad_len == pad);
+    for (size_t i = 0; i < pad; ++i)
+        TEST_CHECK(padded[ext_pos + 4 + i] == 0x00);
+
+    // The padding extension replaces the old extensions-length value: exactly
+    // two consecutive bytes differ, and the delta equals 4 + pad.
+    size_t diffs = 0, first_diff = 0;
+    for (size_t i = 0; i < orig_len; ++i) {
+        if (padded[i] != ch[i]) {
+            if (diffs == 0) first_diff = i;
+            ++diffs;
+        }
+    }
+    TEST_CHECK(diffs == 2);
+    TEST_CHECK(padded[first_diff + 1] != ch[first_diff + 1]);
+    size_t old_el = (static_cast<size_t>(ch[first_diff]) << 8) | ch[first_diff + 1];
+    size_t new_el = (static_cast<size_t>(padded[first_diff]) << 8) | padded[first_diff + 1];
+    TEST_CHECK(new_el == old_el + 4 + pad);
+
+    // Non-ClientHello input passes through unchanged
+    std::vector<uint8_t> other = {0x17, 0x03, 0x03, 0x00, 0x04,
+                                  0x01, 0x02, 0x03, 0x04};
+    auto out2 = manip.add_tls_padding(other.data(), other.size(), 64);
+    TEST_CHECK(out2 == other);
+
+    // Zero padding is a no-op
+    auto out3 = manip.add_tls_padding(ch.data(), ch.size(), 0);
+    TEST_CHECK(out3 == ch);
+
+    std::cout << " OK" << std::endl;
+}
+
 int main() {
     if (sodium_init() < 0)
         test_skip("libsodium initialization failed");
@@ -352,6 +411,7 @@ int main() {
     test_presets_create();
     test_tls_fingerprint_integration();
     test_technique_toggle();
+    test_tls_padding_rfc7685();
 
     std::cout << "\nAll advanced DPI tests passed!" << std::endl;
     return 0;
