@@ -15,6 +15,9 @@
 #include <algorithm>
 #include <regex>
 #include <cstring>
+#include <cctype>
+#include <cstdlib>
+#include <cstdio>
 #include <set>
 #include <map>
 #include <mutex>
@@ -866,11 +869,27 @@ std::string License::generate_machine_fingerprint() {
 }
 
 std::string License::get_hwid() {
-    std::string components = get_mac_address() + get_cpu_id() + get_os_uuid();
-    SecureMemory input(components.size());
-    std::memcpy(input.data(), components.data(), components.size());
-    SecureMemory hash = crypto_->hash_sha256(input);
-    return to_hex(hash);
+    // Unified HWID: lowercase hostname — identical to the web GUI verifier
+    // (web/server.py `_machine_id()` = platform.node().lower()) and the Qt GUI
+    // display. Historically this was sha256(mac + cpu_id + os_uuid), which did
+    // NOT match the web side, so HWID-bound license keys always mismatched
+    // across interfaces. The licensing ecosystem standardises on hostname.
+    char host[256] = {0};
+#ifdef _WIN32
+    DWORD sz = static_cast<DWORD>(sizeof(host));
+    if (GetComputerNameA(host, &sz) == 0) host[0] = '\0';
+#else
+    if (gethostname(host, sizeof(host) - 1) != 0) host[0] = '\0';
+#endif
+    host[sizeof(host) - 1] = '\0';
+    std::string h(host);
+    // trim whitespace
+    const auto not_space = [](unsigned char c){ return !std::isspace(c); };
+    h.erase(h.begin(), std::find_if(h.begin(), h.end(), not_space));
+    h.erase(std::find_if(h.rbegin(), h.rend(), not_space).base(), h.end());
+    std::transform(h.begin(), h.end(), h.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return h.empty() ? "unknown-host" : h;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1164,6 +1183,200 @@ License::LicenseInfo License::get_license_info(const std::string& license_file) 
 // ─────────────────────────────────────────────────────────────────────────────
 // Activate / Deactivate / Transfer
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// NCP-XXXXX vendor keys (base32 payload+sig, Ed25519) — the format used by the
+// web GUI (web/ncp_license.py), the Qt GUI (src/gui/LicenseVerifier.cpp) and
+// the keygen tool. All three verify against the same embedded public key.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Vendor Ed25519 public key (base64). Same value as
+// web/server.py NCP_LICENSE_PUBLIC_KEY_B64 and LicenseVerifier.cpp kPublicKeyB64.
+static const char* kVendorPublicKeyB64 = "FT2FWdlm6rGldWix5fDJBuZmrHIR+73CuRpWszs/Hog=";
+
+static std::vector<uint8_t> base64_decode_(const std::string& in) {
+    static const std::string alpha =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<int> T(256, -1);
+    for (int i = 0; i < 64; ++i) T[static_cast<unsigned char>(alpha[i])] = i;
+    std::vector<uint8_t> out;
+    int val = 0, bits = -8;
+    for (unsigned char c : in) {
+        if (T[c] == -1) break;  // '=' or whitespace ends the data
+        val = (val << 6) + T[c];
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back(static_cast<uint8_t>((val >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return out;
+}
+
+// RFC4648 base32 (uppercase; separators/'=' ignored) — mirrors
+// web/ncp_license.py decode_key_string and LicenseVerifier.cpp base32Decode.
+static std::vector<uint8_t> base32_decode_(const std::string& in) {
+    static const char* alpha = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    std::vector<int> T(256, -1);
+    for (int i = 0; i < 32; ++i) T[static_cast<unsigned char>(alpha[i])] = i;
+    std::vector<uint8_t> out;
+    int buffer = 0, bits = 0;
+    for (char ch : in) {
+        int v = T[static_cast<unsigned char>(ch)];
+        if (v < 0) continue;
+        buffer = (buffer << 5) | v;
+        bits += 5;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((buffer >> bits) & 0xFF));
+        }
+    }
+    return out;
+}
+
+// Parse "YYYY-MM-DD" into a time_point (UTC-best-effort, local midnight).
+static bool parse_iso_date_(const std::string& s,
+                            std::chrono::system_clock::time_point* out) {
+    if (s.size() < 10) return false;
+    std::tm tm{};
+    if (std::sscanf(s.c_str(), "%d-%d-%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday) != 3)
+        return false;
+    tm.tm_year -= 1900;
+    tm.tm_mon -= 1;
+    std::time_t t = std::mktime(&tm);
+    if (t == static_cast<std::time_t>(-1)) return false;
+    *out = std::chrono::system_clock::from_time_t(t);
+    return true;
+}
+
+License::ValidationResult License::verify_vendor_key(const std::string& key_string,
+                                                     LicenseInfo* info,
+                                                     std::string* err) {
+    std::string s = key_string;
+    // trim
+    const auto not_space = [](unsigned char c){ return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+
+    // strip "NCP-" prefix and separators, uppercase
+    if (s.size() >= 4 && (s.substr(0, 4) == "NCP-" || s.substr(0, 4) == "ncp-"))
+        s = s.substr(4);
+    s.erase(std::remove(s.begin(), s.end(), '-'), s.end());
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return std::toupper(c); });
+    if (s.empty()) {
+        if (err) *err = "empty key";
+        return ValidationResult::INVALID_FORMAT;
+    }
+
+    const std::vector<uint8_t> raw = base32_decode_(s);
+    if (raw.size() <= 64) {
+        if (err) *err = "bad key format (too short after base32 decode)";
+        return ValidationResult::INVALID_FORMAT;
+    }
+    const std::vector<uint8_t> payload(raw.begin(), raw.end() - 64);
+    const std::vector<uint8_t> sig(raw.end() - 64, raw.end());
+    const std::vector<uint8_t> pub = base64_decode_(kVendorPublicKeyB64);
+    if (pub.size() != 32) {
+        if (err) *err = "internal: bad embedded public key";
+        return ValidationResult::INVALID_KEY;
+    }
+
+    SecureMemory msg(payload.size()), sm_sig(sig.size()), sm_pub(pub.size());
+    std::memcpy(msg.data(), payload.data(), payload.size());
+    std::memcpy(sm_sig.data(), sig.data(), sig.size());
+    std::memcpy(sm_pub.data(), pub.data(), pub.size());
+    if (!crypto_->verify_ed25519(msg, sm_sig, sm_pub)) {
+        if (err) *err = "signature invalid";
+        return ValidationResult::INVALID_SIGNATURE;
+    }
+
+    const std::string payload_json(payload.begin(), payload.end());
+    const int days = std::atoi(json_get(payload_json, "days").c_str());
+    const std::string created = json_get(payload_json, "created");
+    const std::string bound_hwid = json_get(payload_json, "hwid");
+
+    // HWID binding: non-empty payload hwid must match this machine.
+    if (!bound_hwid.empty()) {
+        std::string local = get_hwid();
+        std::string want = bound_hwid;
+        std::transform(want.begin(), want.end(), want.begin(),
+                       [](unsigned char c){ return std::tolower(c); });
+        if (want != local) {
+            if (err) *err = "key bound to a different machine (hwid mismatch)";
+            return ValidationResult::HWID_MISMATCH;
+        }
+    }
+
+    // Expiry: days == 0 means lifetime; otherwise created + days is the end.
+    int days_remaining = 0;
+    bool valid = true;
+    if (days > 0 && !created.empty()) {
+        std::chrono::system_clock::time_point from;
+        if (parse_iso_date_(created, &from)) {
+            const auto deadline = from + std::chrono::hours(24) * days;
+            const auto now = std::chrono::system_clock::now();
+            if (deadline < now) {
+                valid = false;
+                if (err) *err = "key expired";
+            } else {
+                days_remaining = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::hours>(deadline - now).count() / 24);
+            }
+        }
+    }
+    if (!valid) return ValidationResult::EXPIRED;
+
+    if (info) {
+        info->is_valid = true;
+        info->days_remaining = (days == 0) ? 36500 : days_remaining;  // lifetime
+        info->plan = json_get(payload_json, "plan");
+        info->type = (days == 0) ? LicenseType::LIFETIME : LicenseType::PREMIUM;
+        info->hwid = bound_hwid;
+    }
+    return ValidationResult::VALID;
+}
+
+bool License::activate_key_offline(const std::string& key_string,
+                                   const std::string& license_file,
+                                   std::string* err) {
+    std::string s = key_string;
+    const auto not_space = [](unsigned char c){ return !std::isspace(c); };
+    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
+    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
+
+    if (verify_vendor_key(s, nullptr, err) != ValidationResult::VALID)
+        return false;
+
+    std::ofstream f(license_file, std::ios::binary | std::ios::trunc);
+    if (!f.is_open()) {
+        if (err) *err = "cannot write " + license_file;
+        return false;
+    }
+    f << s << "\n";
+    f.close();
+    return true;
+}
+
+License::ValidationResult License::validate_any(const std::string& hwid,
+                                                const std::string& license_file) {
+    std::ifstream file(license_file, std::ios::binary);
+    if (!file.is_open()) return ValidationResult::FILE_NOT_FOUND;
+    std::string content((std::istreambuf_iterator<char>(file)),
+                        std::istreambuf_iterator<char>());
+    const auto not_space = [](unsigned char c){ return !std::isspace(c); };
+    content.erase(content.begin(),
+                  std::find_if(content.begin(), content.end(), not_space));
+
+    if (content.rfind("NCP-", 0) == 0 || content.rfind("ncp-", 0) == 0) {
+        // Vendor-format key file — verified against the embedded public key;
+        // `hwid` argument is unused here (verify_vendor_key binds internally).
+        (void)hwid;
+        return verify_vendor_key(content, nullptr, nullptr);
+    }
+    // Legacy "hwid|expiry|signature" format (self-signed/test flow).
+    return validate_offline(hwid, license_file);
+}
+
 bool License::activate_license(const std::string& license_key, const std::string& server_url) {
     if (license_key.empty() || server_url.empty()) return false;
 

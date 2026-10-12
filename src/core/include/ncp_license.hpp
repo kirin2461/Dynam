@@ -176,6 +176,23 @@ public:
     bool transfer_license(const std::string& old_hwid, const std::string& new_hwid,
                          const std::string& server_url);
 
+    // ── NCP-XXXXX vendor keys (base32 payload + Ed25519 sig) ────────────────
+    // The format used by the web GUI (web/ncp_license.py), the Qt GUI
+    // (src/gui/LicenseVerifier.cpp) and the keygen tool; verified against the
+    // embedded vendor public key.
+    // Verify a key string offline: signature, expiry, HWID binding.
+    ValidationResult verify_vendor_key(const std::string& key_string,
+                                       LicenseInfo* info = nullptr,
+                                       std::string* err = nullptr);
+    // Verify + persist the key into `license_file` (default "license.key").
+    bool activate_key_offline(const std::string& key_string,
+                              const std::string& license_file = "license.key",
+                              std::string* err = nullptr);
+    // Router: NCP-XXXXX file -> vendor verification, otherwise legacy
+    // "hwid|expiry|signature" flow.
+    ValidationResult validate_any(const std::string& hwid,
+                                  const std::string& license_file);
+
     // Anti-Tamper and Anti-Debug
     void enable_anti_tamper(uint8_t flags);
     AntiDebugInfo check_anti_debug();

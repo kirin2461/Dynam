@@ -133,10 +133,13 @@ run 10 "$BIN" license validate
 expect "license validate graceful (no file)" 'INVALID'
 
 run 10 "$BIN" license activate
-if printf '%s' "$OUT" | grep -qi 'not yet implemented'; then
-    stub "license activate" "explicit 'not yet implemented'"
+expect "license activate w/o key prints usage" 'Usage'
+
+run 10 "$BIN" license activate NCP-GARBAGE-KEY
+if printf '%s' "$OUT" | grep -qi 'Activation failed' && [ $RC -lt 128 ]; then
+    pass "license activate rejects garbage key cleanly"
 else
-    pass "license activate responds"
+    fail "license activate rejects garbage key cleanly (rc=$RC)"
 fi
 
 # ───────────────────────── E. SPA ────────────────────────────
@@ -333,14 +336,22 @@ else
     fail "spa knock bad IP crashed (rc=$RC)"
 fi
 
-# ───────────────────── M. mimic (known cosmetic) ─────────────
+# ───────────────────── M. mimic (profile persistence) ────────
 echo "--- M. mimic ---"
+export XDG_CONFIG_HOME="$WORK/xdg"
 run 10 "$BIN" mimic https
-if printf '%s' "$OUT" | grep -q 'Traffic mimicry configured'; then
-    stub "mimic" "prints 'configured' but config dies with the process (no persistence/no running engine)"
+expect "mimic saves profile" 'profile saved'
+if [ -f "$WORK/xdg/ncp/mimicry.conf" ] && grep -q '^https' "$WORK/xdg/ncp/mimicry.conf"; then
+    pass "mimic profile persisted to config file"
 else
-    fail "mimic prints configuration"
+    fail "mimic profile persisted to config file"
 fi
+run 10 "$BIN" mimic current
+expect "mimic current shows saved profile" 'https'
+run 10 "$BIN" mimic off
+expect "mimic off clears profile" 'cleared'
+[ ! -f "$WORK/xdg/ncp/mimicry.conf" ] && pass "mimic off removed config file" || fail "mimic off removed config file"
+unset XDG_CONFIG_HOME
 
 # ───────────────────── N. documented skips ───────────────────
 echo "--- N. safety skips (by policy, statically audited) ---"
