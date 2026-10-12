@@ -260,6 +260,18 @@ LOG_BUFFER_SIZE = 500
 
 # ─── App & SocketIO ──────────────────────────────────────────────────────────
 # Заменяется CI на короткий SHA коммита при сборке релиза
+
+def _load_product_version() -> str:
+    """Product version stamped by CMake into web/static/version.txt."""
+    try:
+        v = (Path(__file__).parent / "static" / "version.txt").read_text(encoding="utf-8").strip()
+        return v if v else "0.0.0-dev"
+    except Exception:
+        return "0.0.0-dev"
+
+
+_PRODUCT_VERSION = _load_product_version()
+
 BUILD_STAMP = "__NCP_BUILD_STAMP__"
 
 app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="")
@@ -2038,7 +2050,7 @@ def api_geneva_status():
 @app.route("/api/version")
 def api_version():
     return jsonify({
-        "version": "1.4.0-dev",
+        "version": _PRODUCT_VERSION,
         "build": ("web-" + datetime.now().strftime("%Y%m%d")
                   + ("" if BUILD_STAMP.startswith("__") else "-" + BUILD_STAMP)),
         "platform": platform.system(),
