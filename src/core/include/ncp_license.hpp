@@ -124,6 +124,15 @@ public:
 
     // HWID Generation (multi-factor hardware fingerprinting)
     std::string get_hwid();
+
+    /**
+     * @brief Lowercase hostname — binding identifier for vendor NCP-XXXXX keys.
+     *
+     * Matches web/server.py `_machine_id()` and the Qt GUI. Distinct from
+     * get_hwid(), which remains the legacy sha256 hardware fingerprint used
+     * by the self-signed license-file flow.
+     */
+    std::string get_host_id();
     HardwareProfile get_hardware_profile();
     std::string generate_machine_fingerprint();
     std::string compute_composite_hwid(const HardwareProfile& profile);

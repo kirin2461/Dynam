@@ -869,11 +869,24 @@ std::string License::generate_machine_fingerprint() {
 }
 
 std::string License::get_hwid() {
-    // Unified HWID: lowercase hostname — identical to the web GUI verifier
-    // (web/server.py `_machine_id()` = platform.node().lower()) and the Qt GUI
-    // display. Historically this was sha256(mac + cpu_id + os_uuid), which did
-    // NOT match the web side, so HWID-bound license keys always mismatched
-    // across interfaces. The licensing ecosystem standardises on hostname.
+    // Legacy fingerprint: sha256(mac + cpu_id + os_uuid) — 64 hex chars.
+    // Used by the legacy (self-signed) license-file flow. For the vendor
+    // NCP-XXXXX key ecosystem the binding identifier is the lowercase
+    // hostname — see get_host_id().
+    std::string components = get_mac_address() + get_cpu_id() + get_os_uuid();
+    SecureMemory input(components.size());
+    std::memcpy(input.data(), components.data(), components.size());
+    SecureMemory hash = crypto_->hash_sha256(input);
+    return to_hex(hash);
+}
+
+std::string License::get_host_id() {
+    // Unified host identifier for vendor NCP-XXXXX keys: lowercase hostname —
+    // identical to the web GUI verifier (web/server.py `_machine_id()` =
+    // platform.node().lower()) and the Qt GUI (QSysInfo::machineHostName().
+    // toLower()). Historically the CLI used the sha256 fingerprint above,
+    // which did NOT match the web side, so HWID-bound keys mismatched across
+    // interfaces. The vendor-key ecosystem standardises on hostname.
     char host[256] = {0};
 #ifdef _WIN32
     DWORD sz = static_cast<DWORD>(sizeof(host));
@@ -891,7 +904,6 @@ std::string License::get_hwid() {
                    [](unsigned char c){ return std::tolower(c); });
     return h.empty() ? "unknown-host" : h;
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // License validation — offline
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1297,7 +1309,7 @@ License::ValidationResult License::verify_vendor_key(const std::string& key_stri
 
     // HWID binding: non-empty payload hwid must match this machine.
     if (!bound_hwid.empty()) {
-        std::string local = get_hwid();
+        std::string local = get_host_id();
         std::string want = bound_hwid;
         std::transform(want.begin(), want.end(), want.begin(),
                        [](unsigned char c){ return std::tolower(c); });

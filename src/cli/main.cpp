@@ -3070,8 +3070,8 @@ void handle_license(const std::vector<std::string>& args) {
     License lic;
     
     if (action == "hwid") {
-        std::string hwid = lic.get_hwid();
-        std::cout << "Hardware ID: " << hwid << "\n";
+        std::cout << "Host ID (for NCP- keys): " << lic.get_host_id() << "\n";
+        std::cout << "Hardware ID (legacy):    " << lic.get_hwid() << "\n";
     }
     else if (action == "info") {
         std::string license_file = get_arg(args, 1, "license.key");
