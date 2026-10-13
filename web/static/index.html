@@ -260,6 +260,8 @@
             </div>
             <div id="status-label" class="status-hero__label" style="color:var(--red)">НЕ ПОДКЛЮЧЕНО</div>
             <div id="status-sub" class="status-hero__sub">Нажмите «Подключить» для запуска</div>
+            <!-- PresetAutoPilot: виден только в auto-режиме (stats.autopilot.enabled), рендерится из app.js -->
+            <div id="autopilot-status" class="badge badge--inactive" style="display:none;margin-bottom:var(--sp-3)" title=""></div>
             <div style="display:flex;gap:var(--sp-3);">
               <button class="btn btn--primary" onclick="toggleConnection()">Подключить</button>
               <button class="btn" id="btn-rotate" onclick="rotateIdentity()">Ротировать</button>

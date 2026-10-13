@@ -161,6 +161,9 @@ function updateStatusUI() {
   // Statusbar uptime
   const sbUptime = document.getElementById('sb-uptime');
   if (sbUptime) sbUptime.textContent = running ? appState.uptime : '—';
+
+  // При отключении прячем autopilot-бейдж (stats-ивенты больше не приходят)
+  renderPresetAutopilot(appState.stats.autopilot);
 }
 
 // ─── Connect / Disconnect ─────────────────────────────────────────────────
@@ -205,6 +208,54 @@ function applyStats(data) {
 
   // Charts
   updateTrafficChart(data.speed_up || 0, data.speed_down || 0);
+
+  // PresetAutoPilot (auto-режим пресетов) — компактный бейдж на дашборде
+  renderPresetAutopilot(data.autopilot);
+}
+
+// ─── PresetAutoPilot виджет (SPEC §8.3) ──────────────────────────────────
+
+function renderPresetAutopilot(ap) {
+  const el = document.getElementById('autopilot-status');
+  if (!el) return;
+  // Секции нет (ручной режим) или движок остановлен — бейдж скрыт
+  if (!ap || !ap.enabled || !appState.running) {
+    el.style.display = 'none';
+    return;
+  }
+
+  const presetLabel = ap.current_preset
+    ? (OPERATOR_LABELS[ap.current_preset] || ap.current_preset)
+    : '—';
+  const rtt = (ap.ewma_rtt_ms != null && ap.ewma_rtt_ms > 0)
+    ? Math.round(ap.ewma_rtt_ms) + 'мс' : '—';
+
+  let text, cls;
+  if (ap.mode === 'selecting') {
+    text = 'Авто: подбор стратегии…';
+    cls = 'badge badge--warn';           // жёлтый — идёт selection
+  } else {
+    text = `Авто: ${presetLabel} · RTT ${rtt} · переключений ${ap.switches_total || 0}`;
+    cls = (ap.mode === 'degraded' || ap.mode === 'degraded-net')
+      ? 'badge badge--error'             // красный — деградация
+      : (ap.mode === 'monitoring' ? 'badge badge--active' : 'badge badge--inactive');
+  }
+  el.className = cls;
+  el.textContent = text;
+  el.style.display = '';
+
+  // Tooltip: последнее переключение из history + note движка
+  const parts = [];
+  const last = Array.isArray(ap.history) && ap.history.length
+    ? ap.history[ap.history.length - 1] : null;
+  if (last) {
+    const from = OPERATOR_LABELS[last.from] || last.from || '—';
+    const to = OPERATOR_LABELS[last.to] || last.to || '—';
+    const when = last.ts ? new Date(last.ts * 1000).toLocaleString('ru-RU') : '';
+    parts.push(`Последнее переключение: ${from} → ${to} (${last.reason || '—'})${when ? ' · ' + when : ''}`);
+  }
+  if (ap.note) parts.push(ap.note);
+  el.title = parts.join('\n');
 }
 
 // ─── Module Stats ─────────────────────────────────────────────────────────
