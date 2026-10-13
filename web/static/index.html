@@ -825,6 +825,30 @@
           </table>
         </div>
       </div>
+
+      <!-- Пентест -->
+      <div class="card" style="margin-top:var(--sp-4)">
+        <div class="card__title" style="display:flex;justify-content:space-between;align-items:center">
+          Пентест — автоматические проверки безопасности
+          <span id="pentest-badge" class="badge badge--inactive">Не запускался</span>
+        </div>
+        <div class="text-sm" style="color:var(--text-secondary);margin-bottom:var(--sp-3)">
+          10 read-only проверок: целостность движка, защита веб-API, конфигурация,
+          TLS-пробы (443), эвристика DPI, DNS-утечки, экспозиция прокси, порты, канал обновлений.
+          Результат можно выгрузить PDF-отчётом для передачи.
+        </div>
+        <div style="display:flex;gap:var(--sp-2);flex-wrap:wrap;align-items:center;margin-bottom:var(--sp-3)">
+          <button class="btn btn--primary" id="pentest-btn-run" onclick="pentestRun()">Запустить пентест</button>
+          <a class="btn" id="pentest-pdf-link" href="#" style="display:none" onclick="pentestDownloadPdf();return false">Скачать PDF-отчёт</a>
+          <span id="pentest-progress" class="text-sm" style="color:var(--text-secondary)"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Проверка</th><th>Статус</th><th>Детали</th><th>Рекомендация</th></tr></thead>
+            <tbody id="pentest-results"><tr><td colspan="4" style="color:var(--text-secondary)">Пентест ещё не запускался</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
 
