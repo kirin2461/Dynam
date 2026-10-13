@@ -59,7 +59,12 @@ add_executable(ncp_tests
     test_spa.cpp            # Enterprise SPA (Ed25519 + ipset) tests
     test_awg31_hardening.cpp  # AWG 3.1: header protection, padding, timers, CPS
     test_scoped_trust.cpp     # Scoped trust (NUЦ containment) tests
+    test_preset_autopilot.cpp  # PresetAutoPilot: selection/switch/cooldown/JSON
     # --- Zone F: previously unconnected gtest files ---
+    # NOTE: keep the ECH files LAST. ECHCacheTest.ECHRetryMechanism detaches a
+    # DoH worker on network-stall skip; on master it is the final suite so the
+    # process exits before that worker can throw. Adding suites after it
+    # re-exposes that latent crash (observed: std::bad_alloc abort).
     test_e2e_extended.cpp    # X448 / ECDH_P256 E2E encryption tests
     test_ech.cpp             # HPKE-based ECH unit tests
     test_ech_cache.cpp       # ECH config cache / retry tests
