@@ -32,6 +32,7 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_tor_manager.cpp       # Managed Tor + pluggable transports (obfs4/Snowflake)
     src/ncp_blockcheck.cpp
     src/autopilot.cpp
+    src/preset_autopilot.cpp
     src/ncp_dpi_detector.cpp
     src/ncp_quic.cpp
     src/ncp_ipfrag.cpp
