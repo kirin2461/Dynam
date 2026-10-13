@@ -301,23 +301,37 @@ public:
         mode = "monitoring";
     }
 
-    // ── STARTUP-SELECTION (SPEC §5.1) — runs once, no lock while probing ──
-    void startup_phase() {
-        std::string first_host;
+    // Quick connectivity check: succeed if ANY probe host answers.
+    // A blocked/throttled reference host (exactly what this tool fights)
+    // must not be mistaken for a dead network. Never under the lock.
+    bool quick_connectivity_ok(BlockcheckProbe* last_out) {
+        std::vector<std::string> hosts;
         {
             std::lock_guard<std::mutex> lk(m);
-            if (!cfg.probe_hosts.empty()) first_host = cfg.probe_hosts.front();
+            hosts = cfg.probe_hosts;
         }
-        if (first_host.empty()) {
+        for (const auto& h : hosts) {
+            BlockcheckProbe q = direct_probe(h, kQuickProbeTimeoutMs);
+            if (stop_flag.load()) return false;
+            if (q.ok) return true;
+            if (last_out) *last_out = q;
+        }
+        return false;
+    }
+
+    // ── STARTUP-SELECTION (SPEC §5.1) — runs once, no lock while probing ──
+    void startup_phase() {
+        {
             std::lock_guard<std::mutex> lk(m);
-            mode = "monitoring";
-            return;
+            if (cfg.probe_hosts.empty()) {
+                mode = "monitoring";
+                return;
+            }
         }
 
-        // 1. Quick connectivity check.
-        BlockcheckProbe quick = direct_probe(first_host, kQuickProbeTimeoutMs);
-        if (stop_flag.load()) return;
-        if (!quick.ok) {
+        // 1. Quick connectivity check (any reachable host = network is up).
+        BlockcheckProbe quick;
+        if (!quick_connectivity_ok(&quick)) {
             // No network: keep the fallback config the engine started with.
             std::lock_guard<std::mutex> lk(m);
             mode = "degraded-net";
@@ -584,16 +598,14 @@ public:
 
         if (net_down) {
             // Network was dead at startup: cheap re-check every 60 s;
-            // when it comes back, run the selection for real.
-            std::string first_host;
+            // when it comes back (any probe host answers), run the
+            // selection for real.
             {
                 std::lock_guard<std::mutex> lk(m);
-                if (!cfg.probe_hosts.empty()) first_host = cfg.probe_hosts.front();
+                if (cfg.probe_hosts.empty()) return;
             }
-            if (first_host.empty()) return;
-            BlockcheckProbe q = direct_probe(first_host, kQuickProbeTimeoutMs);
-            if (stop_flag.load()) return;
-            if (q.ok) {
+            BlockcheckProbe q;
+            if (quick_connectivity_ok(&q)) {
                 {
                     std::lock_guard<std::mutex> lk(m);
                     mode = "selecting";
