@@ -265,10 +265,10 @@ jobs:
             2. `ncp-gui.exe` — Web GUI (панель на http://localhost:8085), либо `ncp-qt.exe` — десктопный Qt-интерфейс.
             3. CLI: `ncp.exe run` / `ncp.exe dpi` требуют прав администратора (WinDivert driver mode).
 
-            ### Изменения с v1.7.1
-            - Апдейтер больше не сообщает неверную версию: версия штампуется из CMake (`web/static/version.txt`)
-            - Совместимость с OpenSSL 4.x (macOS, brew openssl@4)
-            - Полная Windows-поддержка стека (Winsock2, WinDivert), паритет Qt/Web GUI
+            ### Изменения с v1.7.2
+            - **Preset AutoPilot («запустил и забыл»)**: режим `--preset auto` / «Auto-detect» в GUI — при подключении NCP сам прогоняет TLS/443-пробы по пресетам операторов, выбирает лучший по успеху и RTT, горячо переключает стратегию при деградации (без рестарта движка). Статус «Авто» на дашборде веб-GUI. Флаги тюнинга: `--auto-interval`, `--auto-timeout`, `--auto-candidates`, `--auto-hosts`, `--auto-cooldown`.
+            - Исправлен запуск движка из веб-GUI (trial-secret mismatch)
+            - `/api/version` и бейдж версии в шапке показывают реальную версию продукта
           generate_release_notes: true
           files: |
             ncp-linux-x64/ncp-linux-x64.tar.gz
