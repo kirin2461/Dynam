@@ -51,6 +51,9 @@ struct ProbeBehavior {
     int tspu_latency = 50;      // -1 = all probes fail
     int beeline_latency = 100;  // -1 = all probes fail
     bool tspu_first_host_fails = false;
+    // First probe host unreachable via direct probe (DPI-blocked host must
+    // not trip the startup connectivity gate when other hosts answer).
+    bool direct_first_host_fails = false;
     // Direct baseline must be "working but slow" (300ms): a fast direct probe
     // means "no filtering detected" and legitimately beats every preset
     // (score = success*100000 - latency), while a failing direct probe fails
@@ -66,6 +69,9 @@ struct ProbeBehavior {
         else lat = -1;  // any other candidate preset: dead
         if (lat < 0) return mk_probe(host, false, 0);
         if (preset == DPIPreset::RUNET_TSPU && tspu_first_host_fails &&
+            host == "a.test")
+            return mk_probe(host, false, 0);
+        if (preset == DPIPreset::NONE && direct_first_host_fails &&
             host == "a.test")
             return mk_probe(host, false, 0);
         return mk_probe(host, true, lat);
@@ -158,6 +164,27 @@ TEST(PresetAutoPilotStartup, NoNetworkGoesDegradedNet) {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - t0).count();
     EXPECT_LT(ms, 2000);
+}
+
+// A blocked first reference host (youtube.com throttled by DPI while other
+// hosts answer) must NOT be mistaken for a dead network: the connectivity
+// gate succeeds on ANY reachable host and selection proceeds.
+TEST(PresetAutoPilotStartup, BlockedFirstHostDoesNotTripDegradedNet) {
+    ProbeBehavior pb;
+    {
+        std::lock_guard<std::mutex> lk(pb.m);
+        pb.direct_first_host_fails = true;  // a.test blocked, b/c.test answer
+    }
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_test_cfg(pb, now);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] {
+        return pa.current_preset() == DPIPreset::RUNET_TSPU;  // best score
+    }));
+    EXPECT_NE(pa.mode_string(), "degraded-net");
+    pa.stop();
 }
 
 TEST(PresetAutoPilotStartup, DirectWinsKeepsFallback) {
