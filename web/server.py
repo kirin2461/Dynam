@@ -325,6 +325,8 @@ state = {
         "active_connections": 0,
         "speed_up": 0,
         "speed_down": 0,
+        # PresetAutoPilot-секция engine stats (SPEC §7); None вне auto-режима
+        "autopilot": None,
     },
     "config": {
         "strategy": "balanced",
@@ -854,6 +856,11 @@ def _apply_engine_stats(data):
     if int(ar.get("as_switches", 0)) > 0:
         m["as_router"]["current_path"] = "multi-AS"
 
+    # PresetAutoPilot (auto-режим пресетов): пробрасываем секцию как есть
+    # в stats-ивент по /ws — отдельный endpoint не нужен. В ручном режиме
+    # секции нет → None, фронт прячет виджет.
+    state["stats"]["autopilot"] = data.get("autopilot") or None
+
 
 def stats_update_loop():
     """Background thread: collect REAL network stats from OS when NCP is running.
@@ -904,6 +911,11 @@ def stats_update_loop():
             if eng:
                 with stats_lock:
                     _apply_engine_stats(eng)
+            else:
+                # Stats-файл протух/отсутствует (движок остановлен) — гасим
+                # autopilot-виджет, чтобы не показывать устаревшее состояние
+                with stats_lock:
+                    state["stats"]["autopilot"] = None
 
             # Emit real stats via WebSocket
             payload = {**state["stats"], "uptime": get_uptime()}
