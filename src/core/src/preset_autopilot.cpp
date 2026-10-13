@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstdio>
 #include <ctime>
 #include <mutex>
 #include <sstream>
@@ -29,14 +30,25 @@ namespace {
 std::string pa_json_escape(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 8);
-    for (char c : s) {
+    static const char* hex = "0123456789abcdef";
+    for (const unsigned char c : s) {
         switch (c) {
             case '"': out += "\\\""; break;
             case '\\': out += "\\\\"; break;
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
-            default: out += c;
+            default:
+                // RFC 8259: ALL control chars < 0x20 must be escaped. A raw
+                // byte (e.g. \x01 in a host name) breaks the whole stats JSON
+                // for strict parsers (web UI).
+                if (c < 0x20) {
+                    out += "\\u00";
+                    out += hex[(c >> 4) & 0xF];
+                    out += hex[c & 0xF];
+                } else {
+                    out += static_cast<char>(c);
+                }
         }
     }
     return out;
@@ -246,7 +258,18 @@ public:
             new_cfg.quic_force_tcp = quic_tcp;
             new_cfg.quic_ipfrag_offset = quic_frag;
             new_cfg.mode = run_mode;
-            engine->update_config(new_cfg);
+            if (!engine->update_config(new_cfg)) {
+                // The engine rejected the config — there was NO real switch.
+                // Do not record a SwitchEvent and do not touch `current`;
+                // just flag the failure so the operator can see it.
+                fprintf(stderr,
+                        "[!] PresetAutoPilot: engine rejected update_config(); "
+                        "switch to %s NOT applied\n",
+                        DPI::preset_to_string(winner));
+                std::lock_guard<std::mutex> lk(m);
+                note = "apply-failed";
+                return;
+            }
         }
 
         const int64_t ts = now();
@@ -379,10 +402,17 @@ public:
             pcfg.use_doh = cfg.use_doh;
             pcfg.base = engine->get_config();
             if (!proxy.start(pcfg)) {
-                BlockcheckProbe pr;
-                pr.domain = hosts.front();
-                pr.fail_reason = "proxy";
-                probes.push_back(std::move(pr));
+                // Temp proxy did not come up: the whole round is unmeasurable.
+                // Push a failed probe per host so the aggregation below counts
+                // this as a fully failed round (round_failed=true and
+                // last_round_all_failed=true), keeping degradation detection
+                // (consec_fail_rounds) consistent.
+                for (const auto& h : hosts) {
+                    BlockcheckProbe pr;
+                    pr.domain = h;
+                    pr.fail_reason = "proxy";
+                    probes.push_back(std::move(pr));
+                }
             } else {
                 const uint16_t port = proxy.bound_port();
                 for (const auto& h : hosts) {
@@ -493,66 +523,41 @@ public:
     }
 
     // ── Main loop (SPEC §4) ──
+    // Exception safety: this thread MUST never let an exception escape — an
+    // uncaught throw in a std::thread is std::terminate and kills the whole
+    // process. Per-iteration catch keeps the loop alive through transient
+    // failures (e.g. bad_alloc inside a probe round); the outer catch-all is
+    // the last line of defence and parks the autopilot in "idle".
     void run_loop() {
         is_running.store(true);
-        {
-            std::lock_guard<std::mutex> lk(m);
-            mode = "selecting";
-        }
-        startup_phase();
-
-        while (!stop_flag.load()) {
-            int interval;
-            bool net_down;
+        try {
             {
                 std::lock_guard<std::mutex> lk(m);
-                net_down = (mode == "degraded-net");
-                interval = net_down ? kDegradedNetIntervalSec
-                                    : cfg.monitor_interval_sec;
+                mode = "selecting";
             }
-            if (!cfg.probe_fn && interval < 1) interval = 1;
-            interruptible_sleep(interval);
-            if (stop_flag.load()) break;
+            startup_phase();
 
-            if (net_down) {
-                // Network was dead at startup: cheap re-check every 60 s;
-                // when it comes back, run the selection for real.
-                std::string first_host;
-                {
-                    std::lock_guard<std::mutex> lk(m);
-                    if (!cfg.probe_hosts.empty()) first_host = cfg.probe_hosts.front();
+            while (!stop_flag.load()) {
+                try {
+                    monitor_iteration();
+                } catch (const std::exception& e) {
+                    fprintf(stderr,
+                            "[!] PresetAutoPilot: exception in monitor "
+                            "iteration: %s (continuing)\n", e.what());
+                } catch (...) {
+                    fprintf(stderr,
+                            "[!] PresetAutoPilot: unknown exception in "
+                            "monitor iteration (continuing)\n");
                 }
-                if (first_host.empty()) continue;
-                BlockcheckProbe q = direct_probe(first_host, kQuickProbeTimeoutMs);
-                if (stop_flag.load()) break;
-                if (q.ok) {
-                    {
-                        std::lock_guard<std::mutex> lk(m);
-                        mode = "selecting";
-                    }
-                    startup_phase();
-                } else {
-                    std::lock_guard<std::mutex> lk(m);
-                    last_probe = q;
-                    last_probe_ts = now();
-                }
-                continue;
             }
-
-            monitor_round();
-            if (stop_flag.load()) break;
-
-            bool deg_fail = false, deg_rtt = false;
-            {
-                std::lock_guard<std::mutex> lk(m);
-                deg_fail = consec_fail_rounds >= cfg.degrade_fail_rounds;
-                deg_rtt = baseline_rtt_ms > 0.0 && ewma_samples >= 5 &&
-                          ewma_rtt_ms > cfg.degrade_rtt_factor * baseline_rtt_ms;
-                if (!deg_fail && !deg_rtt && mode == "degraded")
-                    mode = "monitoring";  // recovered on its own
-            }
-            if (deg_fail || deg_rtt)
-                handle_degradation(deg_fail ? "degradation" : "reselection");
+        } catch (const std::exception& e) {
+            fprintf(stderr,
+                    "[!] PresetAutoPilot: fatal exception, background thread "
+                    "exiting: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr,
+                    "[!] PresetAutoPilot: fatal unknown exception, background "
+                    "thread exiting\n");
         }
 
         {
@@ -560,6 +565,62 @@ public:
             mode = "idle";
         }
         is_running.store(false);
+    }
+
+    // One iteration of the main loop (sleep → probe round → degradation
+    // handling). May throw; run_loop() contains it per-iteration.
+    void monitor_iteration() {
+        int interval;
+        bool net_down;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            net_down = (mode == "degraded-net");
+            interval = net_down ? kDegradedNetIntervalSec
+                                : cfg.monitor_interval_sec;
+        }
+        if (!cfg.probe_fn && interval < 1) interval = 1;
+        interruptible_sleep(interval);
+        if (stop_flag.load()) return;
+
+        if (net_down) {
+            // Network was dead at startup: cheap re-check every 60 s;
+            // when it comes back, run the selection for real.
+            std::string first_host;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                if (!cfg.probe_hosts.empty()) first_host = cfg.probe_hosts.front();
+            }
+            if (first_host.empty()) return;
+            BlockcheckProbe q = direct_probe(first_host, kQuickProbeTimeoutMs);
+            if (stop_flag.load()) return;
+            if (q.ok) {
+                {
+                    std::lock_guard<std::mutex> lk(m);
+                    mode = "selecting";
+                }
+                startup_phase();
+            } else {
+                std::lock_guard<std::mutex> lk(m);
+                last_probe = q;
+                last_probe_ts = now();
+            }
+            return;
+        }
+
+        monitor_round();
+        if (stop_flag.load()) return;
+
+        bool deg_fail = false, deg_rtt = false;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            deg_fail = consec_fail_rounds >= cfg.degrade_fail_rounds;
+            deg_rtt = baseline_rtt_ms > 0.0 && ewma_samples >= 5 &&
+                      ewma_rtt_ms > cfg.degrade_rtt_factor * baseline_rtt_ms;
+            if (!deg_fail && !deg_rtt && mode == "degraded")
+                mode = "monitoring";  // recovered on its own
+        }
+        if (deg_fail || deg_rtt)
+            handle_degradation(deg_fail ? "degradation" : "reselection");
     }
 };
 

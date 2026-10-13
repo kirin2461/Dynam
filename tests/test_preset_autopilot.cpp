@@ -325,6 +325,30 @@ TEST(PresetAutoPilotJson, StatsJsonRoundTrip) {
     EXPECT_EQ(j.back(), '}');
 }
 
+// Control chars in probed host names must not leak raw bytes < 0x20 into the
+// stats JSON (they break strict JSON parsers in the web UI).
+TEST(PresetAutoPilotJson, EscapesControlChars) {
+    ProbeBehavior pb;
+    std::atomic<int64_t> now{4000};
+    auto cfg = mk_test_cfg(pb, now);
+    // raw 0x01 in host (LAST: last_probe keeps the final probe of a round)
+    cfg.probe_hosts = {"a.test", "b.test", "c\x01.test"};
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] { return pa.current_preset() == DPIPreset::RUNET_TSPU; }));
+    // wait for a monitor round so last_probe carries the poisoned host name
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("\\u0001") != std::string::npos;
+    }));
+    pa.stop();
+
+    const std::string j = pa.to_stats_json();
+    for (const unsigned char c : j)
+        EXPECT_GE(c, 0x20) << "raw control byte in stats JSON";
+    EXPECT_NE(j.find("\\u0001"), std::string::npos);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Assumption A1 (SPEC §5.1 step 4 / risk R5): apply_preset must NOT clobber
 // CLI modifiers that handle_run applies after it (hostlist/ipset/quic).

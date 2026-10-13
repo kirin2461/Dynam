@@ -1034,7 +1034,7 @@ int main(int argc, char* argv[]) {
 
     ArgumentParser parser("ncp", NCP_VERSION_STRING);
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers; --auto auto-selects DPI preset; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--preset NAME]", "[--auto]", "[--auto-interval S]", "[--auto-candidates CSV]", "[--auto-hosts CSV]", "[--auto-cooldown S]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --auto auto-selects DPI preset; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--preset NAME]", "[--auto]", "[--auto-interval S]", "[--auto-timeout MS]", "[--auto-candidates CSV]", "[--auto-hosts CSV]", "[--auto-cooldown S]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
     parser.add_command("rotate", "Rotate all identities", handle_rotate);
