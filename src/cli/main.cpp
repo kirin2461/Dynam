@@ -40,6 +40,7 @@
 #include "ncp_hostlist.hpp"
 #include "ncp_dpi_detector.hpp"
 #include "ncp_autopilot.hpp"
+#include "ncp_preset_autopilot.hpp"
 #include "ncp_spa.hpp"
 #include "ncp_reality.hpp"
 #include "ncp_stegodns.hpp"
@@ -123,6 +124,10 @@ struct AppState {
     bool geneva_best_valid = false;
     std::atomic<bool> geneva_best_pending{false};
     std::unique_ptr<CovertChannelManager> covert_channel;
+    // Preset-level autopilot (created only for --auto / --preset auto).
+    // Runs its own thread and hot-applies presets via update_config(), so it
+    // must be stopped BEFORE dpi_bypass is torn down.
+    std::unique_ptr<ncp::PresetAutoPilot> preset_autopilot;
     // Transport modules
     std::unique_ptr<ProtocolRotationSchedule> protocol_rotation;
     std::unique_ptr<ASAwareRouter> as_router;
@@ -147,6 +152,7 @@ struct AppState {
         l3_stealth.reset();
         dns_leak.reset();
         paranoid.reset();
+        if (preset_autopilot) { preset_autopilot->stop(); preset_autopilot.reset(); }
         dpi_bypass.reset();
         spoofer.reset();
     }
@@ -862,6 +868,8 @@ static std::vector<std::string> get_options_all(const std::vector<std::string>& 
 static std::string first_positional_arg(const std::vector<std::string>& args) {
     static const std::unordered_set<std::string> kValueOptions = {
         "--allow-port","--apply","--args","--authorized-keys","--autohostlist",
+        "--auto-interval","--auto-timeout","--auto-candidates","--auto-hosts",
+        "--auto-cooldown",
         "--base-port","--bind","--chain","--default-ttl","--detector-log",
         "--domain","--domains","--events-log","--expires","--fake-quic",
         "--fake-ttl","--fallback","--file","--hop-interval","--host",
@@ -900,6 +908,21 @@ static int get_option_int(const std::vector<std::string>& args, const std::strin
     } catch (...) {
         return default_val;
     }
+}
+
+// Split a comma-separated option value, trimming whitespace and dropping
+// empty tokens (used by --auto-candidates / --auto-hosts).
+static std::vector<std::string> split_csv_option(const std::string& csv) {
+    std::vector<std::string> out;
+    std::istringstream ss(csv);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+        size_t s = tok.find_first_not_of(" \t");
+        size_t e = tok.find_last_not_of(" \t");
+        if (s != std::string::npos)
+            out.push_back(tok.substr(s, e - s + 1));
+    }
+    return out;
 }
 
 
@@ -1011,7 +1034,7 @@ int main(int argc, char* argv[]) {
 
     ArgumentParser parser("ncp", NCP_VERSION_STRING);
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --auto auto-selects DPI preset; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--preset NAME]", "[--auto]", "[--auto-interval S]", "[--auto-candidates CSV]", "[--auto-hosts CSV]", "[--auto-cooldown S]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
     parser.add_command("rotate", "Rotate all identities", handle_rotate);
@@ -1198,6 +1221,10 @@ static void write_module_stats_json(const std::string& path) {
           << ",\"region_switches\":" << v.region_switches.load()
           << ",\"health_checks\":" << v.health_checks.load()
           << ",\"dead_nodes_detected\":" << v.dead_nodes_detected.load() << "}";
+    }
+    // Preset AutoPilot section (present only in --auto / --preset auto mode)
+    if (g_app.preset_autopilot) {
+        j << ",\"autopilot\":" << g_app.preset_autopilot->to_stats_json();
     }
     j << "}\n";
     // Atomic replace: write tmp, then rename (Windows-safe: remove target first)
@@ -1429,6 +1456,34 @@ static DPI::DPIConfig geneva_to_dpi_config(DPI::DPIConfig cfg,
 }
 
 void handle_run(const std::vector<std::string>& args) {
+    if (has_flag(args, "--help") || has_flag(args, "-h")) {
+        std::cout << "Usage: ncp run [<interface>] [options]\n"
+                  << "  --preset NAME         DPI bypass preset: tspu, beeline, mts, megafon,\n"
+                  << "                        tele2, mobile, auto (default: tspu)\n"
+                  << "  --auto, --autoprobe   Auto-detect mode: probe candidate presets in the\n"
+                  << "                        background, hot-switch to the best one, keep\n"
+                  << "                        monitoring and re-selecting on degradation\n"
+                  << "  --auto-interval SEC   Auto mode: seconds between monitor rounds (default 30)\n"
+                  << "  --auto-timeout MS     Auto mode: per-probe timeout for selection (default 1500)\n"
+                  << "  --auto-candidates CSV Auto mode: candidate presets, e.g. tspu,beeline,mobile\n"
+                  << "                        (default: built-in set, max 6)\n"
+                  << "  --auto-hosts CSV      Auto mode: reference hosts for TLS/443 probes\n"
+                  << "                        (default: first 3 of the blockcheck domain list)\n"
+                  << "  --auto-cooldown SEC   Auto mode: min seconds between preset switches (default 120)\n"
+                  << "  --hostlist FILE       Selective desync: only hosts from FILE\n"
+                  << "  --hostlist-exclude F  Selective desync: exclude hosts from FILE\n"
+                  << "  --ipset FILE          Selective desync: only IPs/networks from FILE\n"
+                  << "  --quic-block          Block QUIC (UDP/443) — clients fall back to TCP/TLS\n"
+                  << "  --quic-frag N         Fragment QUIC Initial at IP offset N\n"
+                  << "  --zapret-profile NAME Attach a zapret chain profile\n"
+                  << "  --geneva-evolve       Run Geneva GA strategy evolution in background\n"
+                  << "  --stats-file FILE     Rewrite full stats JSON to FILE every 2s (atomic)\n"
+                  << "  --status-interval SEC Runtime heartbeat period (default 30, 0 = off)\n"
+                  << "  --no-spoof            Skip IP/MAC/DNS spoofing\n"
+                  << "  --kill-switch         Arm firewall kill switch (drops ALL traffic if\n"
+                  << "                        protection stops unexpectedly) — opt-in, dangerous\n";
+        return;
+    }
     try {
         // ── License gate ──────────────────────────────────────────────────────
         // License validation required for all invocations.
@@ -1612,6 +1667,37 @@ void handle_run(const std::vector<std::string>& args) {
         // --autoprobe flag forces AUTOPROBE preset
         if (has_flag(args, "--autoprobe") || has_flag(args, "--auto")) {
             chosen_preset = DPI::DPIPreset::AUTOPROBE;
+        }
+
+        // AUTOPROBE doubles as the PresetAutoPilot trigger: the engine starts
+        // with the AUTOPROBE fallback config (unchanged behavior), then the
+        // autopilot thread probes candidate presets in the background and
+        // hot-applies the winner via update_config().
+        const bool auto_mode = (chosen_preset == DPI::DPIPreset::AUTOPROBE);
+        ncp::PresetAutoPilot::Config auto_cfg;
+        if (auto_mode) {
+            auto_cfg.monitor_interval_sec = get_option_int(args, "--auto-interval", 30);
+            auto_cfg.probe_timeout_ms = get_option_int(args, "--auto-timeout", 1500);
+            auto_cfg.switch_cooldown_sec = get_option_int(args, "--auto-cooldown", 120);
+            auto_cfg.use_doh = has_flag(args, "--doh");
+            std::string cand_csv = get_option(args, "--auto-candidates", "");
+            if (!cand_csv.empty()) {
+                for (const auto& tok : split_csv_option(cand_csv)) {
+                    DPI::DPIPreset p = DPI::preset_from_string(tok);
+                    if (p == DPI::DPIPreset::NONE || p == DPI::DPIPreset::AUTOPROBE) {
+                        std::cerr << "[!] --auto-candidates: ignoring unknown/auto preset '"
+                                  << tok << "'\n";
+                        continue;
+                    }
+                    auto_cfg.candidates.push_back(p);
+                }
+                if (auto_cfg.candidates.empty()) {
+                    std::cerr << "[!] --auto-candidates: no valid presets, using built-in set\n";
+                }
+            }
+            std::string hosts_csv = get_option(args, "--auto-hosts", "");
+            if (!hosts_csv.empty())
+                auto_cfg.probe_hosts = split_csv_option(hosts_csv);
         }
 
         DPI::DPIConfig dpi_cfg;
@@ -2187,6 +2273,25 @@ void handle_run(const std::vector<std::string>& args) {
             ncp_write_state(mods);
         }
 
+        // ── Preset AutoPilot (--auto / --preset auto) ──
+        // Created only in auto mode; the engine is already running with the
+        // AUTOPROBE fallback config. Selection runs in the background thread
+        // and hot-applies the winning preset via update_config().
+        if (auto_mode && g_app.dpi_bypass && g_app.dpi_bypass->is_running()) {
+            g_app.preset_autopilot = std::make_unique<ncp::PresetAutoPilot>();
+            if (g_app.preset_autopilot->start(g_app.dpi_bypass.get(), auto_cfg)) {
+                // Empty candidate list = built-in default set (8, capped to 6).
+                const size_t n_cand = auto_cfg.candidates.empty()
+                    ? 6 : auto_cfg.candidates.size();
+                std::cout << "[*] Preset AutoPilot: enabled ("
+                          << n_cand << " candidates, interval "
+                          << auto_cfg.monitor_interval_sec << "s)\n" << std::flush;
+            } else {
+                std::cerr << "[!] Preset AutoPilot failed to start\n";
+                g_app.preset_autopilot.reset();
+            }
+        }
+
         g_running = true;
 
         // ── Runtime heartbeat: live counters prove modules actually work ──
@@ -2337,6 +2442,13 @@ void handle_run(const std::vector<std::string>& args) {
         }
 
         // Cleanup after loop exit (RAII compliance)
+        // Stop Preset AutoPilot BEFORE engine teardown: its thread calls
+        // dpi_bypass->update_config(), so it must be joined while the engine
+        // is still alive (interruptible 200ms sleep quanta keep join <= ~1s).
+        if (g_app.preset_autopilot) {
+            g_app.preset_autopilot->stop();
+            std::cout << "[+] Preset AutoPilot stopped\n";
+        }
         if (!stats_file.empty()) write_module_stats_json(stats_file);  // final flush
         std::cout << "\n[*] Shutting down services...\n";
 
