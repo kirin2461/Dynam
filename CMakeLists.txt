@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(ncp-cpp
-    VERSION 1.7.3
+    VERSION 1.7.4
     DESCRIPTION "Network Control Protocol - C++ Implementation"
     LANGUAGES CXX
 )
