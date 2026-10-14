@@ -1161,7 +1161,7 @@ public:
     // uncaught throw in a std::thread is std::terminate and kills the whole
     // process. Per-iteration catch keeps the loop alive through transient
     // failures (e.g. bad_alloc inside a probe round); the outer catch-all is
-    // the last line of defence and parks the autopilot in "idle".
+    // the last line of defence and stops the background thread.
     void run_loop() {
         is_running.store(true);
         try {
@@ -1194,10 +1194,10 @@ public:
                     "thread exiting\n");
         }
 
-        {
-            std::lock_guard<std::mutex> lk(m);
-            mode = "idle";
-        }
+        // Do NOT clobber `mode` with "idle" on thread exit: operators (and
+        // to_stats_json()) must keep seeing the last operational state
+        // ("monitoring"/"degraded"/...). "idle" remains the initial value
+        // for a never-started autopilot only.
         is_running.store(false);
     }
 
@@ -1206,13 +1206,20 @@ public:
     void monitor_iteration() {
         int interval;
         bool net_down;
+        int lvl;
         {
             std::lock_guard<std::mutex> lk(m);
             net_down = (mode == "degraded-net");
+            lvl = level;
             interval = net_down ? kDegradedNetIntervalSec
                                 : cfg.monitor_interval_sec;
         }
         if (!cfg.probe_fn && interval < 1) interval = 1;
+        // v2: while escalated (L2/L3) floor the round cadence at 1 s even in
+        // test busy-loop configs — the de-escalation check needs *consecutive
+        // rounds*, and a hot loop would burn all of them (plus probe traffic)
+        // in microseconds, making the escalated state unobservable.
+        if (lvl >= 2 && interval < 1) interval = 1;
         interruptible_sleep(interval);
         if (stop_flag.load()) return;
 
