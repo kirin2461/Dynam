@@ -3009,6 +3009,64 @@ void apply_preset(DPIPreset preset, DPIConfig& config) {
     }
 }
 
+// ── Geneva GA → DPI bypass translation ─────────────────────────────────────
+// Maps the actions of a Geneva strategy (GA winner) onto DPIConfig knobs so
+// the evolved strategy actually shapes intercepted traffic via
+// DPIBypass::update_config(). Actions without a DPIConfig equivalent
+// (DROP, TAMPER_FLAGS) are skipped and counted in `skipped`.
+// (Moved from src/cli/main.cpp so PresetAutoPilot L3 can reuse it — logic 1:1.)
+DPIConfig geneva_strategy_to_dpi_config(const DPIConfig& base,
+                                        const GenevaStrategy& strat,
+                                        int* skipped) {
+    DPIConfig cfg = base;
+    std::vector<int> frag_positions;
+    for (const auto& step : strat.steps) {
+        switch (step.action) {
+            case GenevaAction::FRAGMENT:
+                cfg.enable_tcp_split = true;
+                if (step.param > 0) {
+                    frag_positions.push_back(
+                        static_cast<int>(std::min<size_t>(step.param, 64)));
+                }
+                break;
+            case GenevaAction::TAMPER_TTL:
+                // Geneva "tamper TTL" == send a fake copy with a low TTL
+                cfg.enable_fake_packet = true;
+                cfg.fake_ttl = step.param > 0
+                    ? static_cast<int>(std::min<size_t>(step.param, 8)) : 1;
+                break;
+            case GenevaAction::TAMPER_CHECKSUM:
+                cfg.enable_fake_packet = true;
+                cfg.fake_fooling |= 1;  // badsum
+                break;
+            case GenevaAction::TAMPER_SEQ:
+                cfg.enable_fake_packet = true;
+                cfg.fake_fooling |= 2;  // badseq
+                break;
+            case GenevaAction::DUPLICATE:
+                // Closest DPIConfig analog: repeat the fake packet N times
+                cfg.enable_fake_packet = true;
+                cfg.fake_repeats = step.param > 0
+                    ? static_cast<int>(std::min<size_t>(step.param, 8)) : 2;
+                break;
+            case GenevaAction::DISORDER:
+                cfg.enable_disorder = true;
+                break;
+            case GenevaAction::DROP:
+            case GenevaAction::TAMPER_FLAGS:
+                if (skipped) ++(*skipped);
+                break;
+        }
+    }
+    if (frag_positions.size() > 1) {
+        cfg.enable_multi_layer_split = true;
+        cfg.split_positions = frag_positions;
+    } else if (frag_positions.size() == 1) {
+        cfg.split_position = frag_positions[0];
+    }
+    return cfg;
+}
+
 DPIPreset preset_from_string(const std::string& name) {
     auto lower = to_lower_copy(name);
     if (lower == "runet-soft" || lower == "runet_soft" || lower == "runetsoft") return DPIPreset::RUNET_SOFT;
