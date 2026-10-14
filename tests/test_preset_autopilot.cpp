@@ -417,4 +417,478 @@ TEST(PresetAutoPilotApi, StartRequiresEngineOrProbeFn) {
     EXPECT_EQ(pa.mode_string(), "idle");
 }
 
+// ═════════════════════════════════════════════════════════════════════════════
+// v2: escalation ladder (SPEC AUTOPILOT_V2 §8) — L0 direct → L1 preset →
+// L2 augmented (rungs) → L3 Geneva GA. All network/time/evolution via hooks;
+// engine==nullptr (state-only mode).
+//
+// Probe phases are told apart by the timeout the autopilot passes:
+//   - quick connectivity check: NONE preset, 2000 ms
+//   - selection (startup/re-selection): any preset, probe_timeout_ms=100
+//   - rung/monitor/de-escalation rounds: monitor_probe_timeout_ms=150
+// ═════════════════════════════════════════════════════════════════════════════
+
+struct EscProbe {
+    mutable std::mutex m;
+    bool quick_ok = true;        // quick connectivity probe (NONE, 2000 ms)
+    bool selection_ok = false;   // any probe at selection timeout (100 ms)
+    bool direct_ok = false;      // direct probes at monitor timeout (NONE, 150 ms)
+    bool live_ok = true;         // preset probes at monitor timeout (rung/monitor)
+    int live_fail_first = 0;     // first N live probes fail (rung revert test)
+    int live_calls = 0;          // counts non-NONE probes at monitor timeout
+
+    BlockcheckProbe probe(DPIPreset p, const std::string& h, int timeout) {
+        std::lock_guard<std::mutex> lk(m);
+        bool ok = false;
+        if (timeout == 2000) ok = quick_ok;
+        else if (timeout == 100) ok = selection_ok;
+        else {
+            if (p == DPIPreset::NONE) {
+                ok = direct_ok;
+            } else {
+                ++live_calls;
+                ok = live_ok && live_calls > live_fail_first;
+            }
+        }
+        return ok ? mk_probe(h, true, 100) : mk_probe(h, false, 0);
+    }
+
+    int live_probe_calls() const {
+        std::lock_guard<std::mutex> lk(m);
+        return live_calls;
+    }
+};
+
+PresetAutoPilot::Config mk_esc_cfg(EscProbe& ep, std::atomic<int64_t>& now) {
+    PresetAutoPilot::Config cfg;
+    cfg.candidates = {DPIPreset::RUNET_TSPU, DPIPreset::BEELINE_MOBILE};
+    cfg.probe_hosts = {"a.test", "b.test", "c.test"};
+    cfg.probe_timeout_ms = 100;          // selection phase
+    cfg.monitor_probe_timeout_ms = 150;  // rung/monitor/de-escalation phase
+    cfg.monitor_interval_sec = 0;        // busy loop
+    cfg.switch_cooldown_sec = 120;
+    cfg.min_dwell_sec = 180;
+    cfg.probe_fn = [&ep](DPIPreset p, const std::string& h, int t) {
+        return ep.probe(p, h, t);
+    };
+    cfg.now_fn = [&now] { return now.load(); };
+    return cfg;
+}
+
+// Deterministic fake IAutoEvolver (SPEC §3 TEST HOOK). generation() is
+// monotonic per call so tests can observe growth through to_stats_json().
+struct EvolverObs {
+    std::atomic<int> factory_calls{0};
+    std::atomic<int> start_calls{0};
+    std::atomic<int> stop_calls{0};
+    std::atomic<bool> run{false};
+    std::atomic<uint32_t> gen{0};
+};
+
+class FakeEvolver : public ncp::IAutoEvolver {
+public:
+    explicit FakeEvolver(std::shared_ptr<EvolverObs> o) : obs(std::move(o)) {}
+    bool start() override {
+        obs->start_calls++;
+        obs->run.store(true);
+        return true;
+    }
+    void stop() override {
+        obs->stop_calls++;
+        obs->run.store(false);
+    }
+    bool running() const override { return obs->run.load(); }
+    uint32_t generation() const override { return ++obs->gen; }
+    double best_fitness() const override { return 500.0; }
+    void set_on_new_best(
+        std::function<void(const ncp::DPI::GenevaStrategy&)> cb) override {
+        on_best = std::move(cb);
+    }
+    std::shared_ptr<EvolverObs> obs;
+    std::function<void(const ncp::DPI::GenevaStrategy&)> on_best;
+};
+
+std::function<std::unique_ptr<ncp::IAutoEvolver>()>
+mk_evolver_factory(std::shared_ptr<EvolverObs> obs) {
+    return [obs]() {
+        obs->factory_calls++;
+        return std::unique_ptr<ncp::IAutoEvolver>(new FakeEvolver(obs));
+    };
+}
+
+// ── 1. AllPresetsFail_GoesToL2 ──────────────────────────────────────────────
+TEST(Escalation, AllPresetsFail_GoesToL2) {
+    EscProbe ep;  // selection all fail; quick ok; rung probes succeed
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    // level flips to 2 when the base preset is applied; wait for the whole
+    // episode so the rung outcome is committed before we stop.
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("\"note\":\"l2-ok\"") != std::string::npos;
+    }));
+    pa.stop();
+
+    const std::string j = pa.to_stats_json();
+    EXPECT_NE(j.find("\"level\":2"), std::string::npos);
+    EXPECT_NE(j.find("\"level_name\":\"augmented\""), std::string::npos);
+    // R1 succeeded immediately (score >= min_acceptable_score).
+    EXPECT_NE(j.find("\"fooling_badsum_badseq\""), std::string::npos);
+    // note must be non-empty and explain the escalation outcome
+    EXPECT_EQ(j.find("\"note\":\"\""), std::string::npos) << "note must be set";
+    // L3 never reached: no geneva block
+    EXPECT_EQ(j.find("\"geneva\":"), std::string::npos);
+}
+
+// ── 2. RungRevertOnNoImprovement ────────────────────────────────────────────
+TEST(Escalation, RungRevertOnNoImprovement) {
+    EscProbe ep;
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_fail_first = 3;  // R1 probe round (3 hosts) fails → revert
+    }
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] { return pa.current_level() == 2; }));
+    // L2 success is reached via R2 (first rung that improves the score)
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("\"note\":\"l2-ok\"") != std::string::npos;
+    }));
+    pa.stop();
+
+    const std::string j = pa.to_stats_json();
+    // R1 gave no improvement → reverted, absent from active_features
+    EXPECT_EQ(j.find("fooling_badsum_badseq"), std::string::npos);
+    // R2 (fake_repeats=4) improved → kept
+    EXPECT_NE(j.find("fake_repeats_4"), std::string::npos);
+    // exactly one rung applied
+    EXPECT_NE(j.find("\"active_features\":[\"fake_repeats_4\"]"), std::string::npos);
+}
+
+// ── 3. L2Success_StopsAtL2 ──────────────────────────────────────────────────
+TEST(Escalation, L2Success_StopsAtL2) {
+    EscProbe ep;  // R1 succeeds at once
+    auto obs = std::make_shared<EvolverObs>();
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+    cfg.evolver_factory = mk_evolver_factory(obs);  // L3 would be reachable…
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] {
+        return pa.current_level() == 2 &&
+               pa.to_stats_json().find("\"note\":\"l2-ok\"") != std::string::npos;
+    }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    pa.stop();
+
+    EXPECT_EQ(pa.current_level(), 2);
+    EXPECT_EQ(pa.mode_string(), "monitoring");
+    // …but Geneva was never even constructed: L2 sufficed
+    EXPECT_EQ(obs->factory_calls.load(), 0);
+    EXPECT_EQ(obs->start_calls.load(), 0);
+}
+
+// ── 4. AllRungsFail_GoesToL3 ────────────────────────────────────────────────
+TEST(Escalation, AllRungsFail_GoesToL3) {
+    EscProbe ep;
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_ok = false;    // every rung fails
+        ep.direct_ok = false;  // direct stays dead (no de-escalation)
+    }
+    auto obs = std::make_shared<EvolverObs>();
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+    cfg.evolver_factory = mk_evolver_factory(obs);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] { return pa.current_level() == 3; }));
+    ASSERT_TRUE(wait_for([&] { return obs->start_calls.load() == 1; }));
+    pa.stop();
+
+    EXPECT_EQ(obs->factory_calls.load(), 1);
+    EXPECT_EQ(obs->stop_calls.load(), 1);  // stopped exactly once at teardown
+
+    const std::string j = pa.to_stats_json();
+    EXPECT_NE(j.find("\"level\":3"), std::string::npos);
+    EXPECT_NE(j.find("\"level_name\":\"geneva\""), std::string::npos);
+    EXPECT_NE(j.find("\"geneva\":{"), std::string::npos);
+    EXPECT_NE(j.find("\"escalation-l3\""), std::string::npos);
+}
+
+// ── 4b. Geneva stats block while L3 active (running + growing generation) ──
+TEST(Escalation, GenevaStatsBlockWhileRunning) {
+    EscProbe ep;
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_ok = false;
+        ep.direct_ok = false;
+    }
+    auto obs = std::make_shared<EvolverObs>();
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+    cfg.evolver_factory = mk_evolver_factory(obs);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] { return pa.current_level() == 3; }));
+    const std::string j1 = pa.to_stats_json();
+    const std::string j2 = pa.to_stats_json();
+    pa.stop();
+
+    EXPECT_NE(j1.find("\"geneva\":{\"running\":true"), std::string::npos);
+    // generation is monotonic across stats reads while the evolver lives
+    EXPECT_GT(obs->gen.load(), 0u);
+    (void)j2;
+}
+
+// ── 5. DeescalateWhenDirectRecovers ─────────────────────────────────────────
+TEST(Escalation, DeescalateWhenDirectRecovers) {
+    EscProbe ep;
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_ok = false;   // rungs fail → L3
+        ep.direct_ok = true;  // direct healthy at monitor timeout → de-escalate
+    }
+    auto obs = std::make_shared<EvolverObs>();
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+    cfg.evolver_factory = mk_evolver_factory(obs);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] { return pa.current_level() == 3; }));
+    // direct ok for deescalate_direct_rounds(=3) consecutive rounds → L0
+    ASSERT_TRUE(wait_for([&] { return pa.current_level() == 0; }));
+    ASSERT_TRUE(wait_for([&] { return obs->stop_calls.load() == 1; }));
+    pa.stop();  // must NOT stop the evolver twice
+
+    EXPECT_EQ(obs->stop_calls.load(), 1);
+    EXPECT_EQ(pa.current_preset(), DPIPreset::NONE);
+    const std::string j = pa.to_stats_json();
+    EXPECT_NE(j.find("\"reason\":\"de-escalation\""), std::string::npos);
+    EXPECT_NE(j.find("\"level\":0"), std::string::npos);
+    EXPECT_NE(j.find("\"level_name\":\"direct\""), std::string::npos);
+    EXPECT_NE(j.find("\"active_features\":[]"), std::string::npos);
+    // geneva block persists (L3 was active this session), evolver stopped
+    EXPECT_NE(j.find("\"geneva\":{\"running\":false"), std::string::npos);
+}
+
+// ── 6. DisabledByConfig (v1 regression guard) ───────────────────────────────
+TEST(Escalation, DisabledByConfig) {
+    EscProbe ep;  // same world as AllPresetsFail_GoesToL2…
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_ok = false;
+    }
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+    cfg.escalation_enabled = false;  // …but escalation off → strict v1
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    // v1: no preset winner and direct baseline dead → degraded-net, no L2
+    ASSERT_TRUE(wait_for([&] { return pa.mode_string() == "degraded-net"; }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    pa.stop();
+
+    EXPECT_EQ(pa.current_level(), 0);
+    EXPECT_EQ(ep.live_probe_calls(), 0);  // no rung probes ever ran
+    const std::string j = pa.to_stats_json();
+    EXPECT_NE(j.find("\"level\":0"), std::string::npos);
+    EXPECT_EQ(j.find("\"geneva\":"), std::string::npos);
+}
+
+// ── 7. CooldownRespected ────────────────────────────────────────────────────
+TEST(Escalation, CooldownRespected) {
+    EscProbe ep;
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_ok = false;    // all rungs fail
+        ep.direct_ok = false;
+    }
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);  // escalation_cooldown_sec = 300 (default)
+    // no evolver_factory and no geneva_fitness → episodes end at L2
+    // (note="geneva-unavailable"), making repeated episodes observable via
+    // switches_total.
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("geneva-unavailable") != std::string::npos;
+    }));
+    EXPECT_NE(pa.to_stats_json().find("\"switches_total\":1"), std::string::npos);
+
+    // Past the 60 s anti-storm floor but inside the escalation cooldown:
+    // degradation re-selection runs, but the second L2 entry is gated.
+    now.store(1000 + 61);
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("escalation-cooldown") != std::string::npos;
+    }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_NE(pa.to_stats_json().find("\"switches_total\":1"), std::string::npos)
+        << "second episode must be blocked by escalation_cooldown_sec";
+
+    // Past the cooldown → the second episode runs.
+    now.store(1000 + 300);
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("\"switches_total\":2") != std::string::npos;
+    }));
+    pa.stop();
+}
+
+// ── 8. GenevaTranslator.PureLogic ───────────────────────────────────────────
+TEST(GenevaTranslator, PureLogic) {
+    using ncp::DPI::DPIConfig;
+    using ncp::DPI::GenevaAction;
+    using ncp::DPI::GenevaStep;
+    using ncp::DPI::GenevaStrategy;
+    using ncp::DPI::geneva_strategy_to_dpi_config;
+
+    DPIConfig base;
+    base.hostlist_file = "/tmp/hosts.txt";   // must be preserved
+    base.split_position = 5;
+    base.fake_fooling = 4;                   // md5sig bit — must survive |=
+    base.enable_fake_packet = false;
+    base.fake_repeats = 1;
+    base.fake_ttl = 3;
+    base.enable_disorder = false;
+
+    auto step = [](GenevaAction a, size_t param) {
+        GenevaStep s;
+        s.action = a;
+        s.param = param;
+        return s;
+    };
+
+    // FRAGMENT: single position, clamped to 64
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::FRAGMENT, 100)};
+        auto out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_tcp_split);
+        EXPECT_EQ(out.split_position, 64);
+        EXPECT_FALSE(out.enable_multi_layer_split);
+        EXPECT_EQ(out.hostlist_file, "/tmp/hosts.txt");
+    }
+    // FRAGMENT x2: multi-layer split, both clamped
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::FRAGMENT, 10),
+                   step(GenevaAction::FRAGMENT, 200)};
+        auto out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_multi_layer_split);
+        ASSERT_EQ(out.split_positions.size(), 2u);
+        EXPECT_EQ(out.split_positions[0], 10);
+        EXPECT_EQ(out.split_positions[1], 64);
+        EXPECT_EQ(out.split_position, 5);  // untouched for multi-split
+    }
+    // FRAGMENT param 0: enables split but sets no position
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::FRAGMENT, 0)};
+        auto out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_tcp_split);
+        EXPECT_EQ(out.split_position, 5);
+        EXPECT_FALSE(out.enable_multi_layer_split);
+    }
+    // TAMPER_TTL: clamp to 8; param 0 → 1
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::TAMPER_TTL, 100)};
+        auto out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_fake_packet);
+        EXPECT_EQ(out.fake_ttl, 8);
+
+        s.steps = {step(GenevaAction::TAMPER_TTL, 0)};
+        out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_EQ(out.fake_ttl, 1);
+    }
+    // TAMPER_CHECKSUM / TAMPER_SEQ: fooling bits OR-ed, existing bits kept
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::TAMPER_CHECKSUM, 0),
+                   step(GenevaAction::TAMPER_SEQ, 0)};
+        auto out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_fake_packet);
+        EXPECT_EQ(out.fake_fooling, 4 | 1 | 2);
+    }
+    // DUPLICATE: fake_repeats clamped to 8; param 0 → 2
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::DUPLICATE, 100)};
+        auto out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_fake_packet);
+        EXPECT_EQ(out.fake_repeats, 8);
+
+        s.steps = {step(GenevaAction::DUPLICATE, 0)};
+        out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_EQ(out.fake_repeats, 2);
+    }
+    // DISORDER
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::DISORDER, 0)};
+        auto out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_disorder);
+    }
+    // DROP and TAMPER_FLAGS have no DPIConfig equivalent → skipped counter
+    {
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::DROP, 0),
+                   step(GenevaAction::TAMPER_FLAGS, 0),
+                   step(GenevaAction::DISORDER, 0)};
+        int skipped = 0;
+        auto out = geneva_strategy_to_dpi_config(base, s, &skipped);
+        EXPECT_EQ(skipped, 2);
+        EXPECT_TRUE(out.enable_disorder);  // translatable step still applied
+        EXPECT_EQ(out.split_position, 5);
+        EXPECT_EQ(out.fake_fooling, 4);
+        // skipped == nullptr is allowed
+        out = geneva_strategy_to_dpi_config(base, s, nullptr);
+        EXPECT_TRUE(out.enable_disorder);
+    }
+}
+
+// ── 9. Stats JSON back-compat (v1 fields + v2 fields per level) ─────────────
+TEST(Escalation, StatsJsonBackCompat) {
+    ProbeBehavior pb;  // classic v1 world: TSPU wins the startup selection
+    std::atomic<int64_t> now{3000};
+    auto cfg = mk_test_cfg(pb, now);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] { return pa.current_preset() == DPIPreset::RUNET_TSPU; }));
+    pa.stop();
+
+    const std::string j = pa.to_stats_json();
+    // v1 fields all still present
+    EXPECT_NE(j.find("\"enabled\":true"), std::string::npos);
+    EXPECT_NE(j.find("\"mode\":\"monitoring\""), std::string::npos);
+    EXPECT_NE(j.find("\"current_preset\":\"RuNet-TSPU\""), std::string::npos);
+    EXPECT_NE(j.find("\"engine_preset_effective\":\"RuNet-TSPU\""), std::string::npos);
+    EXPECT_NE(j.find("\"ewma_rtt_ms\":"), std::string::npos);
+    EXPECT_NE(j.find("\"switches_total\":1"), std::string::npos);
+    EXPECT_NE(j.find("\"scores\":["), std::string::npos);
+    EXPECT_NE(j.find("\"history\":["), std::string::npos);
+    EXPECT_NE(j.find("\"note\":"), std::string::npos);
+    // v2 fields at L1
+    EXPECT_NE(j.find("\"level\":1"), std::string::npos);
+    EXPECT_NE(j.find("\"level_name\":\"preset\""), std::string::npos);
+    EXPECT_NE(j.find("\"active_features\":[]"), std::string::npos);
+    // geneva block absent: L3 never activated this session
+    EXPECT_EQ(j.find("\"geneva\":"), std::string::npos);
+    // history events carry the level
+    EXPECT_NE(j.find("\"reason\":\"startup-selection\""), std::string::npos);
+    EXPECT_NE(j.find("\"level\":1"), std::string::npos);
+}
+
 } // namespace

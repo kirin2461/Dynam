@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ncp_geneva_engine.hpp"   // GenevaStrategy (geneva_strategy_to_dpi_config)
+
 #include <string>
 #include <vector>
 #include <memory>
@@ -467,6 +469,15 @@ const char* validation_error_to_string(ValidationError err);
 void apply_preset(DPIPreset preset, DPIConfig& config);
 DPIPreset preset_from_string(const std::string& name);
 const char* preset_to_string(DPIPreset preset);
+
+// Трансляция эволюционированной Geneva-стратегии в DPIConfig поверх base.
+// FRAGMENT→split/multi_split (clamp pos<=64), TAMPER_TTL→fake_ttl (clamp 8),
+// TAMPER_CHECKSUM→fooling|1, TAMPER_SEQ→fooling|2, DUPLICATE→fake_repeats
+// (clamp 8), DISORDER→enable_disorder. DROP и TAMPER_FLAGS не транслируются —
+// инкремент *skipped (если передан).
+DPIConfig geneva_strategy_to_dpi_config(const DPIConfig& base,
+                                        const GenevaStrategy& strat,
+                                        int* skipped = nullptr);
 
 enum class DPILogLevel {
     DEBUG,
