@@ -62,6 +62,115 @@ constexpr int kDegradedNetIntervalSec = 60;
 // Quick connectivity check timeout at startup (SPEC §5.1.1).
 constexpr int kQuickProbeTimeoutMs = 2000;
 
+// ── v2 escalation (SPEC AUTOPILOT_V2) ──────────────────────────────────────
+const char* pa_level_name(int level) {
+    switch (level) {
+        case 0: return "direct";
+        case 1: return "preset";
+        case 2: return "augmented";
+        case 3: return "geneva";
+        default: return "unknown";
+    }
+}
+
+// L2 augmentation rungs (SPEC §4) — fixed order, cheap → expensive.
+constexpr int kNumRungs = 6;
+const char* const kRungNames[kNumRungs] = {
+    "fooling_badsum_badseq",  // R1
+    "fake_repeats_4",         // R2
+    "random_ttl",             // R3
+    "midsld_split",           // R4
+    "disorder_15",            // R5
+    "reverse_frag",           // R6
+};
+
+void pa_apply_rung(int idx, DPI::DPIConfig& c) {
+    switch (idx) {
+        case 0:  // R1: badsum+badseq fooling on fake packets
+            c.fake_fooling |= 1 | 2;
+            c.enable_fake_packet = true;
+            break;
+        case 1:  // R2: repeat each fake packet 4 times
+            c.fake_repeats = 4;
+            break;
+        case 2:  // R3: randomize fake TTL (autottl untouched — presets set it)
+            c.randomize_fake_ttl = true;
+            break;
+        case 3:  // R4: midsld split + multi-layer split at {1} (+midsld)
+            c.split_at_midsld = true;
+            c.enable_multi_layer_split = true;
+            c.split_positions = {1};
+            break;
+        case 4:  // R5: disorder with 15 ms delay
+            c.enable_disorder = true;
+            c.disorder_delay_ms = 15;
+            break;
+        case 5:  // R6: reverse fragment order
+            c.enable_reverse_frag = true;
+            break;
+        default: break;
+    }
+}
+
+// Production IAutoEvolver adapter over GenevaGA (SPEC §3/§5). Private to this
+// translation unit; unit tests inject a fake via Config::evolver_factory.
+class GenevaEvolver : public IAutoEvolver {
+public:
+    GenevaEvolver(const std::string& target, int population, int interval_sec,
+                  double mutation, const DPI::FitnessEvaluator& fitness) {
+        // host[:port]; empty host → discord.com; port from suffix or 443.
+        std::string host = target.empty() ? "discord.com" : target;
+        uint16_t port = 443;
+        const size_t colon = host.find_last_of(':');
+        if (colon != std::string::npos && host.find(':') == colon) {
+            const std::string ps = host.substr(colon + 1);
+            if (!ps.empty() && std::all_of(ps.begin(), ps.end(),
+                    [](char ch) { return ch >= '0' && ch <= '9'; })) {
+                host = host.substr(0, colon);
+                port = static_cast<uint16_t>(std::stoi(ps) & 0xFFFF);
+            }
+        }
+        DPI::GAConfig gc;
+        gc.population_size = std::max<size_t>(
+            4, std::min<size_t>(64, static_cast<size_t>(std::max(population, 0))));
+        gc.evolution_interval_sec = std::max(30, interval_sec);   // clamp >= 30
+        gc.mutation_rate = std::min(1.0, std::max(0.0, mutation));
+        gc.fitness_timeout_ms = std::min(gc.fitness_timeout_ms, 3000);
+        gc.seed_presets = true;
+        ga_.set_config(gc);
+        ga_.set_target(host, port);
+        ga_.set_fitness_evaluator(fitness);
+        // GA contract: callbacks must be registered before start(). The
+        // callback fires from the GA thread — it only forwards to cb_, which
+        // the autopilot sets to a mutex+flag writer (never stop()).
+        ga_.on_new_best([this](const DPI::Individual& best) {
+            std::function<void(const DPI::GenevaStrategy&)> cb;
+            {
+                std::lock_guard<std::mutex> lk(cb_m_);
+                cb = cb_;
+            }
+            if (cb) cb(best.strategy);
+        });
+        ga_.initialize_population();
+        ga_.inject_preset_strategies();
+    }
+
+    bool start() override { return ga_.start(); }
+    void stop() override { ga_.stop(); }
+    bool running() const override { return ga_.is_running(); }
+    uint32_t generation() const override { return ga_.get_stats().current_generation; }
+    double best_fitness() const override { return ga_.get_stats().best_fitness; }
+    void set_on_new_best(std::function<void(const DPI::GenevaStrategy&)> cb) override {
+        std::lock_guard<std::mutex> lk(cb_m_);
+        cb_ = std::move(cb);
+    }
+
+private:
+    DPI::GenevaGA ga_;
+    std::mutex cb_m_;
+    std::function<void(const DPI::GenevaStrategy&)> cb_;
+};
+
 } // anonymous namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,6 +205,25 @@ public:
     // this autopilot last pushed via update_config() ("AutoProbe" = the
     // fallback config the engine was started with).
     std::string engine_preset_effective = "AutoProbe";
+
+    // ── v2 escalation state (under m unless noted) ──
+    int level = 0;                          // 0 direct, 1 preset, 2 augmented, 3 geneva
+    std::vector<std::string> active_features;  // applied L2 rungs (+ geneva marker)
+    long live_score = 0;                    // score of the currently applied config
+    int deescalate_ok_rounds = 0;           // consecutive rounds with healthy direct
+    bool escalated_once = false;            // first L2/L3 entry is never cooldown-gated
+    bool episode_active = false;            // escalation episode anti-reentrancy
+    int64_t last_escalation_ts = 0;         // last entry into L2/L3
+    std::unique_ptr<IAutoEvolver> evolver;  // L3 evolver; touched under m ONLY
+                                            // (except stop(), see stop_evolver())
+    bool geneva_ever_active = false;        // gates the "geneva" stats block
+    bool geneva_pending = false;            // set by the evolver callback only
+    DPI::GenevaStrategy geneva_pending_strategy;
+    bool geneva_finished_noted = false;     // GA stopped on its own (target fitness)
+    double geneva_applied_fitness = -1.0;   // <0: no geneva strategy applied yet
+    // Cached evolver stats for to_stats_json() after the evolver is gone.
+    uint32_t geneva_last_generation = 0;
+    double geneva_last_best_fitness = 0.0;
 
     int64_t now() const {
         return cfg.now_fn ? cfg.now_fn() : static_cast<int64_t>(std::time(nullptr));
@@ -235,8 +363,11 @@ public:
     // Hot-apply a winning preset on top of the engine's live config (keeps
     // CLI modifiers) and commit the switch to state. Probing is done; this
     // only touches the engine and locked fields.
+    // v2: target_level is the escalation level after the switch (1 for a plain
+    // preset win, 2 when the preset is the base of an L2 episode).
     void apply_winner(DPI::DPIPreset winner, const CandidateScore& ws,
-                      const std::string& reason, long from_score) {
+                      const std::string& reason, long from_score,
+                      int target_level = 1) {
         if (engine) {
             DPI::DPIConfig new_cfg = engine->get_config();
             // Safety net for assumption A1 (verified: apply_preset does NOT
@@ -285,11 +416,14 @@ public:
         ev.reason = reason;
         ev.from_score = from_score;
         ev.to_score = ws.score;
+        ev.level = target_level;
         history.push_back(std::move(ev));
         if (history.size() > 32) history.erase(history.begin());
 
         current = winner;
+        level = target_level;
         engine_preset_effective = DPI::preset_to_string(winner);
+        live_score = ws.score;
         baseline_rtt_ms = ws.avg_latency_ms;
         ewma_rtt_ms = ws.avg_latency_ms;
         ewma_samples = ws.avg_latency_ms > 0.0 ? 1 : 0;
@@ -345,6 +479,26 @@ public:
         SelectionResult sel = run_selection(/*include_current=*/false);
         if (stop_flag.load()) return;
         const CandidateScore* winner = best_candidate(sel);
+
+        // v2: presets exhausted (none reached the acceptability threshold) and
+        // direct degraded too → escalation episode L1→L2(→L3). Direct healthy
+        // means "no filtering" and stays L0 via the v1 direct-wins path below.
+        if (cfg.escalation_enabled) {
+            long min_acc;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                min_acc = cfg.min_acceptable_score;
+            }
+            const bool exhausted = !winner || winner->score < min_acc;
+            const bool direct_ok =
+                sel.direct_success > 0 && sel.direct_score >= min_acc;
+            if (exhausted && !direct_ok &&
+                run_escalation_episode(sel)) {
+                std::lock_guard<std::mutex> lk(m);
+                last_scores = sel.scores;
+                return;
+            }
+        }
 
         if (!winner) {
             std::lock_guard<std::mutex> lk(m);
@@ -504,6 +658,47 @@ public:
         if (stop_flag.load()) return;
 
         const CandidateScore* winner = best_candidate(sel);
+
+        // v2: presets exhausted on re-selection → escalation episode.
+        {
+            int lvl;
+            long min_acc;
+            bool evolver_alive;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                lvl = level;
+                min_acc = cfg.min_acceptable_score;
+                evolver_alive = (evolver != nullptr);
+            }
+            if (lvl >= 2 && evolver_alive) {
+                // The L3 Geneva evolver is alive and keeps evolving — a second
+                // episode must NOT start: it would downgrade L3→L2 without
+                // restoring direct (SPEC §2) and would destroy the RUNNING
+                // evolver under m (`evolver = std::move(ev)`), while the GA
+                // thread's on_new_best callback waits on that same m → hard
+                // deadlock. The only way down is direct recovery, handled by
+                // escalated_round().
+                std::lock_guard<std::mutex> lk(m);
+                consec_fail_rounds = 0;
+                if (mode == "degraded") mode = "monitoring";
+                return;
+            }
+            if (cfg.escalation_enabled &&
+                (!winner || winner->score < min_acc)) {
+                const bool direct_ok =
+                    sel.direct_success > 0 && sel.direct_score >= min_acc;
+                if (!direct_ok && run_escalation_episode(sel)) return;
+            }
+            if (lvl >= 2) {
+                // Beyond presets the only way down is direct recovery (handled
+                // by escalated_round()); reset degradation tracking and stay.
+                std::lock_guard<std::mutex> lk(m);
+                consec_fail_rounds = 0;
+                if (mode == "degraded") mode = "monitoring";
+                return;
+            }
+        }
+
         if (!winner) return;  // everything failed — stay degraded
 
         DPI::DPIPreset cur;
@@ -536,12 +731,469 @@ public:
         apply_winner(winner->preset, *winner, reason, cur_fresh_score);
     }
 
+    // ═════════════════════════════════════════════════════════════════════
+    // v2: escalation machinery (SPEC AUTOPILOT_V2 §4/§5)
+    // ═════════════════════════════════════════════════════════════════════
+
+    // Probe all reference hosts against the LIVE applied config and return a
+    // blockcheck-scale score (success*100000 - avg_latency). Never under m.
+    // hook_preset is passed to probe_fn in test mode so mocks can tell rung
+    // probes (base preset) apart from direct probes (NONE).
+    long probe_live_score(DPI::DPIPreset hook_preset) {
+        std::vector<std::string> hosts;
+        int timeout_ms;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            hosts = cfg.probe_hosts;
+            timeout_ms = cfg.monitor_probe_timeout_ms;
+        }
+        if (hosts.empty()) return 0;
+
+        std::vector<BlockcheckProbe> probes;
+        probes.reserve(hosts.size());
+        if (cfg.probe_fn) {
+            for (const auto& h : hosts) {
+                if (stop_flag.load()) return 0;
+                probes.push_back(cfg.probe_fn(hook_preset, h, timeout_ms));
+            }
+        } else if (engine && engine->interception_active()) {
+            for (const auto& h : hosts) {
+                if (stop_flag.load()) return 0;
+                probes.push_back(BlockChecker::probe_direct(h, timeout_ms));
+            }
+        } else if (engine) {
+            // Passive/proxy mode: probe through a temp desync proxy carrying
+            // the engine's live (augmented) config — same harness as the
+            // v1 monitor round.
+            DesyncProxy proxy;
+            DesyncProxy::Config pcfg;
+            pcfg.port = 0;
+            pcfg.use_doh = cfg.use_doh;
+            pcfg.base = engine->get_config();
+            if (proxy.start(pcfg)) {
+                const uint16_t port = proxy.bound_port();
+                for (const auto& h : hosts) {
+                    if (stop_flag.load()) break;
+                    probes.push_back(BlockChecker::probe_via_socks5(port, h, timeout_ms));
+                }
+                proxy.stop();
+            }
+        } else {
+            return 0;
+        }
+        int succ = 0;
+        long lat_sum = 0;
+        for (const auto& pr : probes)
+            if (pr.ok) { succ++; lat_sum += pr.latency_ms; }
+        const double avg = succ ? static_cast<double>(lat_sum) / succ : 0.0;
+        return static_cast<long>(succ) * 100000L - static_cast<long>(avg);
+    }
+
+    // One direct (preset=NONE) probe round; healthy when a majority of hosts
+    // answers. Used for the L2/L3 de-escalation check. Never under m.
+    bool direct_round_healthy() {
+        std::vector<std::string> hosts;
+        int timeout_ms;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            hosts = cfg.probe_hosts;
+            timeout_ms = cfg.monitor_probe_timeout_ms;
+        }
+        if (hosts.empty()) return false;
+        int ok = 0;
+        int total = 0;
+        for (const auto& h : hosts) {
+            if (stop_flag.load()) return false;
+            BlockcheckProbe pr = direct_probe(h, timeout_ms);
+            total++;
+            if (pr.ok) ok++;
+        }
+        return ok > total / 2;
+    }
+
+    // Record a SwitchEvent. Caller holds m.
+    void record_event_locked(const std::string& from, const std::string& to,
+                             const std::string& reason, long from_score,
+                             long to_score, int ev_level, int64_t ts) {
+        SwitchEvent ev;
+        ev.ts = ts;
+        ev.from_preset = from;
+        ev.to_preset = to;
+        ev.reason = reason;
+        ev.from_score = from_score;
+        ev.to_score = to_score;
+        ev.level = ev_level;
+        history.push_back(std::move(ev));
+        if (history.size() > 32) history.erase(history.begin());
+    }
+
+    // Move the evolver out (under m) and stop it (NOT under m — blocking join
+    // of the GA thread; must never run while holding m because the GA
+    // callback locks m, and never from a GA callback).
+    void stop_evolver() {
+        std::unique_ptr<IAutoEvolver> ev;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            if (evolver) {
+                geneva_last_generation = evolver->generation();
+                geneva_last_best_fitness = evolver->best_fitness();
+            }
+            ev = std::move(evolver);
+            geneva_pending = false;
+        }
+        if (ev) ev->stop();
+    }
+
+    // De-escalation L2/L3 → L0: direct stayed healthy for
+    // cfg.deescalate_direct_rounds consecutive monitor rounds. Stops the GA,
+    // restores the AUTOPROBE fallback config (engine startup state), records
+    // reason="de-escalation".
+    void deescalate_to_direct() {
+        stop_evolver();
+        if (engine) {
+            // Save/restore everything update_config() cannot hot-swap plus
+            // the CLI modifiers (SPEC §11: mode/listen_port/hostlist/ipset/
+            // ws_*/kill_switch stay untouched).
+            const DPI::DPIConfig live = engine->get_config();
+            DPI::DPIConfig fresh;
+            DPI::apply_preset(DPI::DPIPreset::AUTOPROBE, fresh);
+            fresh.hostlist_file = live.hostlist_file;
+            fresh.hostlist_exclude_file = live.hostlist_exclude_file;
+            fresh.ipset_file = live.ipset_file;
+            fresh.quic_force_tcp = live.quic_force_tcp;
+            fresh.quic_ipfrag_offset = live.quic_ipfrag_offset;
+            fresh.mode = live.mode;
+            fresh.listen_port = live.listen_port;
+            fresh.nfqueue_num = live.nfqueue_num;
+            fresh.kill_switch = live.kill_switch;
+            fresh.kill_switch_allow_host = live.kill_switch_allow_host;
+            fresh.kill_switch_allow_port = live.kill_switch_allow_port;
+            fresh.ws_server_url = live.ws_server_url;
+            fresh.ws_sni_override = live.ws_sni_override;
+            fresh.ws_local_port = live.ws_local_port;
+            fresh.ws_ping_interval_sec = live.ws_ping_interval_sec;
+            fresh.ws_reconnect_delay_ms = live.ws_reconnect_delay_ms;
+            fresh.ws_max_reconnect_attempts = live.ws_max_reconnect_attempts;
+            if (!engine->update_config(fresh)) {
+                std::lock_guard<std::mutex> lk(m);
+                note = "apply-failed";   // retry on the next monitor round
+                return;
+            }
+        }
+        const int64_t ts = now();
+        std::lock_guard<std::mutex> lk(m);
+        record_event_locked(
+            current == DPI::DPIPreset::NONE ? "Custom" : DPI::preset_to_string(current),
+            "direct", "de-escalation", live_score, 0, /*level=*/0, ts);
+        current = DPI::DPIPreset::NONE;
+        level = 0;
+        engine_preset_effective = "AutoProbe";
+        active_features.clear();
+        live_score = 0;
+        deescalate_ok_rounds = 0;
+        consec_fail_rounds = 0;
+        last_round_all_failed = false;
+        baseline_rtt_ms = 0.0;
+        ewma_rtt_ms = 0.0;
+        ewma_samples = 0;
+        geneva_applied_fitness = -1.0;
+        geneva_finished_noted = false;
+        last_switch_ts = ts;
+        switches_total++;
+        note = "de-escalated:direct-healthy";
+        mode = "monitoring";
+    }
+
+    // Apply a pending Geneva best strategy (set by the evolver callback) to
+    // the live engine config via the core translator. Runs on the autopilot
+    // thread, never in the GA callback (SPEC §5).
+    void apply_geneva_pending() {
+        DPI::GenevaStrategy strat;
+        double fitness = -1.0;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            if (!geneva_pending) return;
+            geneva_pending = false;
+            strat = geneva_pending_strategy;
+            if (evolver) fitness = evolver->best_fitness();
+        }
+        int skipped = 0;
+        bool applied = true;
+        if (engine) {
+            // Base = the live engine config: hostlist/ipset/quic/mode/ws_*/
+            // kill_switch are preserved automatically because the translator
+            // only rewrites desync fields on top of `base`.
+            DPI::DPIConfig nc = DPI::geneva_strategy_to_dpi_config(
+                engine->get_config(), strat, &skipped);
+            applied = engine->update_config(nc);
+        }
+        const int64_t ts = now();
+        std::lock_guard<std::mutex> lk(m);
+        if (!applied) {
+            note = "geneva-apply-failed";
+            return;
+        }
+        geneva_applied_fitness = fitness;
+        record_event_locked(
+            current == DPI::DPIPreset::NONE ? "Custom" : DPI::preset_to_string(current),
+            "geneva", "geneva-best", live_score, 0, /*level=*/3, ts);
+        last_switch_ts = ts;
+        switches_total++;
+        note = skipped > 0 ? "geneva-best-applied,skipped=" + std::to_string(skipped)
+                           : "geneva-best-applied";
+    }
+
+    // Escalation episode L1→L2(→L3). Called when selection exhausted the
+    // preset candidates (none reached cfg.min_acceptable_score) and direct is
+    // not healthy either. Runs synchronously on the autopilot thread; probing
+    // never under m. Returns true when the episode took over (level set).
+    bool run_escalation_episode(const SelectionResult& sel) {
+        int max_rungs;
+        long min_acc;
+        double hyst;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            if (!cfg.escalation_enabled || episode_active) return false;
+            if (evolver) {
+                // Safety net (the caller already guards this): never recycle
+                // a live L3 evolver — destroying it here under m deadlocks
+                // against its on_new_best callback, which locks m. Report
+                // "took over" so callers do not fall through to L1 switching.
+                return true;
+            }
+            if (escalated_once) {
+                // Anti-flap (SPEC §2): min interval between L2/L3 entries,
+                // and no upward move inside the plain switch cooldown.
+                const int64_t t = now();
+                if (t - last_escalation_ts < cfg.escalation_cooldown_sec ||
+                    t - last_switch_ts < cfg.switch_cooldown_sec) {
+                    note = "escalation-cooldown";
+                    return false;
+                }
+            }
+            episode_active = true;
+            max_rungs = cfg.augment_max_rungs;
+            min_acc = cfg.min_acceptable_score;
+            hyst = cfg.hysteresis_pct;
+        }
+        struct EpisodeGuard {
+            std::mutex& mx; bool& flag;
+            ~EpisodeGuard() { std::lock_guard<std::mutex> lk(mx); flag = false; }
+        } guard{m, episode_active};
+
+        // Base preset: the highest-scoring candidate even below the threshold
+        // (L2 = best preset + augmentations); fall back to the current preset
+        // or the first candidate when no scores exist at all.
+        DPI::DPIPreset base = DPI::DPIPreset::NONE;
+        CandidateScore base_cs;
+        const CandidateScore* best_any = nullptr;
+        for (const auto& s : sel.scores)
+            if (!best_any || s.score > best_any->score) best_any = &s;
+        if (best_any) {
+            base = best_any->preset;
+            base_cs = *best_any;
+        } else {
+            std::lock_guard<std::mutex> lk(m);
+            base = current != DPI::DPIPreset::NONE ? current
+                     : (cfg.candidates.empty() ? DPI::DPIPreset::NONE
+                                               : cfg.candidates.front());
+            if (base == DPI::DPIPreset::NONE) {
+                note = "escalation-no-base";
+                return false;
+            }
+            base_cs.preset = base;
+            base_cs.name = DPI::preset_to_string(base);
+        }
+
+        // ── L2: apply the base preset (event reason="escalation-l2") ──
+        apply_winner(base, base_cs, "escalation-l2", 0, /*target_level=*/2);
+        {
+            std::lock_guard<std::mutex> lk(m);
+            if (note == "apply-failed") return true;  // engine rejected; stay
+            active_features.clear();
+            live_score = base_cs.score;
+            last_escalation_ts = now();
+            escalated_once = true;
+            deescalate_ok_rounds = 0;
+            geneva_applied_fitness = -1.0;
+            note = "presets-exhausted";
+        }
+
+        // Working config: the engine's live config (post apply_winner) or a
+        // virtual one in test mode (engine==nullptr, probe_fn set).
+        DPI::DPIConfig working;
+        if (engine) {
+            working = engine->get_config();
+        } else {
+            working = DPI::DPIConfig();
+            DPI::apply_preset(base, working);
+        }
+
+        // Rungs R1..R6 (capped by augment_max_rungs): mutate → probe →
+        // keep on improvement / revert otherwise.
+        const int n_rungs = std::min(kNumRungs, std::max(max_rungs, 0));
+        for (int r = 0; r < n_rungs; ++r) {
+            if (stop_flag.load()) return true;
+            DPI::DPIConfig mutated = working;
+            pa_apply_rung(r, mutated);
+            if (engine && !engine->update_config(mutated))
+                continue;  // rejected: counts as a failed rung, keep `working`
+            const long sc = probe_live_score(base);
+            if (stop_flag.load()) return true;
+            long cur_score;
+            { std::lock_guard<std::mutex> lk(m); cur_score = live_score; }
+            // Keep on a strict improvement (hysteresis-scaled) or on reaching
+            // the acceptability threshold. With cur<=0 any positive score is
+            // an improvement; a failed probe round (0 vs 0) reverts the rung.
+            const bool keep =
+                sc >= min_acc ||
+                (cur_score > 0
+                     ? sc >= static_cast<long>(cur_score * (1.0 + hyst / 100.0))
+                     : sc > 0);
+            if (keep) {
+                working = mutated;
+                std::lock_guard<std::mutex> lk(m);
+                active_features.push_back(kRungNames[r]);
+                live_score = sc;
+            } else if (engine) {
+                engine->update_config(working);  // revert rung
+            }
+            {
+                std::lock_guard<std::mutex> lk(m);
+                if (live_score >= min_acc) {
+                    // L2 success: settle in MONITORING on the augmented config.
+                    note = "l2-ok";
+                    mode = "monitoring";
+                    return true;
+                }
+            }
+        }
+
+        // ── L3: Geneva GA evolution (SPEC §5) ──
+        bool have_factory;
+        bool have_fitness;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            have_factory = static_cast<bool>(cfg.evolver_factory);
+            have_fitness = static_cast<bool>(cfg.geneva_fitness);
+        }
+        if (!have_factory && !have_fitness) {
+            std::lock_guard<std::mutex> lk(m);
+            note = "geneva-unavailable";   // stay on the best L2 config found
+            mode = "monitoring";
+            return true;
+        }
+
+        // Do not start a GA when stop() was requested mid-episode.
+        if (stop_flag.load()) return true;
+
+        std::unique_ptr<IAutoEvolver> ev;
+        if (have_factory) {
+            // Copy the factory under m, invoke it WITHOUT the lock: a test
+            // factory may call back into autopilot-observable state and no
+            // autopilot state is touched by the construction itself.
+            std::function<std::unique_ptr<IAutoEvolver>()> factory;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                factory = cfg.evolver_factory;
+            }
+            if (factory) ev = factory();
+        } else {
+            // Production adapter: GenevaGA + real fitness probes (TLS/443 to
+            // geneva_target only — SPEC §11).
+            std::string target;
+            int population, interval;
+            double mutation;
+            DPI::FitnessEvaluator fitness;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                target = cfg.geneva_target;
+                population = cfg.geneva_population;
+                interval = cfg.geneva_interval_sec;
+                mutation = cfg.geneva_mutation;
+                fitness = cfg.geneva_fitness;
+            }
+            try {
+                ev = std::make_unique<GenevaEvolver>(target, population, interval,
+                                                     mutation, fitness);
+            } catch (...) {
+                ev.reset();
+            }
+        }
+        if (!ev) {
+            std::lock_guard<std::mutex> lk(m);
+            note = "geneva-start-failed";
+            mode = "monitoring";
+            return true;
+        }
+        // Pending-slot callback: the evolver thread may ONLY write under m +
+        // set the flag (SPEC §11). No stop(), no update_config() here.
+        ev->set_on_new_best([this](const DPI::GenevaStrategy& s) {
+            std::lock_guard<std::mutex> lk(m);
+            geneva_pending_strategy = s;
+            geneva_pending = true;
+        });
+        if (!ev->start()) {
+            std::lock_guard<std::mutex> lk(m);
+            note = "geneva-start-failed";
+            mode = "monitoring";
+            return true;
+        }
+        const int64_t ts = now();
+        {
+            std::lock_guard<std::mutex> lk(m);
+            evolver = std::move(ev);
+            level = 3;
+            geneva_ever_active = true;
+            mode = "monitoring";
+            note = "geneva-evolving";
+            record_event_locked(DPI::preset_to_string(base), "geneva",
+                                "escalation-l3", live_score, 0, /*level=*/3, ts);
+            last_switch_ts = ts;
+            switches_total++;
+        }
+        return true;
+    }
+
+    // One monitor-round step while escalated (L2/L3): direct-recovery
+    // de-escalation check, GA-finished detection and pending Geneva apply.
+    // Returns true when a de-escalation to L0 happened (skip degradation
+    // handling for this round).
+    bool escalated_round() {
+        const bool healthy = direct_round_healthy();
+        int lvl;
+        bool need_deesc;
+        {
+            std::lock_guard<std::mutex> lk(m);
+            deescalate_ok_rounds = healthy ? deescalate_ok_rounds + 1 : 0;
+            need_deesc = deescalate_ok_rounds >= cfg.deescalate_direct_rounds;
+            lvl = level;
+        }
+        if (need_deesc) {
+            deescalate_to_direct();
+            return true;
+        }
+        if (lvl == 3) {
+            {
+                std::lock_guard<std::mutex> lk(m);
+                if (evolver && !evolver->running() && !geneva_finished_noted) {
+                    // GA stopped on its own (target fitness reached): keep the
+                    // last applied best, just note it (SPEC §5.4).
+                    geneva_finished_noted = true;
+                    note = "geneva-finished";
+                }
+            }
+            apply_geneva_pending();
+        }
+        return false;
+    }
+
     // ── Main loop (SPEC §4) ──
     // Exception safety: this thread MUST never let an exception escape — an
     // uncaught throw in a std::thread is std::terminate and kills the whole
     // process. Per-iteration catch keeps the loop alive through transient
     // failures (e.g. bad_alloc inside a probe round); the outer catch-all is
-    // the last line of defence and parks the autopilot in "idle".
+    // the last line of defence and stops the background thread.
     void run_loop() {
         is_running.store(true);
         try {
@@ -574,10 +1226,10 @@ public:
                     "thread exiting\n");
         }
 
-        {
-            std::lock_guard<std::mutex> lk(m);
-            mode = "idle";
-        }
+        // Do NOT clobber `mode` with "idle" on thread exit: operators (and
+        // to_stats_json()) must keep seeing the last operational state
+        // ("monitoring"/"degraded"/...). "idle" remains the initial value
+        // for a never-started autopilot only.
         is_running.store(false);
     }
 
@@ -586,13 +1238,20 @@ public:
     void monitor_iteration() {
         int interval;
         bool net_down;
+        int lvl;
         {
             std::lock_guard<std::mutex> lk(m);
             net_down = (mode == "degraded-net");
+            lvl = level;
             interval = net_down ? kDegradedNetIntervalSec
                                 : cfg.monitor_interval_sec;
         }
         if (!cfg.probe_fn && interval < 1) interval = 1;
+        // v2: while escalated (L2/L3) floor the round cadence at 1 s even in
+        // test busy-loop configs — the de-escalation check needs *consecutive
+        // rounds*, and a hot loop would burn all of them (plus probe traffic)
+        // in microseconds, making the escalated state unobservable.
+        if (lvl >= 2 && interval < 1) interval = 1;
         interruptible_sleep(interval);
         if (stop_flag.load()) return;
 
@@ -621,6 +1280,17 @@ public:
 
         monitor_round();
         if (stop_flag.load()) return;
+
+        // v2: on L2/L3 each monitor round additionally probes direct for the
+        // de-escalation check and (L3) applies pending Geneva winners.
+        {
+            int lvl;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                lvl = level;
+            }
+            if (lvl >= 2 && escalated_round()) return;  // de-escalated to L0
+        }
 
         bool deg_fail = false, deg_rtt = false;
         {
@@ -672,6 +1342,9 @@ bool PresetAutoPilot::start(DPI::DPIBypass* engine, const Config& cfg_in) {
     if (c.monitor_probe_timeout_ms <= 0) c.monitor_probe_timeout_ms = 3000;
     if (c.degrade_fail_rounds <= 0) c.degrade_fail_rounds = 3;
     if (c.ewma_alpha <= 0.0 || c.ewma_alpha > 1.0) c.ewma_alpha = 0.3;
+    // v2 escalation sanitization (0 rounds would de-escalate instantly).
+    if (c.deescalate_direct_rounds <= 0) c.deescalate_direct_rounds = 3;
+    if (c.escalation_cooldown_sec < 0) c.escalation_cooldown_sec = 300;
 
     impl_->engine = engine;
     impl_->stop_flag.store(false);
@@ -682,10 +1355,19 @@ bool PresetAutoPilot::start(DPI::DPIBypass* engine, const Config& cfg_in) {
 
 void PresetAutoPilot::stop() {
     impl_->stop_flag.store(true);
+    // v2 (SPEC §11): stop the evolver BEFORE joining the autopilot thread and
+    // never while holding m (the GA callback locks m). Moving the pointer out
+    // under m makes the monitor thread see nullptr on its next check.
+    impl_->stop_evolver();
     if (impl_->th.joinable()) impl_->th.join();
 }
 
 bool PresetAutoPilot::running() const { return impl_->is_running.load(); }
+
+int PresetAutoPilot::current_level() const {
+    std::lock_guard<std::mutex> lk(impl_->m);
+    return impl_->level;
+}
 
 DPI::DPIPreset PresetAutoPilot::current_preset() const {
     std::lock_guard<std::mutex> lk(impl_->m);
@@ -743,11 +1425,36 @@ std::string PresetAutoPilot::to_stats_json() const {
           << ",\"to\":\"" << pa_json_escape(ev.to_preset) << "\""
           << ",\"reason\":\"" << pa_json_escape(ev.reason) << "\""
           << ",\"from_score\":" << ev.from_score
-          << ",\"to_score\":" << ev.to_score << "}";
+          << ",\"to_score\":" << ev.to_score
+          << ",\"level\":" << ev.level << "}";
     }
     j << "]";
 
     j << ",\"note\":\"" << pa_json_escape(impl_->note) << "\"";
+
+    // ── v2 escalation fields (SPEC §3) ──
+    j << ",\"level\":" << impl_->level
+      << ",\"level_name\":\"" << pa_level_name(impl_->level) << "\""
+      << ",\"active_features\":[";
+    for (size_t i = 0; i < impl_->active_features.size(); ++i)
+        j << (i ? "," : "") << "\"" << pa_json_escape(impl_->active_features[i]) << "\"";
+    if (impl_->level == 3 && impl_->geneva_applied_fitness >= 0.0)
+        j << (impl_->active_features.empty() ? "" : ",")
+          << "\"geneva:best=" << impl_->geneva_applied_fitness << "\"";
+    j << "]";
+    if (impl_->geneva_ever_active) {
+        bool running = false;
+        uint32_t gen = impl_->geneva_last_generation;
+        double best = impl_->geneva_last_best_fitness;
+        if (impl_->evolver) {
+            running = impl_->evolver->running();
+            gen = impl_->evolver->generation();
+            best = impl_->evolver->best_fitness();
+        }
+        j << ",\"geneva\":{\"running\":" << (running ? "true" : "false")
+          << ",\"generation\":" << gen
+          << ",\"best_fitness\":" << best << "}";
+    }
     j << "}";
     return j.str();
 }

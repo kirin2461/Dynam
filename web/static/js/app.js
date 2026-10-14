@@ -240,6 +240,15 @@ function renderPresetAutopilot(ap) {
       ? 'badge badge--error'             // красный — деградация
       : (ap.mode === 'monitoring' ? 'badge badge--active' : 'badge badge--inactive');
   }
+  // v2: эскалация за пределы пресетов (SPEC AUTOPILOT_V2 §9). Старый движок
+  // не шлёт level_name — тогда рендер как раньше. textContent — XSS-safe.
+  if (ap.level_name === 'augmented') {
+    const n = Array.isArray(ap.active_features) ? ap.active_features.length : 0;
+    if (n > 0) text += ` · + функции: ${n}`;
+  } else if (ap.level_name === 'geneva') {
+    const gen = (ap.geneva && ap.geneva.generation != null) ? ap.geneva.generation : '—';
+    text += ` · + Geneva эволюция (поколение ${gen})`;
+  }
   el.className = cls;
   el.textContent = text;
   el.style.display = '';

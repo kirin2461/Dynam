@@ -21,6 +21,7 @@
 
 #include "ncp_dpi.hpp"
 #include "ncp_blockcheck.hpp"
+#include "ncp_geneva_ga.hpp"        // DPI::FitnessEvaluator, DPI::GenevaStrategy
 
 #include <atomic>
 #include <cstdint>
@@ -30,6 +31,28 @@
 #include <vector>
 
 namespace ncp {
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IAutoEvolver — minimal online-evolution interface used by PresetAutoPilot
+// v2 escalation level L3 (Geneva GA). Declared publicly so unit tests can
+// inject a deterministic fake via Config::evolver_factory.
+// Threading contract: set_on_new_best() callback fires from the evolver's own
+// thread — implementations of the callback must only write under a mutex and
+// set a pending flag (never call stop() from it). stop() is blocking and must
+// NOT be called from the evolver's own callbacks.
+// ─────────────────────────────────────────────────────────────────────────────
+class IAutoEvolver {
+public:
+    virtual ~IAutoEvolver() = default;
+    virtual bool start() = 0;          // запуск эволюции (false = не удалось)
+    virtual void stop() = 0;           // блокирующая остановка; НЕ вызывать из его же коллбэков
+    virtual bool running() const = 0;
+    virtual uint32_t generation() const = 0;
+    virtual double best_fitness() const = 0;      // шкала FitnessResult::score (0..1000)
+    // Коллбэк на новую лучшую стратегию; вызывается ПОТОКОМ эволюционера —
+    // внутри только запись под мьютекс + флаг pending (никаких stop()).
+    virtual void set_on_new_best(std::function<void(const DPI::GenevaStrategy&)> cb) = 0;
+};
 
 class PresetAutoPilot {
 public:
@@ -47,8 +70,11 @@ public:
         std::string from_preset;
         std::string to_preset;
         std::string reason;          // "startup-selection" | "degradation" | "reselection"
+                                     // v2: | "escalation-l2" | "escalation-l3"
+                                     //     | "geneva-best" | "de-escalation"
         long from_score = 0;
         long to_score = 0;
+        int level = 1;               // v2: escalation level AFTER the event (0..3)
     };
 
     struct Config {
@@ -80,6 +106,26 @@ public:
         // cooldown/dwell/anti-storm decisions and event timestamps.
         // Production default: time(nullptr).
         std::function<int64_t()> now_fn;
+
+        // ── v2: эскалация на функции движка (SPEC AUTOPILOT_V2 §3) ──
+        bool escalation_enabled = true;        // CLI --no-auto-escalate отключает (→ чистый v1)
+        int escalation_cooldown_sec = 300;     // мин. интервал между входами на L2/L3
+        int deescalate_direct_rounds = 3;      // direct здоров N раундов → де-эскалация
+        long min_acceptable_score = 90000;     // порог «здоровья» (blockcheck-шкала: success*100000 - rtt)
+        int augment_max_rungs = 6;             // cap rungs за эпизод L2
+
+        // L3 (Geneva). Пустой host → "discord.com". Порт из строки host:port или 443.
+        std::string geneva_target;             // CLI --geneva-target
+        int geneva_population = 20;            // CLI --geneva-population
+        int geneva_interval_sec = 60;          // CLI --geneva-interval (evolution interval, clamp >= 30)
+        double geneva_mutation = 0.15;         // CLI --geneva-mutation
+        // Продакшн: CLI передаёт ncp::cli::geneva_probe_fitness. nullptr → L3 недоступен.
+        // (Тип — ncp::DPI::FitnessEvaluator из ncp_geneva_ga.hpp; в SPEC §3
+        // указан как GenevaGA::FitnessEvaluator — это namespace-level alias.)
+        DPI::FitnessEvaluator geneva_fitness = nullptr;
+        // TEST HOOK: фабрика эволюционера. Когда задана — GenevaGA не создаётся,
+        // используется фейк (deterministic unit tests, SPEC §8).
+        std::function<std::unique_ptr<IAutoEvolver>()> evolver_factory;
     };
 
     PresetAutoPilot();
@@ -99,6 +145,7 @@ public:
     bool running() const;
 
     DPI::DPIPreset current_preset() const;       // NONE until first selection
+    int current_level() const;                   // v2: 0 direct, 1 preset, 2 augmented, 3 geneva
     std::string mode_string() const;             // "selecting"|"monitoring"|"degraded"|"idle"
 
     // JSON fragment WITHOUT enclosing braces content wrappers — a full object:

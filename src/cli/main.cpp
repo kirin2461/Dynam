@@ -1034,7 +1034,7 @@ int main(int argc, char* argv[]) {
 
     ArgumentParser parser("ncp", NCP_VERSION_STRING);
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers; --auto auto-selects DPI preset; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--preset NAME]", "[--auto]", "[--auto-interval S]", "[--auto-timeout MS]", "[--auto-candidates CSV]", "[--auto-hosts CSV]", "[--auto-cooldown S]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --auto auto-selects DPI preset; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--preset NAME]", "[--auto]", "[--auto-interval S]", "[--auto-timeout MS]", "[--auto-candidates CSV]", "[--auto-hosts CSV]", "[--auto-cooldown S]", "[--auto-escalate]", "[--no-auto-escalate]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
     parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
     parser.add_command("status", "Show current spoof status", handle_status);
     parser.add_command("rotate", "Rotate all identities", handle_rotate);
@@ -1395,65 +1395,9 @@ static bool trial_check_or_issue(const std::string& path) {
 }
 
 // ── Geneva GA → DPI bypass translation ─────────────────────────────────────
-// Maps the actions of a Geneva strategy (GA winner) onto DPIConfig knobs so
-// the evolved strategy actually shapes intercepted traffic via
-// DPIBypass::update_config(). Actions without a DPIConfig equivalent
-// (DROP, TAMPER_FLAGS) are skipped and reported in `skipped`.
-static DPI::DPIConfig geneva_to_dpi_config(DPI::DPIConfig cfg,
-                                           const DPI::GenevaStrategy& strat,
-                                           std::string* skipped = nullptr) {
-    std::vector<int> frag_positions;
-    for (const auto& step : strat.steps) {
-        switch (step.action) {
-            case DPI::GenevaAction::FRAGMENT:
-                cfg.enable_tcp_split = true;
-                if (step.param > 0) {
-                    frag_positions.push_back(
-                        static_cast<int>(std::min<size_t>(step.param, 64)));
-                }
-                break;
-            case DPI::GenevaAction::TAMPER_TTL:
-                // Geneva "tamper TTL" == send a fake copy with a low TTL
-                cfg.enable_fake_packet = true;
-                cfg.fake_ttl = step.param > 0
-                    ? static_cast<int>(std::min<size_t>(step.param, 8)) : 1;
-                break;
-            case DPI::GenevaAction::TAMPER_CHECKSUM:
-                cfg.enable_fake_packet = true;
-                cfg.fake_fooling |= 1;  // badsum
-                break;
-            case DPI::GenevaAction::TAMPER_SEQ:
-                cfg.enable_fake_packet = true;
-                cfg.fake_fooling |= 2;  // badseq
-                break;
-            case DPI::GenevaAction::DUPLICATE:
-                // Closest DPIConfig analog: repeat the fake packet N times
-                cfg.enable_fake_packet = true;
-                cfg.fake_repeats = step.param > 0
-                    ? static_cast<int>(std::min<size_t>(step.param, 8)) : 2;
-                break;
-            case DPI::GenevaAction::DISORDER:
-                cfg.enable_disorder = true;
-                break;
-            case DPI::GenevaAction::DROP:
-            case DPI::GenevaAction::TAMPER_FLAGS:
-                if (skipped) {
-                    if (!skipped->empty()) *skipped += ", ";
-                    *skipped += step.description.empty()
-                        ? (step.action == DPI::GenevaAction::DROP ? "drop" : "tamper-flags")
-                        : step.description;
-                }
-                break;
-        }
-    }
-    if (frag_positions.size() > 1) {
-        cfg.enable_multi_layer_split = true;
-        cfg.split_positions = frag_positions;
-    } else if (frag_positions.size() == 1) {
-        cfg.split_position = frag_positions[0];
-    }
-    return cfg;
-}
+// Moved to core: DPI::geneva_strategy_to_dpi_config (ncp_dpi.hpp) so both the
+// CLI geneva_best_pending loop and PresetAutoPilot L3 share one
+// implementation. `skipped` there is a count of untranslatable actions.
 
 void handle_run(const std::vector<std::string>& args) {
     if (has_flag(args, "--help") || has_flag(args, "-h")) {
@@ -1470,6 +1414,9 @@ void handle_run(const std::vector<std::string>& args) {
                   << "  --auto-hosts CSV      Auto mode: reference hosts for TLS/443 probes\n"
                   << "                        (default: first 3 of the blockcheck domain list)\n"
                   << "  --auto-cooldown SEC   Auto mode: min seconds between preset switches (default 120)\n"
+                  << "  --auto-escalate       Auto mode: allow escalation beyond presets (L2\n"
+                  << "                        augmentations, then L3 Geneva GA evolution) [default]\n"
+                  << "  --no-auto-escalate    Auto mode: presets only (classic v1 autopilot)\n"
                   << "  --hostlist FILE       Selective desync: only hosts from FILE\n"
                   << "  --hostlist-exclude F  Selective desync: exclude hosts from FILE\n"
                   << "  --ipset FILE          Selective desync: only IPs/networks from FILE\n"
@@ -1680,6 +1627,24 @@ void handle_run(const std::vector<std::string>& args) {
             auto_cfg.probe_timeout_ms = get_option_int(args, "--auto-timeout", 1500);
             auto_cfg.switch_cooldown_sec = get_option_int(args, "--auto-cooldown", 120);
             auto_cfg.use_doh = has_flag(args, "--doh");
+            // v2 escalation ladder (L2 augmentations → L3 Geneva GA evolution).
+            // Default ON in auto mode; --no-auto-escalate → чистый v1.
+            auto_cfg.escalation_enabled = !has_flag(args, "--no-auto-escalate");
+            // Geneva GA settings are shared with --geneva-evolve; in auto mode
+            // they configure the L3 evolver, and the real probe fitness makes
+            // L3 reachable (nullptr → L3 unavailable).
+            auto_cfg.geneva_target = get_option(args, "--geneva-target", "");
+            auto_cfg.geneva_population =
+                std::max(4, get_option_int(args, "--geneva-population", 20));
+            auto_cfg.geneva_interval_sec =
+                std::max(30, get_option_int(args, "--geneva-interval", 60));
+            {
+                double mr = 0.15;
+                try { mr = std::stod(get_option(args, "--geneva-mutation", "0.15")); }
+                catch (...) { mr = 0.15; }
+                auto_cfg.geneva_mutation = std::min(1.0, std::max(0.0, mr));
+            }
+            auto_cfg.geneva_fitness = &ncp::cli::geneva_probe_fitness;
             std::string cand_csv = get_option(args, "--auto-candidates", "");
             if (!cand_csv.empty()) {
                 for (const auto& tok : split_csv_option(cand_csv)) {
@@ -2324,14 +2289,15 @@ void handle_run(const std::vector<std::string>& args) {
                     best = g_app.geneva_best_strategy;
                 }
                 if (g_app.dpi_bypass && g_app.dpi_bypass->is_running()) {
-                    std::string skipped;
-                    auto new_cfg = geneva_to_dpi_config(
+                    int skipped = 0;
+                    auto new_cfg = DPI::geneva_strategy_to_dpi_config(
                         g_app.dpi_bypass->get_config(), best, &skipped);
                     if (g_app.dpi_bypass->update_config(new_cfg)) {
                         std::cout << "[+] Geneva best strategy applied to DPI bypass: "
                                   << best.description;
-                        if (!skipped.empty())
-                            std::cout << " (no DPI equivalent, skipped: " << skipped << ")";
+                        if (skipped > 0)
+                            std::cout << " (" << skipped
+                                      << " action(s) without DPI equivalent skipped)";
                         std::cout << "\n" << std::flush;
                     } else {
                         std::cerr << "[!] Failed to apply Geneva strategy to DPI bypass\n";
