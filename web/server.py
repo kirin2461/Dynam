@@ -2296,6 +2296,27 @@ except Exception as _ent_err:
     logger.warning(f"Enterprise routes not available: {_ent_err}")
 
 
+# ── Pentest module routes (automated read-only checks + PDF report) ──
+try:
+    import pentest
+    pentest.register(app, {
+        "state": state,
+        "push_log": push_log,
+        "save_config": save_config,
+        "ncp_binary": str(NCP_BINARY),
+        "config_dir": CONFIG_PATH.parent,
+        "exe_dir": EXE_DIR,
+        "api_token": _API_TOKEN,
+        "web_port": int(os.environ.get("NCP_WEB_PORT", 8085)),
+        "web_host": "127.0.0.1",
+        "product_version": _PRODUCT_VERSION,
+        "engine_stats_file": ENGINE_STATS_FILE,
+    })
+    logger.info("Pentest routes registered")
+except Exception as _pentest_err:
+    logger.warning(f"Pentest routes not available: {_pentest_err}")
+
+
 if __name__ == "__main__":
     # Restore saved license
     _try_restore_license()

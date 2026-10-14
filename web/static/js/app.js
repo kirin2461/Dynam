@@ -2197,6 +2197,104 @@ async function monitorAutopilotPresetPoll() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Пентест — автоматические проверки безопасности + PDF-отчёт
+// ═══════════════════════════════════════════════════════════════════════════
+
+let _pentestPoll = null;
+
+const PENTEST_STATUS_RU = {PASS: 'Пройдена', WARN: 'Предупреждение', FAIL: 'Провалена', SKIP: 'Пропущена'};
+const PENTEST_STATUS_COLOR = {PASS: '#3fb950', WARN: '#d29922', FAIL: '#e5534b', SKIP: '#8b949e'};
+
+async function pentestRun() {
+  const btn = document.getElementById('pentest-btn-run');
+  try {
+    await apiFetch('/pentest/run', {method: 'POST'});
+  } catch (e) {
+    return; // toast уже показан apiFetch (в т.ч. 409 «уже выполняется»)
+  }
+  if (btn) btn.disabled = true;
+  const badge = document.getElementById('pentest-badge');
+  if (badge) { badge.textContent = 'Выполняется'; badge.className = 'badge badge--active'; }
+  const link = document.getElementById('pentest-pdf-link');
+  if (link) link.style.display = 'none';
+  if (_pentestPoll) clearInterval(_pentestPoll);
+  _pentestPoll = setInterval(pentestPoll, 1500);
+  pentestPoll();
+}
+
+async function pentestPoll() {
+  let data;
+  try {
+    data = await apiFetch('/pentest/status');
+  } catch (e) {
+    return;
+  }
+  const prog = document.getElementById('pentest-progress');
+  if (prog) {
+    prog.textContent = data.running
+      ? `Проверка ${Math.min(data.done + 1, data.total)}/${data.total}: ${data.current || '…'}`
+      : (data.ts ? `Завершён: ${data.ts} (${data.done}/${data.total})` : '');
+  }
+  pentestRender(data.results || []);
+  if (!data.running) {
+    if (_pentestPoll) { clearInterval(_pentestPoll); _pentestPoll = null; }
+    const btn = document.getElementById('pentest-btn-run');
+    if (btn) btn.disabled = false;
+    const badge = document.getElementById('pentest-badge');
+    const has = (data.results || []).length > 0;
+    if (badge && has) {
+      const fails = data.results.filter(r => r.status === 'FAIL').length;
+      const warns = data.results.filter(r => r.status === 'WARN').length;
+      badge.textContent = fails ? `Провалено: ${fails}` : (warns ? `Предупреждения: ${warns}` : 'Все проверки пройдены');
+      badge.className = 'badge ' + (fails || warns ? 'badge--warn' : 'badge--active');
+    }
+    const link = document.getElementById('pentest-pdf-link');
+    if (link) link.style.display = has ? '' : 'none';
+  }
+}
+
+function pentestRender(results) {
+  const tbody = document.getElementById('pentest-results');
+  if (!tbody) return;
+  if (!results.length) {
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Пентест ещё не запускался</td></tr>';
+    return;
+  }
+  tbody.innerHTML = results.map(r => {
+    const color = PENTEST_STATUS_COLOR[r.status] || '#8b949e';
+    const label = PENTEST_STATUS_RU[r.status] || r.status;
+    return `<tr><td>${escapeHtml(r.title || r.id)}</td>`
+      + `<td><span style="color:${color};font-weight:600">${label}</span></td>`
+      + `<td>${escapeHtml(r.details || '—')}</td>`
+      + `<td>${escapeHtml(r.recommendation || '—')}</td></tr>`;
+  }).join('');
+}
+
+async function pentestDownloadPdf() {
+  try {
+    const resp = await fetch(API_BASE + '/api/pentest/report.pdf', {
+      headers: {'X-NCP-Token': NCP_TOKEN},
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({error: resp.statusText}));
+      showToast(err.error || 'PDF недоступен', 'error');
+      return;
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'ncp-pentest.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    showToast('Ошибка загрузки PDF: ' + e.message, 'error');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Enterprise modules — SPA, Reality, Stego-DNS, Port-Hopping, Fog, XDP
 // ═══════════════════════════════════════════════════════════════════════════
 
