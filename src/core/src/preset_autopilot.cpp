@@ -663,10 +663,25 @@ public:
         {
             int lvl;
             long min_acc;
+            bool evolver_alive;
             {
                 std::lock_guard<std::mutex> lk(m);
                 lvl = level;
                 min_acc = cfg.min_acceptable_score;
+                evolver_alive = (evolver != nullptr);
+            }
+            if (lvl >= 2 && evolver_alive) {
+                // The L3 Geneva evolver is alive and keeps evolving — a second
+                // episode must NOT start: it would downgrade L3→L2 without
+                // restoring direct (SPEC §2) and would destroy the RUNNING
+                // evolver under m (`evolver = std::move(ev)`), while the GA
+                // thread's on_new_best callback waits on that same m → hard
+                // deadlock. The only way down is direct recovery, handled by
+                // escalated_round().
+                std::lock_guard<std::mutex> lk(m);
+                consec_fail_rounds = 0;
+                if (mode == "degraded") mode = "monitoring";
+                return;
             }
             if (cfg.escalation_enabled &&
                 (!winner || winner->score < min_acc)) {
@@ -939,6 +954,13 @@ public:
         {
             std::lock_guard<std::mutex> lk(m);
             if (!cfg.escalation_enabled || episode_active) return false;
+            if (evolver) {
+                // Safety net (the caller already guards this): never recycle
+                // a live L3 evolver — destroying it here under m deadlocks
+                // against its on_new_best callback, which locks m. Report
+                // "took over" so callers do not fall through to L1 switching.
+                return true;
+            }
             if (escalated_once) {
                 // Anti-flap (SPEC §2): min interval between L2/L3 entries,
                 // and no upward move inside the plain switch cooldown.
@@ -1062,10 +1084,20 @@ public:
             return true;
         }
 
+        // Do not start a GA when stop() was requested mid-episode.
+        if (stop_flag.load()) return true;
+
         std::unique_ptr<IAutoEvolver> ev;
         if (have_factory) {
-            std::lock_guard<std::mutex> lk(m);
-            ev = cfg.evolver_factory();
+            // Copy the factory under m, invoke it WITHOUT the lock: a test
+            // factory may call back into autopilot-observable state and no
+            // autopilot state is touched by the construction itself.
+            std::function<std::unique_ptr<IAutoEvolver>()> factory;
+            {
+                std::lock_guard<std::mutex> lk(m);
+                factory = cfg.evolver_factory;
+            }
+            if (factory) ev = factory();
         } else {
             // Production adapter: GenevaGA + real fitness probes (TLS/443 to
             // geneva_target only — SPEC §11).

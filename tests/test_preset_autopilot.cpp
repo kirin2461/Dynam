@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -889,6 +890,94 @@ TEST(Escalation, StatsJsonBackCompat) {
     // history events carry the level
     EXPECT_NE(j.find("\"reason\":\"startup-selection\""), std::string::npos);
     EXPECT_NE(j.find("\"level\":1"), std::string::npos);
+}
+
+// ── 10. RepeatEpisodeKeepsRunningEvolver (review blocker regression) ──────
+// A second escalation episode while the L3 Geneva evolver is alive must be
+// refused: re-entering would (a) downgrade L3→L2 without restoring direct
+// (SPEC §2) and (b) destroy the RUNNING evolver under the autopilot mutex
+// (`evolver = std::move(ev)`) while the GA thread's on_new_best callback
+// waits on that same mutex → hard deadlock. The safe path is stop_evolver(),
+// which moves the pointer out from under the lock.
+class DeferredBestEvolver : public FakeEvolver {
+public:
+    using FakeEvolver::FakeEvolver;
+    bool start() override {
+        if (!FakeEvolver::start()) return false;
+        // Deferred on_new_best storm, starting after the autopilot has
+        // settled on L3: emulates a GA thread reporting new bests while the
+        // monitor loop runs degradation handling.
+        best_th = std::thread([this] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+            while (obs->run.load()) {
+                if (on_best) on_best(ncp::DPI::GenevaStrategy{});
+                std::this_thread::sleep_for(std::chrono::milliseconds(25));
+            }
+        });
+        return true;
+    }
+    void stop() override {
+        FakeEvolver::stop();       // run=false → the helper thread exits
+        if (best_th.joinable()) best_th.join();
+    }
+    ~DeferredBestEvolver() override {
+        // If this destructor ever runs UNDER the autopilot mutex (the old
+        // bug), the join below waits for the helper thread whose callback
+        // waits on that same mutex → deadlock. With the fix, evolvers are
+        // only destroyed via stop_evolver(), i.e. outside the lock and
+        // after stop().
+        if (best_th.joinable()) best_th.join();
+    }
+
+private:
+    std::thread best_th;
+};
+
+TEST(Escalation, RepeatEpisodeKeepsRunningEvolver) {
+    EscProbe ep;
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_ok = false;    // every rung fails → L3
+        ep.direct_ok = false;  // direct stays dead (no de-escalation)
+    }
+    auto obs = std::make_shared<EvolverObs>();
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+    cfg.degrade_fail_rounds = 1;   // degradation handling on the 1st failed round
+    cfg.evolver_factory = [obs]() {
+        obs->factory_calls++;
+        return std::unique_ptr<ncp::IAutoEvolver>(new DeferredBestEvolver(obs));
+    };
+
+    auto pa = std::make_unique<PresetAutoPilot>();
+    ASSERT_TRUE(pa->start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] { return pa->current_level() == 3; }));
+    ASSERT_TRUE(wait_for([&] { return obs->start_calls.load() == 1; }));
+
+    // Past every cooldown/floor: degradation cycles re-run selection while
+    // the evolver is alive — a repeat episode must be REFUSED.
+    now.store(1000 + 400);
+    // Escalated rounds are paced at 1s; give the loop several degradation
+    // cycles (each: failed live round → handle_degradation → re-selection).
+    std::this_thread::sleep_for(std::chrono::milliseconds(4500));
+
+    EXPECT_EQ(obs->factory_calls.load(), 1)
+        << "a repeat episode constructed a second evolver";
+    EXPECT_EQ(obs->start_calls.load(), 1)
+        << "a repeat episode started a second evolver";
+    EXPECT_EQ(pa->current_level(), 3)
+        << "a repeat episode downgraded L3→L2 without restoring direct";
+
+    // Liveness watchdog: if the running evolver was ever recycled under the
+    // autopilot mutex, its callback thread deadlocks against it and stop()
+    // never returns.
+    auto stop_done = std::async(std::launch::async, [&] { pa->stop(); });
+    if (stop_done.wait_for(std::chrono::seconds(10)) !=
+        std::future_status::ready) {
+        pa.release();  // do not hang the whole test binary on the regression
+        FAIL() << "deadlock: stop() did not return within 10s";
+    }
+    EXPECT_EQ(obs->stop_calls.load(), 1);
 }
 
 } // namespace
