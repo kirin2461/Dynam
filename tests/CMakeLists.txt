@@ -60,6 +60,8 @@ add_executable(ncp_tests
     test_awg31_hardening.cpp  # AWG 3.1: header protection, padding, timers, CPS
     test_scoped_trust.cpp     # Scoped trust (NUЦ containment) tests
     test_preset_autopilot.cpp  # PresetAutoPilot: selection/switch/cooldown/JSON
+    test_geneva_fitness.cpp    # Geneva GA probe: ServerHello required, alert != bypass
+    ${CMAKE_SOURCE_DIR}/src/cli/geneva_fitness.cpp  # probe under test (cli TU)
     # --- Zone F: previously unconnected gtest files ---
     # NOTE: keep the ECH files LAST. ECHCacheTest.ECHRetryMechanism detaches a
     # DoH worker on network-stall skip; on master it is the final suite so the
@@ -82,6 +84,7 @@ target_include_directories(ncp_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core/include
     ${CMAKE_SOURCE_DIR}/src/core
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/cli
 )
 
 # ==================== Standalone functional check ====================

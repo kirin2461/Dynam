@@ -213,7 +213,7 @@ DPI::FitnessResult geneva_probe_fitness(const DPI::GenevaStrategy& strategy,
             if (!ok) return res;  // RST/timeout mid-sequence
         }
 
-        // ── Await any response bytes (ServerHello) within the budget ──
+        // ── Await response bytes within the budget ──
         budget = timeout_ms - elapsed_ms();
         if (budget <= 0) return res;
         int wr = gf_wait(s, POLLIN, budget);
@@ -221,6 +221,20 @@ DPI::FitnessResult geneva_probe_fitness(const DPI::GenevaStrategy& strategy,
         uint8_t buf[16];
         int n = ::recv(s, reinterpret_cast<char*>(buf), sizeof(buf), 0);
         if (n <= 0) return res;  // RST or orderly close before any data
+
+        // Require a real TLS ServerHello record (content type 0x16, version
+        // 0x03xx). "Any bytes" is NOT success: strategies whose fake prefix
+        // corrupts the stream can blind a stateful DPI (its TLS parser fails,
+        // no SNI match, flow passes), but the server's TLS ALERT (0x15) to
+        // that corruption is not a usable bypass — no real client can
+        // complete a handshake on such a flow. Live acceptance on a Windows
+        // VM behind slirp (v1.7.5): the GA converged at fitness ~961 purely
+        // on alert-to-corruption responses (15 03 01 00 02 02 2f) while
+        // end-to-end Schannel handshakes kept failing. Alerts also must not
+        // count when they reject our minimal CH on an open path — that is a
+        // reachability signal (see pentest tls-alert semantics), not a
+        // working desync strategy.
+        if (n < 2 || buf[0] != 0x16 || buf[1] != 0x03) return res;
 
         res.connected = true;
         res.latency_ms = static_cast<double>(elapsed_ms());
