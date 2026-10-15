@@ -3034,6 +3034,15 @@ DPIConfig geneva_strategy_to_dpi_config(const DPIConfig& base,
                 cfg.enable_fake_packet = true;
                 cfg.fake_ttl = step.param > 0
                     ? static_cast<int>(std::min<size_t>(step.param, 8)) : 1;
+                // The GA measured this TTL against the real DPI — it MUST win
+                // over TTL auto-derivation. autottl is ineffective on Windows
+                // (WinDivert intercepts pre-routing: observed TTL is always the
+                // local default 128, so hops==0 and eff_ttl collapses to
+                // autottl_delta), and randomize would equally discard the
+                // evolved value. A fake that dies before reaching the DPI
+                // poisons nothing; one that overshoots poisons the server.
+                cfg.enable_autottl = false;
+                cfg.randomize_fake_ttl = false;
                 break;
             case GenevaAction::TAMPER_CHECKSUM:
                 cfg.enable_fake_packet = true;
