@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "geneva_fitness.hpp"
+#include "ncp_winsock_init.hpp"  // winsock_init() — required before any socket on Windows
 
 #include <atomic>
 #include <chrono>
@@ -45,10 +46,12 @@ public:
     bool start(const std::vector<uint8_t>& response, int hold_ms = 0) {
         response_ = response;
         hold_ms_ = hold_ms;
+        if (!ncp::winsock_init()) return false;  // no-op on POSIX
         srv_ = ::socket(AF_INET, SOCK_STREAM, 0);
         if (srv_ < 0) return false;
         int one = 1;
-        ::setsockopt(srv_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        ::setsockopt(srv_, SOL_SOCKET, SO_REUSEADDR,
+                     reinterpret_cast<const char*>(&one), sizeof(one));
         sockaddr_in addr{};
         addr.sin_family = AF_INET;
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -81,9 +84,15 @@ private:
         if (c < 0) return;
         // Drain the ClientHello (whatever the probe sends).
         uint8_t drain[2048];
+#ifdef _WIN32
+        DWORD rcv_ms = 2000;  // Windows SO_RCVTIMEO takes DWORD milliseconds
+        ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&rcv_ms), sizeof(rcv_ms));
+#else
         struct timeval tv{};
         tv.tv_sec = 2;
         ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
         ::recv(c, reinterpret_cast<char*>(drain), sizeof(drain), 0);
         if (hold_ms_ > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms_));
