@@ -813,6 +813,25 @@ TEST(GenevaTranslator, PureLogic) {
         out = geneva_strategy_to_dpi_config(base, s, nullptr);
         EXPECT_EQ(out.fake_ttl, 1);
     }
+    // TAMPER_TTL must defeat TTL auto-derivation: the GA measured its TTL
+    // against the live DPI, so autottl/randomize from the base preset (both
+    // ineffective on Windows — WinDivert sees pre-routing TTL 128, hops==0)
+    // must be switched off, otherwise the evolved TTL is silently overridden
+    // and the fake dies before reaching the DPI (live acceptance finding,
+    // v1.7.4 Windows VM vs stateful SNI filter).
+    {
+        DPIConfig autoBase = base;
+        autoBase.enable_autottl = true;
+        autoBase.autottl_delta = 2;
+        autoBase.randomize_fake_ttl = true;
+        GenevaStrategy s;
+        s.steps = {step(GenevaAction::TAMPER_TTL, 5)};
+        auto out = geneva_strategy_to_dpi_config(autoBase, s, nullptr);
+        EXPECT_TRUE(out.enable_fake_packet);
+        EXPECT_EQ(out.fake_ttl, 5);
+        EXPECT_FALSE(out.enable_autottl);
+        EXPECT_FALSE(out.randomize_fake_ttl);
+    }
     // TAMPER_CHECKSUM / TAMPER_SEQ: fooling bits OR-ed, existing bits kept
     {
         GenevaStrategy s;
