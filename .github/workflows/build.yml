@@ -68,7 +68,16 @@ jobs:
             -DENABLE_TOR_PROXY=OFF
 
       - name: Build
-        run: cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+        run: |
+          set +e
+          cmake --build build --config Release -j$(sysctl -n hw.ncpu) 2>&1 | tee build.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            grep -E "error:|Error " build.log | head -30 \
+              | sed -e "s/%/%25/g" -e "s/\\r/%0D/g" \
+              | while IFS= read -r line; do echo "::error::$line"; done
+          fi
+          exit $rc
 
       - name: Run tests
         working-directory: build
