@@ -169,6 +169,14 @@ jobs:
           path: build/bin/
           retention-days: 7
 
+  dpi-evidence-tests:
+    name: UDP DPI evidence gate regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run hermetic DPI gate tests
+        run: python3 scripts/lab/test_udp_dpi_gate.py
+
   sanitizers:
     runs-on: ubuntu-latest
     strategy:

@@ -56,6 +56,7 @@
 - ✅ **Desktop GUI**: Qt6 app (`ncp-qt.exe`) with charts, license panel and tray integration.
 - ✅ **Docker testbeds**: three isolated topologies (3-node midbox, 2-node combined Server/DPI, DPI Lab) — the full combat matrix runs without touching the host network.
 - ✅ **DPI Lab**: userspace NFQUEUE DPI emulator with TCP reassembly (buffer-limit + strict/permissive OOO policies), 4 automated suites (desync formation / DPI-model bypass matrix / endpoint compatibility / performance), tc-netem impairment profiles, IPv6 smoke tests.
+- ✅ **Independent UDP DPI evidence gate**: whole-capture nDPI/TShark verdicts, DPI-confidence checks, negative controls, and session-disjoint capture validation for mimicry/porthop experiments ([guide](docs/DPI_EVIDENCE_GATE.md)).
 
 ### Implementation Progress
 
