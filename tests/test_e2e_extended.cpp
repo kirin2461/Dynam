@@ -12,6 +12,51 @@
 
 using namespace ncp;
 
+namespace {
+
+void establish_session(E2ESession& initiator, E2ESession& responder) {
+    auto initiator_keys = initiator.generate_key_pair();
+    auto responder_keys = responder.generate_key_pair();
+    auto request = initiator.create_key_exchange_request(initiator_keys);
+    auto response = responder.process_key_exchange_request(request, responder_keys);
+    ASSERT_TRUE(initiator.complete_key_exchange(response, initiator_keys));
+    ASSERT_TRUE(initiator.is_established());
+    ASSERT_TRUE(responder.is_established());
+}
+
+// Full Double Ratchet roundtrip incl. a DH rotation, run against a session
+// restored from serialized state. Regression coverage for the restore path
+// dropping local_ratchet_kp.protocol (broke X448/P256 DH steps after
+// restore).
+void restore_then_rotate_roundtrip(const E2EConfig& config) {
+    E2ESession alice(config), bob(config);
+    establish_session(alice, bob);
+
+    // Pin both directions.
+    ASSERT_TRUE(bob.decrypt(alice.encrypt({'a', '0'})).has_value());
+    ASSERT_TRUE(alice.decrypt(bob.encrypt({'b', '0'})).has_value());
+
+    auto state = bob.serialize_session_state();
+    E2ESession restored(config);
+    ASSERT_TRUE(restored.restore_session_state(state));
+
+    // Initiator rotates; the restored session must DH-step with the restored
+    // (protocol-correct) ratchet keypair.
+    alice.rotate_keys();
+    auto m = alice.encrypt({'r', 'o', 't'});
+    auto d = restored.decrypt(m);
+    ASSERT_TRUE(d.has_value());
+    EXPECT_EQ(*d, std::vector<uint8_t>({'r', 'o', 't'}));
+
+    // And the restored session's own post-step sending chain works too.
+    auto reply = restored.encrypt({'o', 'k'});
+    auto dr = alice.decrypt(reply);
+    ASSERT_TRUE(dr.has_value());
+    EXPECT_EQ(*dr, std::vector<uint8_t>({'o', 'k'}));
+}
+
+} // namespace
+
 class E2EExtendedTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -375,4 +420,14 @@ TEST_F(E2EExtendedTest, ECDH_P256_EmptyMessageEncryption) {
     std::vector<uint8_t> decrypted = session.decrypt_message(encrypted, key);
     
     EXPECT_EQ(empty_plaintext, decrypted) << "ECDH P-256: Empty message encryption/decryption must work";
+}
+
+// ======================== Restore + DH Rotation (non-X25519) ========================
+
+TEST_F(E2EExtendedTest, ECDH_P256_RestoreThenDhRotation) {
+    restore_then_rotate_roundtrip(p256_config);
+}
+
+TEST_F(E2EExtendedTest, X448_RestoreThenDhRotation) {
+    restore_then_rotate_roundtrip(x448_config);
 }

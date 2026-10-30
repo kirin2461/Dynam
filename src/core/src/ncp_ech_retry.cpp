@@ -23,6 +23,10 @@ struct ECHConnectionManager::Impl {
     std::optional<ECHAttempt> last_attempt;
     std::unordered_map<std::string, std::vector<ECHAttempt>> history;
 
+    // Test seam: when set, replaces the live DoH ECHConfigFetcher lookups
+    // in connect_with_ech(). Empty in production.
+    std::function<bool(const std::string&, ECHConfig&)> config_fetch_override;
+
     Impl() {
         policy = RetryPolicy();
         cache = std::make_shared<ECHConfigCache>();
@@ -113,9 +117,16 @@ ECHResult ECHConnectionManager::connect_with_ech(
         }
     }
 
-    // Try 2: Fetch from DoH
-    ECHConfigFetcher fetcher;
-    if (fetcher.fetch_ech_config(domain, config)) {
+    // Try 2: Fetch config (live DoH by default; overridable for tests).
+    // The fetcher is constructed lazily so tests that install a fetch
+    // override never touch the DoH machinery at all.
+    std::unique_ptr<ECHConfigFetcher> default_fetcher;
+    auto do_fetch = [this, &default_fetcher](const std::string& d, ECHConfig& c) -> bool {
+        if (impl_->config_fetch_override) return impl_->config_fetch_override(d, c);
+        if (!default_fetcher) default_fetcher = std::make_unique<ECHConfigFetcher>();
+        return default_fetcher->fetch_ech_config(d, c);
+    };
+    if (do_fetch(domain, config)) {
         config_found = true;
 
         ECHAttempt attempt;
@@ -141,7 +152,7 @@ ECHResult ECHConnectionManager::connect_with_ech(
         std::this_thread::sleep_for(delay);
 
         // Retry fetch
-        if (fetcher.fetch_ech_config(domain, config)) {
+        if (do_fetch(domain, config)) {
             ECHAttempt attempt;
             auto result = impl_->attempt_connection(domain, client_hello, config, encrypted_hello, attempt);
             impl_->store_attempt(attempt);
@@ -240,6 +251,11 @@ void ECHConnectionManager::clear_history() {
 
 void ECHConnectionManager::set_cache_enabled(bool enabled) {
     impl_->cache_enabled = enabled;
+}
+
+void ECHConnectionManager::set_config_fetch_override(
+    std::function<bool(const std::string&, ECHConfig&)> fetcher) {
+    impl_->config_fetch_override = std::move(fetcher);
 }
 
 void ECHConnectionManager::set_cache(std::shared_ptr<ECHConfigCache> cache) {

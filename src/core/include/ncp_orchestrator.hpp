@@ -20,6 +20,7 @@
 #include "ncp_flow_shaper.hpp"
 #include "ncp_probe_resist.hpp"
 #include "ncp_mimicry.hpp"
+#include "ncp_mimicry_session_provider.hpp"  // IMimicrySessionProvider (telemetry)
 #include "ncp_tls_fingerprint.hpp"
 #include "ncp_dpi_advanced.hpp"
 #include "ncp_ech.hpp"
@@ -168,6 +169,21 @@ struct OrchestratorStats {
     double mimicry_overhead_pct = 0.0;
     double total_overhead_pct = 0.0;
 
+    // ---- Read-only per-session UDP/mimicry telemetry ----
+    // Populated by get_stats() from the attached IMimicrySessionProvider
+    // snapshot (see set_mimicry_session_provider); all zero when no provider
+    // is attached or the provider has expired. These are pure aggregates of
+    // NcpConnectionDirector session views — the orchestrator NEVER mutates
+    // UDP/mimicry/profile state; actuation is exclusively via
+    // NcpConnectionDirector / the profile-transition API, and the
+    // orchestrator never calls set_strategy()/apply_preset() on behalf of
+    // UDP sessions.
+    uint64_t mimicry_sessions_active = 0;             ///< established sessions
+    uint64_t mimicry_transitions_in_flight = 0;       ///< FSM state != IDLE
+    uint64_t mimicry_transitions_effective_total = 0; ///< sum over sessions
+    uint64_t mimicry_transitions_aborted_total = 0;   ///< aborted + timed out
+    uint64_t mimicry_mtu_budget_rejections_total = 0; ///< sum over sessions
+
     void reset() {
         packets_sent.store(0); packets_received.store(0);
         bytes_original.store(0); bytes_on_wire.store(0);
@@ -195,7 +211,15 @@ struct OrchestratorStats {
           adversarial_overhead_pct(o.adversarial_overhead_pct),
           flow_shaping_overhead_pct(o.flow_shaping_overhead_pct),
           mimicry_overhead_pct(o.mimicry_overhead_pct),
-          total_overhead_pct(o.total_overhead_pct) {}
+          total_overhead_pct(o.total_overhead_pct),
+          mimicry_sessions_active(o.mimicry_sessions_active),
+          mimicry_transitions_in_flight(o.mimicry_transitions_in_flight),
+          mimicry_transitions_effective_total(
+              o.mimicry_transitions_effective_total),
+          mimicry_transitions_aborted_total(
+              o.mimicry_transitions_aborted_total),
+          mimicry_mtu_budget_rejections_total(
+              o.mimicry_mtu_budget_rejections_total) {}
 };
 
 // ===== Processed Packet =====
@@ -279,6 +303,22 @@ public:
 
     void set_config(const OrchestratorConfig& config);
     OrchestratorConfig get_config() const;
+
+    /// Attach a read-only per-session UDP/mimicry telemetry source
+    /// (typically NcpConnectionDirector::mimicry_provider()). The
+    /// orchestrator holds NO ownership — a weak_ptr — so director shutdown
+    /// ordering is safe: once the provider expires, get_stats() reports
+    /// zeros for the mimicry_* aggregates.
+    ///
+    /// READ-ONLY contract: the provider is only ever queried for snapshots
+    /// inside get_stats(). The orchestrator gains NO method that mutates
+    /// mimicry/profile state; all UDP/mimicry actuation stays exclusively
+    /// with NcpConnectionDirector / the profile-transition API, and the
+    /// orchestrator never calls set_strategy()/apply_preset() on behalf of
+    /// UDP sessions.
+    void set_mimicry_session_provider(
+        std::weak_ptr<const ncp::IMimicrySessionProvider> provider);
+
     OrchestratorStats get_stats() const;
     void reset_stats();
 
@@ -338,6 +378,10 @@ private:
     int consecutive_successes_ = 0;
     std::chrono::steady_clock::time_point last_escalation_;
     mutable std::mutex strategy_mutex_;
+
+    // Read-only UDP/mimicry telemetry source (weak: no ownership; guarded
+    // by strategy_mutex_). Queried inside get_stats() only.
+    std::weak_ptr<const ncp::IMimicrySessionProvider> mimicry_provider_;
 
     std::atomic<bool> running_{false};
     OrchestratorSendCallback send_callback_;

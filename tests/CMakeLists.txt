@@ -40,6 +40,24 @@ add_executable(ncp_tests
     test_stegodns.cpp
     test_porthop.cpp            # M2: port-hopping transport tests
     test_mimicry_stats.cpp      # M5: statistical profile tests
+    test_reference_profile_catalog.cpp  # Этап 1A: reference profile catalog tests
+    test_profile_transition.cpp    # Generic per-session profile transition tests
+    test_udp_profile_transition.cpp # Real UDP client/server transition tests
+    test_mimicry_autopilot.cpp     # UDP/mimicry decision-loop tests
+    test_mimicry_session.cpp       # Per-session E2E/mimicry adapter tests
+    test_transport_config.cpp      # G2.2: versioned transport-config migration/coexistence tests
+    test_datagram_path_budget.cpp  # G3: authoritative path MTU/PMTU sizing
+    test_turn_client.cpp           # G5: STUN/TURN codec and transaction tests
+    test_turn_server.cpp           # G5: TURN-over-UDP server tests
+    test_mimicry_fsm.cpp           # Per-session FSM timing/shape tests
+    test_mimicry_catalog_io.cpp    # Signed catalog binary IO tests
+    test_connection_director.cpp   # Per-session director/registry + CLI wiring tests
+    test_orchestrator_mimicry_provider.cpp  # Read-only per-session provider tests
+    test_mimicry_session_fsm.cpp   # FSM runtime integration in the session adapter
+    test_mimicry_sibling_binding.cpp  # I-SIB-1: hash-bound family IS the variant group
+    test_cli_mimicry_flags.cpp     # Operator CLI mimicry flags/helpers tests
+    test_mimicry_session_v2.cpp    # Transition protocol v2 (arbitrary masks) tests
+    test_udp_profile_transition_v2.cpp  # Real-UDP v2 evidence (loss parity, storm recovery)
     test_desync_confuse.cpp   # M3: TCP state confusion builders tests
     test_aemm.cpp             # M9: Reed-Solomon erasure coding tests
     test_fog.cpp               # M7: fog mesh relay tests
@@ -56,6 +74,7 @@ add_executable(ncp_tests
     test_r13_fixes.cpp       # Tests for R11-R13 critical fixes
     test_thread_safety.cpp   # Thread safety verification tests
     test_bypass_features.cpp # Hostlist/proxy/blockcheck/zapret-import/detector
+    test_blockcheck_parallel.cpp # Parallel probes, stable validation, concurrent learning
     test_spa.cpp            # Enterprise SPA (Ed25519 + ipset) tests
     test_awg31_hardening.cpp  # AWG 3.1: header protection, padding, timers, CPS
     test_scoped_trust.cpp     # Scoped trust (NUЦ containment) tests
@@ -63,10 +82,6 @@ add_executable(ncp_tests
     test_geneva_fitness.cpp    # Geneva GA probe: ServerHello required, alert != bypass
     ${CMAKE_SOURCE_DIR}/src/cli/geneva_fitness.cpp  # probe under test (cli TU)
     # --- Zone F: previously unconnected gtest files ---
-    # NOTE: keep the ECH files LAST. ECHCacheTest.ECHRetryMechanism detaches a
-    # DoH worker on network-stall skip; on master it is the final suite so the
-    # process exits before that worker can throw. Adding suites after it
-    # re-exposes that latent crash (observed: std::bad_alloc abort).
     test_e2e_extended.cpp    # X448 / ECDH_P256 E2E encryption tests
     test_ech.cpp             # HPKE-based ECH unit tests
     test_ech_cache.cpp       # ECH config cache / retry tests
@@ -79,6 +94,13 @@ target_link_libraries(ncp_tests
         gtest_main
 )
 add_dependencies(ncp_tests ncp_core)
+
+find_library(MSQUIC_LIBRARY NAMES msquic libmsquic.so.2)
+if(MSQUIC_LIBRARY)
+    target_sources(ncp_tests PRIVATE
+        test_real_quic.cpp
+        test_quic_director_adapter.cpp)
+endif()
 
 target_include_directories(ncp_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/src/core/include

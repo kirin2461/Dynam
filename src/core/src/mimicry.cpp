@@ -205,6 +205,8 @@ std::vector<uint8_t> TrafficMimicry::wrap_payload(
         case TrafficMimicry::MimicProfile::SKYPE:              result = create_skype_wrapper(payload); break;
         case TrafficMimicry::MimicProfile::ZOOM:               result = create_zoom_wrapper(payload); break;
         case TrafficMimicry::MimicProfile::GENERIC_TCP:        result = create_generic_tcp_wrapper(payload); break;
+        case TrafficMimicry::MimicProfile::QUIC_SHORT_HEADER:  result = create_quic_short_header_wrapper(payload); break;
+        case TrafficMimicry::MimicProfile::STUN_MESSAGE:       result = create_stun_message_wrapper(payload); break;
         case TrafficMimicry::MimicProfile::GENERIC_UDP:
         default:                                               result = create_generic_udp_wrapper(payload); break;
     }
@@ -242,6 +244,8 @@ std::vector<uint8_t> TrafficMimicry::unwrap_payload(
         case TrafficMimicry::MimicProfile::DNS_QUERY:
         case TrafficMimicry::MimicProfile::DNS_RESPONSE:        result = extract_dns_payload(mimicked_data); break;
         case TrafficMimicry::MimicProfile::QUIC_INITIAL:        result = extract_quic_payload(mimicked_data); break;
+        case TrafficMimicry::MimicProfile::QUIC_SHORT_HEADER:  result = extract_quic_short_header_payload(mimicked_data); break;
+        case TrafficMimicry::MimicProfile::STUN_MESSAGE:       result = extract_stun_message_payload(mimicked_data); break;
         case TrafficMimicry::MimicProfile::WEBSOCKET:           result = extract_websocket_payload(mimicked_data); break;
         case TrafficMimicry::MimicProfile::BITTORRENT:          result = extract_bittorrent_payload(mimicked_data); break;
         default:
@@ -1286,6 +1290,332 @@ std::vector<uint8_t> TrafficMimicry::extract_quic_payload(const std::vector<uint
     uint32_t payload_len = (static_cast<uint32_t>(pt[1]) << 24) | (static_cast<uint32_t>(pt[2]) << 16) | (static_cast<uint32_t>(pt[3]) << 8) | pt[4];
     if (5 + payload_len > pt.size()) return {};
     return std::vector<uint8_t>(pt.begin() + 5, pt.begin() + 5 + payload_len);
+}
+
+// ==================== QUIC short header (v2, session-bound) ====================
+//
+// QUIC 1-RTT-like mask (transition protocol v2):
+//   [first:1]  0x40|spin|rand — 0x80 clear (short header), 0x40 set
+//   [dcid:8]   session-stable DCID = BLAKE2b-16(session_mask_key,
+//              "NCP-QUIC-SHORT-DCID-v1") truncated to 8 bytes
+//   [pn:4]     packet number (per-instance quic_packet_number_ counter)
+//   [nonce:24] random XChaCha20 nonce (self-describing, as QUIC_INITIAL)
+//   [ct_len:4] BE length of ct
+//   [ct]       XChaCha20-Poly1305(key = BLAKE2b(session_mask_key,
+//              "NCP-QUIC-SHORT-KEY-v1")) over
+//              [wire_version:1][payload_len:4 BE][payload]
+// The AEAD key is derived from the SESSION KEY directly — never from the
+// DCID, which is transmitted in clear in every datagram (a DCID-derived key
+// would be publicly forgeable by any passive observer).
+// Unwrap is fail-closed: wrong first-byte form, wrong/foreign DCID, truncated
+// fields, AEAD failure or wire-version mismatch all yield {}. Random garbage
+// must clear the DCID check (2^-64) before it can even cost an AEAD attempt.
+
+/// Session-stable 8-byte DCID derived from the session mask key.
+static std::array<uint8_t, 8> quic_short_session_dcid(
+        const std::array<uint8_t, 32>& session_mask_key) {
+    uint8_t full[crypto_generichash_BYTES];  // 32 (min out for generichash ok)
+    uint8_t info[] = "NCP-QUIC-SHORT-DCID-v1";
+    crypto_generichash(full, sizeof(full),
+                       session_mask_key.data(), session_mask_key.size(),
+                       info, sizeof(info) - 1);
+    std::array<uint8_t, 8> dcid{};
+    std::memcpy(dcid.data(), full, dcid.size());
+    sodium_memzero(full, sizeof(full));
+    return dcid;
+}
+
+std::vector<uint8_t> TrafficMimicry::create_quic_short_header_wrapper(
+        const std::vector<uint8_t>& payload) {
+    const auto dcid = quic_short_session_dcid(config_.session_mask_key);
+
+    // AEAD key from the session mask key directly. The DCID is public (in
+    // every datagram); keying the AEAD with BLAKE2b(DCID, ...) would let any
+    // passive observer forge datagrams that pass the mask layer.
+    uint8_t quic_key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
+    uint8_t quic_info[] = "NCP-QUIC-SHORT-KEY-v1";
+    crypto_generichash(quic_key, sizeof(quic_key),
+                       config_.session_mask_key.data(),
+                       config_.session_mask_key.size(),
+                       quic_info, sizeof(quic_info) - 1);
+
+    // Inner plaintext: [wire_version][4-byte BE length][payload]
+    std::vector<uint8_t> plaintext;
+    plaintext.reserve(5 + payload.size());
+    plaintext.push_back(wire_version_);
+    uint32_t pl = static_cast<uint32_t>(payload.size());
+    plaintext.push_back((pl >> 24) & 0xFF);
+    plaintext.push_back((pl >> 16) & 0xFF);
+    plaintext.push_back((pl >> 8) & 0xFF);
+    plaintext.push_back(pl & 0xFF);
+    plaintext.insert(plaintext.end(), payload.begin(), payload.end());
+
+    uint8_t nonce[crypto_aead_xchacha20poly1305_ietf_NPUBBYTES];
+    randombytes_buf(nonce, sizeof(nonce));
+
+    std::vector<uint8_t> ct(plaintext.size() +
+                            crypto_aead_xchacha20poly1305_ietf_ABYTES);
+    unsigned long long ct_len = 0;
+    crypto_aead_xchacha20poly1305_ietf_encrypt(
+        ct.data(), &ct_len, plaintext.data(), plaintext.size(),
+        nullptr, 0, nullptr, nonce, quic_key);
+    ct.resize(static_cast<size_t>(ct_len));
+    sodium_memzero(quic_key, sizeof(quic_key));
+
+    std::vector<uint8_t> result;
+    result.reserve(1 + 8 + 4 + sizeof(nonce) + 4 + ct.size());
+    // First byte: short header form (0x80 clear), fixed bit 0x40 set,
+    // spin bit (0x20) and low bits randomized.
+    result.push_back(static_cast<uint8_t>(
+        0x40 | (ncp::csprng_bytes(1)[0] & 0x3F)));
+    result.insert(result.end(), dcid.begin(), dcid.end());
+    uint64_t pn = quic_packet_number_.fetch_add(1, std::memory_order_relaxed);
+    result.push_back((pn >> 24) & 0xFF);
+    result.push_back((pn >> 16) & 0xFF);
+    result.push_back((pn >> 8) & 0xFF);
+    result.push_back(pn & 0xFF);
+    result.insert(result.end(), nonce, nonce + sizeof(nonce));
+    uint32_t ct_size = static_cast<uint32_t>(ct.size());
+    result.push_back((ct_size >> 24) & 0xFF);
+    result.push_back((ct_size >> 16) & 0xFF);
+    result.push_back((ct_size >> 8) & 0xFF);
+    result.push_back(ct_size & 0xFF);
+    result.insert(result.end(), ct.begin(), ct.end());
+    return result;
+}
+
+std::vector<uint8_t> TrafficMimicry::extract_quic_short_header_payload(
+        const std::vector<uint8_t>& data) {
+    constexpr size_t kHeader = 1 + 8 + 4;                    // first+dcid+pn
+    constexpr size_t kNonce = crypto_aead_xchacha20poly1305_ietf_NPUBBYTES;
+    if (data.size() < kHeader + kNonce + 4 +
+                      crypto_aead_xchacha20poly1305_ietf_ABYTES + 5) {
+        return {};
+    }
+    // Short-header form: 0x80 clear, fixed bit 0x40 set.
+    if ((data[0] & 0x80) != 0 || (data[0] & 0x40) == 0) return {};
+
+    // Fail-fast wrong-flow reject: the DCID must be this session's.
+    const auto dcid = quic_short_session_dcid(config_.session_mask_key);
+    if (sodium_memcmp(data.data() + 1, dcid.data(), dcid.size()) != 0)
+        return {};
+
+    // Same session-keyed derivation as the wrap side (the DCID compare
+    // above remains the fail-fast wrong-flow check; the DCID itself is
+    // public and must never key the AEAD).
+    uint8_t quic_key[crypto_aead_xchacha20poly1305_ietf_KEYBYTES];
+    uint8_t quic_info[] = "NCP-QUIC-SHORT-KEY-v1";
+    crypto_generichash(quic_key, sizeof(quic_key),
+                       config_.session_mask_key.data(),
+                       config_.session_mask_key.size(),
+                       quic_info, sizeof(quic_info) - 1);
+
+    size_t pos = kHeader;  // packet number is informational; not replay-checked
+    const uint8_t* nonce = &data[pos];
+    pos += kNonce;
+    uint32_t ct_size = (static_cast<uint32_t>(data[pos]) << 24) |
+                       (static_cast<uint32_t>(data[pos + 1]) << 16) |
+                       (static_cast<uint32_t>(data[pos + 2]) << 8) |
+                        static_cast<uint32_t>(data[pos + 3]);
+    pos += 4;
+    if (pos + ct_size != data.size()) {  // exact: no trailing garbage
+        sodium_memzero(quic_key, sizeof(quic_key));
+        return {};
+    }
+
+    std::vector<uint8_t> pt(ct_size);
+    unsigned long long pt_len = 0;
+    int r = crypto_aead_xchacha20poly1305_ietf_decrypt(
+        pt.data(), &pt_len, nullptr, &data[pos], ct_size,
+        nullptr, 0, nonce, quic_key);
+    sodium_memzero(quic_key, sizeof(quic_key));
+    if (r != 0 || pt_len < 5) return {};
+    pt.resize(static_cast<size_t>(pt_len));
+
+    if (pt[0] != wire_version_) return {};
+    uint32_t payload_len = (static_cast<uint32_t>(pt[1]) << 24) |
+                           (static_cast<uint32_t>(pt[2]) << 16) |
+                           (static_cast<uint32_t>(pt[3]) << 8) |
+                            static_cast<uint32_t>(pt[4]);
+    if (5u + payload_len > pt.size()) return {};
+    return std::vector<uint8_t>(pt.begin() + 5,
+                                pt.begin() + 5 + payload_len);
+}
+
+// ==================== STUN message (v2, session-bound) ====================
+//
+// RFC 5389-shaped mask (transition protocol v2):
+//   [type:2]   Binding Request (0x0001) / Response (0x0101), alternated per
+//              wrapped datagram (TrafficMimicry is direction-agnostic; both
+//              shapes appear on the wire exactly as real connectivity checks)
+//   [length:2] BE attribute-area length (excludes the 20-byte header),
+//              4-byte aligned, exact (no trailing bytes accepted)
+//   [cookie:4] 0x2112A442
+//   [txn:12]   HMAC-SHA256(session_mask_key, counter) truncated to 96 bits
+//              (with a configured endpoint_role: HMAC-SHA256(session_mask_key,
+//              role || counter) — direction-distinct per endpoint)
+//   attrs:     [0x8022 (reserved-range) carrying
+//               [wire_version:1][payload_len:4 BE][payload], zero-padded to 4]
+//              [0x0008 MESSAGE-INTEGRITY, 20 bytes: HMAC-SHA256(session_mask
+//               _key, header+preceding attributes) truncated to 160 bits —
+//               the MESSAGE-INTEGRITY shape/strength of RFC 5389's HMAC-SHA1;
+//               this libsodium build ships no HMAC-SHA1 primitive]
+// Unwrap is fail-closed: type/cookie/length/alignment/attribute-layout or
+// MESSAGE-INTEGRITY mismatch all yield {} — mask-level authentication rejects
+// forgeries before any E2E AEAD attempt.
+
+static constexpr uint16_t kStunTypeBindingRequest  = 0x0001;
+static constexpr uint16_t kStunTypeBindingResponse = 0x0101;
+static constexpr uint32_t kStunMagicCookie = 0x2112A442u;
+static constexpr uint16_t kStunAttrPayload = 0x8022;  // comprehension-optional
+static constexpr uint16_t kStunAttrMessageIntegrity = 0x0008;
+static constexpr size_t kStunHeaderSize = 20;
+static constexpr size_t kStunMiMacSize = 20;  // 160-bit truncated HMAC-SHA256
+static constexpr size_t kStunMiAttrSize = 4 + kStunMiMacSize;
+
+/// MESSAGE-INTEGRITY-shaped mask-level authenticator: HMAC-SHA256 keyed with
+/// the session mask key, truncated to 160 bits.
+static void stun_message_integrity(const std::array<uint8_t, 32>& key,
+                                   const uint8_t* msg, size_t msg_len,
+                                   uint8_t out[kStunMiMacSize]) {
+    uint8_t full[crypto_auth_hmacsha256_BYTES];
+    crypto_auth_hmacsha256(full, msg, msg_len, key.data());
+    std::memcpy(out, full, kStunMiMacSize);
+    sodium_memzero(full, sizeof(full));
+}
+
+std::vector<uint8_t> TrafficMimicry::create_stun_message_wrapper(
+        const std::vector<uint8_t>& payload) {
+    const uint64_t counter =
+        stun_counter_.fetch_add(1, std::memory_order_relaxed);
+    const uint16_t type = (counter & 1) ? kStunTypeBindingResponse
+                                        : kStunTypeBindingRequest;
+
+    // Transaction id: HMAC-SHA256(session key, counter) truncated to 96
+    // bits. When an endpoint role is configured (1=client, 2=server — the
+    // session adapter sets it from its Role) the role byte is mixed into
+    // the HMAC input so the two endpoints emit direction-distinct
+    // transaction-id streams instead of an identical, direction-agnostic
+    // sequence. Role 0 (standalone use) keeps the legacy stream exactly.
+    uint8_t ctr_be[8];
+    for (int i = 0; i < 8; ++i)
+        ctr_be[i] = static_cast<uint8_t>((counter >> (56 - 8 * i)) & 0xFF);
+    uint8_t txn_full[crypto_auth_hmacsha256_BYTES];
+    if (config_.endpoint_role == 0) {
+        crypto_auth_hmacsha256(txn_full, ctr_be, sizeof(ctr_be),
+                               config_.session_mask_key.data());
+    } else {
+        uint8_t hmac_in[1 + sizeof(ctr_be)];
+        hmac_in[0] = config_.endpoint_role;
+        std::memcpy(hmac_in + 1, ctr_be, sizeof(ctr_be));
+        crypto_auth_hmacsha256(txn_full, hmac_in, sizeof(hmac_in),
+                               config_.session_mask_key.data());
+        sodium_memzero(hmac_in, sizeof(hmac_in));
+    }
+
+    // Payload attribute value: [wire_version][4-byte BE length][payload].
+    std::vector<uint8_t> value;
+    value.reserve(5 + payload.size());
+    value.push_back(wire_version_);
+    uint32_t pl = static_cast<uint32_t>(payload.size());
+    value.push_back((pl >> 24) & 0xFF);
+    value.push_back((pl >> 16) & 0xFF);
+    value.push_back((pl >> 8) & 0xFF);
+    value.push_back(pl & 0xFF);
+    value.insert(value.end(), payload.begin(), payload.end());
+
+    const size_t value_padded = (value.size() + 3) & ~static_cast<size_t>(3);
+    const uint16_t msg_len = static_cast<uint16_t>(
+        4 + value_padded + kStunMiAttrSize);
+
+    std::vector<uint8_t> result;
+    result.reserve(kStunHeaderSize + msg_len);
+    result.push_back(static_cast<uint8_t>((type >> 8) & 0x3F));  // top bits 0
+    result.push_back(static_cast<uint8_t>(type & 0xFF));
+    result.push_back(static_cast<uint8_t>((msg_len >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(msg_len & 0xFF));
+    result.push_back(static_cast<uint8_t>((kStunMagicCookie >> 24) & 0xFF));
+    result.push_back(static_cast<uint8_t>((kStunMagicCookie >> 16) & 0xFF));
+    result.push_back(static_cast<uint8_t>((kStunMagicCookie >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(kStunMagicCookie & 0xFF));
+    result.insert(result.end(), txn_full, txn_full + 12);
+    sodium_memzero(txn_full, sizeof(txn_full));
+
+    // Payload attribute (padded to 4-byte boundary, RFC 5389 §15).
+    result.push_back(static_cast<uint8_t>((kStunAttrPayload >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(kStunAttrPayload & 0xFF));
+    result.push_back(static_cast<uint8_t>((value.size() >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(value.size() & 0xFF));
+    result.insert(result.end(), value.begin(), value.end());
+    while (result.size() % 4 != 0) result.push_back(0x00);
+
+    // MESSAGE-INTEGRITY over header + preceding attributes, with the length
+    // field already covering the MI attribute (RFC 5389 style).
+    uint8_t mac[kStunMiMacSize];
+    stun_message_integrity(config_.session_mask_key, result.data(),
+                           result.size(), mac);
+    result.push_back(static_cast<uint8_t>((kStunAttrMessageIntegrity >> 8) & 0xFF));
+    result.push_back(static_cast<uint8_t>(kStunAttrMessageIntegrity & 0xFF));
+    result.push_back(0x00);
+    result.push_back(static_cast<uint8_t>(kStunMiMacSize));
+    result.insert(result.end(), mac, mac + sizeof(mac));
+    sodium_memzero(mac, sizeof(mac));
+    return result;
+}
+
+std::vector<uint8_t> TrafficMimicry::extract_stun_message_payload(
+        const std::vector<uint8_t>& data) {
+    if (data.size() < kStunHeaderSize + 4 + 8 + kStunMiAttrSize) return {};
+    const uint16_t type = (static_cast<uint16_t>(data[0]) << 8) | data[1];
+    if (type != kStunTypeBindingRequest && type != kStunTypeBindingResponse)
+        return {};
+    const uint16_t msg_len = (static_cast<uint16_t>(data[2]) << 8) | data[3];
+    if (msg_len % 4 != 0) return {};
+    if (static_cast<size_t>(msg_len) != data.size() - kStunHeaderSize)
+        return {};  // exact: no trailing garbage
+    uint32_t cookie = (static_cast<uint32_t>(data[4]) << 24) |
+                      (static_cast<uint32_t>(data[5]) << 16) |
+                      (static_cast<uint32_t>(data[6]) << 8) |
+                       static_cast<uint32_t>(data[7]);
+    if (cookie != kStunMagicCookie) return {};
+
+    // Attribute layout: exactly [0x8022 payload][0x0008 MESSAGE-INTEGRITY].
+    size_t pos = kStunHeaderSize;
+    const uint16_t attr_type =
+        (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
+    const uint16_t attr_len =
+        (static_cast<uint16_t>(data[pos + 2]) << 8) | data[pos + 3];
+    if (attr_type != kStunAttrPayload) return {};
+    if (attr_len < 5) return {};
+    const size_t attr_padded = (static_cast<size_t>(attr_len) + 3) &
+                               ~static_cast<size_t>(3);
+    if (4 + attr_padded + kStunMiAttrSize != msg_len) return {};
+    const size_t mi_pos = pos + 4 + attr_padded;
+    if ((static_cast<uint16_t>(data[mi_pos]) << 8 | data[mi_pos + 1]) !=
+            kStunAttrMessageIntegrity ||
+        (static_cast<uint16_t>(data[mi_pos + 2]) << 8 | data[mi_pos + 3]) !=
+            kStunMiMacSize) {
+        return {};
+    }
+
+    // Mask-level authentication: MESSAGE-INTEGRITY over the header (length
+    // already includes the MI attribute) + preceding attributes.
+    uint8_t mac[kStunMiMacSize];
+    stun_message_integrity(config_.session_mask_key, data.data(), mi_pos,
+                           mac);
+    const bool mac_ok =
+        sodium_memcmp(mac, data.data() + mi_pos + 4, sizeof(mac)) == 0;
+    sodium_memzero(mac, sizeof(mac));
+    if (!mac_ok) return {};
+
+    const uint8_t* value = data.data() + pos + 4;
+    if (value[0] != wire_version_) return {};
+    uint32_t payload_len = (static_cast<uint32_t>(value[1]) << 24) |
+                           (static_cast<uint32_t>(value[2]) << 16) |
+                           (static_cast<uint32_t>(value[3]) << 8) |
+                            static_cast<uint32_t>(value[4]);
+    if (payload_len + 5u != attr_len) return {};
+    return std::vector<uint8_t>(value + 5, value + 5 + payload_len);
 }
 
 // ==================== BitTorrent ====================

@@ -1,9 +1,16 @@
 #include <gtest/gtest.h>
 #include "ncp_license.hpp"
+#if defined(__linux__)
+#include <sodium.h>
+#endif
 #include <fstream>
 #include <cstring>
 #include <chrono>
+#include <iomanip>
+#include <sstream>
 #include <thread>
+#include <algorithm>
+#include <vector>
 
 using namespace ncp;
 
@@ -264,6 +271,51 @@ TEST_F(LicenseTest, CheckCodeIntegrity) {
     // Unmodified test binary: integrity check must pass.
     EXPECT_TRUE(license.check_code_integrity());
 }
+
+#if defined(__linux__)
+TEST_F(LicenseTest, CodeIntegrityStableAcrossRepeatedChecks) {
+    // Regression test for the UBSan failure in CheckCodeIntegrity /
+    // CheckAntiDebug: compute_code_hash() used to buffer the entire
+    // /proc/self/exe image in a SecureMemory, whose R14-H04 100MB cap is
+    // exceeded by sanitizer-instrumented test binaries (the UBSan Debug
+    // ncp_tests is ~120MB), throwing std::runtime_error("SecureMemory size
+    // exceeds maximum (100MB)") out of both tests. The fix stream-hashes
+    // the file. Under UBSan this test IS the regression gate: any return
+    // to whole-file buffering throws here. Repeated calls must also agree
+    // (the streaming baseline must be stable).
+    EXPECT_TRUE(license.check_code_integrity());
+    EXPECT_TRUE(license.check_code_integrity());
+    EXPECT_TRUE(license.check_code_integrity());
+}
+
+TEST_F(LicenseTest, StreamingSha256MatchesOneShot) {
+    // Guards the invariant compute_code_hash() now relies on: libsodium's
+    // incremental crypto_hash_sha256 (init/update/final) over a byte
+    // stream must produce a digest identical to the one-shot
+    // crypto_hash_sha256 over the same bytes. Uses a >100MB payload so the
+    // old whole-file SecureMemory path would have hit the 100MB cap.
+    const size_t total = 100 * 1024 * 1024 + 12345;
+    std::vector<uint8_t> payload(total);
+    for (size_t i = 0; i < total; ++i)
+        payload[i] = static_cast<uint8_t>(i * 2654435761u >> 13);
+
+    unsigned char one_shot[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256(one_shot, payload.data(), payload.size());
+
+    crypto_hash_sha256_state state;
+    crypto_hash_sha256_init(&state);
+    const size_t chunk = 64 * 1024;
+    for (size_t off = 0; off < total; off += chunk) {
+        const size_t n = std::min(chunk, total - off);
+        crypto_hash_sha256_update(&state, payload.data() + off, n);
+    }
+    unsigned char streamed[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256_final(&state, streamed);
+
+    EXPECT_EQ(0, std::memcmp(one_shot, streamed, sizeof(one_shot)));
+}
+#endif
+
 
 TEST_F(LicenseTest, CheckMemoryIntegrity) {
     // No tampering in the test process: must pass.

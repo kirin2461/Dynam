@@ -107,6 +107,78 @@ double IntervalDistribution::theoretical_stddev() const {
     return 0.0;
 }
 
+// ==================== JointSizeIatSampler ====================
+
+bool JointSizeIatSampler::is_valid() const noexcept {
+    if (components.empty() || components.size() > kMaxComponents)
+        return false;
+    bool any_positive = false;
+    for (const auto& c : components) {
+        if (!std::isfinite(c.weight) || c.weight < 0.0)
+            return false;
+        if (c.weight > 0.0)
+            any_positive = true;
+    }
+    return any_positive;
+}
+
+std::pair<double, double> JointSizeIatSampler::sample(
+    std::mt19937_64& rng) const {
+    if (!is_valid())
+        return {kFallbackSizeBytes, kFallbackIatMs};
+
+    // Pick a component by weight. Weights are validated non-negative and
+    // finite; a hostile sum (overflow to inf) still degrades to fallback.
+    double wsum = 0.0;
+    for (const auto& c : components)
+        wsum += c.weight;
+    if (!std::isfinite(wsum) || !(wsum > 0.0))
+        return {kFallbackSizeBytes, kFallbackIatMs};
+
+    std::uniform_real_distribution<double> pick(0.0, 1.0);
+    double r = pick(rng) * wsum;
+    const JointSizeIatComponent* chosen = &components.back();
+    for (const auto& c : components) {
+        r -= c.weight;
+        if (r <= 0.0) {
+            chosen = &c;
+            break;
+        }
+    }
+
+    // Two independent standard normals via Box-Muller (one rng pair per
+    // sample, so replay is deterministic for a given seed).
+    constexpr double kTau = 6.283185307179586476925286766559;
+    const double u1 = std::max(pick(rng), 1e-12);
+    const double u2 = pick(rng);
+    const double radius = std::sqrt(-2.0 * std::log(u1));
+    const double z0 = radius * std::cos(kTau * u2);
+    const double z1 = radius * std::sin(kTau * u2);
+
+    double size = chosen->mu_size_bytes + chosen->l00 * z0;
+    double iat = chosen->mu_iat_ms + chosen->l10 * z0 + chosen->l11 * z1;
+
+    // is_valid() checks structure only, so a crafted model can carry
+    // finite-but-huge (or NaN/Inf) component params. Mirror the 1-D IAT
+    // clamp (MAX_BASE_IAT_MS): unclamped, the value would reach a sleep
+    // site and stall the sender (or panic a Duration conversion).
+    if (!std::isfinite(iat))
+        iat = kFallbackIatMs;
+    else
+        iat = clampd(iat, 0.0, kMaxIatMs);
+    if (!std::isfinite(size))
+        size = kFallbackSizeBytes;
+    size = clampd(size, 1.0, kMaxSizeBytes);
+
+    return {size, iat};
+}
+
+double JointSizeIatSampler::component_correlation(
+    const JointSizeIatComponent& c) noexcept {
+    const double denom = std::sqrt(c.l10 * c.l10 + c.l11 * c.l11);
+    return denom > 0.0 ? c.l10 / denom : 0.0;
+}
+
 // ==================== StatProfile sampling ====================
 
 double StatProfile::sample_size(std::mt19937_64& rng) const {
@@ -162,6 +234,29 @@ double StatProfile::sample_interval_ms(std::mt19937_64& rng) const {
             return intervals.fixed_ms;
     }
     return 0.0;
+}
+
+bool StatProfile::has_joint_size_iat() const noexcept {
+    return size_iat_joint.is_valid();
+}
+
+void StatProfile::sample_size_iat(std::mt19937_64& rng,
+                                  double& size_bytes_out,
+                                  double& iat_ms_out) const {
+    if (size_iat_joint.is_valid()) {
+        const auto pair = size_iat_joint.sample(rng);
+        // The joint sampler enforces the u16 wire budget [1, 65535]; on top
+        // of that apply the profile's declared size clamps so plan()/prepare
+        // stay within this StatProfile's [clamp_min, clamp_max] envelope.
+        double size = clampd(pair.first, sizes.clamp_min, sizes.clamp_max);
+        size_bytes_out = size < 1.0 ? 1.0 : size;
+        iat_ms_out = pair.second;
+        return;
+    }
+    // Legacy path: independent marginals, size sampled before the interval —
+    // identical rng consumption and values to the pre-joint implementation.
+    size_bytes_out = sample_size(rng);
+    iat_ms_out = sample_interval_ms(rng);
 }
 
 // ==================== Built-in profiles ====================
@@ -239,14 +334,19 @@ std::vector<Chunk> MimicryShaper::plan(size_t payload_len) {
     std::vector<Chunk> chunks;
     size_t remaining = payload_len;
     while (remaining > 0) {
-        double sample = profile_.sample_size(rng_);
+        // sample_size_iat() keeps the legacy (size-then-interval) rng
+        // consumption for profiles without a joint model, so legacy plans
+        // are bit-identical; with a joint model each chunk is a correlated
+        // (size, iat) pair.
+        double sample = 0.0, iat = 0.0;
+        profile_.sample_size_iat(rng_, sample, iat);
         size_t chunk = static_cast<size_t>(std::llround(sample));
         if (chunk == 0) chunk = 1;
         if (chunk > remaining) chunk = remaining;
 
         Chunk c;
         c.bytes = chunk;
-        c.delay_ms = profile_.sample_interval_ms(rng_);
+        c.delay_ms = iat;
         chunks.push_back(c);
 
         remaining -= chunk;
@@ -256,6 +356,66 @@ std::vector<Chunk> MimicryShaper::plan(size_t payload_len) {
 
 void MimicryShaper::reset(uint64_t seed) {
     rng_.seed(seed);
+    // A queued shape derives from the old rng stream; drop it so replay
+    // starts from a clean slate.
+    prepared_valid_ = false;
+}
+
+void MimicryShaper::set_profile(StatProfile profile) {
+    profile_ = std::move(profile);
+    ++profile_epoch_;
+    // Stale-epoch shapes must never be consumed after a transition, and a
+    // shape queued under the previous epoch must not leak into the new one.
+    prepared_valid_ = false;
+}
+
+PreparedShape MimicryShaper::prepare_data_shape(size_t mtu_bytes) {
+    if (prepared_valid_)
+        return prepared_;
+
+    double size = 0.0, iat = 0.0;
+    profile_.sample_size_iat(rng_, size, iat);
+
+    // MTU/budget validation: the prepared packet must fit the caller's
+    // per-packet budget. A zero budget is invalid input; degrade to a
+    // 1-byte minimum instead of emitting an empty packet.
+    const size_t mtu = mtu_bytes == 0 ? 1 : mtu_bytes;
+    long long bytes = static_cast<long long>(std::llround(size));
+    if (bytes < 1) bytes = 1;
+    if (static_cast<unsigned long long>(bytes) >
+        static_cast<unsigned long long>(mtu))
+        bytes = static_cast<long long>(mtu);
+
+    PreparedShape s;
+    s.bytes = static_cast<size_t>(bytes);
+    // Defensive pacing cap, mirroring the joint sampler / MAX_BASE_IAT_MS
+    // clamp: a non-finite or huge delay must never reach a sleep site.
+    if (!std::isfinite(iat))
+        iat = JointSizeIatSampler::kFallbackIatMs;
+    s.delay_ms = clampd(iat, 0.0, kMaxPreparedIatMs);
+    s.profile_epoch = profile_epoch_;
+
+    prepared_ = s;
+    prepared_valid_ = true;
+    return s;
+}
+
+bool MimicryShaper::take_data_shape(PreparedShape& out) {
+    if (!prepared_valid_)
+        return false;
+    if (prepared_.profile_epoch != profile_epoch_) {
+        // Stale epoch: drop without consuming (defense in depth —
+        // set_profile() already clears the queue on every transition).
+        prepared_valid_ = false;
+        return false;
+    }
+    out = prepared_;
+    prepared_valid_ = false;
+    return true;
+}
+
+void MimicryShaper::cancel_prepared_shape() noexcept {
+    prepared_valid_ = false;
 }
 
 } // namespace ncp

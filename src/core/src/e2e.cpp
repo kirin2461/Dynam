@@ -373,6 +373,14 @@ void append_blob(std::vector<uint8_t>& out, const uint8_t* data, size_t len) {
 void append_blob(std::vector<uint8_t>& out, const SecureMemory& mem) { append_blob(out, mem.data(), mem.size()); }
 void append_blob(std::vector<uint8_t>& out, const std::vector<uint8_t>& vec) { append_blob(out, vec.data(), vec.size()); }
 
+// SecureMemory is move-only by design; this is the explicit, deliberate
+// byte-copy used to build tentative ratchet state that is discarded unless
+// the inbound message authenticates.
+SecureMemory clone_secure(const SecureMemory& src) {
+    if (src.size() == 0) return SecureMemory();
+    return SecureMemory(src.data(), src.size());
+}
+
 } // anonymous namespace
 
 struct E2ESession::Impl {
@@ -397,6 +405,36 @@ struct E2ESession::Impl {
     KeyPair local_ratchet_kp;
     std::vector<uint8_t> remote_ratchet_pub;
     bool ratchet_initialized = false;
+    // The two handshake roles must start with opposite directional chains.
+    // Without this, both peers derive the same sending chain and cannot
+    // decrypt each other's initial Double Ratchet messages.
+    bool is_initiator = false;
+    // Rotation fence: at most one spontaneous (locally initiated) DH
+    // rotation may be outstanding at a time. Set by rotate_keys(); cleared
+    // only by commit_dh_step(), i.e. when an authenticated peer message
+    // carries a new ratchet key proving the peer saw our rotation and
+    // answered with its own DH step. Without this fence a second rotation
+    // (double rotate, or re-rotation while the first rotated packet was
+    // lost) advances the root key past the value the peer can derive and
+    // permanently desynchronizes the session.
+    bool rotation_in_flight = false;
+    // The root key value the PEER is currently on. In this Double Ratchet
+    // each full DH step advances the root twice (recv half, then send half),
+    // so after we commit an inbound DH step our ratchet.root_key is one
+    // send-half AHEAD of the peer's root. A spontaneous rotation must be
+    // based on the peer's root — otherwise the peer cannot derive the new
+    // sending chain and the session permanently desyncs (this was the
+    // second-cycle/loss-retry desync). Initialized to root_key at handshake
+    // (both roots equal), refreshed at every commit_dh_step() to the
+    // intermediate recv-half root, which is exactly the peer's current root.
+    SecureMemory peer_root_key;
+    // Monotonic crypto epoch: incremented ONLY when new DH root/chain
+    // material is actually committed — i.e. a local rotate_keys() rotation
+    // or an authenticated inbound DH ratchet step (commit_dh_step).
+    // Never bumped by failed/forged decrypts (verify-then-commit) and never
+    // reset by anything short of a fresh handshake. SessionProfileContext
+    // binds this epoch instead of guessing from host-visible counters.
+    uint64_t crypto_epoch = 0;
 
     SecureMemory sending_chain_key;
     SecureMemory receiving_chain_key;
@@ -454,57 +492,92 @@ struct E2ESession::Impl {
         sodium_memzero(ck_buf, sizeof(ck_buf));
     }
 
-    void dh_ratchet_step(const std::vector<uint8_t>& new_remote_pub) {
-        remote_ratchet_pub = new_remote_pub;
+    // Result of a full DH ratchet step, computed without touching session
+    // state so decrypt() can verify-then-commit: unauthenticated input must
+    // never mutate the pinned remote key, chain keys, or counters.
+    struct DhStepResult {
+        SecureMemory root_key;
+        SecureMemory peer_root_key;   // intermediate recv-half root
+        SecureMemory receiving_chain_key;
+        SecureMemory sending_chain_key;
+        KeyPair local_kp;
+    };
+
+    DhStepResult compute_dh_step(const std::vector<uint8_t>& new_remote_pub) {
+        DhStepResult r;
         SecureMemory dh_recv = ratchet_dh(local_ratchet_kp, new_remote_pub);
         SecureMemory new_root, new_recv_chain;
         kdf_rk(ratchet.root_key, dh_recv, new_root, new_recv_chain);
-        ratchet.root_key = std::move(new_root);
-        receiving_chain_key = std::move(new_recv_chain);
+        r.receiving_chain_key = std::move(new_recv_chain);
+        // The peer performed this exact recv-half step when it sent us its
+        // new key, so new_root is the root the peer is currently on.
+        r.peer_root_key = clone_secure(new_root);
 
+        r.local_kp = generate_ratchet_keypair(config.key_exchange);
+        SecureMemory dh_send = ratchet_dh(r.local_kp, new_remote_pub);
+        SecureMemory new_root2, new_send_chain;
+        kdf_rk(new_root, dh_send, new_root2, new_send_chain);
+        r.root_key = std::move(new_root2);
+        r.sending_chain_key = std::move(new_send_chain);
+        return r;
+    }
+
+    void commit_dh_step(const std::vector<uint8_t>& new_remote_pub, DhStepResult&& r) {
+        remote_ratchet_pub = new_remote_pub;
+        ratchet.root_key = std::move(r.root_key);
+        peer_root_key = std::move(r.peer_root_key);
+        receiving_chain_key = std::move(r.receiving_chain_key);
+        sending_chain_key = std::move(r.sending_chain_key);
+        ratchet.chain_key = clone_secure(sending_chain_key);
+        local_ratchet_kp = std::move(r.local_kp);
         ratchet.previous_chain_length = ratchet.sending_chain_length;
         ratchet.receiving_chain_length = 0;
-
-        local_ratchet_kp = generate_ratchet_keypair(config.key_exchange);
-        SecureMemory dh_send = ratchet_dh(local_ratchet_kp, new_remote_pub);
-        SecureMemory new_root2, new_send_chain;
-        kdf_rk(ratchet.root_key, dh_send, new_root2, new_send_chain);
-        ratchet.root_key = std::move(new_root2);
-        ratchet.chain_key = SecureMemory(sending_chain_key.size());
-        std::memcpy(ratchet.chain_key.data(), new_send_chain.data(), new_send_chain.size());
-        sending_chain_key = std::move(new_send_chain);
         ratchet.sending_chain_length = 0;
+        // The peer answered our outstanding rotation (if any) with an
+        // authenticated DH step of its own: the in-flight rotation fence
+        // opens and a new spontaneous rotation becomes allowed.
+        rotation_in_flight = false;
+        // New DH root/chain material committed (authenticated).
+        ++crypto_epoch;
     }
 
-    bool skip_message_keys(SecureMemory& recv_chain_key, uint32_t& recv_counter, uint32_t until) {
-        if (until < recv_counter || until - recv_counter > config.max_skip_messages) return false;
-        
-        // R6-SEC-01: Evict oldest keys if we're at the cap
-        while (ratchet.skipped_keys.size() >= ratchet.max_skipped_keys && 
-               !ratchet.skipped_keys.empty()) {
-            ratchet.skipped_keys.erase(ratchet.skipped_keys.begin());
+    void dh_ratchet_step(const std::vector<uint8_t>& new_remote_pub) {
+        commit_dh_step(new_remote_pub, compute_dh_step(new_remote_pub));
+    }
+
+    // Advance chain key `ck` from position `from` to `until`, staging the
+    // intermediate message keys under namespace `ns` into `staged` instead of
+    // mutating ratchet.skipped_keys. Returns false (staging nothing) if the
+    // gap exceeds the configured skip bound. Keys beyond the cap are dropped
+    // but the chain still advances, mirroring the R6-SEC-01 eviction policy.
+    bool stage_skipped_keys(SecureMemory& ck, uint32_t from, uint32_t until,
+                            const std::vector<uint8_t>& ns,
+                            std::map<RatchetSkippedId, SecureMemory>& staged) {
+        if (until < from || until - from > config.max_skip_messages) return false;
+        for (uint32_t n = from; n < until; ++n) {
+            SecureMemory mk;
+            kdf_ck(ck, mk);
+            if (staged.size() < RatchetState::max_skipped_keys) {
+                staged[RatchetSkippedId{ns, n}] = std::move(mk);
+            }
         }
-        
-        while (recv_counter < until) {
-            // R6-SEC-01: Check cap before adding new key
-            if (ratchet.skipped_keys.size() >= ratchet.max_skipped_keys) {
-                // Evict oldest to make room
+        return true;
+    }
+
+    // Merge staged skipped keys into the ratchet after the message that
+    // justified them authenticated successfully. R6-SEC-01: evict oldest
+    // entries if the cap is reached.
+    void commit_staged_skipped(std::map<RatchetSkippedId, SecureMemory>& staged) {
+        for (auto& [id, key] : staged) {
+            while (ratchet.skipped_keys.size() >= ratchet.max_skipped_keys &&
+                   !ratchet.skipped_keys.empty()) {
                 ratchet.skipped_keys.erase(ratchet.skipped_keys.begin());
             }
-            SecureMemory mk;
-            kdf_ck(recv_chain_key, mk);
-            ratchet.skipped_keys[recv_counter] = std::move(mk);
-            recv_counter++;
+            if (ratchet.skipped_keys.size() < ratchet.max_skipped_keys) {
+                ratchet.skipped_keys[id] = std::move(key);
+            }
         }
-        return true;
-    }
-
-    bool try_skipped_message_keys(uint32_t msg_number, SecureMemory& out_key) {
-        auto it = ratchet.skipped_keys.find(msg_number);
-        if (it == ratchet.skipped_keys.end()) return false;
-        out_key = std::move(it->second);
-        ratchet.skipped_keys.erase(it);
-        return true;
+        staged.clear();
     }
 };
 
@@ -614,21 +687,41 @@ void E2ESession::init_ratchet_keys() {
     uint8_t info_root[] = "NCP-DR-ROOT-v1";
     crypto_generichash(impl.ratchet.root_key.data(), 32, impl.shared_secret.data(), impl.shared_secret.size(), info_root, sizeof(info_root)-1);
 
+    // Directional initial chains: initiator A->B / B<-A, responder B->A /
+    // A<-B. Derive both from the same root so the two handshake roles share
+    // matching send/receive chains without exposing role-specific secrets.
     impl.sending_chain_key = SecureMemory(32);
-    uint8_t info_chain[] = "NCP-DR-CHAIN-v1";
-    crypto_generichash(impl.sending_chain_key.data(), 32, impl.shared_secret.data(), impl.shared_secret.size(), info_chain, sizeof(info_chain)-1);
+    impl.receiving_chain_key = SecureMemory(32);
+    uint8_t info_chain_a[] = "NCP-DR-CHAIN-A-v2";
+    uint8_t info_chain_b[] = "NCP-DR-CHAIN-B-v2";
+    const auto& send_info = impl.is_initiator ? info_chain_a : info_chain_b;
+    const auto& recv_info = impl.is_initiator ? info_chain_b : info_chain_a;
+    constexpr size_t kChainInfoLen = sizeof(info_chain_a) - 1;
+    static_assert(sizeof(info_chain_a) == sizeof(info_chain_b),
+                  "direction labels must have equal storage size");
+    crypto_generichash(impl.sending_chain_key.data(), 32,
+                       impl.ratchet.root_key.data(), impl.ratchet.root_key.size(),
+                       send_info, kChainInfoLen);
+    crypto_generichash(impl.receiving_chain_key.data(), 32,
+                       impl.ratchet.root_key.data(), impl.ratchet.root_key.size(),
+                       recv_info, kChainInfoLen);
     SecureMemory tmp_chain(impl.sending_chain_key.size());
     std::memcpy(tmp_chain.data(), impl.sending_chain_key.data(), impl.sending_chain_key.size());
     impl.ratchet.chain_key = std::move(tmp_chain);
 
-    impl.receiving_chain_key = SecureMemory(32);
-    uint8_t info_recv[] = "NCP-DR-RECV-v1";
-    crypto_generichash(impl.receiving_chain_key.data(), 32, impl.ratchet.root_key.data(), impl.ratchet.root_key.size(), info_recv, sizeof(info_recv)-1);
-
     impl.local_ratchet_kp = generate_ratchet_keypair(impl.config.key_exchange);
+    // The handshake public key is not the first Double Ratchet key. The first
+    // authenticated message advertises and pins the peer's initial ratchet
+    // public key; only a subsequent key change triggers a DH ratchet step.
+    impl.remote_ratchet_pub.clear();
     impl.ratchet.sending_chain_length = 0;
     impl.ratchet.receiving_chain_length = 0;
     impl.ratchet.skipped_keys.clear();
+    // A fresh handshake starts a new epoch sequence with no rotation in
+    // flight and both peers on the same root.
+    impl.crypto_epoch = 0;
+    impl.rotation_in_flight = false;
+    impl.peer_root_key = clone_secure(impl.ratchet.root_key);
     impl.ratchet_initialized = true;
 }
 
@@ -658,6 +751,18 @@ std::vector<uint8_t> E2ESession::create_key_exchange_request(const KeyPair& loca
 
 std::vector<uint8_t> E2ESession::process_key_exchange_request(const std::vector<uint8_t>& request, const KeyPair& local_keys) {
     std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
+    // R-REHS-01: reject (replayed or fresh) key-exchange requests on a
+    // session that already completed a handshake. Re-running init here
+    // would reset the replay window (chain lengths and skipped keys),
+    // letting an attacker replay previously consumed ciphertexts by simply
+    // re-sending the original KX request. A deliberate re-handshake must
+    // use a fresh E2ESession. Duplicate-delivery resilience belongs to the
+    // transport (which may cache and re-send the original response).
+    if (pImpl_->state == E2ESessionState::SessionEstablished || pImpl_->ratchet_initialized) {
+        throw std::runtime_error(
+            "E2ESession::process_key_exchange_request: refusing re-handshake "
+            "on an established session; create a fresh session instead");
+    }
     if (request.size() < 4) throw std::runtime_error("Invalid KX request");
     uint16_t pk_len = read_u16(request.data() + 2);
     if (request.size() < 4u + pk_len) throw std::runtime_error("KX request too short");
@@ -689,6 +794,7 @@ std::vector<uint8_t> E2ESession::process_key_exchange_request(const std::vector<
         response.insert(response.end(), hash, hash + 32);
         
         pImpl_->remote_ratchet_pub = peer_public;
+        pImpl_->is_initiator = false;
         init_ratchet_keys();
         pImpl_->state = E2ESessionState::SessionEstablished;
         
@@ -698,6 +804,7 @@ std::vector<uint8_t> E2ESession::process_key_exchange_request(const std::vector<
     // For DH-based protocols (X25519, X448, P256)
     pImpl_->shared_secret = compute_shared_secret(local_keys, peer_public);
     pImpl_->remote_ratchet_pub = peer_public;
+    pImpl_->is_initiator = false;
     init_ratchet_keys();
 
     pImpl_->state = E2ESessionState::SessionEstablished;
@@ -717,6 +824,14 @@ std::vector<uint8_t> E2ESession::process_key_exchange_request(const std::vector<
 
 bool E2ESession::complete_key_exchange(const std::vector<uint8_t>& response, const KeyPair& local_keys) {
     std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
+    // R-REHS-01: only a session that actually initiated a key exchange may
+    // complete one. A replayed response on an already-established session
+    // must not re-run init (that would reset the replay window and allow
+    // old ciphertext replay); a response with no matching request is
+    // rejected as well (the transcript hash check below also enforces this).
+    if (pImpl_->state != E2ESessionState::KeyExchangeInitiated || pImpl_->ratchet_initialized) {
+        return false;
+    }
     if (response.size() < 4) return false;
     uint16_t pk_len = read_u16(response.data() + 2);
     if (response.size() < 4u + pk_len) return false;
@@ -764,6 +879,7 @@ bool E2ESession::complete_key_exchange(const std::vector<uint8_t>& response, con
             // Now compute_shared_secret will use decapsulate
             pImpl_->shared_secret = compute_shared_secret(local_keys, peer_public);
             pImpl_->remote_ratchet_pub = peer_public;
+            pImpl_->is_initiator = true;
             init_ratchet_keys();
             pImpl_->state = E2ESessionState::SessionEstablished;
             return true;
@@ -773,6 +889,7 @@ bool E2ESession::complete_key_exchange(const std::vector<uint8_t>& response, con
     // For DH-based protocols (X25519, X448, P256)
     pImpl_->shared_secret = compute_shared_secret(local_keys, peer_public);
     pImpl_->remote_ratchet_pub = peer_public;
+    pImpl_->is_initiator = true;
     init_ratchet_keys();
 
     pImpl_->state = E2ESessionState::SessionEstablished;
@@ -842,6 +959,8 @@ std::optional<std::vector<uint8_t>> E2ESession::decrypt_with_key_(
     std::vector<uint8_t> aad;
     aad.push_back(hdr.version);
     append_u32(aad, hdr.message_number);
+    // Must mirror encrypt(): previous_chain_length is part of the AAD.
+    append_u32(aad, hdr.previous_chain_length);
     aad.insert(aad.end(), hdr.dh_public_key.begin(), hdr.dh_public_key.end());
     aad.insert(aad.end(), hdr.associated_data.begin(), hdr.associated_data.end());
 
@@ -869,10 +988,14 @@ std::optional<std::vector<uint8_t>> E2ESession::decrypt_with_key_(
     // Unpad if padding was enabled
     if (pImpl_->config.enable_padding) {
         auto unpadded = E2EUtils::unpad_message(plaintext);
-        if (unpadded.has_value()) {
-            pImpl_->messages_received++;
-            return unpadded.value();
+        if (!unpadded.has_value()) {
+            // Authenticated but malformed padding: reject rather than leak
+            // the raw padded buffer to the application.
+            sodium_memzero(plaintext.data(), plaintext.size());
+            return std::nullopt;
         }
+        pImpl_->messages_received++;
+        return unpadded.value();
     }
 
     pImpl_->messages_received++;
@@ -925,7 +1048,11 @@ EncryptedMessage E2ESession::encrypt(const std::vector<uint8_t>& plaintext, cons
     }
 
     MessageHeader hdr;
-    hdr.version = 2; // Bump version
+    // Wire version 3: the AEAD AAD now binds previous_chain_length (see
+    // below). This is an INTENTIONAL wire-format incompatibility: v3
+    // endpoints cannot decrypt v2 messages and vice versa. Both peers must
+    // run the same build. Session-state serialization is unaffected.
+    hdr.version = 3;
     hdr.message_number = pImpl_->ratchet.sending_chain_length;
     hdr.previous_chain_length = pImpl_->ratchet.previous_chain_length;
     hdr.dh_public_key.assign(pImpl_->local_ratchet_kp.public_key.data(), pImpl_->local_ratchet_kp.public_key.data() + pImpl_->local_ratchet_kp.public_key.size());
@@ -945,6 +1072,10 @@ EncryptedMessage E2ESession::encrypt(const std::vector<uint8_t>& plaintext, cons
     std::vector<uint8_t> aad;
     aad.push_back(hdr.version);
     append_u32(aad, hdr.message_number);
+    // Bind previous_chain_length into the AAD: it drives the receiver's
+    // skipped-key staging across DH ratchet boundaries, so a tampered value
+    // must fail authentication rather than silently corrupting the skip list.
+    append_u32(aad, hdr.previous_chain_length);
     aad.insert(aad.end(), hdr.dh_public_key.begin(), hdr.dh_public_key.end());
     aad.insert(aad.end(), associated_data.begin(), associated_data.end());
 
@@ -981,35 +1112,121 @@ std::optional<std::vector<uint8_t>> E2ESession::decrypt(const EncryptedMessage& 
     if (pImpl_->state != E2ESessionState::SessionEstablished || !pImpl_->ratchet_initialized) return std::nullopt;
 
     const auto& hdr = encrypted_message.header;
-    uint32_t msg_num = hdr.message_number;
+    const uint32_t msg_num = hdr.message_number;
 
-    SecureMemory skipped_key;
-    if (pImpl_->try_skipped_message_keys(msg_num, skipped_key)) {
-        return decrypt_with_key_(encrypted_message, skipped_key);
+    // Verify-then-commit: nothing below mutates pinned keys, chain keys,
+    // skipped keys, counters, or replay state until the AEAD tag verifies.
+
+    // 1) Previously skipped (out-of-order) message keys. Keys are peeked,
+    //    never consumed up front; an entry is erased only after the AEAD tag
+    //    verifies, so forged packets cannot destroy skipped-key state.
+    //    Matching is by message number across all chain namespaces: keys from
+    //    older chains are namespaced separately so they cannot collide, and
+    //    AEAD verification (which binds the header's DH key via AAD and the
+    //    key-commitment tag) rejects wrong-chain candidates.
+    for (auto it = pImpl_->ratchet.skipped_keys.begin();
+         it != pImpl_->ratchet.skipped_keys.end(); ++it) {
+        if (it->first.second != msg_num) continue;
+        auto plaintext = decrypt_with_key_(encrypted_message, it->second);
+        if (plaintext.has_value()) {
+            pImpl_->ratchet.skipped_keys.erase(it);
+            return plaintext;
+        }
     }
 
-    if (!hdr.dh_public_key.empty() && hdr.dh_public_key != pImpl_->remote_ratchet_pub) {
-        pImpl_->dh_ratchet_step(hdr.dh_public_key);
+    const bool new_dh_key = !hdr.dh_public_key.empty() &&
+                            hdr.dh_public_key != pImpl_->remote_ratchet_pub;
+
+    // R7-SEC-04: Reject messages with already-consumed message numbers on
+    // the current chain to prevent chain rollback attacks. (Applies only to
+    // the current chain; a new DH key starts a fresh chain, and consumed
+    // old-chain messages fail AEAD verification below.)
+    if (!new_dh_key && msg_num < pImpl_->ratchet.receiving_chain_length) {
+        return std::nullopt;
     }
 
-    // R7-SEC-04: Reject messages with already-consumed message numbers
-    // to prevent chain rollback attacks. Without this check, an attacker
-    // can send a forged message with msg_num=0 to permanently kill the session.
-    if (msg_num < pImpl_->ratchet.receiving_chain_length) {
-        return std::nullopt;  // Already consumed this message number
+    // 2) Current-chain attempt (also the initial-pin path when the peer's
+    //    first ratchet key has not been pinned yet). All derivation happens
+    //    on tentative copies; state is committed only on successful decrypt.
+    if (!new_dh_key || pImpl_->remote_ratchet_pub.empty()) {
+        if (msg_num >= pImpl_->ratchet.receiving_chain_length) {
+            const std::vector<uint8_t>& chain_id =
+                !hdr.dh_public_key.empty() ? hdr.dh_public_key
+                                           : pImpl_->remote_ratchet_pub;
+            SecureMemory tent_ck = clone_secure(pImpl_->receiving_chain_key);
+            std::map<RatchetSkippedId, SecureMemory> staged;
+            if (!pImpl_->stage_skipped_keys(tent_ck,
+                                            pImpl_->ratchet.receiving_chain_length,
+                                            msg_num, chain_id, staged)) {
+                return std::nullopt;  // skip gap too large
+            }
+            SecureMemory message_key;
+            pImpl_->kdf_ck(tent_ck, message_key);
+
+            auto plaintext = decrypt_with_key_(encrypted_message, message_key);
+            if (plaintext.has_value()) {
+                if (new_dh_key) {
+                    // Initial post-handshake pin: the advertised key is now
+                    // authenticated by a message key derived from the
+                    // handshake secret, so pinning it is safe.
+                    pImpl_->remote_ratchet_pub = hdr.dh_public_key;
+                }
+                pImpl_->receiving_chain_key = std::move(tent_ck);
+                pImpl_->ratchet.receiving_chain_length = msg_num + 1;
+                pImpl_->commit_staged_skipped(staged);
+                return plaintext;
+            }
+        }
+        if (!new_dh_key) {
+            return std::nullopt;  // same-chain failure; no state mutated
+        }
+        // else: first contact may be on an already-rotated chain (the sender
+        // pinned our key from one of our messages and rotated before we ever
+        // received one of theirs). Fall through to the tentative DH step.
     }
 
-    if (msg_num > pImpl_->ratchet.receiving_chain_length) {
-        uint32_t counter = pImpl_->ratchet.receiving_chain_length;
-        if (!pImpl_->skip_message_keys(pImpl_->receiving_chain_key, counter, msg_num)) return std::nullopt;
-        pImpl_->ratchet.receiving_chain_length = counter;
+    // 3) New ratchet key from the peer: full DH ratchet step computed on
+    //    tentative state, committed only after AEAD verification.
+    if (new_dh_key) {
+        Impl::DhStepResult step;
+        try {
+            step = pImpl_->compute_dh_step(hdr.dh_public_key);
+        } catch (const std::exception&) {
+            return std::nullopt;  // malformed peer key; nothing was mutated
+        }
+
+        std::map<RatchetSkippedId, SecureMemory> staged;
+        // Preserve delayed messages from the outgoing chain: stage skipped
+        // keys up to the sender's advertised previous-chain length under the
+        // old chain's namespace. If the gap exceeds the skip bound those old
+        // messages are lost, but the DH step itself must still proceed.
+        const uint32_t old_recv_len = pImpl_->ratchet.receiving_chain_length;
+        if (hdr.previous_chain_length > old_recv_len) {
+            SecureMemory advance_ck = clone_secure(pImpl_->receiving_chain_key);
+            pImpl_->stage_skipped_keys(advance_ck, old_recv_len,
+                                       hdr.previous_chain_length,
+                                       pImpl_->remote_ratchet_pub, staged);
+        }
+
+        SecureMemory tent_ck = clone_secure(step.receiving_chain_key);
+        if (!pImpl_->stage_skipped_keys(tent_ck, 0, msg_num,
+                                        hdr.dh_public_key, staged)) {
+            return std::nullopt;  // skip gap too large on the new chain
+        }
+        SecureMemory message_key;
+        pImpl_->kdf_ck(tent_ck, message_key);
+
+        auto plaintext = decrypt_with_key_(encrypted_message, message_key);
+        if (!plaintext.has_value()) return std::nullopt;  // nothing committed
+
+        pImpl_->commit_dh_step(hdr.dh_public_key, std::move(step));
+        pImpl_->receiving_chain_key = std::move(tent_ck);
+        pImpl_->ratchet.receiving_chain_length = msg_num + 1;
+        pImpl_->commit_staged_skipped(staged);
+        return plaintext;
     }
 
-    SecureMemory message_key;
-    pImpl_->kdf_ck(pImpl_->receiving_chain_key, message_key);
-    pImpl_->ratchet.receiving_chain_length = msg_num + 1;
-
-    return decrypt_with_key_(encrypted_message, message_key);
+    return std::nullopt;
 }
 
 // ... Rest of the implementation (Serialization, revoke_session, E2EManager, etc.) ...
@@ -1018,7 +1235,10 @@ std::optional<std::vector<uint8_t>> E2ESession::decrypt(const EncryptedMessage& 
 std::vector<uint8_t> E2ESession::serialize_session_state() const {
     std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
     std::vector<uint8_t> out;
-    out.push_back(0x02); // Serialized version 2
+    // Serialized version 4: adds handshake role (is_initiator), the rotation
+    // fence (rotation_in_flight) and the monotonic crypto epoch. v1-v3 blobs
+    // remain restorable (see restore_session_state).
+    out.push_back(0x04);
     
     append_u16(out, static_cast<uint16_t>(pImpl_->session_id.size()));
     out.insert(out.end(), pImpl_->session_id.begin(), pImpl_->session_id.end());
@@ -1044,20 +1264,50 @@ std::vector<uint8_t> E2ESession::serialize_session_state() const {
     append_blob(out, pImpl_->remote_ratchet_pub);
     out.push_back(pImpl_->ratchet_initialized ? 1 : 0);
 
+    // v4: rotation state machine + monotonic crypto epoch.
+    out.push_back(pImpl_->is_initiator ? 1 : 0);
+    out.push_back(pImpl_->rotation_in_flight ? 1 : 0);
+    append_u32(out, static_cast<uint32_t>((pImpl_->crypto_epoch >> 32) & 0xFFFFFFFF));
+    append_u32(out, static_cast<uint32_t>(pImpl_->crypto_epoch & 0xFFFFFFFF));
+    append_blob(out, pImpl_->peer_root_key);
+
     append_u32(out, static_cast<uint32_t>(pImpl_->ratchet.skipped_keys.size()));
-    for (const auto& [msg_num, key] : pImpl_->ratchet.skipped_keys) {
-        append_u32(out, msg_num);
+    for (const auto& [id, key] : pImpl_->ratchet.skipped_keys) {
+        append_blob(out, id.first);   // chain DH ratchet public key (namespace)
+        append_u32(out, id.second);   // message number within that chain
         append_blob(out, key);
     }
     return out;
 }
+
+namespace {
+// Validate restored ratchet key sizes against the (already validated) key
+// exchange protocol. Kyber1024 sessions ratchet with X25519-sized keys (see
+// generate_ratchet_keypair), so they share the X25519 branch.
+bool ratchet_pub_size_valid(KeyExchangeProtocol proto, size_t len) {
+    switch (proto) {
+        case KeyExchangeProtocol::X448: return len == 56;
+        case KeyExchangeProtocol::ECDH_P256: return len == 65 || len == 33;
+        default: return len == 32;  // X25519, Kyber1024 ratchet keys
+    }
+}
+bool ratchet_priv_size_valid(KeyExchangeProtocol proto, size_t len) {
+    switch (proto) {
+        case KeyExchangeProtocol::X448: return len == 56;
+        // P-256 private scalars are serialized via BN_num_bytes(), so a
+        // leading zero byte trims the encoding below 32 bytes.
+        case KeyExchangeProtocol::ECDH_P256: return len >= 1 && len <= 32;
+        default: return len == 32;  // X25519, Kyber1024 ratchet keys
+    }
+}
+}  // namespace
 
 bool E2ESession::restore_session_state(const std::vector<uint8_t>& data) {
     std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
     if (data.size() < 21) return false;
     size_t pos = 0;
     uint8_t ver = data[pos++];
-    if (ver < 1 || ver > 2) return false;
+    if (ver < 1 || ver > 4) return false;
 
     auto safe_read = [&](size_t n) { return pos + n <= data.size(); };
     auto read_secure_blob = [&](SecureMemory& mem) -> bool {
@@ -1083,8 +1333,13 @@ bool E2ESession::restore_session_state(const std::vector<uint8_t>& data) {
     pos += sid_len;
 
     if (!safe_read(1)) return false;
+    // Validate the enum range before casting: a corrupt blob must not
+    // materialize an out-of-range E2ESessionState.
+    if (data[pos] > static_cast<uint8_t>(E2ESessionState::SessionRevoked)) return false;
     pImpl_->state = static_cast<E2ESessionState>(data[pos++]);
     if (!safe_read(7)) return false;
+    // Same for the key exchange protocol (X25519..Kyber1024 = 0..3).
+    if (data[pos] > static_cast<uint8_t>(KeyExchangeProtocol::Kyber1024)) return false;
     pImpl_->config.key_exchange = static_cast<KeyExchangeProtocol>(data[pos++]);
     pImpl_->config.enable_forward_secrecy = data[pos++] != 0;
     pImpl_->config.enable_post_quantum = data[pos++] != 0;
@@ -1114,15 +1369,79 @@ bool E2ESession::restore_session_state(const std::vector<uint8_t>& data) {
     if (!safe_read(1)) return false;
     pImpl_->ratchet_initialized = data[pos++] != 0;
 
+    // The ratchet keypair protocol was never serialized in v1-v3, which left
+    // it at the X25519 default and broke the post-restore DH ratchet step for
+    // X448/P256. Derive it from the restored config (Kyber1024 sessions
+    // ratchet with X25519 keys, matching generate_ratchet_keypair).
+    pImpl_->local_ratchet_kp.protocol =
+        (pImpl_->config.key_exchange == KeyExchangeProtocol::Kyber1024)
+            ? KeyExchangeProtocol::X25519
+            : pImpl_->config.key_exchange;
+
+    if (ver >= 4) {
+        // v4: handshake role, rotation fence, monotonic crypto epoch, and
+        // the peer's current root key (spontaneous-rotation base).
+        if (!safe_read(10)) return false;
+        pImpl_->is_initiator = data[pos++] != 0;
+        pImpl_->rotation_in_flight = data[pos++] != 0;
+        uint64_t hi = read_u32(data.data() + pos); pos += 4;
+        uint64_t lo = read_u32(data.data() + pos); pos += 4;
+        pImpl_->crypto_epoch = (hi << 32) | lo;
+        if (!read_secure_blob(pImpl_->peer_root_key)) return false;
+    } else {
+        // The role is unrecoverable from v1-v3 blobs. Defaulting to
+        // non-initiator is the safe choice: spontaneous rotation is
+        // suppressed (the peer's rotations still drive DH ratchet steps), so
+        // a pair of restored sessions can never cross-rotate and desync.
+        // peer_root_key is likewise unrecoverable, but unused while
+        // rotation is suppressed; the next inbound DH commit refreshes it.
+        pImpl_->is_initiator = false;
+        pImpl_->rotation_in_flight = false;
+        pImpl_->crypto_epoch = 0;
+        pImpl_->peer_root_key = clone_secure(pImpl_->ratchet.root_key);
+    }
+
+    // Structural validation of restored key material: reject corrupt blobs
+    // instead of materializing a session that throws or misbehaves later.
+    if (pImpl_->ratchet_initialized) {
+        if (pImpl_->ratchet.root_key.size() != 32 ||
+            pImpl_->sending_chain_key.size() != 32 ||
+            pImpl_->receiving_chain_key.size() != 32) return false;
+        if (ver >= 4 && pImpl_->peer_root_key.size() != 32) return false;
+        if (!ratchet_pub_size_valid(pImpl_->config.key_exchange,
+                                    pImpl_->local_ratchet_kp.public_key.size())) return false;
+        if (!ratchet_priv_size_valid(pImpl_->config.key_exchange,
+                                     pImpl_->local_ratchet_kp.private_key.size())) return false;
+        if (!pImpl_->remote_ratchet_pub.empty() &&
+            !ratchet_pub_size_valid(pImpl_->config.key_exchange,
+                                    pImpl_->remote_ratchet_pub.size())) return false;
+    }
+
     if (!safe_read(4)) return false;
     uint32_t num_skipped = read_u32(data.data() + pos); pos += 4;
+    // R6-SEC-01 (restore path): never materialize more skipped keys than the
+    // in-memory cap; a corrupt/hostile blob must not cause unbounded
+    // allocation.
+    if (num_skipped > RatchetState::max_skipped_keys) return false;
     pImpl_->ratchet.skipped_keys.clear();
     for (uint32_t i = 0; i < num_skipped; ++i) {
+        // v3+ stores the chain namespace (DH ratchet public key) per entry.
+        // v1/v2 entries predate namespacing; they were derived on the
+        // then-current receiving chain, so namespace them under the restored
+        // pinned remote key (may be empty if nothing was pinned yet).
+        std::vector<uint8_t> ns;
+        if (ver >= 3) {
+            if (!read_vec_blob(ns)) return false;
+        } else {
+            ns = pImpl_->remote_ratchet_pub;
+        }
         if (!safe_read(4)) return false;
         uint32_t m = read_u32(data.data() + pos); pos += 4;
         SecureMemory k;
         if (!read_secure_blob(k)) return false;
-        pImpl_->ratchet.skipped_keys[m] = std::move(k);
+        // Message keys are always 32 bytes (kdf_ck output).
+        if (k.size() != 32) return false;
+        pImpl_->ratchet.skipped_keys[RatchetSkippedId{ns, m}] = std::move(k);
     }
     return true;
 }
@@ -1136,9 +1455,52 @@ bool E2ESession::is_expired() const {
 }
 void E2ESession::rotate_keys() {
     std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
-    if (!pImpl_->ratchet_initialized) return;
+    if (pImpl_->state != E2ESessionState::SessionEstablished || !pImpl_->ratchet_initialized) return;
+    // H1: until the peer's first ratchet public key is pinned (by an
+    // authenticated inbound message), no DH step is possible. Rotating only
+    // the advertised key would make the peer DH-step onto a chain we never
+    // derived, permanently desynchronizing the session — so defer the
+    // rotation instead.
+    if (pImpl_->remote_ratchet_pub.empty()) return;
+    // Role gate: only the handshake initiator rotates spontaneously. If both
+    // peers rotate on their own timers, the two DH ratchets cross: each side
+    // DH-steps against a local key the other side has already replaced, and
+    // the send/receive chains permanently diverge. The responder's keys still
+    // rotate on every initiator rotation, because the responder performs a
+    // full DH ratchet step (fresh local key) when it receives the initiator's
+    // new ratchet key.
+    if (!pImpl_->is_initiator) return;
+    // In-flight fence: at most one outstanding spontaneous rotation. A second
+    // rotation before the peer's authenticated DH reply — a double rotate, or
+    // a re-rotation while the first rotated packet was lost — would advance
+    // the root key past the value the peer can derive (the peer still DH-steps
+    // from the pre-rotation root), permanently desynchronizing the session.
+    // The fence is cleared by commit_dh_step() once the peer's authenticated
+    // reply carrying its new ratchet key arrives. While fenced we keep using
+    // the current (already rotated) key, so packet loss of the first rotated
+    // message is harmless: later messages carry the same key.
+    if (pImpl_->rotation_in_flight) return;
+    // Sending-half DH ratchet only: no new remote key was received, so derive
+    // a fresh sending chain from DH(new_local, pinned_remote). The receiving
+    // half happens when the peer replies and advertises its own new key.
+    // (Doing both halves here would clobber the receiving chain the peer is
+    // still using and advance the root key out of lockstep.)
     pImpl_->local_ratchet_kp = generate_ratchet_keypair(pImpl_->config.key_exchange);
-    if (!pImpl_->remote_ratchet_pub.empty()) pImpl_->dh_ratchet_step(pImpl_->remote_ratchet_pub);
+    SecureMemory dh = ratchet_dh(pImpl_->local_ratchet_kp, pImpl_->remote_ratchet_pub);
+    SecureMemory new_root, new_send_chain;
+    // Base the rotation on the peer's current root (peer_root_key), not our
+    // own root: after an inbound DH commit our root is one send-half ahead
+    // of the peer's, and kdf_rk from it would produce a chain the peer
+    // cannot derive. peer_root_key tracks the peer's root exactly.
+    pImpl_->kdf_rk(pImpl_->peer_root_key, dh, new_root, new_send_chain);
+    pImpl_->ratchet.root_key = std::move(new_root);
+    pImpl_->ratchet.chain_key = clone_secure(new_send_chain);
+    pImpl_->sending_chain_key = std::move(new_send_chain);
+    pImpl_->ratchet.previous_chain_length = pImpl_->ratchet.sending_chain_length;
+    pImpl_->ratchet.sending_chain_length = 0;
+    pImpl_->rotation_in_flight = true;
+    // New DH root/chain material committed (local spontaneous rotation).
+    ++pImpl_->crypto_epoch;
 }
 void E2ESession::revoke_session() {
     std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
@@ -1146,6 +1508,7 @@ void E2ESession::revoke_session() {
     if (pImpl_->ratchet.root_key.size() > 0) sodium_memzero(pImpl_->ratchet.root_key.data(), pImpl_->ratchet.root_key.size());
     if (pImpl_->sending_chain_key.size() > 0) sodium_memzero(pImpl_->sending_chain_key.data(), pImpl_->sending_chain_key.size());
     if (pImpl_->receiving_chain_key.size() > 0) sodium_memzero(pImpl_->receiving_chain_key.data(), pImpl_->receiving_chain_key.size());
+    if (pImpl_->peer_root_key.size() > 0) sodium_memzero(pImpl_->peer_root_key.data(), pImpl_->peer_root_key.size());
     if (pImpl_->shared_secret.size() > 0) sodium_memzero(pImpl_->shared_secret.data(), pImpl_->shared_secret.size());
     pImpl_->ratchet.skipped_keys.clear();
 }
@@ -1153,6 +1516,9 @@ std::string E2ESession::get_session_id() const { return pImpl_->session_id; }
 std::chrono::system_clock::time_point E2ESession::get_last_activity() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->last_activity; }
 uint64_t E2ESession::get_messages_sent() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->messages_sent; }
 uint64_t E2ESession::get_messages_received() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->messages_received; }
+uint32_t E2ESession::get_sending_chain_length() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->ratchet.sending_chain_length; }
+uint32_t E2ESession::get_receiving_chain_length() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->ratchet.receiving_chain_length; }
+uint64_t E2ESession::get_crypto_epoch() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->crypto_epoch; }
 
 // ===== E2EManager =====
 struct E2EManager::Impl {

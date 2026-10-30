@@ -4,6 +4,7 @@
 
 #include "../include/ncp_crypto.hpp"
 #include "../include/ncp_secure_memory.hpp"
+#include <sodium.h>  // crypto_hash_sha256_* streaming (compute_code_hash)
 #include <vector>
 #include <array>
 #include "../include/ncp_license.hpp"
@@ -1837,14 +1838,36 @@ std::string License::compute_code_hash() {
     }
     return "no-text-section";
 #else
-    // On Linux/macOS: hash /proc/self/exe or argv[0]
+    // On Linux/macOS: hash /proc/self/exe.
+    //
+    // Stream the file through libsodium's incremental SHA-256 instead of
+    // buffering the whole image in a single SecureMemory. Sanitizer-
+    // instrumented test binaries (UBSan/TSan Debug builds) can exceed
+    // SecureMemory's R14-H04 cap of 100MB, which made the (data, size)
+    // constructor throw std::runtime_error("SecureMemory size exceeds
+    // maximum (100MB)") out of check_code_integrity()/check_anti_debug()
+    // and killed the LicenseTest suite under UBSan. crypto_hash_sha256's
+    // init/update/final over the same bytes yields a digest identical to
+    // the previous one-shot hash, so stored baselines stay comparable.
     std::ifstream f("/proc/self/exe", std::ios::binary);
     if (!f.is_open()) return "no-exe";
-    std::string content((std::istreambuf_iterator<char>(f)),
-                         std::istreambuf_iterator<char>());
+    crypto_hash_sha256_state state;
+    crypto_hash_sha256_init(&state);
+    char chunk[64 * 1024];
+    while (f) {
+        f.read(chunk, sizeof(chunk));
+        const std::streamsize got = f.gcount();
+        if (got > 0) {
+            crypto_hash_sha256_update(
+                &state, reinterpret_cast<const unsigned char*>(chunk),
+                static_cast<unsigned long long>(got));
+        }
+    }
     f.close();
-    SecureMemory mem(reinterpret_cast<const uint8_t*>(content.data()), content.size());
-    return to_hex(crypto_->hash_sha256(mem));
+    unsigned char digest[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256_final(&state, digest);
+    SecureMemory mem(digest, sizeof(digest));
+    return to_hex(mem);
 #endif
 }
 

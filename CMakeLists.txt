@@ -28,6 +28,7 @@ option(ENABLE_GUI "Enable Qt6 GUI application (requires Qt6)" OFF)
 option(ENABLE_CLI "Enable CLI tool" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
 option(ENABLE_DOCS "Generate Doxygen documentation" OFF)
+option(ENABLE_LAB_TOOLS "Build isolated lab-only interoperability harnesses" OFF)
 
 # ==================== Optional Feature Options ====================
 option(ENABLE_WEBSOCKETS "Enable WebSocket tunneling via libwebsockets" ON)
@@ -362,6 +363,24 @@ endif()
 
 # ==================== Subdirectories ====================
 add_subdirectory(src/core)
+
+# Lab-only protected-wire proof harness. It is excluded from production builds
+# by default and is not an independent-implementation interoperability test.
+if(ENABLE_LAB_TOOLS)
+    if(NOT MSQUIC_LIBRARY)
+        message(FATAL_ERROR "ENABLE_LAB_TOOLS requires MsQuic for the protected QUIC harness")
+    endif()
+    add_executable(ncp_quic_protected_cli
+        scripts/lab/quic_interop/ncp_quic_protected_cli.cpp)
+    target_link_libraries(ncp_quic_protected_cli PRIVATE ncp_core)
+    target_compile_options(ncp_quic_protected_cli PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>)
+    add_executable(ncp_quic_director_cli
+        scripts/lab/quic_interop/ncp_quic_director_cli.cpp)
+    target_link_libraries(ncp_quic_director_cli PRIVATE ncp_core)
+    target_compile_options(ncp_quic_director_cli PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>)
+endif()
 
 if(ENABLE_CLI)
     add_subdirectory(src/cli)

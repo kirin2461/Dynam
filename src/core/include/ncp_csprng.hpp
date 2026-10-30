@@ -68,6 +68,8 @@ inline double csprng_double_range(double min_val, double max_val) {
 /// Fill a buffer with random bytes
 /// Replaces: std::generate(buf.begin(), buf.end(), [&]{ return dist(rng); })
 inline void csprng_fill(void* buf, size_t len) {
+    if (len == 0) return;
+    if (!buf) throw std::invalid_argument("csprng_fill: null buffer");
     randombytes_buf(buf, len);
 }
 
@@ -110,7 +112,7 @@ inline uint32_t csprng_uint32() {
 /// Generate random bytes as a vector
 inline std::vector<uint8_t> csprng_bytes(size_t count) {
     std::vector<uint8_t> result(count);
-    randombytes_buf(result.data(), count);
+    if (count != 0) randombytes_buf(result.data(), count);
     return result;
 }
 

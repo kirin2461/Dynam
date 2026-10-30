@@ -45,6 +45,9 @@
 #include "ncp_reality.hpp"
 #include "ncp_stegodns.hpp"
 #include "ncp_porthop.hpp"
+#include "ncp_connection_director.hpp"
+#include "ncp_reference_profile_catalog.hpp"
+#include "ncp_mimicry_cli.hpp"
 #include "ncp_fog.hpp"
 #include "ncp_header_protection.hpp"
 #include "ncp_cps.hpp"
@@ -160,6 +163,10 @@ struct AppState {
 
 AppState g_app;
 std::sig_atomic_t g_running = 0;
+// Process exit code surfaced by handlers that have a real valid/invalid
+// contract (e.g. `ncp mimicry-catalog validate`). Handlers set it instead of
+// calling exit() so cleanup/destructors still run normally.
+static int g_exit_code = 0;
 
 // ============================================================================
 // Signal handler
@@ -1019,6 +1026,7 @@ void handle_spa(const std::vector<std::string>& args);
 void handle_reality(const std::vector<std::string>& args);
 void handle_stegodns(const std::vector<std::string>& args);
 void handle_porthop(const std::vector<std::string>& args);
+void handle_mimicry_catalog(const std::vector<std::string>& args);
 void handle_fog(const std::vector<std::string>& args);
 void handle_cps(const std::vector<std::string>& args);
 void handle_trust(const std::vector<std::string>& args);
@@ -1045,14 +1053,15 @@ int main(int argc, char* argv[]) {
     parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
     parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
     parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]", "[--upstream socks5://127.0.0.1:9050]", "[--tor]", "[--tor-exec /path/tor --tor-bridge \"obfs4 ...\" --pt-obfs4 /path/lyrebird]"});
-    parser.add_command("blockcheck", "Auto-select best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--json]", "[--out file]", "[--apply profile.json]"});
-    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|reset|enable|disable|learn-preset>", "[domain|preset]", "[--json]", "[--timeout ms]"});
+    parser.add_command("blockcheck", "Auto-select and validate best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--parallel N]", "[--validate N]", "[--full-sweep]", "[--doh]", "[--json]", "[--out file]", "[--apply profile.json]"});
+    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|learn-batch|reset|enable|disable|learn-preset>", "[domain|domains|preset]", "[--json]", "[--timeout ms]", "[--parallel N]"});
     parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
     parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
     parser.add_command("spa", "Ed25519 Single Packet Authorization (keygen/knock/serve)", handle_spa, {"<keygen|knock|serve>", "[--out prefix]", "[--key f.key]", "[--allow-port N]", "[--port 54117]", "[--proto tcp]", "[--ttl S]", "[--authorized-keys f]", "[--set-name ncp_spa_allow]", "[--default-ttl 300]", "[--max-ttl 86400]", "[--dry-run]"});
     parser.add_command("reality", "XTLS-Reality-style fallback server (Enterprise)", handle_reality, {"serve", "--listen <port>", "--fallback <host:port>", "--internal <host:port>", "--key-file <f>", "[--dry-run]"});
     parser.add_command("stegodns", "Zero-Knowledge steganographic DNS records (Enterprise)", handle_stegodns, {"<encode|decode>", "[options]"});
     parser.add_command("porthop", "UDP port-hopping transport demo (Enterprise)", handle_porthop, {"<serve|client>", "[options]"});
+    parser.add_command("mimicry-catalog", "Validate/inspect external mimicry profile catalog files", handle_mimicry_catalog, {"<validate|list> <path>"});
     parser.add_command("fog", "Cooperative fog mesh overlay node (Enterprise)", handle_fog, {"node", "--id <hex32>", "--port <n>", "[--peer ip:port]...", "[--frame-secret s]", "[--ver-range min-max]"});
     parser.add_command("cps", "CPS pre-handshake fake-packet chains (AWG I1-I5 analogue)", handle_cps, {"<send|test>", "--chain \"dns:x.ru;wait:50;quic\"", "[--host ip --port N --proto udp|tcp]"});
     parser.add_command("trust", "Scoped trust for state roots (NUЦ containment)", handle_trust, {"<policy-test|init-ca|verify|update-roots>", "[options]"});
@@ -1060,7 +1069,7 @@ int main(int argc, char* argv[]) {
 
     parser.parse_and_execute(argc, argv);
 
-    return 0;
+    return g_exit_code;
 }
 
 // ============================================================================
@@ -3810,13 +3819,27 @@ void handle_blockcheck(const std::vector<std::string>& args) {
         std::cout << "Usage: ncp blockcheck [options]\n"
                   << "  --domains a,b,c       Domains to probe (default: built-in list)\n"
                   << "  --timeout MS          Per-probe timeout (default 5000)\n"
+                  << "  --parallel N          Concurrent domains per strategy (default 4, max 32)\n"
+                  << "  --validate N          Confirmation rounds for top candidates (default 1, max 8)\n"
+                  << "  --validate-candidates N  Max candidates to confirm (default 3)\n"
+                  << "  --full-sweep          Do not stop after a fully validated winner\n"
+                  << "  --doh                 Resolve proxied targets via DNS-over-HTTPS\n"
                   << "  --json                Print report as JSON\n"
                   << "  --out FILE            Save report JSON to FILE\n"
-                  << "  --apply               Print best strategy as DPIConfig/profile JSON\n";
+                  << "  --apply FILE          Write only a stable winning profile as JSON\n";
         return;
     }
     ncp::BlockChecker::Config cfg;
-    cfg.timeout_ms = get_option_int(args, "--timeout", 5000);
+    cfg.timeout_ms = std::max(1, std::min(120000,
+        get_option_int(args, "--timeout", 5000)));
+    cfg.max_parallel_probes = static_cast<size_t>(
+        std::max(1, get_option_int(args, "--parallel", 4)));
+    cfg.validation_rounds = static_cast<uint32_t>(
+        std::max(0, std::min(8, get_option_int(args, "--validate", 1))));
+    cfg.max_validation_candidates = static_cast<size_t>(
+        std::max(1, get_option_int(args, "--validate-candidates", 3)));
+    cfg.early_exit = !has_flag(args, "--full-sweep");
+    cfg.use_doh = has_flag(args, "--doh");
 
     std::string domains_opt = get_option(args, "--domains", "");
     if (!domains_opt.empty()) {
@@ -3837,9 +3860,13 @@ void handle_blockcheck(const std::vector<std::string>& args) {
         };
     }
 
-    std::cout << "[*] Running blockcheck (" 
-              << (cfg.domains.empty() ? 6 : cfg.domains.size()) << " domains, "
-              << "timeout " << cfg.timeout_ms << "ms)...\n";
+    if (!quiet) {
+        std::cout << "[*] Running blockcheck ("
+                  << (cfg.domains.empty() ? 6 : cfg.domains.size()) << " domains, "
+                  << "parallel " << cfg.max_parallel_probes
+                  << ", validation " << cfg.validation_rounds
+                  << ", timeout " << cfg.timeout_ms << "ms)...\n";
+    }
 
     ncp::BlockChecker checker;
     auto report = checker.run(cfg);
@@ -3848,7 +3875,12 @@ void handle_blockcheck(const std::vector<std::string>& args) {
     if (!out_path.empty()) {
         std::ofstream f(out_path, std::ios::trunc);
         f << ncp::BlockChecker::report_to_json(report);
-        std::cout << "[+] Report written to " << out_path << "\n";
+        if (!f) {
+            std::cerr << "[!] Failed to write report: " << out_path << "\n";
+        } else if (!has_flag(args, "--json")) {
+            std::cout << "[+] Report written to " << out_path << "\n";
+        }
+        f.close();
     }
     if (has_flag(args, "--json")) {
         std::cout << ncp::BlockChecker::report_to_json(report);
@@ -3862,15 +3894,32 @@ void handle_blockcheck(const std::vector<std::string>& args) {
             if (r.strategy == report.best_strategy) std::cout << "   <-- BEST";
             std::cout << "\n";
         }
-        std::cout << "\n[+] Best strategy: " << report.best_strategy
-                  << " (" << report.best_description << ")\n";
+        if (report.best_strategy.empty()) {
+            std::cout << "\n[-] No stable working strategy found; nothing to apply\n";
+        } else {
+            std::cout << "\n[+] Best strategy: " << report.best_strategy
+                      << " (" << report.best_description << ")"
+                      << (report.best_validated ? " [validated]" : " [unvalidated]")
+                      << "\n";
+        }
     }
 
     std::string apply_path = get_option(args, "--apply", "");
     if (!apply_path.empty()) {
-        std::ofstream f(apply_path, std::ios::trunc);
-        f << ncp::BlockChecker::best_strategy_to_profile_json(report);
-        std::cout << "[+] Best strategy profile written to " << apply_path << "\n";
+        if (report.best_strategy.empty() || report.validation_rounds == 0 ||
+            !report.best_validated) {
+            std::cerr << "[!] Profile not written: a winner with at least one "
+                         "confirmation round is required\n";
+        } else {
+            std::ofstream f(apply_path, std::ios::trunc);
+            f << ncp::BlockChecker::best_strategy_to_profile_json(report);
+            if (!f) {
+                std::cerr << "[!] Failed to write profile: " << apply_path << "\n";
+            } else if (!has_flag(args, "--json")) {
+                std::cout << "[+] Best strategy profile written to " << apply_path << "\n";
+            }
+            f.close();
+        }
     }
 }
 
@@ -3910,7 +3959,9 @@ void handle_autopilot(const std::vector<std::string>& args) {
                   << "  status [--json]        Show learned per-host strategies\n"
                   << "  learn <domain>         Probe all strategies for domain, store the best\n"
                   << "                         (--doh: resolve probe targets via DNS-over-HTTPS)\n"
+                  << "  learn-batch a,b,c      Learn independent domains concurrently\n"
                   << "  learn-preset <name>    Learn all domains of an app: discord|youtube|x\n"
+                  << "  --parallel N           Concurrent host learns (default 4, max 16)\n"
                   << "  reset [domain]         Drop one record (or all, if omitted)\n"
                   << "  enable                 Persistently enable AutoPilot (proxy picks it up)\n"
                   << "  disable                Persistently disable AutoPilot\n"
@@ -3925,7 +3976,10 @@ void handle_autopilot(const std::vector<std::string>& args) {
 
     ncp::AutoPilot ap;
     ncp::AutoPilot::Config cfg;
-    cfg.probe_timeout_ms = get_option_int(args, "--timeout", 5000);
+    cfg.probe_timeout_ms = std::max(1, std::min(120000,
+        get_option_int(args, "--timeout", 5000)));
+    cfg.max_parallel_learns = static_cast<size_t>(
+        std::max(1, get_option_int(args, "--parallel", 4)));
     cfg.use_doh = has_flag(args, "--doh");
     ap.load(cfg);
 
@@ -3985,40 +4039,75 @@ void handle_autopilot(const std::vector<std::string>& args) {
         return;
     }
 
-    if (action == "learn-preset") {
+    if (action == "learn-preset" || action == "learn-batch") {
         if (positional.empty()) {
-            std::cerr << "[!] Usage: ncp autopilot learn-preset <";
-            bool first = true;
-            for (const auto& kv : autopilot_presets()) {
-                std::cerr << (first ? "" : "|") << kv.first;
-                first = false;
-            }
-            std::cerr << "> [--doh] [--timeout ms]\n";
+            std::cerr << "[!] Usage: ncp autopilot " << action << " <"
+                      << (action == "learn-batch" ? "domain1,domain2,..." : "discord|youtube|x")
+                      << "> [--doh] [--timeout ms] [--parallel N]\n";
             return;
         }
-        auto it = autopilot_presets().find(positional);
-        if (it == autopilot_presets().end()) {
-            std::cerr << "[!] Unknown preset: " << positional << "\n";
-            return;
-        }
-        std::cout << "[*] AutoPilot learning preset '" << positional << "' ("
-                  << it->second.size() << " domains)...\n";
-        int ok_count = 0;
-        int idx = 0;
-        for (const auto& domain : it->second) {
-            ++idx;
-            std::cout << "  [" << idx << "/" << it->second.size() << "] " << domain
-                      << " ... " << std::flush;
-            std::string learned;
-            if (ap.learn(domain, &learned)) {
-                std::cout << learned << "\n";
-                ++ok_count;
-            } else {
-                std::cout << "no working strategy (marked degraded)\n";
+        std::vector<std::string> domains;
+        if (action == "learn-preset") {
+            auto it = autopilot_presets().find(positional);
+            if (it == autopilot_presets().end()) {
+                std::cerr << "[!] Unknown preset: " << positional << "\n";
+                return;
+            }
+            domains = it->second;
+        } else {
+            std::istringstream ss(positional);
+            std::string tok;
+            while (std::getline(ss, tok, ',')) {
+                size_t b = tok.find_first_not_of(" \t");
+                size_t e = tok.find_last_not_of(" \t");
+                if (b != std::string::npos)
+                    domains.push_back(ncp::AutoPilot::normalize_host(tok.substr(b, e - b + 1)));
             }
         }
-        std::cout << "[+] Preset '" << positional << "': " << ok_count << "/"
-                  << it->second.size() << " domains learned\n";
+        std::vector<std::string> unique_domains;
+        for (const auto& domain : domains) {
+            if (std::find(unique_domains.begin(), unique_domains.end(), domain) ==
+                unique_domains.end()) unique_domains.push_back(domain);
+        }
+        domains = std::move(unique_domains);
+        if (domains.empty()) {
+            std::cerr << "[!] Empty domain list\n";
+            return;
+        }
+
+        std::cout << "[*] AutoPilot learning " << domains.size() << " domains (parallel "
+                  << cfg.max_parallel_learns << ")...\n";
+        std::atomic<size_t> next{0};
+        size_t ok_count = 0;
+        size_t done_count = 0;
+        std::mutex output_mu;
+        auto worker = [&] {
+            while (true) {
+                const size_t idx = next.fetch_add(1);
+                if (idx >= domains.size()) break;
+                const auto& domain = domains[idx];
+                std::string learned;
+                const bool ok = ap.learn(domain, &learned);
+                std::lock_guard<std::mutex> lk(output_mu);
+                ++done_count;
+                std::cout << "  [" << done_count << "/" << domains.size() << "] "
+                          << domain << " ... ";
+                if (ok) {
+                    std::cout << learned << "\n";
+                    ++ok_count;
+                } else {
+                    std::cout << "no working strategy (marked degraded)\n";
+                }
+            }
+        };
+        const size_t worker_count = std::max<size_t>(
+            1, std::min(cfg.max_parallel_learns, domains.size()));
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+        for (size_t i = 0; i < worker_count; ++i) workers.emplace_back(worker);
+        for (auto& w : workers) w.join();
+        std::cout << "[+] Batch '" << positional << "': " << ok_count << "/"
+                  << domains.size() << " domains learned\n";
         return;
     }
 
@@ -4620,11 +4709,94 @@ static void porthop_print_usage() {
               << "  ncp porthop serve --base-port <n> --range <n> --secret <s>\n"
               << "      [--hop-interval S|Smin-Smax] [--session-id <hex>]...\n"
               << "      [--hp-secret <s>] [--ver-range <min>-<max>]\n"
-              << "      [--content-padding <min>-<max>]\n"
+              << "      [--content-padding <min>-<max>] [--mimicry-profile <id>]\n"
+              << "      [--mimicry-catalog <f>] [--mimicry-allowed <csv>]\n"
+              << "      [--mimicry-require-signed | --mimicry-allow-unsigned-dev]\n"
+              << "      [--mimicry-transition-grace <ms>] [--mimicry-stats-json <f>]\n"
               << "  ncp porthop client --host <ip> --base-port <n> --range <n> --secret <s>\n"
               << "      --message <s> [--hop-interval S|Smin-Smax] [--session-id <hex>]\n"
               << "      [--hp-secret <s>] [--ver-range <min>-<max>]\n"
               << "      [--content-padding <min>-<max>] [--cps \"dns:x.ru;wait:50;quic\"]\n"
+              << "      [--mimicry-profile <id> [--mimicry-transition <id>]]\n"
+              << "      [--mimicry-catalog <f>] [--mimicry-allowed <csv>]\n"
+              << "      [--mimicry-auto | --mimicry-locked]\n"
+              << "      [--mimicry-switch-cooldown <s>] [--mimicry-min-dwell <s>]\n"
+              << "      [--mimicry-hysteresis <pct>] [--mimicry-transition-grace <ms>]\n"
+              << "      [--mimicry-stats-json <f>]\n"
+              << "      [--mimicry-load-count <n>] [--mimicry-load-size <n>]\n"
+              << "      [--mimicry-load-rate <r>] [--mimicry-load-duration <sec>]\n"
+              << "      [--mimicry-load-seed <n>] [--mimicry-load-stats-json <f>]\n"
+              << "\n"
+              << "  Secure mimicry mode (explicit; both sides must enable it):\n"
+              << "    --mimicry-profile <id>   per-session E2E-protected mimicry session\n"
+              << "                       (ConnectionDirector + NcpMimicrySession) keyed by\n"
+              << "                       the PortHop session id. Built-in profile ids:\n"
+              << "                       webrtc_video, zoom_call, youtube_stream, voip_opus\n"
+              << "    --mimicry-transition   (client) request a negotiated hot profile\n"
+              << "                       switch to <id> after the handshake\n"
+              << "    --mimicry-catalog <path>\n"
+              << "                       load an external signed catalog file\n"
+              << "                       (MimicryCatalogIo) BEFORE session creation; its\n"
+              << "                       profile ids become usable by --mimicry-profile /\n"
+              << "                       --mimicry-transition\n"
+              << "    --mimicry-allowed <csv>\n"
+              << "                       restrict the profile ids this node will activate;\n"
+              << "                       --mimicry-profile/--mimicry-transition must be on\n"
+              << "                       the list and an attached autopilot never selects\n"
+              << "                       off-list candidates\n"
+              << "    --mimicry-require-signed\n"
+              << "                       explicitly require trusted Ed25519 signatures on\n"
+              << "                       external catalog records (this is already the\n"
+              << "                       default SignaturePolicy::ENFORCE)\n"
+              << "    --mimicry-allow-unsigned-dev\n"
+              << "                       DEV ONLY: accept unsigned external catalog records\n"
+              << "                       (SignaturePolicy::DEV_UNSIGNED; loud warning)\n"
+              << "    --mimicry-auto     (client) attach a MimicryAutoPilot in AUTO mode\n"
+              << "                       (transition requests go through the director)\n"
+              << "    --mimicry-locked   (client) attach the autopilot in LOCKED mode:\n"
+              << "                       monitoring only, NO transitions (forbids\n"
+              << "                       --mimicry-transition)\n"
+              << "    --mimicry-switch-cooldown <sec>  autopilot: min interval between\n"
+              << "                       committed switches (default 60)\n"
+              << "    --mimicry-min-dwell <sec>        autopilot: min time on a healthy\n"
+              << "                       profile before leaving it (default 90)\n"
+              << "    --mimicry-hysteresis <pct>       autopilot: challenger must beat the\n"
+              << "                       current profile by this margin (default 10)\n"
+              << "    --mimicry-transition-grace <ms>  adapter: old-layout RX grace window\n"
+              << "                       after a transition activates (default 1000)\n"
+              << "    --mimicry-v2 on|off            operator kill-switch: off negotiates\n"
+              << "                       profile_transition_v1 only — non-generic/stateful\n"
+              << "                       transition targets and mask variants are refused\n"
+              << "                       (hard error with a v2-only --mimicry-transition)\n"
+              << "    --mimicry-stats-json <path>\n"
+              << "                       write the teardown stats JSON to <path> instead\n"
+              << "                       of stdout (atomic tmp+rename)\n"
+              << "  Multi-packet load mode (CLIENT secure mode only; the serve side\n"
+              << "  stays the plain echo loop — load flags are rejected there):\n"
+              << "    --mimicry-load-count <n>   messages to send (1..100000, dflt 100)\n"
+              << "    --mimicry-load-size <n>    payload bytes per message\n"
+              << "                       (12..1024; magic+seq header is 12 bytes, dflt 128)\n"
+              << "    --mimicry-load-rate <r>    send pacing, msg/s (1..100000, dflt 50)\n"
+              << "    --mimicry-load-duration <sec>\n"
+              << "                       stop sending after this long (0..3600, dflt 0 =\n"
+              << "                       no limit; whichever of count/duration hits first)\n"
+              << "    --mimicry-load-seed <n>    deterministic pattern seed (dflt 1)\n"
+              << "    --mimicry-load-stats-json <path>\n"
+              << "                       write the load report (schema_version=1) to\n"
+              << "                       <path> atomically instead of stdout\n"
+              << "    Any --mimicry-load-* option enables the mode. Each message is a\n"
+              << "    deterministic binary blob (magic + uint64 sequence + seed-derived\n"
+              << "    pattern); every echo is verified byte-exactly. The report carries\n"
+              << "    sent/lost/duplicate/out-of-order/corrupted counters, offered and\n"
+              << "    verified goodput, RTT p50/p95/p99, canonical SHA-256 stream hashes\n"
+              << "    and a passed flag — no payload bytes, addresses or secrets.\n"
+              << "    Default control mode is MANUAL (neither --mimicry-auto nor\n"
+              << "    --mimicry-locked): only an explicit --mimicry-transition request\n"
+              << "    switches profiles. This one-shot CLI covers the interactive verbs:\n"
+              << "    select = --mimicry-transition, lock = --mimicry-locked; mid-session\n"
+              << "    unlock/rollback commands are intentionally not part of it.\n"
+              << "    Without --mimicry-profile the legacy RAW demo (plaintext echo)\n"
+              << "    is preserved unchanged.\n"
               << "\n"
               << "  AWG 3.1-style hardening (all sides must use identical settings):\n"
               << "    --hp-secret        session-derived header prefix replaces the\n"
@@ -4639,6 +4811,129 @@ static void porthop_print_usage() {
 
 static constexpr uint64_t PH_DEFAULT_SESSION = 0x1122334455667788ULL;
 
+// ── Secure mimicry mode helpers (--mimicry-profile) ─────────────────────────
+// The PortHop transport (L2 hop epoch, frame format, header protection) is
+// untouched: the ConnectionDirector/NcpMimicrySession stack only sees the
+// PortHop frame PAYLOADS, keyed by the PortHop session id.
+
+/// Monotonic millisecond clock for the director poll loop.
+static uint64_t porthop_now_ms() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+/// Stateless outer mask for a descriptor's protocol family. Only the
+/// stateless wire-compatible masks are supported by the adapter.
+static ncp::TrafficMimicry::MimicProfile porthop_mimic_for_family(
+        ncp::ProtocolFamily f) {
+    switch (f) {
+        case ncp::ProtocolFamily::GENERIC_TCP:
+        case ncp::ProtocolFamily::TLS:
+        case ncp::ProtocolFamily::HTTP2:
+        case ncp::ProtocolFamily::MESSAGING:
+            return ncp::TrafficMimicry::MimicProfile::GENERIC_TCP;
+        default:
+            return ncp::TrafficMimicry::MimicProfile::GENERIC_UDP;
+    }
+}
+
+/// Director/session template for the secure mimicry mode. The catalog must
+/// outlive the returned config's users (director + sessions).
+static ncp::NcpConnectionDirector::Config porthop_mimicry_director_config(
+        const ncp::ReferenceProfileCatalog& catalog,
+        const ncp::ProfileDescriptor& desc,
+        ncp::NcpMimicrySession::Role role,
+        int64_t transition_grace_ms = -1) {
+    ncp::NcpConnectionDirector::Config d;
+    auto& sc = d.session_template;
+    sc.role = role;
+    sc.stable_profile = ncp::profile_ref_from_descriptor(desc);
+    sc.stable_layout = ncp::profile_layout_from_descriptor(desc);
+    sc.stable_mimic = porthop_mimic_for_family(desc.family);
+    sc.catalog = &catalog;
+    sc.mimic_config.profile = sc.stable_mimic;
+    sc.mimic_config.wire_version = 3;  // peers must agree on the wire format
+    sc.mimic_config.enable_timing_mimicry = false;  // pacing comes from the
+                                                    // catalog-derived shaper
+    sc.mimic_resolver = [&catalog](const ncp::ProfileRef& r)
+        -> std::optional<ncp::TrafficMimicry::MimicProfile> {
+        const auto* d = catalog.find(r.id, r.revision);
+        if (!d) return std::nullopt;
+        return porthop_mimic_for_family(d->family);
+    };
+    sc.advertise_profile_transition = true;
+    sc.allow_insecure_plaintext_legacy = false;  // never downgrade to plaintext
+    sc.path_mtu_bytes = 1500;
+    sc.porthop_overhead_bytes = 32;  // 20-byte PH header + padding headroom
+    if (transition_grace_ms >= 0)
+        sc.transition_config.grace_period_ms =
+            static_cast<uint32_t>(transition_grace_ms);
+    return d;
+}
+
+/// Build the CLI catalog (built-ins + optional external file), printing a
+/// clear error on validation failure. Returns nullptr on failure.
+static std::unique_ptr<ncp::ReferenceProfileCatalog> porthop_build_catalog(
+        const ncp::cli::MimicryFlags& flags) {
+    std::string err;
+    std::vector<std::string> warnings;
+    auto catalog = ncp::cli::build_catalog(flags, err, warnings);
+    for (const auto& w : warnings) std::cerr << "[!] " << w << "\n";
+    if (!catalog) std::cerr << "[!] " << err << "\n";
+    return catalog;
+}
+
+/// Validate a requested profile id against --mimicry-allowed (CLI-level
+/// allow-list; empty list == unrestricted).
+static bool porthop_check_allowed(const ncp::cli::MimicryFlags& flags,
+                                  const std::string& profile_id,
+                                  const char* option_name) {
+    if (ncp::cli::allowed_contains(flags, profile_id)) return true;
+    std::cerr << "[!] " << option_name << " '" << profile_id
+              << "' is not in --mimicry-allowed (";
+    for (size_t i = 0; i < flags.allowed.size(); ++i)
+        std::cerr << (i ? "," : "") << flags.allowed[i];
+    std::cerr << ")\n";
+    return false;
+}
+
+/// Teardown stats JSON: stdout when no --mimicry-stats-json path, atomic
+/// file write otherwise. Never contains secrets or peer addresses.
+static void porthop_emit_mimicry_stats(
+        const ncp::cli::MimicryFlags& flags, const char* role,
+        const std::vector<std::pair<uint64_t, ncp::NcpMimicrySession::Stats>>&
+            sessions,
+        const ncp::NcpConnectionDirector::Stats& dstats,
+        const std::string& autopilot_json = "") {
+    const std::string json = ncp::cli::mimicry_stats_json(
+        role, sessions, dstats, autopilot_json);
+    if (flags.stats_json_path.empty()) {
+        std::cout << "[*] Mimicry session stats (JSON):\n" << json << "\n";
+        return;
+    }
+    std::string err;
+    if (!ncp::cli::write_mimicry_stats_file(flags.stats_json_path, json, err))
+        std::cerr << "[!] " << err << "\n";
+    else
+        std::cout << "[+] Mimicry session stats written to "
+                  << flags.stats_json_path << "\n";
+}
+
+/// Resolve the initial mimicry profile against the built-in catalog, with a
+/// clear error listing the registered ids.
+static const ncp::ProfileDescriptor* porthop_resolve_profile(
+        const ncp::ReferenceProfileCatalog& catalog,
+        const std::string& profile_id, const char* option_name) {
+    const auto* desc = catalog.find_latest(profile_id);
+    if (desc) return desc;
+    std::cerr << "[!] Unknown " << option_name << ": " << profile_id << "\n"
+              << "    Registered profiles:";
+    for (const auto& id : catalog.list()) std::cerr << " " << id;
+    std::cerr << "\n";
+    return nullptr;
+}
+
 static uint64_t parse_session_id(const std::string& s, bool& ok) {
     try {
         size_t idx = 0;
@@ -4649,6 +4944,376 @@ static uint64_t parse_session_id(const std::string& s, bool& ok) {
         ok = false;
         return 0;
     }
+}
+
+// ── Secure mimicry load run (--mimicry-load-*) ──────────────────────────────
+// Sends up to `count` deterministic binary messages (magic + uint64 sequence
+// + seed-derived pattern) with `rate` pacing, optionally cut short by
+// `duration_sec`; the existing secure echo server bounces them back and every
+// echo is verified byte-exactly against the regenerated payload. Payloads are
+// NEVER logged. The send loop pumps non-blocking so the offered rate is not
+// capped by the receive poll; a bounded drain waits for stragglers after the
+// last send. Teardown verdict comes from the metrics, not the CLI exit path.
+static constexpr int kLoadDrainTimeoutMs = 5000;
+
+static void porthop_client_secure_load(
+        ncp::NcpConnectionDirector& director, uint64_t sid,
+        const std::function<void(int)>& pump_once,
+        const ncp::cli::MimicryLoadFlags& lf,
+        ncp::MimicryAutoPilot* pilot) {
+    using Director = ncp::NcpConnectionDirector;
+    ncp::cli::MimicryLoadTracker tracker(lf.seed, lf.size, lf.count);
+
+    const auto t_start = std::chrono::steady_clock::now();
+    auto rel_ms = [&]() -> uint32_t {
+        return static_cast<uint32_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t_start).count());
+    };
+    // Harvest verified echoes without ever printing payload bytes.
+    auto drain_app = [&]() {
+        while (auto app = director.next_application_data()) {
+            if (app->session_id != sid) continue;
+            tracker.note_received(app->payload.data(), app->payload.size(),
+                                  rel_ms());
+        }
+    };
+    // Feed only matured sends (750 ms old) so in-flight echoes are not treated
+    // as packet loss. evaluate() remains in pump_once, after which the next
+    // pump applies any requested transition through the production director.
+    uint32_t next_autopilot_sample_ms = 1000;
+    auto feed_autopilot = [&]() {
+        if (!pilot) return;
+        const uint32_t now_ms = rel_ms();
+        if (now_ms < next_autopilot_sample_ms) return;
+        next_autopilot_sample_ms = now_ms + 1000;
+        ncp::MimicryAutoPilot::UdpMetrics sample;
+        if (tracker.autopilot_metrics(now_ms, 750, sample))
+            pilot->ingest_metrics(sample);
+    };
+
+    std::cout << "[*] Load mode: count=" << lf.count << " size=" << lf.size
+              << " rate=" << lf.rate << " msg/s"
+              << (lf.duration_sec
+                      ? " duration=" + std::to_string(lf.duration_sec) + "s"
+                      : "")
+              << " seed=" << lf.seed << "\n";
+
+    const auto send_deadline =
+        lf.duration_sec
+            ? t_start + std::chrono::milliseconds(lf.duration_sec * 1000)
+            : std::chrono::steady_clock::time_point::max();
+    const std::chrono::nanoseconds slot(
+        static_cast<int64_t>(1e9 / static_cast<double>(lf.rate)));
+    auto next_slot = t_start;
+    uint64_t attempted = 0;
+    std::vector<uint8_t> msg;
+    while (attempted < lf.count) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= send_deadline) break;
+        if (now < next_slot) std::this_thread::sleep_until(next_slot);
+        ncp::cli::build_load_message(lf.seed, attempted,
+                                     static_cast<size_t>(lf.size), msg);
+        const auto err = director.send_application(sid, msg, porthop_now_ms());
+        if (err != Director::Error::NONE) {
+            tracker.note_send_error();
+            if (pilot) pilot->report_degradation();
+        } else {
+            tracker.note_sent(attempted, msg, rel_ms());
+        }
+        ++attempted;
+        next_slot += slot;
+        pump_once(0);  // flush egress + harvest echoes without blocking
+        drain_app();
+        feed_autopilot();
+    }
+    if (attempted < lf.count)
+        std::cout << "[*] Load duration reached — stopped after " << attempted
+                  << " of " << lf.count << " message(s)\n";
+
+    // Bounded drain: wait for outstanding echoes after the final send.
+    const auto drain_deadline = std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(kLoadDrainTimeoutMs);
+    while (std::chrono::steady_clock::now() < drain_deadline &&
+           tracker.received_unique() < tracker.sent()) {
+        pump_once(10);
+        drain_app();
+        feed_autopilot();
+    }
+    feed_autopilot();
+    const uint64_t elapsed = rel_ms();
+    const auto m = tracker.finalize(lf.count, attempted, elapsed);
+
+    // Human-readable summary (no payload bytes, no addresses).
+    std::cout << "[*] Load result: sent " << m.sent << "/" << m.attempted
+              << " (send errors " << m.send_errors << ")"
+              << ", received-unique " << m.received_unique
+              << ", duplicates " << m.duplicates
+              << ", out-of-order " << m.out_of_order
+              << ", corrupted " << m.corrupted
+              << ", missing " << m.missing
+              << ", elapsed " << m.elapsed_ms << " ms"
+              << ", offered " << (m.offered_goodput_bps / 1000.0) << " kbps"
+              << ", verified " << (m.verified_goodput_bps / 1000.0) << " kbps";
+    if (m.has_rtt)
+        std::cout << ", RTT p50/p95/p99 " << m.rtt_p50_ms << "/"
+                  << m.rtt_p95_ms << "/" << m.rtt_p99_ms << " ms";
+    std::cout << "\n[*] Load stream hashes: sent " << m.sha256_sent
+              << ", received-unique " << m.sha256_received_unique << "\n"
+              << (m.passed ? "[+] Load verification PASSED\n"
+                           : "[!] Load verification FAILED\n");
+
+    // Machine-readable report (schema_version=1; atomic file or stdout).
+    const std::string json = ncp::cli::mimicry_load_stats_json(m, lf);
+    if (lf.stats_set && !lf.stats_json_path.empty()) {
+        std::string err;
+        if (!ncp::cli::write_mimicry_stats_file(lf.stats_json_path, json, err))
+            std::cerr << "[!] " << err << "\n";
+        else
+            std::cout << "[+] Load stats written to " << lf.stats_json_path
+                      << "\n";
+    } else {
+        std::cout << "[*] Load stats (JSON):\n" << json << "\n";
+    }
+}
+
+// ── Secure mimicry client (--mimicry-profile) ───────────────────────────────
+// Handshake + capability pump through the ConnectionDirector poll loop BEFORE
+// any application data, optional negotiated profile transition, then the
+// protected message send and response pump. Never prints secrets; the PortHop
+// hop epoch stays transport-local.
+static void porthop_client_secure(ncp::PortHopClient& client, uint64_t sid,
+                                  const std::string& host,
+                                  const std::string& message,
+                                  const std::string& profile_id,
+                                  const std::string& transition_id,
+                                  const ncp::cli::MimicryFlags& mflags) {
+    using Director = ncp::NcpConnectionDirector;
+    using TR = ncp::MimicryAutoPilot::TransitionResult;
+
+    auto catalog = porthop_build_catalog(mflags);
+    if (!catalog) return;
+    const auto* desc = porthop_resolve_profile(*catalog, profile_id,
+                                               "--mimicry-profile");
+    if (!desc) return;
+    if (!porthop_check_allowed(mflags, profile_id, "--mimicry-profile"))
+        return;
+    const ncp::ProfileDescriptor* tdesc = nullptr;
+    if (!transition_id.empty()) {
+        tdesc = porthop_resolve_profile(*catalog, transition_id,
+                                        "--mimicry-transition");
+        if (!tdesc) return;
+        if (!porthop_check_allowed(mflags, transition_id,
+                                   "--mimicry-transition"))
+            return;
+        // Operator kill-switch: --mimicry-v2 off rejects v2-only targets.
+        std::string v2err;
+        if (ncp::cli::v2_kill_switch_conflict(mflags, tdesc, v2err)) {
+            std::cerr << "[!] " << v2err << "\n";
+            return;
+        }
+    }
+
+    auto dcfg = porthop_mimicry_director_config(
+        *catalog, *desc, ncp::NcpMimicrySession::Role::Client,
+        mflags.transition_grace_ms);
+    dcfg.max_sessions = 4;
+    dcfg.session_template.advertise_profile_transition_v2 = mflags.v2;
+    Director director(dcfg);
+    if (!director.is_valid()) {
+        std::cerr << "[!] " << director.config_error() << "\n";
+        return;
+    }
+    if (director.add_session(sid) != Director::Error::NONE) {
+        std::cerr << "[!] failed to create the mimicry session\n";
+        return;
+    }
+
+    // Attached only for --mimicry-auto / --mimicry-locked; declared before
+    // the pump lambdas so evaluate() can tick inside the poll loop.
+    std::unique_ptr<ncp::MimicryAutoPilot> pilot;
+
+    // One pump step: drain due director egress onto the wire, feed inbound
+    // frames back into the director. All adapter access is on this thread;
+    // no adapter call happens under a PortHop lock. The poll timeout is a
+    // parameter (default 25 ms) so the load send loop can pump non-blocking
+    // (0 ms) and is not artificially capped at ~40 msg/s by the receive wait.
+    auto pump_once = [&](int poll_timeout_ms = 25) {
+        if (pilot) pilot->evaluate();
+        uint64_t now = porthop_now_ms();
+        for (auto& e : director.poll(now))
+            client.send(e.bytes, ncp::PH_FLAG_NONE);
+        auto frames = client.poll(poll_timeout_ms);
+        now = porthop_now_ms();
+        for (const auto& r : frames)
+            director.on_datagram(sid, r.frame.payload.data(),
+                                 r.frame.payload.size(), now);
+    };
+    auto pump_until = [&](std::chrono::milliseconds budget,
+                          const std::function<bool()>& done) {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        while (std::chrono::steady_clock::now() < deadline && !done())
+            pump_once();
+        return done();
+    };
+
+    // Handshake + capability exchange BEFORE any application payload.
+    if (director.start_handshake(sid, porthop_now_ms()) !=
+            Director::Error::NONE) {
+        std::cerr << "[!] failed to start the E2E handshake\n";
+        return;
+    }
+    if (!pump_until(std::chrono::milliseconds(5000),
+                    [&] { return director.is_established(sid); })) {
+        std::cerr << "[!] Secure mimicry handshake timed out — is the server "
+                     "running with --mimicry-profile?\n";
+        return;
+    }
+    // Let the capability advertisements settle (fixed quiet window).
+    pump_until(std::chrono::milliseconds(300), [] { return false; });
+
+    const auto sst = director.session_stats(sid);
+    std::cout << "[+] Secure mimicry session established: profile "
+              << desc->profile_id << "@" << desc->revision
+              << " (profile_transition_v1="
+              << (sst && sst->transition_capable ? "negotiated"
+                                                 : "not-negotiated")
+              << ")\n";
+
+    // Optional MimicryAutoPilot attach (--mimicry-auto / --mimicry-locked).
+    // The request functor is the director's enqueue-only cross-thread entry
+    // point; commits/aborts arrive through the transition feedback below.
+    bool committed = false, aborted = false;
+    ncp::AbortReason abort_reason = ncp::AbortReason::NONE;
+    if (mflags.auto_mode || mflags.locked) {
+        pilot.reset(new ncp::MimicryAutoPilot(ncp::cli::make_autopilot_config(
+            mflags, *catalog, director.transition_request_handler(sid),
+            dcfg.session_template.mimic_config.wire_version)));
+        pilot->adopt_active_profile(desc->profile_id, desc->revision);
+        pilot->notify_legacy_peer(!sst || !sst->transition_capable);
+        std::cout << "[*] Mimicry autopilot attached ("
+                  << (mflags.auto_mode ? "AUTO" : "LOCKED") << " mode)\n";
+    }
+    if (pilot || tdesc) {
+        director.set_transition_feedback(
+            [&](Director::SessionId, const std::string& pid, uint32_t rev) {
+                committed = true;
+                if (pilot) pilot->commit_transition(pid, rev);
+            },
+            [&](Director::SessionId, const std::string& pid, uint32_t rev,
+                ncp::AbortReason r) {
+                aborted = true;
+                abort_reason = r;
+                if (pilot) pilot->abort_transition(pid, rev);
+            });
+    }
+
+    // Optional catalog-driven transition with commit/rollback feedback.
+    if (tdesc) {
+        const auto res = director.enqueue_profile_transition(
+            sid, tdesc->profile_id, tdesc->revision);
+        if (res != TR::ACCEPTED) {
+            std::cerr << "[!] Transition request refused (result "
+                      << static_cast<unsigned>(res) << ")\n";
+        } else {
+            pump_until(std::chrono::milliseconds(6000),
+                       [&] { return committed || aborted; });
+            if (committed) {
+                std::cout << "[+] Profile transition committed: "
+                          << tdesc->profile_id << "@" << tdesc->revision
+                          << "\n";
+            } else {
+                std::cerr << "[!] Profile transition to " << tdesc->profile_id
+                          << " aborted (" << ncp::to_string(abort_reason)
+                          << ") — continuing on the stable profile\n";
+            }
+        }
+    }
+
+    // Protected application traffic: either the multi-packet deterministic
+    // load run (--mimicry-load-*) or the legacy single message + echo below
+    // (kept byte-for-byte when load mode is not enabled).
+    bool echoed = false;
+    if (mflags.load.enabled()) {
+        porthop_client_secure_load(director, sid, pump_once, mflags.load,
+                                   pilot.get());
+    } else {
+    // Protected application send + response pump.
+    const std::vector<uint8_t> payload(message.begin(), message.end());
+    if (payload.empty() || payload.size() > 1024) {
+        std::cerr << "[!] --message must be 1..1024 bytes in secure mode "
+                     "(datagram budget)\n";
+        return;
+    }
+    for (int attempt = 0; attempt < 3 && !echoed; ++attempt) {
+        if (client.session().epoch_exhausted()) {
+            std::cerr << "[!] PortHop epoch exhausted; refusing application "
+                         "send until a new session is established\n";
+            break;
+        }
+        const auto err = director.send_application(sid, payload,
+                                                   porthop_now_ms());
+        if (err != Director::Error::NONE) {
+            std::cerr << "[!] send_application: "
+                      << Director::to_string(err) << "\n";
+            break;
+        }
+        std::cout << "[*] Sent protected message to " << host << ":"
+                  << client.current_target_port()
+                  << " (epoch " << client.current_epoch() << ")\n";
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(1500);
+        while (std::chrono::steady_clock::now() < deadline && !echoed) {
+            pump_once();
+            while (auto app = director.next_application_data()) {
+                if (app->session_id != sid) continue;
+                const std::string text(app->payload.begin(),
+                                       app->payload.end());
+                std::cout << "[+] Secure echo: \"" << text << "\"\n";
+                echoed = true;
+                if (pilot) pilot->report_success();
+            }
+        }
+        if (!echoed && pilot) {
+            pilot->report_degradation();
+            pump_once(0);  // evaluate the new health signal without blocking
+        }
+        if (!echoed && attempt < 2) {
+            std::cout << "[*] No echo — hopping to the next scheduled port\n";
+            if (!client.hop()) {
+                std::cerr << "[!] PortHop epoch exhausted; a new session_id "
+                             "and handshake are required\n";
+                break;
+            }
+        }
+    }
+    }
+    // A degradation sample near the end of a one-shot run may have just
+    // produced a request. Give the production director a bounded opportunity
+    // to commit/abort it instead of discarding the request at teardown.
+    if (pilot && pilot->has_outstanding_request()) {
+        pump_until(std::chrono::milliseconds(6000),
+                   [&] { return !pilot->has_outstanding_request(); });
+    }
+    client.close();
+    const auto st = director.stats();
+    std::cout << "[*] Secure session stats: datagrams in/out "
+              << st.datagrams_in << "/" << st.datagrams_out
+              << ", app in/out " << st.app_messages_in << "/"
+              << st.app_messages_out
+              << ", transitions committed " << st.transition_commits_reported
+              << ", aborted " << st.transition_aborts_reported << "\n";
+    // Machine-readable teardown report (JSON; no secrets/peer addresses).
+    {
+        std::vector<std::pair<uint64_t, ncp::NcpMimicrySession::Stats>> ss;
+        if (auto one = director.session_stats(sid))  // poll-thread read: OK
+            ss.emplace_back(sid, *one);
+        porthop_emit_mimicry_stats(
+            mflags, "client", ss, st,
+            pilot ? pilot->to_stats_json() : std::string());
+    }
+    if (!echoed && !mflags.load.enabled())
+        std::cerr << "[!] No secure echo received after 3 attempts\n";
 }
 
 void handle_porthop(const std::vector<std::string>& args) {
@@ -4729,6 +5394,49 @@ void handle_porthop(const std::vector<std::string>& args) {
         pad_cfg = *p;
     }
 
+    // Secure mimicry mode: explicit opt-in via --mimicry-profile. Without it
+    // the legacy raw demo below is preserved unchanged.
+    const std::string mimicry_profile = get_option(args, "--mimicry-profile", "");
+    const bool secure_mode = !mimicry_profile.empty();
+    const std::string mimicry_transition =
+        get_option(args, "--mimicry-transition", "");
+
+    // Extended --mimicry-* option bundle (catalog/allow-list/signature
+    // policy/autopilot/knobs/stats). Parse failures are hard errors.
+    ncp::cli::MimicryFlags mflags;
+    {
+        std::string merr;
+        if (!ncp::cli::parse_mimicry_flags(args, mflags, merr)) {
+            std::cerr << "[!] " << merr << "\n";
+            return;
+        }
+    }
+    if (!secure_mode) {
+        if (mflags.any_extended_set()) {
+            std::cerr << "[!] the extended --mimicry-* flags require "
+                         "--mimicry-profile (secure mode)\n";
+            return;
+        }
+        if (!mimicry_transition.empty()) {
+            std::cerr << "[!] --mimicry-transition requires "
+                         "--mimicry-profile (secure mode)\n";
+            return;
+        }
+    }
+    if (mflags.locked && !mimicry_transition.empty()) {
+        std::cerr << "[!] --mimicry-locked forbids profile transitions; "
+                     "drop --mimicry-transition\n";
+        return;
+    }
+    // Multi-packet load mode is a client-side secure-mode feature: the serve
+    // side is just the existing echo loop, so load flags there (or without
+    // --mimicry-profile, rejected above via any_extended_set) are hard errors.
+    if (mflags.load.enabled() && action != "client") {
+        std::cerr << "[!] --mimicry-load-* flags are only valid for "
+                     "'ncp porthop client' secure mode\n";
+        return;
+    }
+
     // ── serve ───────────────────────────────────────────────────────────────
     if (action == "serve") {
         ncp::PortHopServer server(schedule);
@@ -4752,6 +5460,103 @@ void handle_porthop(const std::vector<std::string>& args) {
                       << (base_port + range) << ")\n";
             return;
         }
+
+        // ── secure mimicry serve ────────────────────────────────────────────
+        // Registry of NcpMimicrySession adapters keyed by the PortHop
+        // session id; the PortHop transport (hop epoch, framing) is untouched
+        // and no adapter call happens under a PortHop lock.
+        if (secure_mode) {
+            auto catalog = porthop_build_catalog(mflags);
+            if (!catalog) { server.close(); return; }
+            const auto* desc = porthop_resolve_profile(
+                *catalog, mimicry_profile, "--mimicry-profile");
+            if (!desc) { server.close(); return; }
+            if (!porthop_check_allowed(mflags, mimicry_profile,
+                                       "--mimicry-profile")) {
+                server.close();
+                return;
+            }
+
+            auto dcfg = porthop_mimicry_director_config(
+                *catalog, *desc, ncp::NcpMimicrySession::Role::Server,
+                mflags.transition_grace_ms);
+            dcfg.session_template.advertise_profile_transition_v2 = mflags.v2;
+            ncp::NcpConnectionDirector director(dcfg);
+            if (!director.is_valid()) {
+                std::cerr << "[!] " << director.config_error() << "\n";
+                server.close();
+                return;
+            }
+
+            std::cout << "=== NCP PortHop SECURE mimicry server ===\n"
+                      << "  Ports:     UDP [" << base_port << ", " << (base_port + range) << ")"
+                      << " (hop every " << interval << "s" << (hop_max > hop_min ? ("-" + std::to_string(hop_max) + "s") : "") << ")\n"
+                      << "  Sessions:  " << sid_opts.size() << " whitelisted\n"
+                      << "  Profile:   " << desc->profile_id << "@" << desc->revision
+                      << " (E2E-protected, per-session shaper)\n"
+                      << (mflags.catalog_path.empty()
+                          ? std::string()
+                          : "  Catalog:   " + mflags.catalog_path +
+                            " (external, policy-checked)\n")
+                      << (mflags.allowed.empty()
+                          ? std::string()
+                          : "  Allowed:   " + std::to_string(mflags.allowed.size()) +
+                            " profile id(s) via --mimicry-allowed\n")
+                      << "  Header protection: " << (hp.enabled() ? "ON" : "off")
+                      << "  Padding: " << (pad_cfg.enabled() ? pad_spec : "off") << "\n"
+                      << "[*] Running — Ctrl-C to stop\n";
+
+            g_running = 1;
+            while (g_running) {
+                auto frames = server.poll(50);
+                const uint64_t now = porthop_now_ms();
+                for (const auto& r : frames) {
+                    if (r.frame.flags & ncp::PH_FLAG_ACK_REQUEST)
+                        server.send_ack(r.frame.session_id, r.frame.seq);
+                    director.on_datagram(r.frame.session_id,
+                                         r.frame.payload.data(),
+                                         r.frame.payload.size(), now);
+                }
+                // Protected application echo only (bounded per iteration).
+                for (int i = 0; i < 128; ++i) {
+                    auto app = director.next_application_data();
+                    if (!app) break;
+                    const auto err = director.send_application(
+                        app->session_id, app->payload, now);
+                    if (err != ncp::NcpConnectionDirector::Error::NONE) {
+                        std::cerr << "[!] secure echo failed for sid=0x"
+                                  << std::hex << app->session_id << std::dec
+                                  << ": " << ncp::NcpConnectionDirector::to_string(err)
+                                  << "\n";
+                    }
+                }
+                for (auto& e : director.poll(now))
+                    server.send_to_session(e.session_id, e.bytes.data(),
+                                           e.bytes.size());
+            }
+            server.close();
+            const auto st = director.stats();
+            std::cout << "[*] PortHop secure server stopped (sessions "
+                      << st.sessions_created << " created, "
+                      << st.datagrams_in << " datagrams in, "
+                      << st.datagrams_out << " out, "
+                      << st.app_messages_in << " app messages, "
+                      << st.ingress_unknown_session << " unknown-session drops, "
+                      << st.transition_commits_reported << " transitions committed)\n";
+            // Machine-readable shutdown report (JSON; no secrets/addresses).
+            // The serve loop IS the director poll-loop owner, so direct
+            // session_stats reads here are within the threading contract.
+            {
+                std::vector<std::pair<uint64_t, ncp::NcpMimicrySession::Stats>>
+                    ss;
+                for (auto id : director.session_ids())
+                    if (auto one = director.session_stats(id))
+                        ss.emplace_back(id, *one);
+                porthop_emit_mimicry_stats(mflags, "server", ss, st);
+            }
+            return;
+        }
+
         std::cout << "=== NCP PortHop echo server ===\n"
                   << "  Ports:     UDP [" << base_port << ", " << (base_port + range) << ")"
                   << " (hop every " << interval << "s" << (hop_max > hop_min ? ("-" + std::to_string(hop_max) + "s") : "") << ")\n"
@@ -4790,7 +5595,9 @@ void handle_porthop(const std::vector<std::string>& args) {
     if (action == "client") {
         const std::string host    = get_option(args, "--host", "");
         const std::string message = get_option(args, "--message", "");
-        if (host.empty() || message.empty()) {
+        // Load mode generates its own deterministic payloads; --message is
+        // only required for the single-echo path.
+        if (host.empty() || (message.empty() && !mflags.load.enabled())) {
             std::cerr << "[!] client requires --host <ip> and --message <s>\n";
             porthop_print_usage();
             return;
@@ -4833,9 +5640,21 @@ void handle_porthop(const std::vector<std::string>& args) {
                       << " steps)\n";
         }
 
+        // ── secure mimicry client ───────────────────────────────────────────
+        if (secure_mode) {
+            porthop_client_secure(client, sid, host, message, mimicry_profile,
+                                  mimicry_transition, mflags);
+            return;
+        }
+
         const std::vector<uint8_t> payload(message.begin(), message.end());
         bool echoed = false;
         for (int attempt = 0; attempt < 3 && !echoed; ++attempt) {
+            if (client.session().epoch_exhausted()) {
+                std::cerr << "[!] PortHop epoch exhausted; refusing send until "
+                             "a new session is established\n";
+                break;
+            }
             if (client.session().should_hop(std::chrono::steady_clock::now()))
                 client.hop();
             if (!client.send(payload, ncp::PH_FLAG_ACK_REQUEST)) {
@@ -4862,7 +5681,11 @@ void handle_porthop(const std::vector<std::string>& args) {
             }
             if (!echoed && attempt < 2) {
                 std::cout << "[*] No echo — hopping to the next scheduled port\n";
-                client.hop();
+                if (!client.hop()) {
+                    std::cerr << "[!] PortHop epoch exhausted; a new session_id "
+                                 "and handshake are required\n";
+                    break;
+                }
             }
             if (echoed) break;
         }
@@ -4874,6 +5697,143 @@ void handle_porthop(const std::vector<std::string>& args) {
 
     std::cerr << "[!] Unknown porthop action: " << action << "\n";
     porthop_print_usage();
+}
+
+// ============================================================================
+// ncp mimicry-catalog — external catalog file inspection/validation
+// ============================================================================
+
+static const char* protocol_family_name(ncp::ProtocolFamily f) {
+    using PF = ncp::ProtocolFamily;
+    switch (f) {
+        case PF::GENERIC_UDP:  return "generic_udp";
+        case PF::GENERIC_TCP:  return "generic_tcp";
+        case PF::TLS:          return "tls";
+        case PF::QUIC:         return "quic";
+        case PF::HTTP2:        return "http2";
+        case PF::WEBRTC:       return "webrtc";
+        case PF::VOIP:         return "voip";
+        case PF::VIDEO_STREAM: return "video_stream";
+        case PF::MESSAGING:    return "messaging";
+        case PF::DNS:          return "dns";
+        case PF::STUN:         return "stun";
+    }
+    return "unknown";
+}
+
+static void mimicry_catalog_print_usage() {
+    std::cout << "Usage:\n"
+              << "  ncp mimicry-catalog validate <path>\n"
+              << "      Parse a catalog container and run the catalog's full\n"
+              << "      structural/semantic validation over every record (nothing\n"
+              << "      is registered; the trust store is untouched).\n"
+              << "      Exit code 0 = valid, 1 = parse error or validation errors.\n"
+              << "  ncp mimicry-catalog list <path>\n"
+              << "      List every descriptor: id, revision, family, signature\n"
+              << "      status (yes + key id / no) and validation issues.\n"
+              << "      Exit code 0 = parsed, 1 = parse error.\n"
+              << "\n"
+              << "Container: deterministic signed binary format (NCPMCAT, see\n"
+              << "docs/MIMICRY_PROFILES.md). Records never contain private keys,\n"
+              << "payload bytes or IP addresses. Load a catalog into a session\n"
+              << "with: ncp porthop ... --mimicry-catalog <path>\n";
+}
+
+void handle_mimicry_catalog(const std::vector<std::string>& args) {
+    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+        mimicry_catalog_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+    if (action != "validate" && action != "list") {
+        std::cerr << "[!] Unknown mimicry-catalog action: " << action << "\n";
+        mimicry_catalog_print_usage();
+        g_exit_code = 1;
+        return;
+    }
+    const std::string path = get_arg(args, 1, "");
+    if (path.empty() || path[0] == '-') {
+        std::cerr << "[!] mimicry-catalog " << action
+                  << " requires a <path> argument\n";
+        mimicry_catalog_print_usage();
+        g_exit_code = 1;
+        return;
+    }
+
+    // Metadata pass: full descriptor reconstruction (parse only — pure, no
+    // validation semantics, no trust decisions).
+    ncp::MimicryCatalogIo::ParsedFile parsed;
+    ncp::MimicryCatalogIo::Error perr;
+    if (!ncp::MimicryCatalogIo::parse_file(path, parsed, perr)) {
+        std::cerr << "[!] cannot parse catalog '" << path << "': ["
+                  << perr.code << "] " << perr.message;
+        if (perr.record != ncp::MimicryCatalogIo::kNoRecord)
+            std::cerr << " (record " << perr.record << ")";
+        std::cerr << "\n";
+        g_exit_code = 1;
+        return;
+    }
+
+    // Validation pass: catalog rules over every record WITHOUT registering
+    // anything and without touching the trust store.
+    ncp::ReferenceProfileCatalog probe;  // default limits/capability registry
+    std::vector<std::pair<std::string, std::vector<ncp::ValidationIssue>>>
+        issues;
+    ncp::MimicryCatalogIo::Error verr;
+    if (!ncp::MimicryCatalogIo::validate_file(path, probe, issues, verr)) {
+        std::cerr << "[!] cannot validate catalog '" << path << "': ["
+                  << verr.code << "] " << verr.message;
+        if (verr.record != ncp::MimicryCatalogIo::kNoRecord)
+            std::cerr << " (record " << verr.record << ")";
+        std::cerr << "\n";
+        g_exit_code = 1;
+        return;
+    }
+
+    auto issues_for = [&](const std::string& canonical)
+            -> const std::vector<ncp::ValidationIssue>* {
+        for (const auto& kv : issues)
+            if (kv.first == canonical) return &kv.second;
+        return nullptr;
+    };
+
+    size_t error_count = 0, warning_count = 0;
+    std::cout << "Catalog '" << path << "': container v"
+              << parsed.container_version << ", "
+              << parsed.descriptors.size() << " descriptor(s)\n";
+    for (const auto& d : parsed.descriptors) {
+        const std::string canonical =
+            d.profile_id + "@" + std::to_string(d.revision);
+        std::cout << "  " << canonical
+                  << "  family=" << protocol_family_name(d.family)
+                  << "  signed=" << (d.signature.present ? "yes" : "no");
+        if (d.signature.present)
+            std::cout << " (scheme=" << d.signature.scheme
+                      << ", key id=" << d.signature.key_id << ")";
+        std::cout << "\n";
+        if (const auto* iss = issues_for(canonical)) {
+            for (const auto& i : *iss) {
+                const bool is_err =
+                    (i.severity == ncp::IssueSeverity::ERROR);
+                if (is_err) ++error_count; else ++warning_count;
+                std::cout << "    " << (is_err ? "ERROR" : "warning")
+                          << " [" << i.code << "] " << i.message << "\n";
+            }
+        }
+    }
+
+    if (action == "validate") {
+        if (error_count > 0) {
+            std::cout << "[!] catalog INVALID: " << error_count
+                      << " error(s), " << warning_count << " warning(s)\n";
+            g_exit_code = 1;
+        } else {
+            std::cout << "[+] catalog VALID: " << parsed.descriptors.size()
+                      << " descriptor(s), " << warning_count
+                      << " warning(s)\n";
+            g_exit_code = 0;
+        }
+    }
 }
 
 // ============================================================================

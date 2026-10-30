@@ -18,10 +18,11 @@
 //     no VPN. Feature is opt-in (enabled=false by default).
 // ═══════════════════════════════════════════════════════════════════════════
 
-#include "ncp_dpi_zapret.hpp"
+#include "ncp_blockcheck.hpp"
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -56,10 +57,13 @@ public:
         double ewma_alpha = 0.3;
         int probe_timeout_ms = 5000;
         size_t max_records = 512;          // LRU eviction by last_outcome
+        size_t max_parallel_learns = 4;    // independent hosts, clamped 1..16
         bool background_relearn = true;    // janitor thread re-learns degraded hosts
         // Resolve probe targets via DoH during learn (networks with poisoned
         // DNS). Should mirror the proxy's --doh setting.
         bool use_doh = false;
+        // Deterministic test hook: bypass real BlockChecker network probing.
+        std::function<BlockcheckReport(const std::string&, int)> report_fn;
     };
 
     AutoPilot();
@@ -88,7 +92,9 @@ public:
     void report_failure(const std::string& host, const std::string& reason);
 
     // Synchronous learn: probe all default blockcheck strategies against
-    // host:443 and persist the winner (including "direct").
+    // host:443 and persist the winner (including "direct"). Independent calls
+    // may run concurrently up to max_parallel_learns; excess calls and duplicate
+    // in-flight learns of the same normalized host return false.
     // Returns true when a working strategy was found.
     // Never holds the internal mutex while probing.
     bool learn(const std::string& host, std::string* learned_name = nullptr);
@@ -102,7 +108,8 @@ public:
 
     // Background janitor: every few seconds picks ONE degraded host with
     // recent traffic (last_outcome within 10 min) whose relearn cooldown has
-    // expired and re-learns it. At most one learn runs at a time.
+    // expired and re-learns it. The janitor starts at most one learn at a time;
+    // independent manual learns may run concurrently within the global bound.
     void start();
     void stop();
     bool running() const;

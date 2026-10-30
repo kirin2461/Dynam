@@ -62,6 +62,16 @@ set(NCP_CORE_SRC_SOURCES
     src/ncp_stegodns.cpp         # Enterprise M4: steganographic DNS discovery
     src/ncp_porthop.cpp          # M2: UDP port-hopping transport
     src/ncp_mimicry_stats.cpp    # M5: statistical traffic profiles
+    src/ncp_reference_profile_catalog.cpp  # Этап 1A: signed reference profile catalog
+    src/ncp_profile_transition.cpp      # Generic per-session profile transitions
+    src/ncp_mimicry_autopilot.cpp       # UDP/mimicry decision loop
+    src/ncp_mimicry_session.cpp         # Per-session E2E/mimicry adapter
+    src/ncp_transport_config.cpp        # G2.2: versioned transport-config loader/binder
+    src/ncp_turn_client.cpp             # G5: real TURN-over-UDP client
+    src/ncp_turn_server.cpp             # G5: real TURN-over-UDP server
+    src/ncp_mimicry_fsm.cpp             # Per-session FSM timing and shapes
+    src/ncp_mimicry_catalog_io.cpp      # Signed catalog binary file IO
+    src/ncp_connection_director.cpp     # Per-session registry + poll-loop wiring for PortHop
     src/ncp_desync_confuse.cpp        # M3: TCP state confusion builders (desync engine)
     src/ncp_aemm.cpp                  # M9: Reed-Solomon erasure coding core (K of N)
     src/ncp_fog.cpp              # M7: cooperative fog mesh overlay relay
@@ -492,6 +502,23 @@ target_include_directories(ncp_core
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${CMAKE_SOURCE_DIR}/src
 )
+
+# G4: real QUIC is optional at build time so platforms without MsQuic keep
+# the legacy components. The runtime soname is accepted because some distro
+# packages ship the runtime without an unversioned development symlink.
+find_library(MSQUIC_LIBRARY NAMES msquic libmsquic.so.2)
+if(MSQUIC_LIBRARY)
+    target_sources(ncp_core PRIVATE
+        src/ncp_real_quic.cpp
+        src/ncp_quic_director_adapter.cpp)
+    target_include_directories(ncp_core PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/msquic/include)
+    target_link_libraries(ncp_core PUBLIC ${MSQUIC_LIBRARY})
+    target_compile_definitions(ncp_core PUBLIC NCP_HAVE_MSQUIC=1)
+    message(STATUS "Real QUIC enabled: ${MSQUIC_LIBRARY}")
+else()
+    message(STATUS "MsQuic not found - real QUIC transport disabled")
+endif()
 
 # Set target properties
 set_target_properties(ncp_core PROPERTIES

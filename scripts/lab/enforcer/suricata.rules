@@ -1,0 +1,17 @@
+# Independent structural policy for the isolated G1 control cell.
+# This is deliberately not nDPI and is not represented as a universal DPI model.
+
+# QUIC v1 long-header bootstrap: set a flow-local allowance, then permit the
+# rest of that flow (including short-header packets). byte_test requires the
+# long-header form bit; the version is checked independently.
+pass udp any any -> any any (msg:"NCP ENF allow QUIC v1 bootstrap"; byte_test:1,=,0x80,0,bitmask 0x80; content:"|00 00 00 01|"; offset:1; depth:4; flowbits:set,ncp_quic_allowed; flowbits:noalert; sid:9100001; rev:1;)
+pass udp any any -> any any (msg:"NCP ENF allow established QUIC flow"; flowbits:isset,ncp_quic_allowed; flowbits:noalert; sid:9100002; rev:1;)
+
+# STUN has the fixed magic cookie at bytes 2..5. Keep the flow allowance for
+# Binding Success and subsequent TURN/STUN exchanges on the same flow.
+pass udp any any -> any any (msg:"NCP ENF allow STUN bootstrap"; content:"|21 12 a4 42|"; offset:2; depth:4; flowbits:set,ncp_stun_allowed; flowbits:noalert; sid:9100011; rev:1;)
+pass udp any any -> any any (msg:"NCP ENF allow established STUN flow"; flowbits:isset,ncp_stun_allowed; flowbits:noalert; sid:9100012; rev:1;)
+
+# Everything else on the evidence port is denied, including legacy PH and
+# high-entropy Unknown UDP. This is the enforcing negative control.
+drop udp any any -> any any (msg:"NCP ENF default deny unclassified UDP"; sid:9100099; rev:1;)

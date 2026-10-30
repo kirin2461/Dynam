@@ -1,5 +1,6 @@
 #include "ncp_orchestrator.hpp"
 #include "ncp_ech.hpp"
+#include "ncp_profile_transition.hpp"  // ProfileTransitionState::IDLE
 
 #include <algorithm>
 #include <cstring>
@@ -1013,10 +1014,39 @@ OrchestratorConfig ProtocolOrchestrator::get_config() const {
     return config_;
 }
 
+void ProtocolOrchestrator::set_mimicry_session_provider(
+    std::weak_ptr<const ncp::IMimicrySessionProvider> provider) {
+    std::lock_guard<std::mutex> lock(strategy_mutex_);
+    mimicry_provider_ = std::move(provider);
+}
+
 OrchestratorStats ProtocolOrchestrator::get_stats() const {
     // R9-H04: Thread-safe snapshot of stats_
     std::lock_guard<std::mutex> lock(strategy_mutex_);
-    return OrchestratorStats(stats_);
+    OrchestratorStats out(stats_);
+
+    // Read-only UDP/mimicry telemetry: aggregate the provider's published
+    // per-session snapshot. Expired/absent provider => zeros. The provider
+    // is only ever READ here — the orchestrator never mutates UDP/mimicry
+    // state (actuation is exclusively NcpConnectionDirector / the
+    // profile-transition API).
+    out.mimicry_sessions_active = 0;
+    out.mimicry_transitions_in_flight = 0;
+    out.mimicry_transitions_effective_total = 0;
+    out.mimicry_transitions_aborted_total = 0;
+    out.mimicry_mtu_budget_rejections_total = 0;
+    if (auto provider = mimicry_provider_.lock()) {
+        for (const auto& v : provider->list_sessions()) {
+            if (v.established) ++out.mimicry_sessions_active;
+            if (v.transition_state != ProfileTransitionState::IDLE)
+                ++out.mimicry_transitions_in_flight;
+            out.mimicry_transitions_effective_total += v.transitions_effective;
+            out.mimicry_transitions_aborted_total +=
+                v.transitions_aborted + v.transitions_timed_out;
+            out.mimicry_mtu_budget_rejections_total += v.mtu_budget_rejections;
+        }
+    }
+    return out;
 }
 
 void ProtocolOrchestrator::reset_stats() {

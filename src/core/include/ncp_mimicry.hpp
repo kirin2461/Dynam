@@ -9,6 +9,7 @@
 #include <functional>
 #include <atomic>
 #include <mutex>
+#include <array>
 #include "ncp_csprng.hpp"
 
 namespace ncp {
@@ -47,7 +48,13 @@ public:
         SKYPE,              // Skype-like traffic
         ZOOM,               // Zoom-like video conference
         GENERIC_TCP,        // Generic TCP stream
-        GENERIC_UDP         // Generic UDP datagram
+        GENERIC_UDP,        // Generic UDP datagram
+        // --- Transition protocol v2 stateful masks (appended; existing
+        // numeric values are frozen). Session-bound: these masks are
+        // keyed by MimicConfig::session_mask_key and fail closed on
+        // unwrap for the wrong session / key / DCID. ---
+        QUIC_SHORT_HEADER,  // QUIC 1-RTT-like short header, session-stable DCID
+        STUN_MESSAGE        // RFC 5389-shaped Binding msg + MESSAGE-INTEGRITY
     };
 
     struct MimicConfig {
@@ -101,6 +108,47 @@ public:
          * Default 1200 (RFC 9000 minimum). Can be reduced to save bandwidth.
          */
         uint16_t quic_min_packet_size = 1200;
+
+        /**
+         * @brief Per-session mask binding key (transition protocol v2).
+         *
+         * All-zero = legacy/unbound behavior (the v2 stateful masks then
+         * operate with a zero key — deterministic, but NOT authenticated
+         * per session). The session adapter derives this once per
+         * established E2E session
+         * (HKDF(shared secret, "ncp-mimicry-session/mask-v1")) so both
+         * endpoints hold identical key material. Only the stateful v2 masks
+         * (QUIC_SHORT_HEADER, STUN_MESSAGE) consume it: QUIC_SHORT_HEADER
+         * derives its session-stable DCID and per-packet AEAD key from it
+         * and rejects datagrams carrying a foreign DCID; STUN_MESSAGE
+         * derives its transaction ids and MESSAGE-INTEGRITY HMAC from it
+         * and rejects forgery/tampering at the mask layer. Generic and all
+         * pre-existing masks ignore this field completely (wire-identical).
+         *
+         * WARNING (standalone use): with an all-zero session_mask_key the
+         * QUIC_SHORT_HEADER DCID and the STUN transaction-id stream are
+         * CONSTANT across all standalone instances — a deployment-wide
+         * fingerprint any observer can match on. Use these masks through
+         * the session adapter (which installs a per-session key derived
+         * from the E2E shared secret) or provision a unique key per
+         * session yourself.
+         */
+        std::array<uint8_t, 32> session_mask_key{};
+
+        /**
+         * @brief Endpoint role byte mixed into the STUN_MESSAGE
+         * transaction-id stream (transition protocol v2).
+         *
+         * 0 = unspecified (standalone use): the transaction id keeps the
+         * legacy form HMAC-SHA256(session_mask_key, counter), so pre-role
+         * streams are byte-identical. 1 = client, 2 = server: the stream
+         * becomes HMAC-SHA256(session_mask_key, role || counter), making
+         * the two endpoints' transaction-id sequences direction-distinct
+         * instead of identical. The session adapter sets this from its
+         * Role; the value never affects unwrap (transaction ids are not
+         * authenticated — MESSAGE-INTEGRITY is).
+         */
+        uint8_t endpoint_role = 0;
     };
 
     struct MimicStats {
@@ -196,6 +244,12 @@ private:
     std::vector<uint8_t> create_quic_initial_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_quic_payload(const std::vector<uint8_t>& data);
 
+    // --- Transition protocol v2 stateful masks (session-bound) ---
+    std::vector<uint8_t> create_quic_short_header_wrapper(const std::vector<uint8_t>& payload);
+    std::vector<uint8_t> extract_quic_short_header_payload(const std::vector<uint8_t>& data);
+    std::vector<uint8_t> create_stun_message_wrapper(const std::vector<uint8_t>& payload);
+    std::vector<uint8_t> extract_stun_message_payload(const std::vector<uint8_t>& data);
+
     std::vector<uint8_t> create_websocket_wrapper(const std::vector<uint8_t>& payload);
     std::vector<uint8_t> extract_websocket_payload(const std::vector<uint8_t>& data);
 
@@ -228,6 +282,9 @@ private:
     std::atomic<uint16_t> dns_transaction_id_{0};
     std::atomic<int>      dns_last_domain_idx_{0};
     std::atomic<uint64_t> quic_packet_number_{0};
+    // STUN_MESSAGE transaction counter (v2 mask): drives the request/response
+    // type alternation and the per-message transaction id derivation.
+    std::atomic<uint64_t> stun_counter_{0};
     // TlsSessionPhase stored as int for std::atomic compatibility
     std::atomic<int>      tls_session_phase_{static_cast<int>(TlsSessionPhase::IDLE)};
 

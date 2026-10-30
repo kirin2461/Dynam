@@ -10,6 +10,7 @@
 #include <functional>
 #include <chrono>
 #include <map>
+#include <utility>
 #include <cstdint>
 #include <array>
 
@@ -39,13 +40,22 @@ enum class KeyExchangeProtocol {
     Kyber1024    // Post-quantum KEM (requires liboqs)
 };
 
+/**
+ * @brief Identifies a skipped (out-of-order) message key: the DH ratchet
+ * public key of the chain the message belongs to, plus the message number
+ * within that chain. Namespacing by chain prevents a key derived on one DH
+ * chain from colliding with — or being consumed by — a same-numbered
+ * message from another chain across a DH ratchet boundary.
+ */
+using RatchetSkippedId = std::pair<std::vector<uint8_t>, uint32_t>;
+
 struct RatchetState {
     SecureMemory root_key;        // 32 bytes
     SecureMemory chain_key;       // 32 bytes (legacy — see sending_chain_key)
     uint32_t sending_chain_length = 0;
     uint32_t receiving_chain_length = 0;
     uint32_t previous_chain_length = 0;
-    std::map<uint32_t, SecureMemory> skipped_keys;
+    std::map<RatchetSkippedId, SecureMemory> skipped_keys;
     static constexpr size_t max_skipped_keys = 2000;  // R6-SEC-01: Cap to prevent memory DoS
 };
 
@@ -58,7 +68,10 @@ struct KeyPair {
 };
 
 struct MessageHeader {
-    uint8_t version = 2; 
+    // Wire version 3. v2 -> v3 is an INTENTIONAL wire-format incompatibility:
+    // the AEAD AAD now binds previous_chain_length, so v3 endpoints cannot
+    // decrypt v2 messages and vice versa. Both peers must run the same build.
+    uint8_t version = 3;
     uint32_t message_number = 0;
     uint32_t previous_chain_length = 0;
     std::vector<uint8_t> dh_public_key;
@@ -152,12 +165,43 @@ public:
     E2ESessionState get_state() const;
     bool is_established() const;
     bool is_expired() const;
+    /**
+     * @brief Spontaneous DH ratchet rotation (sending half).
+     *
+     * Rotation policy (safe under periodic, simultaneous, or repeated
+     * invocation, e.g. via E2EManager::rotate_all_keys()):
+     *  - No-op until the peer's ratchet key is pinned by an authenticated
+     *    inbound message (pre-pin rotation would desync the session).
+     *  - Role-gated: only the handshake initiator rotates spontaneously.
+     *    The responder's keys rotate automatically via the full DH ratchet
+     *    step it performs on receiving the initiator's new ratchet key.
+     *  - Fenced: at most one outstanding rotation; further calls are no-ops
+     *    until the peer's authenticated reply carrying its new ratchet key
+     *    is received. This prevents permanent desync on double rotation or
+     *    on loss of the first rotated packet.
+     */
     void rotate_keys();
     void revoke_session();
     std::string get_session_id() const;
     std::chrono::system_clock::time_point get_last_activity() const;
     uint64_t get_messages_sent() const;
     uint64_t get_messages_received() const;
+
+    /**
+     * @brief Monotonic crypto epoch.
+     *
+     * Incremented ONLY when new DH root/chain material is committed: a local
+     * rotate_keys() rotation or an authenticated inbound DH ratchet step.
+     * Never advanced by failed/forged decrypts (verify-then-commit), never
+     * reset by mask/profile transitions; only a fresh handshake starts a new
+     * epoch sequence. Persisted across serialize/restore (v4+).
+     */
+    uint64_t get_crypto_epoch() const;
+
+    /// Monotonic positions in the current directional Double Ratchet chains.
+    /// Mask/profile transitions must never reset these counters.
+    uint32_t get_sending_chain_length() const;
+    uint32_t get_receiving_chain_length() const;
 
     // Serialization support for export/import
     std::vector<uint8_t> serialize_session_state() const;

@@ -999,4 +999,101 @@ TEST(Escalation, RepeatEpisodeKeepsRunningEvolver) {
     EXPECT_EQ(obs->stop_calls.load(), 1);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression: engine update_config() rejection inside apply_winner() must
+// leave the current preset untouched, record NO SwitchEvent, and not poison
+// the decision loop — a later retry (once the engine accepts configs again)
+// must succeed. update_config() rejects configs failing DPIConfig::validate();
+// the engine here is initialized with listen_port=0 (initialize() does not
+// validate, and apply_preset() never touches listen_port), so every hot-apply
+// fails until the test repairs the live config.
+// ─────────────────────────────────────────────────────────────────────────────
+TEST(PresetAutoPilotApplyFailure, RejectedUpdateKeepsPresetAndAllowsRetry) {
+    std::atomic<int64_t> now{1000};
+
+    // Probe world: network up (quick check ok), presets healthy at selection
+    // time and direct dead there (so a preset legitimately wins); monitor
+    // rounds of the applied preset scripted via live_ok.
+    struct ApplyFailProbe {
+        mutable std::mutex m;
+        bool live_ok = false;
+        BlockcheckProbe probe(DPIPreset p, const std::string& h, int timeout) {
+            std::lock_guard<std::mutex> lk(m);
+            bool ok = false;
+            if (timeout == 2000) ok = true;                    // quick check
+            else if (timeout == 100) ok = (p != DPIPreset::NONE);  // selection
+            else ok = (p != DPIPreset::NONE) && live_ok;       // monitor rounds
+            return ok ? mk_probe(h, true, 100) : mk_probe(h, false, 0);
+        }
+    } pb;
+
+    ncp::DPI::DPIBypass engine;
+    ncp::DPI::DPIConfig bad;
+    bad.mode = ncp::DPI::DPIMode::PASSIVE;
+    bad.listen_port = 0;  // invalid per validate(); initialize() accepts it
+    ASSERT_TRUE(engine.initialize(bad));
+    ASSERT_EQ(bad.validate(), ncp::DPI::ValidationError::INVALID_LISTEN_PORT);
+
+    PresetAutoPilot::Config cfg;
+    cfg.candidates = {DPIPreset::RUNET_TSPU, DPIPreset::BEELINE_MOBILE};
+    cfg.probe_hosts = {"a.test", "b.test", "c.test"};
+    cfg.probe_timeout_ms = 100;
+    cfg.monitor_probe_timeout_ms = 150;
+    cfg.monitor_interval_sec = 0;  // busy loop
+    cfg.switch_cooldown_sec = 120;
+    cfg.min_dwell_sec = 180;
+    cfg.probe_fn = [&pb](DPIPreset p, const std::string& h, int t) {
+        return pb.probe(p, h, t);
+    };
+    cfg.now_fn = [&now] { return now.load(); };
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(&engine, cfg));
+
+    // The startup winner cannot be applied: update_config() rejects it.
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("apply-failed") != std::string::npos;
+    }));
+    EXPECT_EQ(pa.current_preset(), DPIPreset::NONE);  // unchanged
+    {
+        const std::string j = pa.to_stats_json();
+        EXPECT_NE(j.find("\"switches_total\":0"), std::string::npos);
+        EXPECT_NE(j.find("\"history\":[]"), std::string::npos)
+            << "a rejected apply must not record a SwitchEvent";
+        EXPECT_EQ(j.find("\"reason\":\"startup-selection\""), std::string::npos);
+        EXPECT_NE(j.find("\"note\":\"apply-failed\""), std::string::npos);
+    }
+
+    // Repair the engine's live config (update_config validates the NEW
+    // config, so a valid replacement is accepted) and let monitor rounds
+    // succeed once the switch lands.
+    ncp::DPI::DPIConfig good;
+    good.mode = ncp::DPI::DPIMode::PASSIVE;
+    ASSERT_TRUE(engine.update_config(good));
+    {
+        std::lock_guard<std::mutex> lk(pb.m);
+        pb.live_ok = true;
+    }
+
+    // Retry: degradation handling re-runs selection (the 60s floor /
+    // cooldown / dwell are all behind the fake clock) and this time the
+    // winner is really applied.
+    ASSERT_TRUE(wait_for([&] {
+        return pa.current_preset() == DPIPreset::RUNET_TSPU;
+    }));
+    ASSERT_TRUE(wait_for([&] { return pa.mode_string() == "monitoring"; }));
+    const std::string j = pa.to_stats_json();
+    EXPECT_NE(j.find("\"switches_total\":1"), std::string::npos);
+    EXPECT_NE(j.find("\"reason\":\"degradation\""), std::string::npos);
+    EXPECT_EQ(j.find("\"reason\":\"startup-selection\""), std::string::npos)
+        << "the failed startup apply must never appear as a switch";
+    EXPECT_NE(j.find("\"current_preset\":\"RuNet-TSPU\""), std::string::npos);
+    EXPECT_NE(j.find("\"engine_preset_effective\":\"RuNet-TSPU\""),
+              std::string::npos);
+    // The engine really carries the winner's config now (TSPU sets fakes).
+    EXPECT_TRUE(engine.get_config().enable_fake_packet);
+    pa.stop();
+    EXPECT_FALSE(pa.running());
+}
+
 } // namespace

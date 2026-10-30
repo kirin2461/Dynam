@@ -343,13 +343,29 @@ ncp proxy --autohostlist /etc/ncp/autohostlist.txt --detector-log /etc/ncp/detec
 
 zapret `blockcheck` equivalent: probes a set of domains through every
 built-in strategy (split-1/2/3/5, split-SNI, multisplit variants, midSLD /
-SNI-extension / end-SLD chain splits), scores them, and reports the winner:
+SNI-extension / end-SLD chain splits), scores them, and reports the winner.
+Domains within one strategy are checked by a bounded parallel worker pool;
+strategies remain sequential so their temporary proxies cannot interfere.
+JSON preserves domain order regardless of worker completion order.
+
+By default, the leading candidates receive one additional confirmation round.
+A domain counts only when it succeeds in discovery and every confirmation;
+a flaky success becomes `fail_reason="unstable"`. A fully validated non-direct
+strategy can end the search early; `--full-sweep` disables that shortcut.
+Probe success means a TLS ServerHello/HRR was received — not a full HTTPS PASS
+and not attribution to a specific DPI device.
 
 ```bash
 ncp blockcheck                                   # built-in domain list
-ncp blockcheck --domains example.com,foo.org --json --out report.json
-ncp blockcheck --apply                           # best strategy as profile JSON
+ncp blockcheck --domains example.com,foo.org --parallel 8 --validate 2 \
+  --json --out report.json
+ncp blockcheck --domains example.com,foo.org --apply best-profile.json
+ncp blockcheck --full-sweep                      # check every strategy
 ```
+
+`--apply` writes a profile only for a winner with at least one confirmation
+round. `--validate 0` retains single-pass reporting but refuses to apply an
+unvalidated profile.
 
 ### AutoPilot — adaptive self-learning engine (`ncp autopilot`)
 
@@ -359,6 +375,10 @@ AutoPilot turns one-shot blockcheck into a continuous, per-host learning loop:
   ClientHello over TCP/443 through a temporary local proxy — no admin, no
   firewall changes) and persists it to `~/.ncp/autopilot.json`
   (`%APPDATA%\ncp\autopilot.json` on Windows).
+- **Learns independent hosts concurrently** (4 tasks by default, up to 16)
+  with serialized atomic DB persistence. A duplicate in-flight learn of the
+  same normalized host is rejected, so manual and background learning cannot
+  overwrite each other's results.
 - **Applies** learned strategies inside `ncp proxy --autopilot` (or whenever
   the DB is enabled): a learned record takes precedence over chains and the
   base strategy; longest-suffix matching covers subdomains automatically.
@@ -371,6 +391,8 @@ AutoPilot turns one-shot blockcheck into a continuous, per-host learning loop:
 
 ```bash
 ncp autopilot learn www.youtube.com --doh   # probe & store best strategy
+ncp autopilot learn-batch youtube.com,instagram.com,discord.com --parallel 3
+ncp autopilot learn-preset youtube --parallel 4 --doh
 ncp autopilot status                        # human-readable DB view
 ncp autopilot status --json                 # machine-readable (GUI-ready)
 ncp autopilot enable                        # proxy picks it up automatically

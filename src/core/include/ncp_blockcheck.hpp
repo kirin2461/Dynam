@@ -34,18 +34,23 @@ struct BlockcheckStrategy {
 struct BlockcheckProbe {
     std::string domain;
     bool ok = false;
-    std::string fail_reason;      // "rst" | "timeout" | "connect" | "proxy"
+    // "rst" | "timeout" | "dns" | "connect" | "proxy" | "tls" | "unstable"
+    std::string fail_reason;
     int latency_ms = 0;
+    int round = 0;                // 0 = discovery, >0 = confirmation round
 };
 
 struct BlockcheckStrategyResult {
     std::string strategy;
     std::string description;
     std::vector<BlockcheckProbe> probes;
+    std::vector<BlockcheckProbe> validation_probes;
     int success_count = 0;
     int total = 0;
     double avg_latency_ms = 0.0;
     long score = 0;
+    bool validation_attempted = false;
+    bool validated = false;       // at least one domain stable in every round
 };
 
 struct BlockcheckReport {
@@ -55,6 +60,10 @@ struct BlockcheckReport {
     DPI::DPIConfig best_config;
     DPI::ZapretChain best_chain;
     bool best_uses_chain = false;
+    bool best_validated = false;
+    bool early_exit_taken = false;
+    size_t parallel_probes = 1;
+    uint32_t validation_rounds = 0;
     int duration_ms = 0;
 };
 
@@ -63,14 +72,28 @@ public:
     struct Config {
         std::vector<std::string> domains;
         std::vector<BlockcheckStrategy> strategies;  // empty → default_strategies()
-        int timeout_ms = 5000;
+        int timeout_ms = 5000;                 // clamped to 1..120000 ms per I/O wait
+        // Domains are checked concurrently inside one strategy. Strategies
+        // remain sequential so their temporary proxies cannot interfere.
+        size_t max_parallel_probes = 4;       // clamped to 1..32
+        // Additional confirmation rounds for the best initial candidates.
+        // A domain counts only when it succeeds in discovery and every round.
+        uint32_t validation_rounds = 1;       // clamped to 0..8; 0 = single-pass
+        size_t max_validation_candidates = 3; // bounds worst-case extra work
+        // Stop after the first non-direct strategy that succeeds for every
+        // domain in discovery and all confirmation rounds.
+        bool early_exit = true;
         // Resolve probe targets via DNS-over-HTTPS inside the temporary
         // probing proxies (needed on networks with poisoned/filtered DNS).
         bool use_doh = false;
-        // progress(strategy_name, domain, ok) — called after each probe
+        // progress(strategy_name, domain, ok) — serialized across workers.
         std::function<void(const std::string&, const std::string&, bool)> progress_cb;
-        // cancel check — return true to abort
+        // cancel check — return true to abort; may be called concurrently by
+        // workers, so the callback itself must be thread-safe.
         std::function<bool()> cancel_cb;
+        // Deterministic test hook. When set, no sockets or proxies are used.
+        std::function<BlockcheckProbe(const BlockcheckStrategy&,
+                                      const std::string&, int)> probe_fn;
     };
 
     BlockcheckReport run(const Config& cfg);

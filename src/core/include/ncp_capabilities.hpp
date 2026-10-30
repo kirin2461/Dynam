@@ -25,6 +25,9 @@ enum class E2EMessageType : uint8_t {
     DATA             = 0x00,   // Application data (may be untagged from old peers)
     CAPABILITIES     = 0x01,   // Capabilities exchange message
     CAPS_CONFIRM     = 0x02,   // Confirmation HMAC of negotiated config
+    // Additive (profile transition stage): control messages of the
+    // per-session ProfileTransitionManager (see ncp_profile_transition.hpp).
+    PROFILE_TRANSITION = 0x03, // Profile transition control (PREPARE/READY/...)
 };
 
 // FIX: inline constexpr (C++17) instead of static constexpr
@@ -146,6 +149,45 @@ struct StageConfigEntry {
 inline constexpr uint16_t NCP_CAPS_VERSION = 1;
 inline constexpr size_t   NCP_MORPH_SEED_SIZE = 32;
 inline constexpr size_t   NCP_CAPS_RESERVED_SIZE = 16;
+
+// ======================================================================
+//  Feature bits carried in NCPCapabilities::reserved (additive)
+// ======================================================================
+//  reserved[0] is a feature bitmap. Unknown bits MUST be ignored on
+//  receive and MUST be sent as zero by peers that do not support them.
+
+/// Bit 0 of reserved[0]: peer supports generic per-session profile
+/// transitions (profile_transition_v1, see ncp_profile_transition.hpp).
+inline constexpr uint8_t NCP_CAPS_FEATURE_PROFILE_TRANSITION_V1 = 0x01;
+
+/// Bit 1 of reserved[0]: peer supports transition protocol v2 (arbitrary
+/// outer-mask transition targets via the v2 mask schedule — control pinned
+/// to the transition-stable mask, ordered RX candidates). V2 implies V1:
+/// a peer advertising 0x02 without 0x01 is malformed and MUST be treated
+/// as v1-only by the receiver (fail-closed).
+inline constexpr uint8_t NCP_CAPS_FEATURE_PROFILE_TRANSITION_V2 = 0x02;
+
+struct NCPCapabilities;  // defined below
+
+/// True if the peer advertised profile_transition_v1 support.
+inline bool capabilities_support_profile_transition(
+    const NCPCapabilities& caps);  // defined after NCPCapabilities
+
+/// Advertise (or clear) profile_transition_v1 support. Purely additive:
+/// only reserved[0] bit 0x01 is modified, everything else is untouched.
+inline void capabilities_set_profile_transition(
+    NCPCapabilities& caps, bool enabled = true);  // defined below
+
+/// True if the peer advertised profile_transition_v2 support (bit 0x02).
+/// Note: this reflects the RAW bit only; v2 negotiation additionally
+/// requires the v1 bit on both sides (v2 ⇒ v1), enforced by the caller.
+inline bool capabilities_support_profile_transition_v2(
+    const NCPCapabilities& caps);  // defined after NCPCapabilities
+
+/// Advertise (or clear) profile_transition_v2 support. Purely additive:
+/// only reserved[0] bit 0x02 is modified, everything else is untouched.
+inline void capabilities_set_profile_transition_v2(
+    NCPCapabilities& caps, bool enabled = true);  // defined below
 
 struct NCPCapabilities {
     uint16_t  version = NCP_CAPS_VERSION;
@@ -349,12 +391,58 @@ struct NCPCapabilities {
 };
 
 // ======================================================================
+//  Feature-bit helpers (reserved[0]) — additive
+// ======================================================================
+
+inline bool capabilities_support_profile_transition(
+    const NCPCapabilities& caps) {
+    return (caps.reserved[0] & NCP_CAPS_FEATURE_PROFILE_TRANSITION_V1) != 0;
+}
+
+inline void capabilities_set_profile_transition(
+    NCPCapabilities& caps, bool enabled) {
+    if (enabled) {
+        caps.reserved[0] = static_cast<uint8_t>(
+            caps.reserved[0] | NCP_CAPS_FEATURE_PROFILE_TRANSITION_V1);
+    } else {
+        caps.reserved[0] = static_cast<uint8_t>(
+            caps.reserved[0] & ~NCP_CAPS_FEATURE_PROFILE_TRANSITION_V1);
+    }
+}
+
+inline bool capabilities_support_profile_transition_v2(
+    const NCPCapabilities& caps) {
+    return (caps.reserved[0] & NCP_CAPS_FEATURE_PROFILE_TRANSITION_V2) != 0;
+}
+
+inline void capabilities_set_profile_transition_v2(
+    NCPCapabilities& caps, bool enabled) {
+    if (enabled) {
+        caps.reserved[0] = static_cast<uint8_t>(
+            caps.reserved[0] | NCP_CAPS_FEATURE_PROFILE_TRANSITION_V2);
+    } else {
+        caps.reserved[0] = static_cast<uint8_t>(
+            caps.reserved[0] & ~NCP_CAPS_FEATURE_PROFILE_TRANSITION_V2);
+    }
+}
+
+struct NegotiatedConfig;  // defined below
+
+// ======================================================================
 //  Negotiated Configuration — result of capabilities exchange
 // ======================================================================
 
 struct NegotiatedConfig {
     uint16_t version = NCP_CAPS_VERSION;           // Included in HMAC
     StageFlag active_stages = StageFlag::NONE;     // Intersection of both peers
+
+    // Additive: intersection (AND) of both peers' reserved[0] feature bits
+    // (e.g. NCP_CAPS_FEATURE_PROFILE_TRANSITION_V1). Deliberately NOT part
+    // of serialize_for_hmac(): the confirmation-HMAC wire format is kept
+    // byte-identical for backward compatibility. A stripped feature bit
+    // downgrades both sides to "feature disabled" (fail-closed), never to
+    // a behavioural mismatch.
+    uint8_t feature_bits = 0;
 
     // Resolved parameters
     std::array<uint8_t, NCP_MORPH_SEED_SIZE> morph_seed{};  // HKDF-derived shared seed
@@ -407,6 +495,37 @@ struct NegotiatedConfig {
     }
 };
 
+/// True if the negotiated config has profile_transition_v1 on.
+inline bool negotiated_support_profile_transition(
+    const NegotiatedConfig& cfg) {
+    return (cfg.feature_bits & NCP_CAPS_FEATURE_PROFILE_TRANSITION_V1) != 0;
+}
+
+/// True if BOTH peers advertised profile_transition_v1 (strict AND on the
+/// reserved[0] feature bits).
+inline bool negotiated_support_profile_transition(
+    const NCPCapabilities& local, const NCPCapabilities& peer) {
+    return capabilities_support_profile_transition(local) &&
+           capabilities_support_profile_transition(peer);
+}
+
+/// True if the negotiated config has profile_transition_v2 on AND v1 on
+/// (v2 ⇒ v1: a v2 bit without v1 is malformed and treated as v1-only).
+inline bool negotiated_support_profile_transition_v2(
+    const NegotiatedConfig& cfg) {
+    return (cfg.feature_bits & NCP_CAPS_FEATURE_PROFILE_TRANSITION_V2) != 0 &&
+           (cfg.feature_bits & NCP_CAPS_FEATURE_PROFILE_TRANSITION_V1) != 0;
+}
+
+/// True if BOTH peers advertised profile_transition_v2 AND
+/// profile_transition_v1 (strict AND; v2 without v1 never counts).
+inline bool negotiated_support_profile_transition_v2(
+    const NCPCapabilities& local, const NCPCapabilities& peer) {
+    return negotiated_support_profile_transition(local, peer) &&
+           capabilities_support_profile_transition_v2(local) &&
+           capabilities_support_profile_transition_v2(peer);
+}
+
 // ======================================================================
 //  Negotiation Logic
 // ======================================================================
@@ -422,6 +541,10 @@ inline NegotiatedConfig negotiate(
     StageFlag both_support = local.supported_stages & peer.supported_stages;
     StageFlag either_wants = local.preferred_stages | peer.preferred_stages;
     result.active_stages = both_support & either_wants;
+
+    // Feature bits: strict AND (both must advertise)
+    result.feature_bits = static_cast<uint8_t>(local.reserved[0] &
+                                               peer.reserved[0]);
 
     // TLS profile: prefer peer's if non-zero (constrained peer drives)
     result.tls_profile = (peer.tls_profile != 0)
@@ -464,6 +587,7 @@ inline NegotiatedConfig negotiate_local_only(
     NegotiatedConfig result;
     result.version = local.version;
     result.active_stages = local.supported_stages & local.preferred_stages;
+    result.feature_bits = local.reserved[0];  // local-only: own advertisement
     result.tls_profile = local.tls_profile;
     result.burst_target = local.burst_target;
     result.max_fragment_size = local.max_fragment_size;

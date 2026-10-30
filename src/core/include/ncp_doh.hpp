@@ -58,12 +58,12 @@ public:
         std::string hostname;
         std::vector<std::string> addresses;     // Resolved IP addresses
         std::vector<std::string> cnames;        // Canonical names
-        RecordType type;
-        uint32_t ttl;                           // Time to live in seconds
-        bool dnssec_valid;                      // DNSSEC validation result
-        bool from_cache;                        // Whether result was cached
-        uint32_t response_time_ms;              // Query response time
-        int status_code;                        // HTTP status code
+        RecordType type = RecordType::A;
+        uint32_t ttl = 0;                       // Time to live in seconds
+        bool dnssec_valid = false;              // DNSSEC validation result
+        bool from_cache = false;                // Whether result was cached
+        uint32_t response_time_ms = 0;          // Query response time
+        int status_code = 0;                    // HTTP status code
         std::string error_message;              // Error description if failed
     };
     /**

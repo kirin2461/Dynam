@@ -227,6 +227,33 @@ std::optional<PortHopFrame> PortHopSession::decode(const uint8_t* data,
     if (raw->session_id != session_id_)
         return std::nullopt;
 
+    // I-EPOCH-6 replay fence (fail-closed, monotonic): reject frames whose
+    // header epoch is older than current_epoch - epoch_replay_window_
+    // (saturating at 0), BEFORE any ACK/HOP_NOTIFY state mutation, so a
+    // replayed old-epoch frame cannot clear ACKs or steer the epoch.
+    // ONLY below-min epochs are fenced: in-window older frames still decode
+    // (and may ACK/notify), future epochs are unaffected (the peer may hop
+    // first). With header protection the frame-epoch-derived prefix
+    // verifies for a valid old replay — this fence is what drops it.
+    if (raw->epoch < min_accepted_epoch_locked()) {
+        ++epoch_fence_dropped_;
+        return std::nullopt;
+    }
+
+    // HOP_NOTIFY admission check runs BEFORE any state mutation (incl.
+    // ACK processing): a notify that advances the epoch by more than
+    // kMaxHopNotifyForwardJump — e.g. a forged 0xffffffff aiming to push
+    // the epoch (and the replay-fence arithmetic) to the u32 wrap point —
+    // is treated as garbage and rejects the WHOLE frame. A legitimate peer
+    // hops one epoch at a time, so real notifies always fit the bound.
+    // The comparison is overflow-safe (see hop_notify_jump_allowed).
+    if ((raw->flags & PH_FLAG_HOP_NOTIFY) && raw->payload.size() >= 4) {
+        uint32_t next_epoch = load_u32_be(raw->payload.data());
+        if (next_epoch > epoch_ &&
+            !hop_notify_jump_allowed(epoch_, next_epoch))
+            return std::nullopt;
+    }
+
     // ACK frame: seq echoes the acknowledged sequence number.
     if (raw->flags & PH_FLAG_ACK) {
         if (raw->seq > last_ack_seq_ || last_ack_seq_ == 0)
@@ -237,7 +264,8 @@ std::optional<PortHopFrame> PortHopSession::decode(const uint8_t* data,
             unacked_.end());
     }
 
-    // HOP_NOTIFY: peer announces its next epoch in the payload (u32 BE).
+    // HOP_NOTIFY: applied only when it advances the epoch (monotonic);
+    // the forward-jump bound was already enforced above.
     if ((raw->flags & PH_FLAG_HOP_NOTIFY) && raw->payload.size() >= 4) {
         uint32_t next_epoch = load_u32_be(raw->payload.data());
         if (next_epoch > epoch_) {
@@ -270,6 +298,12 @@ std::optional<PortHopFrame> PortHopSession::decode_raw(const uint8_t* data,
 bool PortHopSession::should_hop(
     std::chrono::steady_clock::time_point now) const {
     std::lock_guard<std::mutex> lock(mutex_);
+    // Terminal exhaustion supersedes every hop trigger: an exhausted
+    // session must surface epoch_exhausted() to its caller (fail closed,
+    // new session), not an ever-true hop signal that only churns no-op
+    // hops at the ceiling.
+    if (epoch_ == UINT32_MAX)
+        return false;
     if (unacked_.size() > 3)
         return true;
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -277,17 +311,75 @@ bool PortHopSession::should_hop(
     return elapsed.count() > static_cast<int64_t>(cur_interval_sec_);
 }
 
-void PortHopSession::hop() {
+bool PortHopSession::hop() {
     std::lock_guard<std::mutex> lock(mutex_);
-    ++epoch_;
+    if (epoch_ == UINT32_MAX) {
+        // Terminal epoch (I-EPOCH-6 exhaustion): an explicit, observable
+        // no-op. Crucially there is NO epoch_start_/unacked_ reset here —
+        // silently re-arming the hop timer and clearing loss state at the
+        // ceiling would fake a successful hop and mask a dead-end session.
+        // The attempt is counted so operators/tests can observe the churn
+        // and fail closed (new session, new session_id + handshake).
+        ++saturated_hop_attempts_;
+        return false;
+    }
+    // Saturating increment: never wraps UINT32_MAX back to 0 (a wrap would
+    // reopen the replay fence and break epoch monotonicity).
+    epoch_ = saturating_next_epoch(epoch_);
     epoch_start_ = std::chrono::steady_clock::now();
     cur_interval_sec_ = schedule_.sample_interval_sec();
     unacked_.clear();
+    return true;
+}
+
+bool PortHopSession::epoch_exhausted() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return epoch_ == UINT32_MAX;
+}
+
+uint64_t PortHopSession::saturated_hop_attempts() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return saturated_hop_attempts_;
+}
+
+std::unique_ptr<PortHopSession>
+PortHopSession::at_epoch_for_test(uint64_t session_id,
+                                  HopSchedule schedule,
+                                  uint32_t start_epoch) {
+    auto s = std::unique_ptr<PortHopSession>(
+        new PortHopSession(session_id, std::move(schedule)));
+    std::lock_guard<std::mutex> lock(s->mutex_);
+    s->epoch_ = start_epoch;
+    return s;
 }
 
 uint32_t PortHopSession::current_epoch() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return epoch_;
+}
+
+void PortHopSession::set_epoch_replay_window(uint32_t window_epochs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Clamp to a sane maximum: a bogus huge window (e.g. UINT32_MAX) would
+    // make min_accepted_epoch() saturate at 0 for all practical epochs and
+    // thereby silently disable the replay fence. 0 remains a valid strict
+    // mode ("current epoch or newer only").
+    epoch_replay_window_ = std::min(window_epochs, kMaxEpochReplayWindow);
+}
+
+uint32_t PortHopSession::epoch_replay_window() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return epoch_replay_window_;
+}
+
+uint32_t PortHopSession::min_accepted_epoch() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return min_accepted_epoch_locked();
+}
+
+uint64_t PortHopSession::epoch_fence_dropped() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return epoch_fence_dropped_;
 }
 
 uint32_t PortHopSession::next_seq() const {
@@ -547,9 +639,16 @@ std::vector<PortHopReceived> PortHopServer::poll(int timeout_ms) {
             }
 
             SessionState& st = it->second;
+            // Distinguish epoch-fence drops (well-formed frame for a known
+            // session, rejected only for being too old) from genuinely
+            // malformed/undecodable datagrams.
+            const uint64_t fence_before = st.session.epoch_fence_dropped();
             auto frame = st.session.decode(buf, static_cast<size_t>(n));
             if (!frame) {
-                ++malformed_;
+                if (st.session.epoch_fence_dropped() != fence_before)
+                    ++epoch_fence_dropped_;
+                else
+                    ++malformed_;
                 continue;
             }
 
@@ -659,10 +758,24 @@ uint64_t PortHopServer::frames_malformed() const {
     return malformed_;
 }
 
+uint64_t PortHopServer::frames_rejected_epoch_fence() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return epoch_fence_dropped_;
+}
+
 uint64_t PortHopServer::session_frame_count(uint64_t session_id) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = sessions_.find(session_id);
     return it == sessions_.end() ? 0 : it->second.frames;
+}
+
+std::optional<bool> PortHopServer::session_epoch_exhausted(
+    uint64_t session_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = sessions_.find(session_id);
+    if (it == sessions_.end())
+        return std::nullopt;
+    return it->second.session.epoch_exhausted();
 }
 
 // ==================== PortHopClient ====================
@@ -840,8 +953,8 @@ std::vector<PortHopReceived> PortHopClient::poll(int timeout_ms) {
     return out;
 }
 
-void PortHopClient::hop() {
-    session_.hop();
+bool PortHopClient::hop() {
+    return session_.hop();
 }
 
 uint16_t PortHopClient::current_target_port() const {

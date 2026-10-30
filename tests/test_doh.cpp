@@ -153,12 +153,16 @@ TEST_F(DoHClientTest, RecordType_MXHasValue15) {
 // ── DNSResult Structure ───────────────────────────────────────────────────────
 
 TEST_F(DoHClientTest, DNSResult_DefaultValues) {
-    DoHClient::DNSResult r{};
+    // Default-initialization (not only value-initialization with `{}`) must
+    // be safe: cache misses and error paths return DNSResult by value.
+    DoHClient::DNSResult r;
     r.hostname = "example.com";
-    r.type     = DoHClient::RecordType::A;
+    EXPECT_EQ(r.type, DoHClient::RecordType::A);
     EXPECT_FALSE(r.from_cache);
     EXPECT_FALSE(r.dnssec_valid);
     EXPECT_EQ(r.ttl, 0u);
+    EXPECT_EQ(r.response_time_ms, 0u);
+    EXPECT_EQ(r.status_code, 0);
 }
 
 // ── Error Handling ────────────────────────────────────────────────────────────

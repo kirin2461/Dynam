@@ -119,6 +119,21 @@ public:
     void set_cache_enabled(bool enabled);
 
     /**
+     * @brief Override the ECHConfig fetch path (test seam).
+     *
+     * When set, connect_with_ech() invokes this callback instead of
+     * performing a live DNS-over-HTTPS lookup via ECHConfigFetcher.
+     * Production code never sets this (default-constructed managers keep
+     * the live DoH behavior unchanged); it exists so unit tests can
+     * exercise the retry/backoff/fallback logic deterministically and
+     * without network access. The previous network-dependent test had to
+     * detach a watchdog thread around the unbounded DoH call, which could
+     * outlive the test process and crash during static destruction.
+     */
+    void set_config_fetch_override(
+        std::function<bool(const std::string& domain, ECHConfig& config)> fetcher);
+
+    /**
      * @brief Set cache instance (default uses global cache)
      */
     void set_cache(std::shared_ptr<ECHConfigCache> cache);

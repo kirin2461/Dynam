@@ -162,61 +162,104 @@ TEST_F(ECHCacheTest, DiskPersistence) {
     std::remove("./test_ech_cache.dat");
 }
 
-// Test 10: ECH retry mechanism
+// Test 10: ECH retry mechanism (deterministic, no network)
+//
+// Previously this test called connect_with_ech() on a real domain, which
+// performs live DoH lookups (HTTPS RR + TXT fallback) on a cache miss.
+// Those lookups can stall for minutes on network-restricted runners, so
+// the test wrapped the call in a watchdog thread that was DETACHED on
+// stall — the detached worker then kept running past the end of the
+// process, touching torn-down statics (observed: std::bad_alloc abort;
+// the CMake ordering note "keep the ECH files last" only papered over
+// it). It also wrote to stack locals of the already-exited test body.
+//
+// The fetch path is now injected via set_config_fetch_override(), so the
+// retry/backoff/fallback logic is exercised with zero network access,
+// no watchdog, and no detached thread.
 TEST_F(ECHCacheTest, ECHRetryMechanism) {
-    // connect_with_ech() performs live DoH lookups (HTTPS RR + TXT
-    // fallback) on a cache miss. On CI runners where outbound HTTPS is
-    // blocked or broken (observed on the macOS job: ncp_tests died while
-    // this test was running), those lookups can stall for minutes and
-    // hang the whole test binary. Run the call with a watchdog and skip
-    // gracefully on stall instead of hanging the suite.
-    //
-    // The manager is heap-allocated and intentionally leaked on the
-    // timeout path so the detached worker never touches freed memory.
     RetryPolicy policy;
     policy.max_retries = 1;  // bound the backoff loop
     policy.initial_delay = std::chrono::milliseconds(1);
     policy.max_delay = std::chrono::milliseconds(10);
-    auto* manager = new ECHConnectionManager(policy);
+    ECHConnectionManager manager(policy);
 
-    // RFC 2606 ".invalid" — guaranteed nonexistent; NXDOMAINs fast when
-    // DNS works at all.
+    // Fetch override that always fails fast — no DoH, no sockets.
+    int fetch_calls = 0;
+    manager.set_config_fetch_override(
+        [&fetch_calls](const std::string&, ECHConfig&) -> bool {
+            ++fetch_calls;
+            return false;
+        });
+
     const std::string domain = "nonexistent.invalid";
     std::vector<uint8_t> client_hello = {0x16, 0x03, 0x03, 0x00, 0x10};
     std::vector<uint8_t> encrypted;
 
-    std::atomic<bool> done{false};
-    ECHResult result = ECHResult::NETWORK_ERROR;
-    std::thread worker([&]() {
-        result = manager->connect_with_ech(domain, client_hello, encrypted);
-        done.store(true);
-    });
+    ECHResult result = manager.connect_with_ech(domain, client_hello, encrypted);
 
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(45);
-    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-
-    if (!done.load()) {
-        worker.detach();
-        // NOTE: manager intentionally leaked — the detached worker may
-        // still be inside connect_with_ech().
-        GTEST_SKIP() << "ECH DoH lookup stalled (outbound network "
-                        "restricted?) — skipping network-dependent test";
-    }
-    worker.join();
-
-    // Should fallback or return error, but not crash
-    EXPECT_TRUE(
-        result == ECHResult::FALLBACK_PLAINTEXT ||
-        result == ECHResult::GREASE_ACCEPTED ||
-        result == ECHResult::NETWORK_ERROR
-    );
+    // With GREASE enabled (default policy) the manager must fall back to
+    // GREASE once the initial fetch and the bounded retry both fail.
+    EXPECT_EQ(result, ECHResult::GREASE_ACCEPTED);
+    // Initial fetch + max_retries retry fetches.
+    EXPECT_EQ(fetch_calls, 1 + static_cast<int>(policy.max_retries));
 
     // Check history
-    auto last = manager->get_last_attempt();
-    EXPECT_TRUE(last.has_value());
-    delete manager;
+    auto last = manager.get_last_attempt();
+    ASSERT_TRUE(last.has_value());
+    EXPECT_EQ(last->result, ECHResult::GREASE_ACCEPTED);
+    EXPECT_EQ(last->domain, domain);
+}
+
+// Test 11: retry loop actually retries and succeeds (deterministic)
+TEST_F(ECHCacheTest, ECHRetrySucceedsAfterTransientFetchFailure) {
+    RetryPolicy policy;
+    policy.max_retries = 3;
+    policy.initial_delay = std::chrono::milliseconds(1);
+    policy.max_delay = std::chrono::milliseconds(10);
+    ECHConnectionManager manager(policy);
+
+    // Fail the first two fetches, succeed on the third (the 2nd retry)
+    // with a fully valid config so attempt_connection() applies ECH.
+    int fetch_calls = 0;
+    manager.set_config_fetch_override(
+        [&fetch_calls](const std::string& domain, ECHConfig& cfg) -> bool {
+            ++fetch_calls;
+            if (fetch_calls < 3) return false;
+            std::vector<uint8_t> private_key;
+            cfg = create_test_ech_config(domain, HPKECipherSuite(), private_key);
+            return true;
+        });
+
+    const std::string domain = "retry-success.example";
+    // Minimal well-formed ClientHello: record header + handshake header +
+    // version + random + empty session id + cipher suites + compression +
+    // empty extensions block (required by apply_ech()'s parser).
+    std::vector<uint8_t> client_hello = {
+        0x16, 0x03, 0x03, 0x00, 0x40,  // TLS record header
+        0x01, 0x00, 0x00, 0x3c,        // Handshake: ClientHello
+        0x03, 0x03,                    // Version
+    };
+    for (int i = 0; i < 32; i++)
+        client_hello.push_back(static_cast<uint8_t>(i));  // random
+    client_hello.push_back(0x00);        // session id length
+    client_hello.push_back(0x00);        // cipher suites length (2)
+    client_hello.push_back(0x02);
+    client_hello.push_back(0x13);        // TLS_AES_128_GCM_SHA256
+    client_hello.push_back(0x01);
+    client_hello.push_back(0x01);        // compression methods length
+    client_hello.push_back(0x00);        // null compression
+    client_hello.push_back(0x00);        // extensions length (0)
+    client_hello.push_back(0x00);
+    std::vector<uint8_t> encrypted;
+
+    ECHResult result = manager.connect_with_ech(domain, client_hello, encrypted);
+
+    EXPECT_EQ(result, ECHResult::SUCCESS);
+    EXPECT_EQ(fetch_calls, 3);
+    EXPECT_GT(encrypted.size(), client_hello.size());
+    // Successful config is cached for subsequent connections.
+    ASSERT_TRUE(manager.get_last_attempt().has_value());
+    EXPECT_EQ(manager.get_last_attempt()->result, ECHResult::SUCCESS);
 }
 
 // main() is provided by gtest_main via the ncp_tests target.

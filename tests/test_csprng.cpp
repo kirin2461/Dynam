@@ -114,6 +114,11 @@ TEST(CSPRNGTest, FillEmpty) {
     // Should not crash on empty vector
     CSPRNG::fill(buf);
     EXPECT_TRUE(buf.empty());
+
+    // A zero-length raw buffer is a no-op even when data() would be null;
+    // a positive-length null buffer is rejected instead of reaching libsodium.
+    EXPECT_NO_THROW(CSPRNG::fill(nullptr, 0));
+    EXPECT_THROW(CSPRNG::fill(nullptr, 1), std::invalid_argument);
 }
 
 // ─── shuffle ─────────────────────────────────────────────────────────────────

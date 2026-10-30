@@ -234,12 +234,13 @@ void ap_mkdir_parent(const std::string& path) {
 class AutoPilot::Impl {
 public:
     Config cfg;
-    mutable std::mutex mu;                 // guards db + pending_fail
+    mutable std::mutex mu;                 // guards db + pending_fail + learning_hosts
     std::map<std::string, AutoPilotRecord> db;
     std::map<std::string, uint32_t> pending_fail;  // unknown-host failure counters
+    std::map<std::string, bool> learning_hosts;    // per-host in-flight learn dedup
     std::atomic<bool> enabled{false};
     std::atomic<bool> running{false};
-    std::atomic<bool> learn_busy{false};
+    std::atomic<size_t> learn_active{0};
     std::thread janitor;
 
     ~Impl() { stop_janitor(); }
@@ -445,6 +446,9 @@ bool AutoPilot::load(const Config& cfg) {
     impl_->cfg = cfg;
     if (impl_->cfg.db_path.empty()) impl_->cfg.db_path = default_db_path();
     if (impl_->cfg.max_records == 0) impl_->cfg.max_records = 512;
+    impl_->cfg.probe_timeout_ms = std::max(1, std::min(120000, impl_->cfg.probe_timeout_ms));
+    impl_->cfg.max_parallel_learns = std::max<size_t>(
+        1, std::min<size_t>(16, impl_->cfg.max_parallel_learns));
     impl_->load_from_disk();
     return true;
 }
@@ -521,28 +525,56 @@ void AutoPilot::report_failure(const std::string& host_in, const std::string& /*
 bool AutoPilot::learn(const std::string& host_in, std::string* learned_name) {
     std::string host = normalize_host(host_in);
     if (host.empty()) return false;
-    // one learn at a time (probing spins up temp proxies)
-    if (impl_->learn_busy.exchange(true)) return false;
+    // Bounded per-host concurrency: each learn owns independent temporary
+    // proxies, while DB mutation and atomic persistence remain serialized.
+    size_t active = impl_->learn_active.load();
+    while (true) {
+        if (active >= impl_->cfg.max_parallel_learns) return false;
+        if (impl_->learn_active.compare_exchange_weak(active, active + 1)) break;
+    }
     struct BusyGuard {
-        std::atomic<bool>& f;
-        ~BusyGuard() { f.store(false); }
-    } guard{impl_->learn_busy};
+        std::atomic<size_t>& f;
+        ~BusyGuard() { f.fetch_sub(1); }
+    } guard{impl_->learn_active};
+
+    // A manual learn, duplicate batch entry and janitor run must not race on
+    // the same normalized host: a stale failure could otherwise overwrite a
+    // freshly committed stable strategy.
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        if (impl_->learning_hosts.count(host)) return false;
+        impl_->learning_hosts[host] = true;
+    }
+    struct HostGuard {
+        AutoPilot::Impl* impl;
+        std::string host;
+        ~HostGuard() {
+            std::lock_guard<std::mutex> lk(impl->mu);
+            impl->learning_hosts.erase(host);
+        }
+    } host_guard{impl_.get(), host};
 
     int timeout_ms = impl_->cfg.probe_timeout_ms;
 
     // ── probe WITHOUT holding the mutex ──
-    BlockChecker checker;
-    BlockChecker::Config bcfg;
-    bcfg.domains = {host};
-    bcfg.timeout_ms = timeout_ms;
-    bcfg.use_doh = impl_->cfg.use_doh;
-    BlockcheckReport rep = checker.run(bcfg);
+    BlockcheckReport rep;
+    if (impl_->cfg.report_fn) {
+        rep = impl_->cfg.report_fn(host, timeout_ms);
+    } else {
+        BlockChecker checker;
+        BlockChecker::Config bcfg;
+        bcfg.domains = {host};
+        bcfg.timeout_ms = timeout_ms;
+        bcfg.use_doh = impl_->cfg.use_doh;
+        rep = checker.run(bcfg);
+    }
 
     // A winner is real only if it actually probed successfully. Note: "direct"
     // winning legitimately means no bypass is needed (passthrough record).
     bool found = false;
     for (const auto& sr : rep.results) {
-        if (sr.strategy == rep.best_strategy && sr.success_count > 0) found = true;
+        if (sr.strategy == rep.best_strategy && sr.success_count > 0 &&
+            (rep.validation_rounds == 0 || rep.best_validated)) found = true;
     }
 
     AutoPilotStrategy st = Impl::strategy_from_report(rep);

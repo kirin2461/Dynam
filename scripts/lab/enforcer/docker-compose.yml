@@ -1,0 +1,70 @@
+name: ncp-g1-enforcer
+
+services:
+  enforcer:
+    build: .
+    environment:
+      ENFORCER_MODE: "${ENFORCER_MODE:-quic-stun}"
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, NET_RAW]
+    security_opt: [no-new-privileges:true]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      client_net:
+        ipv4_address: 172.30.240.2
+      server_net:
+        ipv4_address: 172.30.241.2
+    volumes:
+      - ./results:/results
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep suricata >/dev/null && nft list table ip ncp_enforcer >/dev/null && grep -q 'Engine started' /var/log/suricata/suricata.log"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+
+  receiver:
+    image: python:3.12-alpine
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        ip route add 172.30.240.0/24 via 172.30.241.2
+        exec python3 /opt/udp_control.py server --output /results/receiver.jsonl
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      server_net:
+        ipv4_address: 172.30.241.10
+    volumes:
+      - ./udp_control.py:/opt/udp_control.py:ro
+      - ./results:/results
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.connect((\"127.0.0.1\",45000)); s.close()'"]
+      interval: 1s
+      timeout: 1s
+      retries: 10
+
+  sender:
+    image: python:3.12-alpine
+    profiles: [controls]
+    entrypoint: ["/bin/sh", "-ec"]
+    command: ["ip route add 172.30.241.0/24 via 172.30.240.2; exec python3 /opt/udp_control.py client"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    networks:
+      client_net:
+        ipv4_address: 172.30.240.10
+    volumes:
+      - ./udp_control.py:/opt/udp_control.py:ro
+      - ./results:/results
+
+networks:
+  client_net:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.name: ncp-g1-client
+  server_net:
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.name: ncp-g1-server

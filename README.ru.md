@@ -329,13 +329,29 @@ ncp proxy --autohostlist /etc/ncp/autohostlist.txt --detector-log /etc/ncp/detec
 Эквивалент zapret `blockcheck`: проверяет набор доменов через каждую
 встроенную стратегию (split-1/2/3/5, split-SNI, варианты multisplit,
 цепочечные сплиты midSLD / SNI-extension / end-SLD), оценивает их и
-показывает победителя:
+показывает победителя. Домены внутри одной стратегии проверяются параллельно
+с ограничением worker pool; стратегии остаются последовательными, чтобы их
+временные прокси не влияли друг на друга. Порядок доменов в JSON не зависит от
+порядка завершения потоков.
+
+По умолчанию лучшие кандидаты проходят один дополнительный confirmation round.
+Домен засчитывается только при успехе в discovery и каждом подтверждении;
+нестабильный успех получает `fail_reason="unstable"`. Полностью подтверждённая
+стратегия, отличная от `direct`, позволяет завершить поиск досрочно; `--full-sweep`
+отключает это сокращение. Успех probe означает получение TLS ServerHello/HRR,
+а не полноценный HTTPS PASS и не атрибуцию конкретного DPI-устройства.
 
 ```bash
 ncp blockcheck                                   # встроенный список доменов
-ncp blockcheck --domains example.com,foo.org --json --out report.json
-ncp blockcheck --apply                           # лучшая стратегия в виде профиля JSON
+ncp blockcheck --domains example.com,foo.org --parallel 8 --validate 2 \
+  --json --out report.json
+ncp blockcheck --domains example.com,foo.org --apply best-profile.json
+ncp blockcheck --full-sweep                      # проверить все стратегии
 ```
+
+`--apply` записывает профиль только для победителя как минимум с одним
+подтверждающим раундом. `--validate 0` оставляет single-pass режим для отчёта,
+но не разрешает применить неподтверждённый профиль.
 
 ### AutoPilot — адаптивный самообучающийся движок (`ncp autopilot`)
 
@@ -345,6 +361,10 @@ AutoPilot превращает разовый blockcheck в непрерывны
   ClientHello по TCP/443 через временный локальный прокси — без админа и без
   изменений файрвола) и сохраняет в `~/.ncp/autopilot.json`
   (`%APPDATA%\ncp\autopilot.json` на Windows).
+- **Обучает независимые хосты параллельно** (по умолчанию до 4 задач, максимум
+  16) с сериализованной атомарной записью БД. Повторный in-flight learn того же
+  нормализованного хоста отклоняется, поэтому ручной запуск и фоновое
+  переобучение не перезаписывают друг друга.
 - **Применяет** выученные стратегии внутри `ncp proxy --autopilot` (или везде,
   где включена БД): выученная запись имеет приоритет над цепочками и базовой
   стратегией; совпадение по самому длинному суффиксу автоматически покрывает
@@ -358,6 +378,8 @@ AutoPilot превращает разовый blockcheck в непрерывны
 
 ```bash
 ncp autopilot learn www.youtube.com --doh   # проба и сохранение лучшей стратегии
+ncp autopilot learn-batch youtube.com,instagram.com,discord.com --parallel 3
+ncp autopilot learn-preset youtube --parallel 4 --doh
 ncp autopilot status                        # человекочитаемый вид БД
 ncp autopilot status --json                 # машиночитаемый (для GUI)
 ncp autopilot enable                        # прокси подхватывает автоматически

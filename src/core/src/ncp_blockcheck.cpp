@@ -4,11 +4,13 @@
 #include "ncp_tls_parse.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <initializer_list>
 #include <mutex>
 #include <cstring>
 #include <sstream>
+#include <thread>
 
 #ifdef _WIN32
     #ifndef WIN32_LEAN_AND_MEAN
@@ -72,17 +74,23 @@ int bc_wait(bc_socket_t s, bool write, int timeout_ms) {
 #endif
 }
 
-bc_socket_t bc_connect(const char* host, uint16_t port, int timeout_ms) {
+bc_socket_t bc_connect(const char* host, uint16_t port, int timeout_ms,
+                       std::string* fail_reason = nullptr) {
+    if (fail_reason) fail_reason->clear();
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* res = nullptr;
-    if (::getaddrinfo(host, std::to_string(port).c_str(), &hints, &res) != 0 || !res)
+    if (::getaddrinfo(host, std::to_string(port).c_str(), &hints, &res) != 0 || !res) {
+        if (fail_reason) *fail_reason = "dns";
         return BC_INVALID_SOCK;
+    }
     bc_socket_t out = BC_INVALID_SOCK;
+    bool saw_timeout = false;
+    bool saw_connect_error = false;
     for (addrinfo* ai = res; ai && out == BC_INVALID_SOCK; ai = ai->ai_next) {
         bc_socket_t s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (s == BC_INVALID_SOCK) continue;
+        if (s == BC_INVALID_SOCK) { saw_connect_error = true; continue; }
 #ifdef _WIN32
         u_long nb = 1;
         ioctlsocket(s, FIONBIO, &nb);
@@ -94,10 +102,14 @@ bc_socket_t bc_connect(const char* host, uint16_t port, int timeout_ms) {
         if (r < 0) {
             int e = bc_err();
             if (e != BC_EINPROGRESS && e != BC_EWOULDBLOCK) {
+                saw_connect_error = true;
                 BC_CLOSE(s);
                 continue;
             }
-            if (bc_wait(s, true, timeout_ms) <= 0) {
+            int wr = bc_wait(s, true, timeout_ms);
+            if (wr <= 0) {
+                if (wr == 0) saw_timeout = true;
+                else saw_connect_error = true;
                 BC_CLOSE(s);
                 continue;
             }
@@ -105,6 +117,7 @@ bc_socket_t bc_connect(const char* host, uint16_t port, int timeout_ms) {
             socklen_t sl = sizeof(so_err);
             ::getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_err), &sl);
             if (so_err != 0) {
+                saw_connect_error = true;
                 BC_CLOSE(s);
                 continue;
             }
@@ -118,6 +131,8 @@ bc_socket_t bc_connect(const char* host, uint16_t port, int timeout_ms) {
         out = s;
     }
     ::freeaddrinfo(res);
+    if (fail_reason && out == BC_INVALID_SOCK)
+        *fail_reason = (saw_timeout && !saw_connect_error) ? "timeout" : "connect";
     return out;
 }
 
@@ -128,6 +143,22 @@ bool bc_send_all(bc_socket_t s, const uint8_t* d, size_t n) {
                        static_cast<int>(n - sent), 0);
         if (r <= 0) return false;
         sent += static_cast<size_t>(r);
+    }
+    return true;
+}
+
+// TCP has no message boundaries: a SOCKS5 reply or a TLS record header may
+// arrive in several short reads. Never classify a valid peer as flaky merely
+// because recv() returned less than requested.
+bool bc_recv_full(bc_socket_t s, void* data, size_t n, int timeout_ms) {
+    auto* out = static_cast<uint8_t*>(data);
+    size_t received = 0;
+    while (received < n) {
+        if (bc_wait(s, false, std::max(1, timeout_ms)) <= 0) return false;
+        int r = ::recv(s, reinterpret_cast<char*>(out + received),
+                       static_cast<int>(n - received), 0);
+        if (r <= 0) return false;
+        received += static_cast<size_t>(r);
     }
     return true;
 }
@@ -229,8 +260,8 @@ BlockcheckProbe BlockChecker::probe_via_socks5(uint16_t proxy_port,
     const uint8_t greet[3] = {0x05, 0x01, 0x00};
     if (!bc_send_all(s, greet, 3)) { p.fail_reason = "proxy"; return p; }
     uint8_t resp[2];
-    if (bc_wait(s, false, timeout_ms) <= 0 ||
-        ::recv(s, reinterpret_cast<char*>(resp), 2, 0) != 2 || resp[1] != 0x00) {
+    if (!bc_recv_full(s, resp, sizeof(resp), timeout_ms) ||
+        resp[0] != 0x05 || resp[1] != 0x00) {
         p.fail_reason = "proxy";
         return p;
     }
@@ -240,25 +271,47 @@ BlockcheckProbe BlockChecker::probe_via_socks5(uint16_t proxy_port,
     req.insert(req.end(), domain.begin(), domain.end());
     req.push_back(0x01); req.push_back(0xBB);  // 443
     if (!bc_send_all(s, req.data(), req.size())) { p.fail_reason = "proxy"; return p; }
-    uint8_t rrep[10];
-    if (bc_wait(s, false, timeout_ms) <= 0) { p.fail_reason = "timeout"; return p; }
-    int rn = ::recv(s, reinterpret_cast<char*>(rrep), sizeof(rrep), 0);
-    if (rn < 2) {
-        p.fail_reason = (rn < 0 && bc_err() == BC_ECONNRESET) ? "rst" : "proxy";
+    uint8_t rrep[4];
+    if (!bc_recv_full(s, rrep, sizeof(rrep), timeout_ms)) {
+        p.fail_reason = "proxy";
         return p;
     }
+    if (rrep[0] != 0x05) { p.fail_reason = "proxy"; return p; }
     if (rrep[1] != 0x00) { p.fail_reason = "connect"; return p; }
+    // Consume the complete BOUND.ADDR/BOUND.PORT according to ATYP so no
+    // SOCKS5 framing bytes can be mistaken for the subsequent TLS record.
+    size_t tail_len = 0;
+    uint8_t domain_len = 0;
+    if (rrep[3] == 0x01) tail_len = 4 + 2;        // IPv4
+    else if (rrep[3] == 0x04) tail_len = 16 + 2; // IPv6
+    else if (rrep[3] == 0x03) {
+        if (!bc_recv_full(s, &domain_len, 1, timeout_ms)) {
+            p.fail_reason = "proxy";
+            return p;
+        }
+        tail_len = static_cast<size_t>(domain_len) + 2;
+    } else {
+        p.fail_reason = "proxy";
+        return p;
+    }
+    uint8_t tail[257];
+    if (!bc_recv_full(s, tail, tail_len, timeout_ms)) {
+        p.fail_reason = "proxy";
+        return p;
+    }
 
-    // send ClientHello, await any response
+    // send ClientHello, await a complete TLS record header
     auto ch = build_client_hello(domain);
     if (!bc_send_all(s, ch.data(), ch.size())) { p.fail_reason = "rst"; return p; }
-    int wr = bc_wait(s, false, timeout_ms);
-    if (wr == 0) { p.fail_reason = "timeout"; return p; }
-    if (wr < 0) { p.fail_reason = "rst"; return p; }
-    uint8_t buf[8];
-    int n = ::recv(s, reinterpret_cast<char*>(buf), sizeof(buf), 0);
-    if (n <= 0) {
-        p.fail_reason = (n < 0 && bc_err() == BC_ECONNRESET) ? "rst" : "timeout";
+    uint8_t buf[6];
+    if (!bc_recv_full(s, buf, sizeof(buf), timeout_ms)) {
+        p.fail_reason = "timeout";
+        return p;
+    }
+    // An arbitrary response (including a TCP/HTTP middlebox reply or TLS
+    // alert) is not a bypass success. Require a TLS ServerHello/HRR record.
+    if (buf[0] != 0x16 || buf[1] != 0x03 || buf[5] != 0x02) {
+        p.fail_reason = "tls";
         return p;
     }
     p.ok = true;
@@ -273,18 +326,20 @@ BlockcheckProbe BlockChecker::probe_direct(const std::string& domain, int timeou
     BlockcheckProbe p;
     p.domain = domain;
     const auto t0 = std::chrono::steady_clock::now();
-    bc_socket_t s = bc_connect(domain.c_str(), 443, timeout_ms);
-    if (s == BC_INVALID_SOCK) { p.fail_reason = "connect"; return p; }
+    bc_socket_t s = bc_connect(domain.c_str(), 443, timeout_ms, &p.fail_reason);
+    if (s == BC_INVALID_SOCK) return p;
     struct G { bc_socket_t s; ~G() { BC_CLOSE(s); } } g{s};
     auto ch = build_client_hello(domain);
     if (!bc_send_all(s, ch.data(), ch.size())) { p.fail_reason = "rst"; return p; }
-    int wr = bc_wait(s, false, timeout_ms);
-    if (wr == 0) { p.fail_reason = "timeout"; return p; }
-    if (wr < 0) { p.fail_reason = "rst"; return p; }
-    uint8_t buf[8];
-    int n = ::recv(s, reinterpret_cast<char*>(buf), sizeof(buf), 0);
-    if (n <= 0) {
-        p.fail_reason = (n < 0 && bc_err() == BC_ECONNRESET) ? "rst" : "timeout";
+    uint8_t buf[6];
+    if (!bc_recv_full(s, buf, sizeof(buf), timeout_ms)) {
+        p.fail_reason = "timeout";
+        return p;
+    }
+    // An arbitrary response (including a TCP/HTTP middlebox reply or TLS
+    // alert) is not a bypass success. Require a TLS ServerHello/HRR record.
+    if (buf[0] != 0x16 || buf[1] != 0x03 || buf[5] != 0x02) {
+        p.fail_reason = "tls";
         return p;
     }
     p.ok = true;
@@ -390,9 +445,28 @@ BlockcheckReport BlockChecker::run(const Config& cfg) {
 
     auto strategies = cfg.strategies.empty() ? default_strategies() : cfg.strategies;
     auto domains = cfg.domains.empty() ? default_domains() : cfg.domains;
+    const int timeout_ms = std::max(1, std::min(120000, cfg.timeout_ms));
+    rep.parallel_probes = std::max<size_t>(1, std::min<size_t>(32, cfg.max_parallel_probes));
+    rep.validation_rounds = std::min<uint32_t>(8, cfg.validation_rounds);
 
-    for (const auto& strat : strategies) {
-        if (cfg.cancel_cb && cfg.cancel_cb()) break;
+    auto finalize = [](BlockcheckStrategyResult& sr) {
+        long latency_sum = 0;
+        sr.success_count = 0;
+        for (const auto& p : sr.probes) {
+            if (!p.ok) continue;
+            ++sr.success_count;
+            latency_sum += p.latency_ms;
+        }
+        sr.avg_latency_ms = sr.success_count
+                                ? static_cast<double>(latency_sum) / sr.success_count
+                                : 0.0;
+        sr.score = static_cast<long>(sr.success_count) * 100000L -
+                   static_cast<long>(sr.avg_latency_ms);
+    };
+
+    // One temporary proxy per strategy. Only independent domain probes are
+    // parallel; proxy lifecycle and strategy ordering stay deterministic.
+    auto run_once = [&](const BlockcheckStrategy& strat, int round) {
         BlockcheckStrategyResult sr;
         sr.strategy = strat.name;
         sr.description = strat.description;
@@ -400,14 +474,13 @@ BlockcheckReport BlockChecker::run(const Config& cfg) {
 
         DesyncProxy proxy;
         uint16_t port = 0;
-        if (!strat.is_direct) {
+        if (!strat.is_direct && !cfg.probe_fn) {
             DesyncProxy::Config pcfg;
             pcfg.port = 0;
             pcfg.use_doh = cfg.use_doh;
             if (strat.use_chain) {
                 pcfg.chains = {strat.chain};
-                // neutral base — chain always matches (no hostlist)
-                pcfg.base.enable_tcp_split = false;
+                pcfg.base.enable_tcp_split = false;  // neutral base
             } else {
                 pcfg.base = strat.config;
             }
@@ -416,45 +489,154 @@ BlockcheckReport BlockChecker::run(const Config& cfg) {
                     BlockcheckProbe pr;
                     pr.domain = d;
                     pr.fail_reason = "proxy";
+                    pr.round = round;
                     sr.probes.push_back(pr);
                 }
-                rep.results.push_back(sr);
-                continue;
+                finalize(sr);
+                return sr;
             }
             port = proxy.bound_port();
         }
 
-        long latency_sum = 0;
-        for (const auto& d : domains) {
-            if (cfg.cancel_cb && cfg.cancel_cb()) break;
-            BlockcheckProbe pr = strat.is_direct
-                                     ? probe_direct(d, cfg.timeout_ms)
-                                     : probe_via_socks5(port, d, cfg.timeout_ms);
-            if (pr.ok) {
-                sr.success_count++;
-                latency_sum += pr.latency_ms;
+        std::vector<BlockcheckProbe> probes(domains.size());
+        std::vector<uint8_t> attempted(domains.size(), 0);
+        std::atomic<size_t> next{0};
+        std::mutex progress_mu;
+        auto worker = [&] {
+            while (true) {
+                if (cfg.cancel_cb && cfg.cancel_cb()) break;
+                const size_t i = next.fetch_add(1);
+                if (i >= domains.size()) break;
+                const auto& d = domains[i];
+                BlockcheckProbe pr;
+                if (cfg.probe_fn) {
+                    pr = cfg.probe_fn(strat, d, timeout_ms);
+                } else {
+                    pr = strat.is_direct
+                             ? probe_direct(d, timeout_ms)
+                             : probe_via_socks5(port, d, timeout_ms);
+                }
+                pr.domain = d;
+                pr.round = round;
+                attempted[i] = 1;
+                probes[i] = std::move(pr);
+                if (cfg.progress_cb) {
+                    std::lock_guard<std::mutex> lk(progress_mu);
+                    cfg.progress_cb(strat.name, d, probes[i].ok);
+                }
             }
-            if (cfg.progress_cb) cfg.progress_cb(strat.name, d, pr.ok);
-            sr.probes.push_back(std::move(pr));
-        }
-        if (!strat.is_direct) proxy.stop();
+        };
+        const size_t worker_count = std::max<size_t>(
+            1, std::min(rep.parallel_probes, domains.size()));
+        std::vector<std::thread> workers;
+        workers.reserve(worker_count);
+        for (size_t i = 0; i < worker_count; ++i) workers.emplace_back(worker);
+        for (auto& w : workers) w.join();
 
-        sr.avg_latency_ms =
-            sr.success_count ? static_cast<double>(latency_sum) / sr.success_count : 0.0;
-        sr.score = static_cast<long>(sr.success_count) * 100000L -
-                   static_cast<long>(sr.avg_latency_ms);
-        rep.results.push_back(std::move(sr));
+        for (size_t i = 0; i < domains.size(); ++i) {
+            if (attempted[i]) sr.probes.push_back(std::move(probes[i]));
+        }
+        if (!strat.is_direct && !cfg.probe_fn) proxy.stop();
+        finalize(sr);
+        return sr;
+    };
+
+    auto validate_candidate = [&](const BlockcheckStrategy& strat,
+                                  BlockcheckStrategyResult& sr) {
+        sr.validation_attempted = true;
+        std::vector<long> latency_sums(sr.probes.size(), 0);
+        for (size_t i = 0; i < sr.probes.size(); ++i)
+            latency_sums[i] = sr.probes[i].latency_ms;
+
+        uint32_t completed_rounds = 0;
+        for (uint32_t round = 1; round <= rep.validation_rounds; ++round) {
+            if (cfg.cancel_cb && cfg.cancel_cb()) break;
+            auto confirmation = run_once(strat, static_cast<int>(round));
+            for (const auto& p : confirmation.probes)
+                sr.validation_probes.push_back(p);
+
+            for (size_t i = 0; i < sr.probes.size(); ++i) {
+                auto& original = sr.probes[i];
+                if (!original.ok) continue;
+                const BlockcheckProbe* match = nullptr;
+                for (const auto& p : confirmation.probes) {
+                    if (p.domain == original.domain) { match = &p; break; }
+                }
+                if (match && match->ok) {
+                    latency_sums[i] += match->latency_ms;
+                } else {
+                    original.ok = false;
+                    original.fail_reason = "unstable";
+                    original.latency_ms = 0;
+                }
+            }
+            ++completed_rounds;
+        }
+        for (size_t i = 0; i < sr.probes.size(); ++i) {
+            if (sr.probes[i].ok)
+                sr.probes[i].latency_ms = static_cast<int>(
+                    latency_sums[i] / (completed_rounds + 1));
+        }
+        finalize(sr);
+        sr.validated = (completed_rounds == rep.validation_rounds &&
+                        sr.success_count > 0);
+    };
+
+    for (const auto& strat : strategies) {
+        if (cfg.cancel_cb && cfg.cancel_cb()) break;
+        rep.results.push_back(run_once(strat, 0));
+        auto& latest = rep.results.back();
+        if (cfg.early_exit && rep.validation_rounds > 0 && !strat.is_direct &&
+            latest.success_count == static_cast<int>(domains.size()) && !domains.empty()) {
+            // Confirm the full candidate before skipping weaker strategies.
+            validate_candidate(strat, latest);
+            if (latest.validated &&
+                latest.success_count == static_cast<int>(domains.size())) {
+                rep.early_exit_taken = true;
+                break;
+            }
+        }
     }
 
-    // pick best: highest score; prefer non-direct bypass on tie
+    std::vector<size_t> candidates;
+    for (size_t i = 0; i < rep.results.size(); ++i) {
+        if (rep.results[i].success_count > 0) candidates.push_back(i);
+    }
+    auto direct_tiebreak = [&](size_t a, size_t b) {
+        const auto& left = rep.results[a];
+        const auto& right = rep.results[b];
+        if (left.score != right.score) return left.score > right.score;
+        if ((left.strategy == "direct") != (right.strategy == "direct"))
+            return left.strategy != "direct";
+        return a < b;
+    };
+    std::sort(candidates.begin(), candidates.end(), direct_tiebreak);
+
+    if (rep.validation_rounds > 0) {
+        const size_t validation_limit = std::min(
+            candidates.size(), std::max<size_t>(1, cfg.max_validation_candidates));
+        for (size_t ci = 0; ci < validation_limit; ++ci) {
+            if (cfg.cancel_cb && cfg.cancel_cb()) break;
+            const size_t idx = candidates[ci];
+            auto& sr = rep.results[idx];
+            if (sr.validation_attempted) continue;  // already checked by early-exit path
+            validate_candidate(strategies[idx], sr);
+        }
+    }
+
+    // Pick only real winners. In validated mode an unstable single-pass
+    // success cannot produce an applicable profile.
     long best_score = -1;
     for (const auto& sr : rep.results) {
+        if (sr.success_count <= 0) continue;
+        if (rep.validation_rounds > 0 && !sr.validated) continue;
         if (sr.score > best_score ||
             (sr.score == best_score && !rep.best_strategy.empty() &&
              rep.best_strategy == "direct" && sr.strategy != "direct")) {
             best_score = sr.score;
             rep.best_strategy = sr.strategy;
             rep.best_description = sr.description;
+            rep.best_validated = rep.validation_rounds > 0;
         }
     }
     for (const auto& s : strategies) {
@@ -478,6 +660,10 @@ std::string BlockChecker::report_to_json(const BlockcheckReport& r) {
     std::ostringstream j;
     j << "{\n  \"best_strategy\": \"" << json_esc(r.best_strategy) << "\",\n";
     j << "  \"best_description\": \"" << json_esc(r.best_description) << "\",\n";
+    j << "  \"best_validated\": " << (r.best_validated ? "true" : "false") << ",\n";
+    j << "  \"early_exit_taken\": " << (r.early_exit_taken ? "true" : "false") << ",\n";
+    j << "  \"parallel_probes\": " << r.parallel_probes << ",\n";
+    j << "  \"validation_rounds\": " << r.validation_rounds << ",\n";
     j << "  \"duration_ms\": " << r.duration_ms << ",\n";
     j << "  \"results\": [\n";
     for (size_t i = 0; i < r.results.size(); ++i) {
@@ -488,16 +674,22 @@ std::string BlockChecker::report_to_json(const BlockcheckReport& r) {
           << ", \"total\": " << sr.total
           << ", \"avg_latency_ms\": " << sr.avg_latency_ms
           << ", \"score\": " << sr.score
+          << ", \"validation_attempted\": " << (sr.validation_attempted ? "true" : "false")
+          << ", \"validated\": " << (sr.validated ? "true" : "false")
           << ", \"probes\": [";
-        for (size_t k = 0; k < sr.probes.size(); ++k) {
-            const auto& p = sr.probes[k];
-            j << (k ? ", " : "")
+        auto emit_probe = [&](const BlockcheckProbe& p, bool first) {
+            j << (first ? "" : ", ")
               << "{\"domain\": \"" << json_esc(p.domain)
-              << "\", \"ok\": " << (p.ok ? "true" : "false");
+              << "\", \"round\": " << p.round
+              << ", \"ok\": " << (p.ok ? "true" : "false");
             if (!p.ok) j << ", \"fail\": \"" << json_esc(p.fail_reason) << "\"";
             else j << ", \"latency_ms\": " << p.latency_ms;
             j << "}";
-        }
+        };
+        for (size_t k = 0; k < sr.probes.size(); ++k) emit_probe(sr.probes[k], k == 0);
+        j << "], \"validation_probes\": [";
+        for (size_t k = 0; k < sr.validation_probes.size(); ++k)
+            emit_probe(sr.validation_probes[k], k == 0);
         j << "]}" << (i + 1 < r.results.size() ? "," : "") << "\n";
     }
     j << "  ]\n}\n";
@@ -505,6 +697,8 @@ std::string BlockChecker::report_to_json(const BlockcheckReport& r) {
 }
 
 std::string BlockChecker::best_strategy_to_profile_json(const BlockcheckReport& r) {
+    if (r.best_strategy.empty() || (r.validation_rounds > 0 && !r.best_validated))
+        return "{}\n";
     std::ostringstream j;
     j << "{\n  \"strategy\": \"" << json_esc(r.best_strategy) << "\",\n";
     j << "  \"description\": \"" << json_esc(r.best_description) << "\",\n";
