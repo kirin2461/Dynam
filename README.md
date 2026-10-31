@@ -9,6 +9,22 @@
 **Version**: 1.7.0
 **CMake Version**: 1.7.0 (synced)
 
+### Latest update — adaptive client and protected transports
+
+- **Automatic fragmentation selection without manual presets.** `ncp blockcheck`
+  checks domains in parallel (`--parallel`), repeats promising candidates
+  (`--validate`), rejects unstable winners, and writes a profile only after
+  confirmation (`--apply`). Use `--full-sweep` to check every strategy.
+- **Parallel AutoPilot learning.** Independent hosts are learned concurrently;
+  duplicate in-flight learning of the same host is rejected. Added
+  `ncp autopilot learn-batch` and parallel `learn-preset`.
+- **Protected transport integration.** Protected Dynam sessions are connected
+  to `NcpConnectionDirector` through `RealQuicEndpoint`; native Dynam TURN and
+  SSH AutoDeploy are included with automated and isolated lab/interop tests.
+- **Verification boundary.** These results do not claim a live external bypass
+  of specific services or attribution of network anomalies to a particular
+  DPI/TSPU device.
+
 ### What's new in 1.7.0 — AWG 3.1 hardening + NUЦ scoped trust + auto-installer
 
 - **v1.7.0 — AWG 3.1-style header protection.** The static frame magics
@@ -629,5 +645,5 @@ quit) and can register itself in autostart (HKCU `Run` on Windows,
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: September 11, 2026
+**Last Updated**: October 31, 2026
 **Version**: 1.7.0
