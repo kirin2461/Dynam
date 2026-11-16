@@ -5738,7 +5738,8 @@ void handle_porthop(const std::vector<std::string>& args) {
                         continue;
                     }
                     const std::string text(r.frame.payload.begin(), r.frame.payload.end());
-                    std::cout << "[+] Echo from :" << r.local_port << " — \"" << text << "\"\n";
+                    std::cout << "[+] Echo from " << r.from_ip << ":" << r.from_port
+                              << " (local port " << r.local_port << ") — \"" << text << "\"\n";
                     echoed = true;
                 }
             }
