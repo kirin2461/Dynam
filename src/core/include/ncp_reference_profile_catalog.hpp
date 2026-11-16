@@ -48,6 +48,12 @@
 
 #include "ncp_mimicry_stats.hpp"  // SizeDistribution / IntervalDistribution / StatProfile
 
+// <windows.h> (pulled in via winsock2.h on Windows) defines ERROR as a macro,
+// which breaks IssueSeverity::ERROR below (same fix as ncp_logger.hpp).
+#ifdef ERROR
+#undef ERROR
+#endif
+
 namespace ncp {
 
 // ==================== Enums ====================

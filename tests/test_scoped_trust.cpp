@@ -125,9 +125,13 @@ std::string make_leaf_pem(const std::string& ca_key_path,
     X509_gmtime_adj(X509_getm_notBefore(leaf), -60);
     X509_gmtime_adj(X509_getm_notAfter(leaf), 3600);
     X509_set_pubkey(leaf, leaf_key);
-    X509_NAME* name = X509_get_subject_name(leaf);
+    // OpenSSL 3.x/4.x return a const X509_NAME* from X509_get_subject_name();
+    // build a fresh name and install it (works on 1.1.1 and 3.x+).
+    X509_NAME* name = X509_NAME_new();
     X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
         reinterpret_cast<const unsigned char*>(dns_name.c_str()), -1, -1, 0);
+    X509_set_subject_name(leaf, name);
+    X509_NAME_free(name);
     X509_set_issuer_name(leaf, X509_get_subject_name(ca_crt));
     {
         X509V3_CTX v3ctx;
