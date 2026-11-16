@@ -68,6 +68,7 @@ existing channel:
    --port`/`--target-port`, `i2p --sam-port`, `proxy --port`).
 5. **`license info`** with no valid license file, **`license info --online`
    validation failure**, and **`license validate`** returning `INVALID`.
+6. **`import-zapret`** usage error and unreadable `--file`.
 
 ```diff
          if (it == commands_.end()) {
@@ -107,6 +108,8 @@ After the fix, both directions confirmed:
 | `ncp autopilot learn example.com` (reachable) | **0** | ✓ |
 | `ncp license info` (no license file) | **1** | ✓ |
 | `ncp license validate` (no license file) | **1** | ✓ |
+| `ncp import-zapret` (no args) | **1** | ✓ |
+| `ncp import-zapret --file /tmp/nope.txt` | **1** | ✓ |
 
 Success paths still exit 0 — checked to make sure the fix did not over-fire:
 

@@ -4210,12 +4210,14 @@ void handle_import_zapret(const std::vector<std::string>& args) {
     std::string file = get_option(args, "--file", "");
     if (cmdline.empty() && file.empty()) {
         std::cerr << "[!] Usage: ncp import-zapret --args \"<zapret args>\" | --file <args.txt> [--out profile.json]\n";
+        g_exit_code = 1;
         return;
     }
     if (!file.empty()) {
         std::ifstream f(file);
         if (!f.is_open()) {
             std::cerr << "[!] Cannot read " << file << "\n";
+            g_exit_code = 1;
             return;
         }
         std::stringstream buf;
