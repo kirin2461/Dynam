@@ -1,11 +1,11 @@
 # Fix Summary — 2026-11-16
 
-Thirteen commits on `fix/r17-findings`, produced by running the project and
-verifying observed behaviour against a live network rather than reading code.
-Every claim below was reproduced before and after the change.
+Sixteen commits on `fix/r17-findings`. The first thirteen came from running the
+project and verifying behaviour against a live network; the last three address
+findings from `AUDIT.md` (R18/R19/R17) and `plan.md` §7 (web panel).
 
 **Final state**: `ctest -C Release` → **8/8 tests pass, 0 failed** (100%).
-`ncp_tests` → 1277 tests ran, 1269 passed, 8 skipped, 0 failed.
+`ncp_tests` → 1283 tests ran, 1275 passed, 8 skipped, 0 failed.
 
 ---
 
@@ -78,6 +78,68 @@ Misleading: reads as address-resolution failure. Now
 Both READMEs declared 1.7.0; `CMakeLists.txt` (the documented source of truth)
 and the binary said 1.7.6. Declaration lines corrected; 1.7.0 changelog entries
 are historical and left intact.
+
+---
+
+## From AUDIT.md and plan.md
+
+Three further commits address findings that were open in `AUDIT.md` and
+`plan.md` §7. These came from code reading, not from running the product, so
+the verification is weaker than the eight above — stated per item below.
+
+### 9. `--help` could start engines and change the network (R19-01/02/03) — `FIX-cli-help-safety.md`
+
+Only the **first** argv element was checked for `--help`, so:
+
+| Command | What it did |
+|---|---|
+| `ncp dpi --help` | Started the DPI engine, **opened the WinDivert driver**, began intercepting packets |
+| `ncp rotate --help` | Rotated identity — bounced the adapter, replaced IP/MAC/DNS |
+| `ncp stop --help` | Stopped every running service |
+
+Fixed **structurally** at the dispatcher: `--help`/`-h` anywhere in argv prints
+per-command usage and never invokes the handler, so a future handler cannot
+reintroduce it. **Verified by running each command** and grepping for
+engine-startup output (none appears).
+
+### 10. NetworkSpoofer audit findings (R18-01 … R18-09, R17-10) — `FIX-spoofer-r18.md`
+
+| ID | Defect | Fix |
+|---|---|---|
+| R18-01 | `apply_disk_serial` overwrote the disk **enumeration path** with a random string — destructive, achieved nothing | Write removed; reports not-supported |
+| R18-02 | `apply_hw_info` was `return true;` on Windows — claimed a spoof that never happened | Returns false |
+| R18-03 | SMBIOS wrote a boot-volatile key and put a UUID in `SystemProductName` | UUID write stopped; marked unsupported |
+| R18-04 | Restore covered only MAC/IPv4/DNS/hostname | Added a change journal, unwound in reverse |
+| R18-05 | `netsh … dhcpclientid=` is not a valid option — always failed | Reports unsupported; Linux refuses when NM/systemd-networkd |
+| R18-06 | `SpoofConfig{}` defaulted **seven** categories ON | All default false; CLI sets each explicitly |
+| R18-07 | IPv4 restore hard-coded `/24` and dropped DHCP mode | Captures prefix length + DHCP flag |
+| R18-08 | Ineffective Windows TCP writes; Linux MTU change never restored | Removed; only `DefaultTTL` kept and journaled |
+| R18-09 | Success detected by searching output for English `"Error"` | Uses child exit code — this machine's Russian locale is exactly what broke |
+| R17-10 | Rebuilt a stats map for every session on every poll | Publishes only on change |
+
+**Limitation, stated plainly:** the spoofing paths were **not executed**.
+`ncp run` requires a license this machine does not have, so `enable()`/
+`disable()` and the journal are verified by reading plus unit tests only. The
+crash-surviving persistent journal from the audit's suggested fix was not
+implemented — the journal is in-memory.
+
+### 11. Web panel XSS and security (W-01 … W-08) — `FIX-web-ui-xss.md`, `FIX-web-ui-security.md`
+
+**Stored XSS (W-01/W-02)** is the serious one: the panel interpolated
+server-supplied values into `innerHTML`. `ev.host` comes from the SOCKS CONNECT
+request, so **any client of the local proxy** could inject script that reads the
+API token from `<meta name="ncp-token">` and drives every `/api/*` route. All
+interpolated values now go through `escapeHtml()`.
+
+Also: CORS origins derived from the real port (W-03), Socket.IO requires the API
+token (W-04), hostname validation on the learn route (W-05), waitress instead of
+the Werkzeug dev server (W-06), corrupt-DB errors surfaced (W-07), update
+install backgrounded (W-08).
+
+**Limitation:** there is **no Python or Node on this machine**, so none of the
+web work was executed — not even `py_compile`. Verification is a grep audit plus
+static cross-reference. Run `python -m py_compile web/server.py
+web/bypass_routes.py` and start the panel before merging.
 
 ---
 
