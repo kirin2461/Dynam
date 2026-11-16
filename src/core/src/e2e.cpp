@@ -251,10 +251,19 @@ size_t pub_len = 0;
             BIGNUM* raw_bn = nullptr;
             EVP_PKEY_get_bn_param(upkey.get(), OSSL_PKEY_PARAM_PRIV_KEY, &raw_bn);
             priv_bn.reset(raw_bn);
-            
-            size_t priv_len = static_cast<size_t>(BN_num_bytes(priv_bn.get()));
-            kp.private_key = SecureMemory(priv_len);
-            BN_bn2bin(priv_bn.get(), kp.private_key.data());
+
+            // A P-256 scalar is always 32 bytes. BN_num_bytes() returns only
+            // the SIGNIFICANT bytes, so a scalar whose top byte happens to be
+            // 0x00 came out 31 bytes long (~1 key in 256). Consumers assert
+            // 32 and the DH helpers expect a fixed-width scalar, so pad on the
+            // left with BN_bn2binpad instead.
+            constexpr size_t kP256ScalarBytes = 32;
+            kp.private_key = SecureMemory(kP256ScalarBytes);
+            if (BN_bn2binpad(priv_bn.get(), kp.private_key.data(),
+                             static_cast<int>(kP256ScalarBytes)) !=
+                static_cast<int>(kP256ScalarBytes)) {
+                throw std::runtime_error("P256 ratchet: private key padding failed");
+            }
 #else
             // OpenSSL 1.1.x: extract via legacy EC_KEY API
             UniqueEC_KEY ec(EVP_PKEY_get1_EC_KEY(upkey.get()));
@@ -267,9 +276,15 @@ size_t pub_len = 0;
             kp.public_key = SecureMemory(pub_len);
             EC_POINT_point2oct(grp, pub, POINT_CONVERSION_UNCOMPRESSED, kp.public_key.data(), pub_len, bnctx.get());
             const BIGNUM* priv = EC_KEY_get0_private_key(ec.get());
-            size_t priv_len = static_cast<size_t>(BN_num_bytes(priv));
-            kp.private_key = SecureMemory(priv_len);
-            BN_bn2bin(priv, kp.private_key.data());
+            // Same fixed-width requirement as the OpenSSL 3 path above: pad on
+            // the left so a scalar with a zero top byte is still 32 bytes.
+            constexpr size_t kP256ScalarBytes = 32;
+            kp.private_key = SecureMemory(kP256ScalarBytes);
+            if (BN_bn2binpad(priv, kp.private_key.data(),
+                             static_cast<int>(kP256ScalarBytes)) !=
+                static_cast<int>(kP256ScalarBytes)) {
+                throw std::runtime_error("P256 ratchet: private key padding failed");
+            }
 #endif
             break;
         }
@@ -1335,9 +1350,12 @@ bool ratchet_pub_size_valid(KeyExchangeProtocol proto, size_t len) {
 bool ratchet_priv_size_valid(KeyExchangeProtocol proto, size_t len) {
     switch (proto) {
         case KeyExchangeProtocol::X448: return len == 56;
-        // P-256 private scalars are serialized via BN_num_bytes(), so a
-        // leading zero byte trims the encoding below 32 bytes.
-        case KeyExchangeProtocol::ECDH_P256: return len >= 1 && len <= 32;
+        // P-256 private scalars are now serialized as fixed-width 32 bytes
+        // (BN_bn2binpad), so a leading zero byte no longer trims the encoding.
+        // Accept exactly 32: the old `len >= 1` here was tolerating the
+        // padding bug rather than fixing it, and would let a truncated scalar
+        // through to the DH helpers.
+        case KeyExchangeProtocol::ECDH_P256: return len == 32;
         default: return len == 32;  // X25519, Kyber1024 ratchet keys
     }
 }
