@@ -66,6 +66,8 @@ existing channel:
    registry-writing command.
 4. **Port validation early-returns** added earlier in this branch (`dpi
    --port`/`--target-port`, `i2p --sam-port`, `proxy --port`).
+5. **`license info`** with no valid license file, **`license info --online`
+   validation failure**, and **`license validate`** returning `INVALID`.
 
 ```diff
          if (it == commands_.end()) {
@@ -103,6 +105,8 @@ After the fix, both directions confirmed:
 | `ncp sysproxy on --port 0` | **1** | ✓ |
 | `ncp autopilot learn www.youtube.com` (unreachable) | **1** | ✓ |
 | `ncp autopilot learn example.com` (reachable) | **0** | ✓ |
+| `ncp license info` (no license file) | **1** | ✓ |
+| `ncp license validate` (no license file) | **1** | ✓ |
 
 Success paths still exit 0 — checked to make sure the fix did not over-fire:
 
@@ -112,6 +116,7 @@ ncp status             -> 0
 ncp crypto keygen      -> 0
 ncp network interfaces -> 0
 ncp trust policy-test  -> 0
+ncp license hwid       -> 0
 ```
 
 ### Test suite — no regressions

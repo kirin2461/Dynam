@@ -3241,6 +3241,7 @@ void handle_license(const std::vector<std::string>& args) {
                     std::cout << "  Valid: Yes\n";
                 } else {
                     std::cerr << "[!] License invalid: " << err << "\n";
+                    g_exit_code = 1;
                 }
                 return;
             }
@@ -3253,6 +3254,7 @@ void handle_license(const std::vector<std::string>& args) {
             std::cout << "  Valid: " << (info.is_valid ? "Yes" : "No") << "\n";
         } else {
             std::cerr << "[!] License file not found or invalid\n";
+            g_exit_code = 1;
         }
     }
     else if (action == "validate") {
@@ -3266,6 +3268,7 @@ void handle_license(const std::vector<std::string>& args) {
             std::cout << "VALID\n";
         } else {
             std::cout << "INVALID\n";
+            g_exit_code = 1;
         }
     }
     else if (action == "activate") {
