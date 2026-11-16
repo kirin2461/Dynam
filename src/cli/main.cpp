@@ -3039,7 +3039,26 @@ void handle_crypto(const std::vector<std::string>& args) {
         std::cout << "[!] Store the secret key securely; anyone with it can sign as you.\n";
     }
     else if (action == "random") {
-        size_t size = static_cast<size_t>(get_option_int(args, "-n", 32));
+        // Accept both "crypto random <n>" and "crypto random -n <n>".
+        // A bare positional (args[1]) previously fell through to the default,
+        // so the documented count was silently ignored.
+        size_t size = 32;
+        std::string positional = get_arg(args, 1);
+        if (!positional.empty() && positional[0] != '-') {
+            try {
+                size = static_cast<size_t>(std::stoull(positional));
+            } catch (...) {
+                std::cerr << "[!] Invalid byte count: " << positional << "\n";
+                return;
+            }
+        } else {
+            int n = get_option_int(args, "-n", 32);
+            if (n > 0) size = static_cast<size_t>(n);
+        }
+        if (size == 0) {
+            std::cerr << "[!] Byte count must be greater than zero\n";
+            return;
+        }
         auto random_bytes = crypto.generate_random(size);
         std::cout << "Random bytes (" << size << "): " << Crypto::bytes_to_hex(random_bytes) << "\n";
     }
