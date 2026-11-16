@@ -4307,6 +4307,7 @@ void handle_spa(const std::vector<std::string>& args) {
 
         if (host.empty() || key_path.empty() || allow_port <= 0 || allow_port > 65535) {
             std::cerr << "[!] knock requires <host>, --key <file.key> and --allow-port <N>\n";
+            g_exit_code = 1;
             spa_print_usage();
             return;
         }
@@ -4344,6 +4345,7 @@ void handle_spa(const std::vector<std::string>& args) {
         const std::string keys_path = get_option(args, "--authorized-keys", "");
         if (keys_path.empty()) {
             std::cerr << "[!] serve requires --authorized-keys <file>\n";
+            g_exit_code = 1;
             spa_print_usage();
             return;
         }
@@ -4394,6 +4396,7 @@ void handle_spa(const std::vector<std::string>& args) {
     }
 
     std::cerr << "[!] Unknown spa action: " << action << "\n";
+    g_exit_code = 1;
     spa_print_usage();
 }
 
@@ -4484,6 +4487,7 @@ void handle_reality(const std::vector<std::string>& args) {
     const std::string action = args[0];
     if (action != "serve") {
         std::cerr << "[!] Unknown reality action: " << action << "\n";
+        g_exit_code = 1;
         reality_print_usage();
         return;
     }
@@ -4498,6 +4502,7 @@ void handle_reality(const std::vector<std::string>& args) {
         listen_port <= 0 || listen_port > 65535) {
         std::cerr << "[!] serve requires --listen <port>, --fallback <host:port>, "
                      "--internal <host:port> and --key-file <f>\n";
+        g_exit_code = 1;
         reality_print_usage();
         return;
     }
@@ -4693,6 +4698,7 @@ void handle_stegodns(const std::vector<std::string>& args) {
             pass.empty() || sk_path.empty() || domain.empty()) {
             std::cerr << "[!] encode requires --ip, --port, --spa-pubkey, "
                          "--passphrase, --signing-key and --domain\n";
+            g_exit_code = 1;
             stegodns_print_usage();
             return;
         }
@@ -4735,6 +4741,7 @@ void handle_stegodns(const std::vector<std::string>& args) {
 
         if (txt.empty() || pass.empty() || vpk_b64.empty()) {
             std::cerr << "[!] decode requires --txt, --passphrase and --verify-pubkey\n";
+            g_exit_code = 1;
             stegodns_print_usage();
             return;
         }
@@ -4769,6 +4776,7 @@ void handle_stegodns(const std::vector<std::string>& args) {
     }
 
     std::cerr << "[!] Unknown stegodns action: " << action << "\n";
+    g_exit_code = 1;
     stegodns_print_usage();
 }
 
@@ -5407,6 +5415,7 @@ void handle_porthop(const std::vector<std::string>& args) {
 
     if (base_port <= 0 || base_port > 65535 || range <= 0 || secret.empty()) {
         std::cerr << "[!] porthop requires --base-port <n>, --range <n> and --secret <s>\n";
+        g_exit_code = 1;
         porthop_print_usage();
         return;
     }
@@ -5671,6 +5680,7 @@ void handle_porthop(const std::vector<std::string>& args) {
         // only required for the single-echo path.
         if (host.empty() || (message.empty() && !mflags.load.enabled())) {
             std::cerr << "[!] client requires --host <ip> and --message <s>\n";
+            g_exit_code = 1;
             porthop_print_usage();
             return;
         }
@@ -5769,6 +5779,7 @@ void handle_porthop(const std::vector<std::string>& args) {
     }
 
     std::cerr << "[!] Unknown porthop action: " << action << "\n";
+    g_exit_code = 1;
     porthop_print_usage();
 }
 
@@ -5820,6 +5831,7 @@ void handle_mimicry_catalog(const std::vector<std::string>& args) {
     const std::string action = args[0];
     if (action != "validate" && action != "list") {
         std::cerr << "[!] Unknown mimicry-catalog action: " << action << "\n";
+        g_exit_code = 1;
         mimicry_catalog_print_usage();
         g_exit_code = 1;
         return;
@@ -5828,6 +5840,7 @@ void handle_mimicry_catalog(const std::vector<std::string>& args) {
     if (path.empty() || path[0] == '-') {
         std::cerr << "[!] mimicry-catalog " << action
                   << " requires a <path> argument\n";
+        g_exit_code = 1;
         mimicry_catalog_print_usage();
         g_exit_code = 1;
         return;
@@ -5950,6 +5963,7 @@ void handle_fog(const std::vector<std::string>& args) {
     const std::string action = args[0];
     if (action != "node") {
         std::cerr << "[!] Unknown fog action: " << action << "\n";
+        g_exit_code = 1;
         fog_print_usage();
         return;
     }
@@ -5960,6 +5974,7 @@ void handle_fog(const std::vector<std::string>& args) {
 
     if (id_hex.empty() || port <= 0 || port > 65535) {
         std::cerr << "[!] fog node requires --id <hex32> and --port <n>\n";
+        g_exit_code = 1;
         fog_print_usage();
         return;
     }
@@ -6178,6 +6193,7 @@ void handle_xdp(const std::vector<std::string>& args) {
     }
 
     std::cerr << "[!] Unknown xdp action: " << action << "\n";
+    g_exit_code = 1;
     xdp_print_usage();
 }
 
@@ -6211,12 +6227,14 @@ void handle_cps(const std::vector<std::string>& args) {
     const std::string spec   = get_option(args, "--chain", "");
     if (spec.empty()) {
         std::cerr << "[!] cps requires --chain \"<spec>\"\n";
+        g_exit_code = 1;
         cps_print_usage();
         return;
     }
     const auto chain = ncp::cps::CpsChain::parse(spec);
     if (!chain) {
         std::cerr << "[!] Bad chain spec: " << spec << "\n";
+        g_exit_code = 1;
         cps_print_usage();
         return;
     }
@@ -6268,6 +6286,7 @@ void handle_cps(const std::vector<std::string>& args) {
     }
 
     std::cerr << "[!] Unknown cps action: " << action << "\n";
+    g_exit_code = 1;
     cps_print_usage();
 }
 
@@ -6417,5 +6436,6 @@ void handle_trust(const std::vector<std::string>& args) {
     }
 
     std::cerr << "[!] Unknown trust action: " << action << "\n";
+    g_exit_code = 1;
     trust_print_usage();
 }

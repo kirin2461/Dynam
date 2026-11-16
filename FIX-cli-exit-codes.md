@@ -133,16 +133,75 @@ ncp license hwid       -> 0
 Identical to baseline. The 8 skips are `I2PManagerTest.*` (no I2P SAM bridge on
 `127.0.0.1:7656`), environmental.
 
-## Scope: what is still wrong
+## Scope: the full sweep
 
-This fixes the paths that were demonstrated broken. It does **not** audit every
-handler — the same missing `g_exit_code = 1` likely appears in dozens of other
-`return;`-after-`cerr` sites. A full sweep is a larger change and should be done
-deliberately rather than opportunistically.
+The first batches fixed only the paths that had been demonstrated. A survey then
+found the same missing assignment at **20 usage-error sites across 9 handlers** —
+every `*_print_usage()` call preceded by a `std::cerr` and not followed by
+`g_exit_code = 1`.
 
-Recommended follow-up: change the handler signature to return `int`, or add a
-`fail()` helper that prints and sets the code, then sweep every `cerr` site. The
-current design makes silent-success the default, which is why this rotted.
+All 20 are now fixed. The insertion was verified as exactly 20 added lines and 0
+removed (`git diff --numstat` → `20 0`), so no logic moved.
+
+The distinction that mattered during the sweep: `print_usage()` is called from
+**two** very different contexts, and only one is an error.
+
+```cpp
+// Help request — NOT an error, must stay exit 0
+if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    cps_print_usage();
+    return;
+}
+
+// Real error — must be exit 1
+if (spec.empty()) {
+    std::cerr << "[!] cps requires --chain \"<spec>\"\n";
+    cps_print_usage();
+    return;
+}
+```
+
+Sites were classified by whether `std::cerr` appeared in the preceding lines.
+The 8 `--help`/empty-args sites were deliberately left alone; the 20 error sites
+were fixed. Both were then verified independently (see below).
+
+### Verified after the sweep
+
+Error paths — all now exit 1:
+
+```
+cps bogusaction        -> 1     fog bogusaction      -> 1
+stegodns bogusaction   -> 1     porthop bogusaction  -> 1
+trust bogusaction      -> 1     reality bogusaction  -> 1
+xdp bogusaction        -> 1     spa bogusaction      -> 1
+
+cps test (no --chain)  -> 1     porthop serve (no args) -> 1
+fog node (no args)     -> 1     reality serve (no args) -> 1
+```
+
+Help paths — all still exit 0:
+
+```
+cps --help  stegodns --help  trust --help  spa --help  fog --help
+porthop --help  reality --help  xdp --help  import-zapret --help
+mimicry-catalog --help      -> all 0
+```
+
+A bare `ncp <cmd>` with no arguments also exits 0, because it hits the
+`args.empty()` help branch by design — that was checked explicitly after the
+first verification pass appeared to show usage errors still exiting 0, and the
+apparent failure turned out to be the *help* path being measured by mistake.
+
+## Design note
+
+The handler signature is `std::function<void(const std::vector<std::string>&)>`,
+so a handler cannot return a status. The global is the only channel, which makes
+silent success the default — that is why this rotted in the first place. Every
+new handler has to remember to set it.
+
+A durable fix would be to return `int` from handlers, or add a `fail()` helper
+that prints, sets the code and returns. That is a larger refactor and was not
+done here; the 20 sites are corrected individually.
 
 ## Why the test suite did not catch this
 
