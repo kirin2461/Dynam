@@ -6,8 +6,8 @@
 
 ## Current Status
 
-**Version**: 1.7.0
-**CMake Version**: 1.7.0 (synced)
+**Version**: 1.7.6
+**CMake Version**: 1.7.6 (synced)
 
 ### Latest update — adaptive client and protected transports
 
@@ -646,4 +646,4 @@ Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE
 
 ---
 **Last Updated**: October 31, 2026
-**Version**: 1.7.0
+**Version**: 1.7.6
