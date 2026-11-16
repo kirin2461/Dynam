@@ -224,6 +224,7 @@ public:
         if (it == commands_.end()) {
             std::cerr << "Unknown command: " << cmd << "\n";
             print_usage();
+            g_exit_code = 1;
             return;
         }
 
@@ -751,11 +752,13 @@ void handle_sysproxy(const std::vector<std::string>& args) {
         if (port < 1 || port > 65535) {
             std::cerr << "[!] Invalid port " << port
                       << " (must be 1-65535); system proxy left unchanged\n";
+            g_exit_code = 1;
             return;
         }
         std::string err;
         if (!sysproxy_apply(static_cast<uint16_t>(port), &err)) {
             std::cerr << "[!] sysproxy on failed: " << err << "\n";
+            g_exit_code = 1;
             return;
         }
         std::cout << "[+] System proxy set to 127.0.0.1:" << port << "\n"
@@ -3312,12 +3315,12 @@ void handle_dpi(const std::vector<std::string>& args) {
 #endif
     // FIX C4244: Explicit cast for int to uint16_t conversion
     int listen_port = get_option_port(args, "--port", 8881);
-    if (listen_port < 0) return;
+    if (listen_port < 0) { g_exit_code = 1; return; }
     config.listen_port = static_cast<uint16_t>(listen_port);
     config.target_host = get_option(args, "--target", "example.com");
     // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
     int target_port = get_option_port(args, "--target-port", 443);
-    if (target_port < 0) return;
+    if (target_port < 0) { g_exit_code = 1; return; }
     config.target_port = static_cast<uint16_t>(target_port);
     config.enable_tcp_split = !has_flag(args, "--no-split");
     config.split_position = get_option_int(args, "--split-pos", 2);
@@ -3434,7 +3437,7 @@ void handle_i2p(const std::vector<std::string>& args) {
         // FIX C4244: Explicit cast for int to uint16_t conversion
         // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
         int sam_port = get_option_port(args, "--sam-port", 7656);
-        if (sam_port < 0) return;
+        if (sam_port < 0) { g_exit_code = 1; return; }
         cfg.sam_port = static_cast<uint16_t>(sam_port);
         cfg.enable_garlic_routing = true;
         cfg.tunnel_length = get_option_int(args, "--tunnel-length", 3);
@@ -3615,7 +3618,7 @@ void handle_proxy(const std::vector<std::string>& args) {
     }
     ncp::DesyncProxy::Config cfg;
     int proxy_port = get_option_port(args, "--port", 1080);
-    if (proxy_port < 0) return;
+    if (proxy_port < 0) { g_exit_code = 1; return; }
     cfg.port = static_cast<uint16_t>(proxy_port);
     cfg.listen_host = get_option(args, "--bind", "127.0.0.1");
 
@@ -4090,6 +4093,7 @@ void handle_autopilot(const std::vector<std::string>& args) {
             std::cout << "[-] No working strategy found for " << positional
                       << " (host unreachable or IP-level blocked). "
                       << "Marked degraded; background re-learn will retry with backoff.\n";
+            g_exit_code = 1;
         }
         return;
     }
