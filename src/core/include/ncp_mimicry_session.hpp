@@ -388,6 +388,13 @@ public:
     /// and the per-session profile context has been created.
     bool is_established() const;
 
+    /// Server role: true when `data` is a key-exchange request whose peer
+    /// public key differs from the one this established session is bound to,
+    /// i.e. a new client reusing the session id rather than a retransmit.
+    /// on_datagram() still drops such a request; the owner (director) is
+    /// expected to replace the session. Never throws.
+    bool is_new_peer_handshake(const uint8_t* data, size_t len) const;
+
     /// Negotiated profile_transition_v1 (both peers advertised it). False for
     /// legacy peers; the wire format then stays protected raw/legacy.
     bool transition_capable() const;

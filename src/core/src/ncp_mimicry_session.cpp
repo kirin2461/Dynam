@@ -250,6 +250,9 @@ struct NcpMimicrySession::Impl {
     E2ESession e2e;
     KeyPair keys;
     bool handshake_started = false;
+    // Peer public key bound at finalize_handshake(). Lets the server tell a
+    // retransmitted KX request (same key) from a new client (different key).
+    std::vector<uint8_t> bound_peer_public_key;
 
     // ---- profile transition context (created once the E2E session is
     // established; the transition session_id is derived from the shared
@@ -306,6 +309,17 @@ struct NcpMimicrySession::Impl {
     // ---- counters ----
     uint64_t mtu_budget_rejections = 0;
     uint64_t ingress_dropped = 0;
+    // R17-05: capabilities delivery. The caps datagram is resent (bounded)
+    // until the peer's caps arrive; a duplicate peer caps (peer has not got
+    // ours yet) triggers one more send of ours. A client-side caps datagram
+    // that overtakes the handshake response is held and replayed once the
+    // session is established instead of being dropped.
+    static constexpr uint32_t kCapsMaxSends = 8;
+    static constexpr uint64_t kCapsResendIntervalMs = 500;
+    static constexpr size_t kMaxEarlyCapsBytes = 4096;
+    uint32_t caps_sends = 0;
+    uint64_t caps_next_resend_ms = 0;
+    std::optional<std::vector<uint8_t>> early_caps;
     uint64_t queue_dropped_packets = 0;  // refused by queue bounds (I-DRAIN-8)
     uint64_t queue_dropped_bytes = 0;
     // I-TXD-2: exact RX candidate work accounting. *_max are per-datagram
@@ -528,6 +542,7 @@ struct NcpMimicrySession::Impl {
                                                 SessionSecret::kSize);
             std::memcpy(shaper_secret_snapshot.data(), ssec.data(),
                         shaper_secret_snapshot.size());
+            bound_peer_public_key = peer_public_key;
 
             // Per-session mask binding key (v2 stateful masks). Both
             // endpoints derive the identical key from the shared secret;
@@ -784,6 +799,7 @@ struct NcpMimicrySession::Impl {
 
     void queue_caps() {
         if (!ctx) return;
+        ++caps_sends;
         try {
             NCPCapabilities caps;
             capabilities_set_profile_transition(
@@ -814,7 +830,11 @@ struct NcpMimicrySession::Impl {
             if (!pt) { ++ingress_dropped; return {IngressKind::Dropped, {}}; }
             auto caps = CapabilitiesExchange::parse_capabilities(*pt);
             if (!caps) { ++ingress_dropped; return {IngressKind::Dropped, {}}; }
+            const bool duplicate = peer_caps.has_value();
             peer_caps = *caps;
+            // R17-05: a repeated peer advertisement means the peer has not
+            // received ours yet — answer with ours (bounded).
+            if (duplicate && caps_sends < kCapsMaxSends) queue_caps();
             sync_crypto_epoch();  // successful decrypt: follow rekeys
             // Negotiation is a strict AND of both advertisements.
             const bool v1_negotiated =
@@ -1027,6 +1047,23 @@ bool NcpMimicrySession::is_established() const {
     }
 }
 
+bool NcpMimicrySession::is_new_peer_handshake(const uint8_t* data,
+                                              size_t len) const {
+    try {
+        const auto& im = *impl_;
+        if (im.cfg.role != Role::Server || !im.ctx || !data || len < 2 ||
+            data[0] != kKindHandshake)
+            return false;
+        std::vector<uint8_t> pub;
+        if (!extract_peer_public_key(
+                std::vector<uint8_t>(data + 1, data + len), pub))
+            return false;
+        return pub != im.bound_peer_public_key;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool NcpMimicrySession::transition_capable() const {
     return impl_->peer_caps.has_value() &&
            impl_->cfg.advertise_profile_transition &&
@@ -1178,9 +1215,26 @@ NcpMimicrySession::on_datagram(const uint8_t* data, size_t len,
                     return {IngressKind::Dropped, {}};
                 }
                 im.queue_caps();
+                // R17-05: replay a caps datagram that overtook this response.
+                if (im.early_caps) {
+                    auto early = std::move(*im.early_caps);
+                    im.early_caps.reset();
+                    im.handle_caps(early.data(), early.size());
+                }
                 return {IngressKind::Handshake, {}};
             }
             case kKindCaps:
+                if (!im.ctx && im.cfg.role == Role::Client &&
+                    im.handshake_started) {
+                    // R17-05: caps reordered ahead of the handshake response.
+                    // Hold the latest one (bounded) until established.
+                    if (blen == 0 || blen > Impl::kMaxEarlyCapsBytes) {
+                        ++im.ingress_dropped;
+                        return {IngressKind::Dropped, {}};
+                    }
+                    im.early_caps = std::vector<uint8_t>(body, body + blen);
+                    return {IngressKind::Dropped, {}};
+                }
                 return im.handle_caps(body, blen);
             case kKindE2E:
                 return im.handle_e2e(body, blen, now_ms);
@@ -1297,6 +1351,15 @@ void NcpMimicrySession::tick(uint64_t now_ms) {
     auto& im = *impl_;
     if (!im.ctx) return;
     im.sync_crypto_epoch();
+    // R17-05: resend our caps (bounded) until the peer's caps arrive.
+    if (!im.peer_caps && im.caps_sends < Impl::kCapsMaxSends) {
+        if (im.caps_next_resend_ms == 0) {
+            im.caps_next_resend_ms = now_ms + Impl::kCapsResendIntervalMs;
+        } else if (now_ms >= im.caps_next_resend_ms) {
+            im.queue_caps();
+            im.caps_next_resend_ms = now_ms + Impl::kCapsResendIntervalMs;
+        }
+    }
     try {
         im.ctx->tick(now_ms);
     } catch (...) {

@@ -149,10 +149,12 @@ std::vector<uint8_t> PortHopSession::encode(const uint8_t* payload,
                                             uint8_t flags) {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // R17-02: a responder replies at the peer's epoch when that is ahead.
+    const uint32_t stamp_epoch = std::max(epoch_, peer_epoch_seen_);
     std::vector<uint8_t> out(HEADER_SIZE + payload_len);
     if (hp_.enabled()) {
         // AWG-style: session-derived prefix instead of a static magic.
-        hp_.prefix(epoch_, out.data(), 2);
+        hp_.prefix(stamp_epoch, out.data(), 2);
         out[2] = hp_.random_version();
     } else {
         out[0] = kMagic0;
@@ -160,7 +162,7 @@ std::vector<uint8_t> PortHopSession::encode(const uint8_t* payload,
         out[2] = kVersion;
     }
     store_u64_be(out.data() + 3, session_id_);
-    store_u32_be(out.data() + 11, epoch_);
+    store_u32_be(out.data() + 11, stamp_epoch);
     uint32_t seq = next_seq_++;
     store_u32_be(out.data() + 15, seq);
     if (payload_len > 0 && payload)
@@ -330,6 +332,12 @@ bool PortHopSession::hop() {
     cur_interval_sec_ = schedule_.sample_interval_sec();
     unacked_.clear();
     return true;
+}
+
+void PortHopSession::note_peer_epoch(uint32_t peer_epoch) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (peer_epoch > peer_epoch_seen_)
+        peer_epoch_seen_ = peer_epoch;
 }
 
 bool PortHopSession::epoch_exhausted() const {
@@ -651,6 +659,10 @@ std::vector<PortHopReceived> PortHopServer::poll(int timeout_ms) {
                     ++malformed_;
                 continue;
             }
+
+            // R17-02: the server never hops on its own; stamp replies at
+            // the client's epoch so its replay fence keeps accepting them.
+            st.session.note_peer_epoch(frame->epoch);
 
             // Learn/refresh the client address from any port (roaming-safe).
             std::memcpy(st.peer_addr.data(), &from,

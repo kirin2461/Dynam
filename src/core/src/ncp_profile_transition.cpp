@@ -431,6 +431,7 @@ struct ProfileTransitionManager::Impl {
         clear_transition();
         if (count_timeout) counters.transitions_timed_out++;
         else counters.transitions_aborted++;
+        counters.last_abort_reason = reason;
         if (hooks.on_aborted) hooks.on_aborted(aborted_tid, reason);
     }
 };
@@ -645,6 +646,7 @@ bool ProfileTransitionManager::on_control_plaintext(
             // The refusal IS a clean pre-activation abort of the proposed
             // transition: record it (state untouched — we never left IDLE).
             im.counters.transitions_aborted++;
+            im.counters.last_abort_reason = AbortReason::UNKNOWN_PROFILE;
             if (im.hooks.on_aborted)
                 im.hooks.on_aborted(msg->transition_id,
                                     AbortReason::UNKNOWN_PROFILE);

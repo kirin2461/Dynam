@@ -6,6 +6,7 @@
 #include <mutex>
 #include <cstring>
 #include <algorithm>
+#include <deque>
 #include <fstream>
 #include <cstdio>
 #ifndef _WIN32
@@ -402,6 +403,11 @@ struct E2ESession::Impl {
     std::vector<uint8_t> last_kx_request_hash; // Task 1
 
     RatchetState ratchet;
+    // R17-06: insertion order of ratchet.skipped_keys, oldest first. The map
+    // is ordered by (DH key, msg_num), so map.begin() is the smallest DH key,
+    // not the oldest entry. May contain ids already consumed by decrypt();
+    // those are skipped at eviction and compacted when the deque grows.
+    std::deque<RatchetSkippedId> skipped_order;
     KeyPair local_ratchet_kp;
     std::vector<uint8_t> remote_ratchet_pub;
     bool ratchet_initialized = false;
@@ -566,17 +572,51 @@ struct E2ESession::Impl {
 
     // Merge staged skipped keys into the ratchet after the message that
     // justified them authenticated successfully. R6-SEC-01: evict oldest
-    // entries if the cap is reached.
-    void commit_staged_skipped(std::map<RatchetSkippedId, SecureMemory>& staged) {
-        for (auto& [id, key] : staged) {
-            while (ratchet.skipped_keys.size() >= ratchet.max_skipped_keys &&
-                   !ratchet.skipped_keys.empty()) {
-                ratchet.skipped_keys.erase(ratchet.skipped_keys.begin());
-            }
-            if (ratchet.skipped_keys.size() < ratchet.max_skipped_keys) {
-                ratchet.skipped_keys[id] = std::move(key);
+    // entries if the cap is reached. R17-06: "oldest" is insertion order
+    // (skipped_order), not the map's (DH key, msg_num) order.
+    void evict_oldest_skipped() {
+        while (!skipped_order.empty()) {
+            auto it = ratchet.skipped_keys.find(skipped_order.front());
+            skipped_order.pop_front();
+            if (it != ratchet.skipped_keys.end()) {
+                ratchet.skipped_keys.erase(it);
+                return;
             }
         }
+        // Order list exhausted (should not happen): fall back to map order.
+        if (!ratchet.skipped_keys.empty())
+            ratchet.skipped_keys.erase(ratchet.skipped_keys.begin());
+    }
+
+    void compact_skipped_order() {
+        if (skipped_order.size() <= 2 * RatchetState::max_skipped_keys) return;
+        std::deque<RatchetSkippedId> live;
+        for (auto& id : skipped_order)
+            if (ratchet.skipped_keys.count(id)) live.push_back(std::move(id));
+        skipped_order.swap(live);
+    }
+
+    void reset_skipped_order_from_map() {
+        skipped_order.clear();
+        for (const auto& kv : ratchet.skipped_keys)
+            skipped_order.push_back(kv.first);
+    }
+
+    void commit_staged_skipped(std::map<RatchetSkippedId, SecureMemory>& staged) {
+        for (auto& [id, key] : staged) {
+            const bool existing = ratchet.skipped_keys.count(id) != 0;
+            while (!existing &&
+                   ratchet.skipped_keys.size() >= ratchet.max_skipped_keys &&
+                   !ratchet.skipped_keys.empty()) {
+                evict_oldest_skipped();
+            }
+            if (existing ||
+                ratchet.skipped_keys.size() < ratchet.max_skipped_keys) {
+                ratchet.skipped_keys[id] = std::move(key);
+                if (!existing) skipped_order.push_back(id);
+            }
+        }
+        compact_skipped_order();
         staged.clear();
     }
 };
@@ -717,6 +757,7 @@ void E2ESession::init_ratchet_keys() {
     impl.ratchet.sending_chain_length = 0;
     impl.ratchet.receiving_chain_length = 0;
     impl.ratchet.skipped_keys.clear();
+    impl.skipped_order.clear();
     // A fresh handshake starts a new epoch sequence with no rotation in
     // flight and both peers on the same root.
     impl.crypto_epoch = 0;
@@ -1443,6 +1484,9 @@ bool E2ESession::restore_session_state(const std::vector<uint8_t>& data) {
         if (k.size() != 32) return false;
         pImpl_->ratchet.skipped_keys[RatchetSkippedId{ns, m}] = std::move(k);
     }
+    // R17-06: serialized order is not insertion order; seed the eviction
+    // order from the restored map (best available approximation).
+    pImpl_->reset_skipped_order_from_map();
     return true;
 }
 
@@ -1511,6 +1555,7 @@ void E2ESession::revoke_session() {
     if (pImpl_->peer_root_key.size() > 0) sodium_memzero(pImpl_->peer_root_key.data(), pImpl_->peer_root_key.size());
     if (pImpl_->shared_secret.size() > 0) sodium_memzero(pImpl_->shared_secret.data(), pImpl_->shared_secret.size());
     pImpl_->ratchet.skipped_keys.clear();
+    pImpl_->skipped_order.clear();
 }
 std::string E2ESession::get_session_id() const { return pImpl_->session_id; }
 std::chrono::system_clock::time_point E2ESession::get_last_activity() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->last_activity; }

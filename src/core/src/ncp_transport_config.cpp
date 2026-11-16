@@ -166,7 +166,17 @@ struct Parser {
             if (raw.size() > 512)
                 return fail(line_no, "line too long");
             // Strip comments (full-line and trailing, per the §2 example).
-            const size_t hash = raw.find('#');
+            // R17-08: '#' starts a comment only at line start or after a
+            // space (YAML rule), so values such as `vault#turn-prod` or
+            // `host#1` are kept intact instead of being silently truncated.
+            size_t hash = std::string::npos;
+            for (size_t i = 0; i < raw.size(); ++i) {
+                if (raw[i] == '#' &&
+                    (i == 0 || raw[i - 1] == ' ' || raw[i - 1] == '\t')) {
+                    hash = i;
+                    break;
+                }
+            }
             std::string line = raw.substr(0, hash);
             // Trim right.
             const size_t last = line.find_last_not_of(" \t\r");

@@ -47,8 +47,6 @@ add_executable(ncp_tests
     test_mimicry_session.cpp       # Per-session E2E/mimicry adapter tests
     test_transport_config.cpp      # G2.2: versioned transport-config migration/coexistence tests
     test_datagram_path_budget.cpp  # G3: authoritative path MTU/PMTU sizing
-    test_turn_client.cpp           # G5: STUN/TURN codec and transaction tests
-    test_turn_server.cpp           # G5: TURN-over-UDP server tests
     test_mimicry_fsm.cpp           # Per-session FSM timing/shape tests
     test_mimicry_catalog_io.cpp    # Signed catalog binary IO tests
     test_connection_director.cpp   # Per-session director/registry + CLI wiring tests
@@ -94,6 +92,14 @@ target_link_libraries(ncp_tests
         gtest_main
 )
 add_dependencies(ncp_tests ncp_core)
+
+# G5 TURN tests drive raw POSIX sockets (arpa/inet.h, close, select on fds)
+# and do not compile under MSVC yet; build them everywhere else.
+if(NOT WIN32)
+    target_sources(ncp_tests PRIVATE
+        test_turn_client.cpp           # G5: STUN/TURN codec and transaction tests
+        test_turn_server.cpp)          # G5: TURN-over-UDP server tests
+endif()
 
 find_library(MSQUIC_LIBRARY NAMES msquic libmsquic.so.2)
 if(MSQUIC_LIBRARY)

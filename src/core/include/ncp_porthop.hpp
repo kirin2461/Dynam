@@ -274,6 +274,15 @@ public:
     /// session; there is intentionally no in-session epoch reset API.
     bool hop();
 
+    /// Responder-side epoch tracking (R17-02). Records the highest header
+    /// epoch decoded from the peer; encode() then stamps outbound frames
+    /// with max(current_epoch, that value). A responder that never hops
+    /// itself thus keeps replying at an epoch the hopping peer's replay
+    /// fence accepts (peers always accept current/future epochs). The local
+    /// epoch, hop schedule and this session's own replay fence are NOT
+    /// changed, so a fresh peer restarting at epoch 0 is still accepted.
+    void note_peer_epoch(uint32_t peer_epoch);
+
     /// Terminal-state query (I-EPOCH-6 exhaustion): true iff the epoch has
     /// reached UINT32_MAX and can never advance again for this session.
     /// Callers should treat this as fail-closed: stop using the session
@@ -320,6 +329,7 @@ private:
     uint32_t epoch_replay_window_ = kDefaultEpochReplayWindow;  // I-EPOCH-6
     uint64_t epoch_fence_dropped_ = 0;  // frames dropped by the epoch fence
     uint32_t epoch_ = 0;
+    uint32_t peer_epoch_seen_ = 0;  // R17-02: highest peer epoch (responder)
     uint32_t next_seq_ = 0;
     uint32_t last_ack_seq_ = 0;
     uint32_t cur_interval_sec_ = 0;  // sampled per epoch (timer range)

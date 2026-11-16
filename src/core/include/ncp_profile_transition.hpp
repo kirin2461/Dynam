@@ -221,6 +221,10 @@ struct ProfileTransitionCounters {
     uint64_t transitions_uncertain = 0;   ///< completed after timeout, unconfirmed
     uint64_t transitions_aborted = 0;     ///< clean pre-activation abort/rollback
     uint64_t transitions_timed_out = 0;   ///< pre-activation timeouts
+    /// R17-09: reason of the most recent abort/timeout (NONE if none yet), so
+    /// observers of the counters can report the real cause instead of
+    /// assuming TIMEOUT.
+    AbortReason last_abort_reason = AbortReason::NONE;
     uint64_t aborts_ignored_post_activation = 0;
 };
 

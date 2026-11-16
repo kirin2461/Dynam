@@ -78,6 +78,22 @@ TEST(TransportConfig, CommentsAndBlankLinesOnlyIsLegacyDefaults) {
     EXPECT_EQ(cfg->wire_transport, WireTransport::LegacyPortHop);
 }
 
+// R17-08: '#' starts a comment only at line start or after whitespace; a
+// '#' inside a value must not silently truncate it.
+TEST(TransportConfig, HashInsideValueIsNotAComment) {
+    std::string err;
+    auto cfg = parse_transport_config(
+        "schema_version: 2\n"
+        "wire_transport: turn\n"
+        "turn:\n"
+        "  transport: udp\n"
+        "  data_mode: channel-data\n"
+        "  credential_ref: vault#turn-prod   # trailing comment\n",
+        err);
+    ASSERT_TRUE(cfg) << err;
+    EXPECT_EQ(cfg->turn.credential_ref, "vault#turn-prod");
+}
+
 // The doc example carries quic/turn sections alongside a legacy selection,
 // which §3.1 rejects — the example illustrates the FIELD SET, not a valid
 // combined config. The parts must parse/reject exactly as specified.

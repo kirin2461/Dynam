@@ -223,4 +223,26 @@ jobs:
       - name: Run tests with ${{ matrix.sanitizer }}
         run: |
           cd build
-          ctest --output-on-failure --timeout 120 -LE network
+          set +e
+          ctest --output-on-failure --timeout 120 -LE network 2>&1 | tee test_output.log
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            # Surface ONLY the failure signals as annotations. Order matters:
+            # the annotation API caps how much it returns per check run, so
+            # the failing gtest case and the TSan report must come first —
+            # putting "[ RUN" progress lines first pushed them past the cap.
+            # Only true failure lines. Do NOT match bare words like "Failure":
+            # they appear inside passing test NAMES (e.g.
+            # E2ETest.PaddingUnpadFailureRejected) and consume the cap.
+            grep -E "WARNING: ThreadSanitizer|SUMMARY: ThreadSanitizer|\[  FAILED  \]|^Failure$|^Expected:|^Which is:" \
+              test_output.log | head -60 \
+              | sed -e "s/%/%25/g" -e "s/\\r//g" \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            grep -A 40 "The following tests FAILED" test_output.log | head -41 \
+              | sed -e "s/%/%25/g" -e "s/\\r//g" \
+              | while IFS= read -r line; do echo "::error::CTX $line"; done
+            # Last test that started before the failure — the crash context.
+            last_run=$(grep "\[ RUN" test_output.log | tail -1 | sed -e "s/%/%25/g" -e "s/\\r//g")
+            echo "::error::LAST_RUNNING_TEST $last_run"
+          fi
+          exit $rc
