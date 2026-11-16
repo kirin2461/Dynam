@@ -3978,8 +3978,12 @@ void handle_autopilot(const std::vector<std::string>& args) {
     ncp::AutoPilot::Config cfg;
     cfg.probe_timeout_ms = std::max(1, std::min(120000,
         get_option_int(args, "--timeout", 5000)));
+    // R17-04: clamp here exactly like AutoPilot::load() (1..16) so the CLI
+    // worker pool never exceeds the core learn_active cap — excess workers
+    // would get an immediate false from learn() and be misreported as
+    // "no working strategy".
     cfg.max_parallel_learns = static_cast<size_t>(
-        std::max(1, get_option_int(args, "--parallel", 4)));
+        std::max(1, std::min(16, get_option_int(args, "--parallel", 4))));
     cfg.use_doh = has_flag(args, "--doh");
     ap.load(cfg);
 

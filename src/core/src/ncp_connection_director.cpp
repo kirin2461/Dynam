@@ -329,8 +329,13 @@ struct NcpConnectionDirector::Impl {
                     se.fb_base_timeouts) {
                 se.fb_pending = false;
                 gate_clear_feedback(kv.first);
+                // R17-09: report the adapter's real abort cause (peer ABORT,
+                // UNKNOWN_PROFILE/PEER_BUSY refusal, ...). Only a timeout
+                // with no recorded reason falls back to TIMEOUT.
+                AbortReason reason = st.transition_counters.last_abort_reason;
+                if (reason == AbortReason::NONE) reason = AbortReason::TIMEOUT;
                 fire_aborted(kv.first, se.fb_profile_id, se.fb_revision,
-                             AbortReason::TIMEOUT);
+                             reason);
                 continue;
             }
             if (now_ms >= se.fb_deadline_ms) {
@@ -540,6 +545,20 @@ void NcpConnectionDirector::on_datagram(SessionId id, const uint8_t* data,
         // the transport (PortHopServer) already whitelisted the session id.
         if (!impl_->server_role() || !impl_->cfg.auto_accept_sessions ||
             add_session(id) != Error::NONE) {
+            ++impl_->ingress_unknown_session;
+            return;
+        }
+        se = impl_->find(id);
+    } else if (impl_->server_role() && impl_->cfg.auto_accept_sessions &&
+               se->adapter->is_new_peer_handshake(data, len)) {
+        // R17-01: a new client reusing a session id (different KX public
+        // key) replaces the stale session instead of being dropped until
+        // the server restarts. Open transition feedback resolves as abort.
+        if (se->fb_pending)
+            impl_->fire_aborted(id, se->fb_profile_id, se->fb_revision,
+                                AbortReason::PROTOCOL_ERROR);
+        remove_session(id);
+        if (add_session(id) != Error::NONE) {
             ++impl_->ingress_unknown_session;
             return;
         }

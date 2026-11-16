@@ -283,6 +283,30 @@ TEST(PortHopEpochFenceTest, InWindowReorderAcrossHopAccepted) {
     EXPECT_EQ(r3->epoch, 3u);
 }
 
+// R17-02: a responder that never hops itself must stamp replies at the
+// hopping peer's epoch, or the peer's replay fence drops every reply once
+// it has hopped past the window.
+TEST(PortHopEpochFenceTest, ResponderRepliesAtPeerEpochAfterManyHops) {
+    PortHopSession client(kSessionId, make_schedule());
+    PortHopSession server(kSessionId, make_schedule());
+    uint8_t b = 0x33;
+
+    for (int i = 0; i < 6; ++i) client.hop();  // client epoch 6, min 2
+    ASSERT_EQ(client.min_accepted_epoch(), 2u);
+
+    auto req = client.encode(&b, 1);
+    auto in = server.decode(req.data(), req.size());
+    ASSERT_TRUE(in.has_value());
+    server.note_peer_epoch(in->epoch);
+    EXPECT_EQ(server.current_epoch(), 0u);  // server schedule untouched
+
+    auto reply = server.encode(&b, 1);
+    auto out = client.decode(reply.data(), reply.size());
+    ASSERT_TRUE(out.has_value());
+    EXPECT_EQ(out->epoch, 6u);
+    EXPECT_EQ(client.epoch_fence_dropped(), 0u);
+}
+
 TEST(PortHopEpochFenceTest, FutureEpochAcceptedPerProtocol) {
     PortHopSession sender(kSessionId, make_schedule());
     PortHopSession receiver(kSessionId, make_schedule());

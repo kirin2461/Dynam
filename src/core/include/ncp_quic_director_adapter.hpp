@@ -16,8 +16,9 @@
  * The adapter owns neither endpoint nor director and creates no threads.
  * All calls must run on the owner's single I/O thread. The endpoint must be
  * started and connected by the caller. Malformed bundles, queue overflow and
- * transport failures are sticky fatal adapter errors: no partial bundle is
- * delivered and there is no plaintext or alternate-transport fallback.
+ * transport failures are fatal: no partial bundle is delivered and there is
+ * no plaintext or alternate-transport fallback. On the server they are
+ * scoped to the offending connection; on the client they are sticky.
  */
 
 #include <cstddef>
@@ -57,6 +58,10 @@ public:
         uint64_t transport_errors = 0;
         uint64_t decode_errors = 0;
         uint64_t pending_overflow = 0;
+        /// Server: connections isolated after a per-connection failure.
+        uint64_t connections_failed = 0;
+        /// Server: inbound messages ignored for an already-failed connection.
+        uint64_t messages_ignored_failed = 0;
     };
 
     NcpQuicDirectorAdapter(RealQuicEndpoint& endpoint,
@@ -83,7 +88,18 @@ public:
     /// inbound QUIC message. A receive timeout is normal and returns true.
     /// False is a sticky fatal error; inspect last_error() and close the
     /// endpoint rather than retrying on another transport.
+    ///
+    /// Server role (R17-03): a malformed bundle, pending-egress overflow or
+    /// send failure attributable to ONE connection fails only that
+    /// connection (see connection_error()); its director session is removed
+    /// and pump() keeps serving every other connection. Endpoint-level
+    /// faults remain sticky for the whole adapter. The client role has a
+    /// single connection, so any failure there is adapter-wide and sticky.
     bool pump(uint64_t now_ms, uint32_t recv_timeout_ms);
+
+    /// Server: the failure reason of an isolated connection, or nullopt if
+    /// the connection is unknown or healthy.
+    std::optional<std::string> connection_error(SessionId id) const;
 
     std::optional<NcpConnectionDirector::AppData> next_application_data();
 

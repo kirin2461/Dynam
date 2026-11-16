@@ -150,17 +150,38 @@ bool bc_send_all(bc_socket_t s, const uint8_t* d, size_t n) {
 // TCP has no message boundaries: a SOCKS5 reply or a TLS record header may
 // arrive in several short reads. Never classify a valid peer as flaky merely
 // because recv() returned less than requested.
-bool bc_recv_full(bc_socket_t s, void* data, size_t n, int timeout_ms) {
+// R17-07: why a bc_recv_full() call failed, so callers can keep the "rst"
+// diagnosis (RST injection) distinct from "timeout" (blackholing).
+enum class BcRecvFail { None, Timeout, Reset, Closed };
+
+bool bc_recv_full(bc_socket_t s, void* data, size_t n, int timeout_ms,
+                  BcRecvFail* why = nullptr) {
+    if (why) *why = BcRecvFail::None;
     auto* out = static_cast<uint8_t*>(data);
     size_t received = 0;
     while (received < n) {
-        if (bc_wait(s, false, std::max(1, timeout_ms)) <= 0) return false;
+        if (bc_wait(s, false, std::max(1, timeout_ms)) <= 0) {
+            if (why) *why = BcRecvFail::Timeout;
+            return false;
+        }
         int r = ::recv(s, reinterpret_cast<char*>(out + received),
                        static_cast<int>(n - received), 0);
-        if (r <= 0) return false;
+        if (r <= 0) {
+            if (why)
+                *why = (r < 0 && bc_err() == BC_ECONNRESET) ? BcRecvFail::Reset
+                                                            : BcRecvFail::Closed;
+            return false;
+        }
         received += static_cast<size_t>(r);
     }
     return true;
+}
+
+/// Map a failed recv to the report's fail_reason. `other` is used for
+/// timeouts/orderly close (e.g. "timeout" for the TLS read, "proxy" for
+/// SOCKS framing); a TCP reset is always "rst".
+const char* bc_recv_reason(BcRecvFail why, const char* other) {
+    return why == BcRecvFail::Reset ? "rst" : other;
 }
 
 std::string json_esc(const std::string& s) {
@@ -272,8 +293,9 @@ BlockcheckProbe BlockChecker::probe_via_socks5(uint16_t proxy_port,
     req.push_back(0x01); req.push_back(0xBB);  // 443
     if (!bc_send_all(s, req.data(), req.size())) { p.fail_reason = "proxy"; return p; }
     uint8_t rrep[4];
-    if (!bc_recv_full(s, rrep, sizeof(rrep), timeout_ms)) {
-        p.fail_reason = "proxy";
+    BcRecvFail why = BcRecvFail::None;
+    if (!bc_recv_full(s, rrep, sizeof(rrep), timeout_ms, &why)) {
+        p.fail_reason = bc_recv_reason(why, "proxy");
         return p;
     }
     if (rrep[0] != 0x05) { p.fail_reason = "proxy"; return p; }
@@ -304,8 +326,8 @@ BlockcheckProbe BlockChecker::probe_via_socks5(uint16_t proxy_port,
     auto ch = build_client_hello(domain);
     if (!bc_send_all(s, ch.data(), ch.size())) { p.fail_reason = "rst"; return p; }
     uint8_t buf[6];
-    if (!bc_recv_full(s, buf, sizeof(buf), timeout_ms)) {
-        p.fail_reason = "timeout";
+    if (!bc_recv_full(s, buf, sizeof(buf), timeout_ms, &why)) {
+        p.fail_reason = bc_recv_reason(why, "timeout");
         return p;
     }
     // An arbitrary response (including a TCP/HTTP middlebox reply or TLS
@@ -332,8 +354,9 @@ BlockcheckProbe BlockChecker::probe_direct(const std::string& domain, int timeou
     auto ch = build_client_hello(domain);
     if (!bc_send_all(s, ch.data(), ch.size())) { p.fail_reason = "rst"; return p; }
     uint8_t buf[6];
-    if (!bc_recv_full(s, buf, sizeof(buf), timeout_ms)) {
-        p.fail_reason = "timeout";
+    BcRecvFail why = BcRecvFail::None;
+    if (!bc_recv_full(s, buf, sizeof(buf), timeout_ms, &why)) {
+        p.fail_reason = bc_recv_reason(why, "timeout");
         return p;
     }
     // An arbitrary response (including a TCP/HTTP middlebox reply or TLS

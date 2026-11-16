@@ -206,7 +206,7 @@ TEST_F(QuicDirectorAdapterTest, ProtectedDirectorExchangeBothRoles) {
     EXPECT_EQ(server.local_address_str(), server_local);
 }
 
-TEST_F(QuicDirectorAdapterTest, MalformedBundleIsAtomicAndFatal) {
+TEST_F(QuicDirectorAdapterTest, MalformedBundleIsAtomicAndFailsOnlyThatConnection) {
     ASSERT_TRUE(certs_.ok);
     RealQuicEndpoint server(server_config(certs_));
     ASSERT_TRUE(server.start()) << server.last_error();
@@ -222,19 +222,20 @@ TEST_F(QuicDirectorAdapterTest, MalformedBundleIsAtomicAndFatal) {
 
     // Declares one datagram but contains no length or payload.
     ASSERT_TRUE(client.send_message({1, 0, 0, 0}));
-    bool failed = false;
-    for (int i = 0; i < 100 && !failed; ++i) {
-        failed = !adapter.pump(now_ms(), 10);
-        if (!failed) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    for (int i = 0; i < 100 && adapter.stats().decode_errors == 0; ++i) {
+        // R17-03: a per-connection fault never fails the server adapter.
+        ASSERT_TRUE(adapter.pump(now_ms(), 10)) << adapter.last_error();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    ASSERT_TRUE(failed);
     EXPECT_EQ(adapter.stats().decode_errors, 1u);
-    EXPECT_EQ(director.stats().datagrams_in, 0u);
+    EXPECT_EQ(adapter.stats().connections_failed, 1u);
+    EXPECT_EQ(director.stats().datagrams_in, 0u);  // atomic: nothing delivered
     EXPECT_EQ(director.session_count(), 0u);
-    EXPECT_FALSE(adapter.pump(now_ms(), 0)); // sticky failure, no fallback
+    EXPECT_TRUE(adapter.last_error().empty());
+    EXPECT_TRUE(adapter.pump(now_ms(), 0));  // still serving other connections
 }
 
-TEST_F(QuicDirectorAdapterTest, PendingOverflowFailsClosed) {
+TEST_F(QuicDirectorAdapterTest, PendingOverflowFailsOnlyThatConnection) {
     ASSERT_TRUE(certs_.ok);
     RealQuicEndpoint server(server_config(certs_));
     ASSERT_TRUE(server.start()) << server.last_error();
@@ -258,16 +259,20 @@ TEST_F(QuicDirectorAdapterTest, PendingOverflowFailsClosed) {
     for (int i = 0; i < 1000 && !overflow; ++i) {
         const uint64_t now = now_ms();
         ASSERT_TRUE(client_adapter.pump(now, 0)) << client_adapter.last_error();
-        if (!server_adapter.pump(now, 0)) {
-            overflow = true;
-            break;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ASSERT_TRUE(server_adapter.pump(now, 0)) << server_adapter.last_error();
+        overflow = server_adapter.stats().pending_overflow > 0;
+        if (!overflow)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     ASSERT_TRUE(overflow);
     EXPECT_EQ(server_adapter.stats().pending_overflow, 1u);
+    EXPECT_EQ(server_adapter.stats().connections_failed, 1u);
     EXPECT_EQ(server_director.stats().app_messages_in, 0u);
-    EXPECT_FALSE(server_adapter.pump(now_ms(), 0));
+    // Fail-closed for that connection only: its session is gone, the
+    // adapter itself keeps serving.
+    EXPECT_EQ(server_director.session_count(), 0u);
+    EXPECT_TRUE(server_adapter.last_error().empty());
+    EXPECT_TRUE(server_adapter.pump(now_ms(), 0));
 }
 
 TEST_F(QuicDirectorAdapterTest, RoleAndBoundsValidation) {
