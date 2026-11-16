@@ -190,6 +190,11 @@ public:
         std::string description;
         std::function<void(const std::vector<std::string>&)> handler;
         std::vector<std::string> args_help;
+        // Prints this command's usage. The dispatcher calls it for a
+        // `--help`/`-h` anywhere in argv and never invokes the handler, so an
+        // individual handler cannot forget the check — and cannot be started
+        // by a help request. Defaults to a summary built from args_help.
+        std::function<void()> help;
     };
 
     ArgumentParser(const std::string& prog_name, const std::string& version)
@@ -199,9 +204,13 @@ public:
         const std::string& name,
         const std::string& description,
         std::function<void(const std::vector<std::string>&)> handler,
-        const std::vector<std::string>& args_help = {}
+        const std::vector<std::string>& args_help = {},
+        std::function<void()> help = nullptr
     ) {
-        commands_[name] = {name, description, handler, args_help};
+        commands_[name] = {name, description, handler, args_help, help};
+        if (!help) {
+            commands_[name].help = [this, name]() { print_command_usage(name); };
+        }
     }
 
     void parse_and_execute(int argc, char* argv[]) {
@@ -229,10 +238,35 @@ public:
         }
 
         std::vector<std::string> args(argv + 2, argv + argc);
+
+        // R19-01/02/03: a help request must never change the system. Handlers
+        // such as `dpi` (starts the WinDivert driver), `stop` (stops services)
+        // and `rotate` (bounces the adapter) have no help check of their own,
+        // so intercept `--help`/`-h` here — anywhere in argv, not just first —
+        // and print usage without invoking the handler.
+        for (const auto& a : args) {
+            if (a == "--help" || a == "-h") {
+                it->second.help();
+                return;
+            }
+        }
+
         it->second.handler(args);
     }
 
 private:
+    void print_command_usage(const std::string& name) const {
+        auto it = commands_.find(name);
+        if (it == commands_.end()) return;
+        const Command& cmd = it->second;
+        std::cout << "Usage: " << prog_name_ << " " << cmd.name;
+        for (const auto& arg : cmd.args_help)
+            std::cout << " " << arg;
+        std::cout << "\n\n  " << cmd.description << "\n\n"
+                  << "Options:\n"
+                  << "  --help, -h  Show this help message\n";
+    }
+
     void print_usage() const {
         std::cout << prog_name_ << " " << version_ << " - Network Control Protocol\n";
         std::cout << "\nUsage: " << prog_name_ << " <command> [options]\n\n";
@@ -728,20 +762,24 @@ static bool sysproxy_restore(std::string* err) {
     return true;
 }
 
+static void sysproxy_print_usage() {
+    std::cout << "Usage: ncp sysproxy <action>\n"
+              << "  on [--port N]   Route all proxy-aware applications through 127.0.0.1:N\n"
+              << "                  (Discord, browsers, Electron apps — no admin needed)\n"
+              << "  off             Restore previous system proxy settings\n"
+              << "  status          Show whether ncp system proxy is active\n"
+              << "\n"
+              << "Start the desync proxy first: ncp proxy --doh --autopilot\n"
+              << "(or use `ncp proxy --system-proxy` to do both in one command)\n";
+}
+
 void handle_sysproxy(const std::vector<std::string>& args) {
     std::string action;
     for (const auto& a : args) {
         if (!a.empty() && a[0] != '-') { action = a; break; }
     }
-    if (action.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
-        std::cout << "Usage: ncp sysproxy <action>\n"
-                  << "  on [--port N]   Route all proxy-aware applications through 127.0.0.1:N\n"
-                  << "                  (Discord, browsers, Electron apps — no admin needed)\n"
-                  << "  off             Restore previous system proxy settings\n"
-                  << "  status          Show whether ncp system proxy is active\n"
-                  << "\n"
-                  << "Start the desync proxy first: ncp proxy --doh --autopilot\n"
-                  << "(or use `ncp proxy --system-proxy` to do both in one command)\n";
+    if (action.empty()) {
+        sysproxy_print_usage();
         return;
     }
     if (action == "on") {
@@ -1065,6 +1103,34 @@ void handle_mimicry_catalog(const std::vector<std::string>& args);
 void handle_fog(const std::vector<std::string>& args);
 void handle_cps(const std::vector<std::string>& args);
 void handle_trust(const std::vector<std::string>& args);
+
+// Per-command usage printers. The dispatcher calls these for `--help`/`-h`
+// instead of the handler (R19-01/02/03), so a help request can never start an
+// engine that rewrites system state.
+static void run_print_usage();
+static void stop_print_usage();
+static void status_print_usage();
+static void rotate_print_usage();
+static void crypto_print_usage();
+static void network_print_usage();
+static void license_print_usage();
+static void dpi_print_usage();
+static void i2p_print_usage();
+static void mimic_print_usage();
+static void proxy_print_usage();
+static void blockcheck_print_usage();
+static void autopilot_print_usage();
+static void sysproxy_print_usage();
+static void import_zapret_print_usage();
+static void spa_print_usage();
+static void reality_print_usage();
+static void stegodns_print_usage();
+static void porthop_print_usage();
+static void mimicry_catalog_print_usage();
+static void fog_print_usage();
+static void cps_print_usage();
+static void trust_print_usage();
+static void xdp_print_usage();
 void handle_xdp(const std::vector<std::string>& args);
 
 // ============================================================================
@@ -1077,30 +1143,30 @@ int main(int argc, char* argv[]) {
 
     ArgumentParser parser("ncp", NCP_VERSION_STRING);
 
-    parser.add_command("run", "Start PARANOID mode (all protection layers; --auto auto-selects DPI preset; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--preset NAME]", "[--auto]", "[--auto-interval S]", "[--auto-timeout MS]", "[--auto-candidates CSV]", "[--auto-hosts CSV]", "[--auto-cooldown S]", "[--auto-escalate]", "[--no-auto-escalate]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"});
-    parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop);
-    parser.add_command("status", "Show current spoof status", handle_status);
-    parser.add_command("rotate", "Rotate all identities", handle_rotate);
-    parser.add_command("crypto", "Cryptographic operations", handle_crypto, {"<action>", "[args]"});
-    parser.add_command("network", "Network operations", handle_network, {"<action>"});
-    parser.add_command("license", "License management", handle_license, {"<action>"});
-    parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"});
-    parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"});
-    parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"});
-    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]", "[--upstream socks5://127.0.0.1:9050]", "[--tor]", "[--tor-exec /path/tor --tor-bridge \"obfs4 ...\" --pt-obfs4 /path/lyrebird]"});
-    parser.add_command("blockcheck", "Auto-select and validate best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--parallel N]", "[--validate N]", "[--full-sweep]", "[--doh]", "[--json]", "[--out file]", "[--apply profile.json]"});
-    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|learn-batch|reset|enable|disable|learn-preset>", "[domain|domains|preset]", "[--json]", "[--timeout ms]", "[--parallel N]"});
-    parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"});
-    parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"});
-    parser.add_command("spa", "Ed25519 Single Packet Authorization (keygen/knock/serve)", handle_spa, {"<keygen|knock|serve>", "[--out prefix]", "[--key f.key]", "[--allow-port N]", "[--port 54117]", "[--proto tcp]", "[--ttl S]", "[--authorized-keys f]", "[--set-name ncp_spa_allow]", "[--default-ttl 300]", "[--max-ttl 86400]", "[--dry-run]"});
-    parser.add_command("reality", "XTLS-Reality-style fallback server (Enterprise)", handle_reality, {"serve", "--listen <port>", "--fallback <host:port>", "--internal <host:port>", "--key-file <f>", "[--dry-run]"});
-    parser.add_command("stegodns", "Zero-Knowledge steganographic DNS records (Enterprise)", handle_stegodns, {"<encode|decode>", "[options]"});
-    parser.add_command("porthop", "UDP port-hopping transport demo (Enterprise)", handle_porthop, {"<serve|client>", "[options]"});
-    parser.add_command("mimicry-catalog", "Validate/inspect external mimicry profile catalog files", handle_mimicry_catalog, {"<validate|list> <path>"});
-    parser.add_command("fog", "Cooperative fog mesh overlay node (Enterprise)", handle_fog, {"node", "--id <hex32>", "--port <n>", "[--peer ip:port]...", "[--frame-secret s]", "[--ver-range min-max]"});
-    parser.add_command("cps", "CPS pre-handshake fake-packet chains (AWG I1-I5 analogue)", handle_cps, {"<send|test>", "--chain \"dns:x.ru;wait:50;quic\"", "[--host ip --port N --proto udp|tcp]"});
-    parser.add_command("trust", "Scoped trust for state roots (NUЦ containment)", handle_trust, {"<policy-test|init-ca|verify|update-roots>", "[options]"});
-    parser.add_command("xdp", "eBPF/XDP kernel packet processing (Enterprise)", handle_xdp, {"<compile|attach|detach|stats|drop|probe>", "[args]"});
+    parser.add_command("run", "Start PARANOID mode (all protection layers; --auto auto-selects DPI preset; --kill-switch arms firewall kill switch; --geneva-evolve runs GA strategy evolution)", handle_run, {"[<interface>]", "[--preset NAME]", "[--auto]", "[--auto-interval S]", "[--auto-timeout MS]", "[--auto-candidates CSV]", "[--auto-hosts CSV]", "[--auto-cooldown S]", "[--auto-escalate]", "[--no-auto-escalate]", "[--geneva-evolve]", "[--geneva-target host[:port]]", "[--geneva-interval N]", "[--geneva-population N]", "[--geneva-mutation F]", "[--hostlist F]", "[--hostlist-exclude F]", "[--ipset F]", "[--no-spoof]"}, run_print_usage);
+    parser.add_command("stop", "Stop spoofing and restore original settings", handle_stop, {}, stop_print_usage);
+    parser.add_command("status", "Show current spoof status", handle_status, {}, status_print_usage);
+    parser.add_command("rotate", "Rotate all identities", handle_rotate, {}, rotate_print_usage);
+    parser.add_command("crypto", "Cryptographic operations", handle_crypto, {"<action>", "[args]"}, crypto_print_usage);
+    parser.add_command("network", "Network operations", handle_network, {"<action>"}, network_print_usage);
+    parser.add_command("license", "License management", handle_license, {"<action>"}, license_print_usage);
+    parser.add_command("dpi", "DPI bypass proxy", handle_dpi, {"[options]"}, dpi_print_usage);
+    parser.add_command("i2p", "I2P proxy configuration", handle_i2p, {"<action>"}, i2p_print_usage);
+    parser.add_command("mimic", "Set traffic mimicry mode", handle_mimic, {"<type>"}, mimic_print_usage);
+    parser.add_command("proxy", "Local SOCKS5/HTTP desync proxy (no admin needed)", handle_proxy, {"[--port 1080]", "[--preset name]", "[--zapret-profile name]", "[--block-quic]", "[--fake-quic N]", "[--autohostlist file]", "[--upstream socks5://127.0.0.1:9050]", "[--tor]", "[--tor-exec /path/tor --tor-bridge \"obfs4 ...\" --pt-obfs4 /path/lyrebird]"}, proxy_print_usage);
+    parser.add_command("blockcheck", "Auto-select and validate best DPI bypass strategy", handle_blockcheck, {"[--domains a,b,c]", "[--timeout ms]", "[--parallel N]", "[--validate N]", "[--full-sweep]", "[--doh]", "[--json]", "[--out file]", "[--apply profile.json]"}, blockcheck_print_usage);
+    parser.add_command("autopilot", "Adaptive self-learning DPI bypass engine", handle_autopilot, {"<status|learn|learn-batch|reset|enable|disable|learn-preset>", "[domain|domains|preset]", "[--json]", "[--timeout ms]", "[--parallel N]"}, autopilot_print_usage);
+    parser.add_command("sysproxy", "System-wide proxy for applications (Discord etc.)", handle_sysproxy, {"<on|off|status>", "[--port N]"}, sysproxy_print_usage);
+    parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"}, import_zapret_print_usage);
+    parser.add_command("spa", "Ed25519 Single Packet Authorization (keygen/knock/serve)", handle_spa, {"<keygen|knock|serve>", "[--out prefix]", "[--key f.key]", "[--allow-port N]", "[--port 54117]", "[--proto tcp]", "[--ttl S]", "[--authorized-keys f]", "[--set-name ncp_spa_allow]", "[--default-ttl 300]", "[--max-ttl 86400]", "[--dry-run]"}, spa_print_usage);
+    parser.add_command("reality", "XTLS-Reality-style fallback server (Enterprise)", handle_reality, {"serve", "--listen <port>", "--fallback <host:port>", "--internal <host:port>", "--key-file <f>", "[--dry-run]"}, reality_print_usage);
+    parser.add_command("stegodns", "Zero-Knowledge steganographic DNS records (Enterprise)", handle_stegodns, {"<encode|decode>", "[options]"}, stegodns_print_usage);
+    parser.add_command("porthop", "UDP port-hopping transport demo (Enterprise)", handle_porthop, {"<serve|client>", "[options]"}, porthop_print_usage);
+    parser.add_command("mimicry-catalog", "Validate/inspect external mimicry profile catalog files", handle_mimicry_catalog, {"<validate|list> <path>"}, mimicry_catalog_print_usage);
+    parser.add_command("fog", "Cooperative fog mesh overlay node (Enterprise)", handle_fog, {"node", "--id <hex32>", "--port <n>", "[--peer ip:port]...", "[--frame-secret s]", "[--ver-range min-max]"}, fog_print_usage);
+    parser.add_command("cps", "CPS pre-handshake fake-packet chains (AWG I1-I5 analogue)", handle_cps, {"<send|test>", "--chain \"dns:x.ru;wait:50;quic\"", "[--host ip --port N --proto udp|tcp]"}, cps_print_usage);
+    parser.add_command("trust", "Scoped trust for state roots (NUЦ containment)", handle_trust, {"<policy-test|init-ca|verify|update-roots>", "[options]"}, trust_print_usage);
+    parser.add_command("xdp", "eBPF/XDP kernel packet processing (Enterprise)", handle_xdp, {"<compile|attach|detach|stats|drop|probe>", "[args]"}, xdp_print_usage);
 
     parser.parse_and_execute(argc, argv);
 
@@ -1443,9 +1509,8 @@ static bool trial_check_or_issue(const std::string& path) {
 // CLI geneva_best_pending loop and PresetAutoPilot L3 share one
 // implementation. `skipped` there is a count of untranslatable actions.
 
-void handle_run(const std::vector<std::string>& args) {
-    if (has_flag(args, "--help") || has_flag(args, "-h")) {
-        std::cout << "Usage: ncp run [<interface>] [options]\n"
+static void run_print_usage() {
+    std::cout << "Usage: ncp run [<interface>] [options]\n"
                   << "  --preset NAME         DPI bypass preset: tspu, beeline, mts, megafon,\n"
                   << "                        tele2, mobile, auto (default: tspu)\n"
                   << "  --auto, --autoprobe   Auto-detect mode: probe candidate presets in the\n"
@@ -1473,8 +1538,9 @@ void handle_run(const std::vector<std::string>& args) {
                   << "  --no-spoof            Skip IP/MAC/DNS spoofing\n"
                   << "  --kill-switch         Arm firewall kill switch (drops ALL traffic if\n"
                   << "                        protection stops unexpectedly) — opt-in, dangerous\n";
-        return;
-    }
+}
+
+void handle_run(const std::vector<std::string>& args) {
     try {
         // ── License gate ──────────────────────────────────────────────────────
         // License validation required for all invocations.
@@ -1567,9 +1633,14 @@ void handle_run(const std::vector<std::string>& args) {
             if (working_dns.size() > 1) std::cout << ", " << working_dns[1];
             std::cout << "\n";
         }
+        // R18-06: SpoofConfig now defaults every category to off, so opt in
+        // here explicitly to keep `ncp run` behaviour unchanged. Hostname was
+        // previously rotated implicitly because rotate_all() always called it.
+        spoof_cfg.spoof_hostname = true;
         spoof_cfg.spoof_hw_info = false;
         spoof_cfg.spoof_smbios = false;
         spoof_cfg.spoof_disk_serial = false;
+        spoof_cfg.spoof_dhcp_client_id = false;
         spoof_cfg.coordinated_rotation = false;
         
         // If user passes --full-spoof, enable everything (for wired/static setups)
@@ -1578,9 +1649,11 @@ void handle_run(const std::vector<std::string>& args) {
             spoof_cfg.spoof_ipv4 = true;
             spoof_cfg.spoof_ipv6 = true;
             spoof_cfg.spoof_mac  = true;
-            spoof_cfg.spoof_hw_info = true;
             spoof_cfg.coordinated_rotation = true;
+            // Hardware-info spoofing is not supported anywhere (R18-02), so
+            // --full-spoof no longer pretends to do it.
             std::cout << "[*] Full spoof mode (IP+MAC+DNS) - use only on wired/static setups\n";
+            std::cout << "[*] Hardware-info/SMBIOS/disk-serial spoofing is not supported\n";
         }
         
         std::string iface = (iface_opt.empty() || iface_opt == "auto") ? detect_default_interface() : iface_opt;
@@ -2637,6 +2710,14 @@ void handle_run(const std::vector<std::string>& args) {
     }
 }
 
+static void stop_print_usage() {
+    std::cout << "Usage: ncp stop\n"
+              << "\n"
+              << "Stops every running NCP service (spoofing, DPI bypass, paranoid\n"
+              << "circuits, transport modules) and restores the original network\n"
+              << "settings. Takes no options.\n";
+}
+
 void handle_stop(const std::vector<std::string>& args) {
     // FIX C4100: Mark unreferenced parameter
     (void)args;
@@ -2788,6 +2869,14 @@ void handle_stop(const std::vector<std::string>& args) {
     std::cout << "[+] All services stopped\n";
 }
 
+static void status_print_usage() {
+    std::cout << "Usage: ncp status\n"
+              << "\n"
+              << "Prints the state of every protection layer: spoofed identities,\n"
+              << "DNS-leak prevention, L3 stealth, DPI bypass, paranoid circuits and\n"
+              << "the per-session director. Read-only. Takes no options.\n";
+}
+
 void handle_status(const std::vector<std::string>& args) {
     // FIX C4100: Mark unreferenced parameter
     (void)args;
@@ -2833,6 +2922,16 @@ void handle_status(const std::vector<std::string>& args) {
         std::cout << "  IPv6: " << (status.ipv6_spoofed ? status.current_ipv6 : "Not spoofed") << "\n";
         std::cout << "  MAC: " << (status.mac_spoofed ? status.current_mac : "Not spoofed") << "\n";
         std::cout << "  Hostname: " << (status.hostname_spoofed ? status.current_hostname : "Not spoofed") << "\n";
+        std::cout << "  DNS: " << (status.dns_spoofed && !status.current_dns.empty()
+                                     ? status.current_dns[0] : "Not spoofed") << "\n";
+        // These categories cannot be changed from user mode on any platform
+        // (R18-01/02/03/05). Report them honestly instead of leaving the
+        // operator to assume they are active.
+        std::cout << "  Hardware serial: Not supported (firmware/DMI is read-only)\n";
+        std::cout << "  SMBIOS/DMI:      Not supported system-wide (use the LD_PRELOAD "
+                     "shim per process on Linux)\n";
+        std::cout << "  Disk serial:     Not supported (from the drive's IDENTIFY data)\n";
+        std::cout << "  DHCP client ID:  Not supported on Windows\n";
     } else {
         std::cout << "[Spoofing] Inactive\n";
     }
@@ -3027,6 +3126,14 @@ void handle_status(const std::vector<std::string>& args) {
     }
 }
 
+static void rotate_print_usage() {
+    std::cout << "Usage: ncp rotate\n"
+              << "\n"
+              << "Generates a fresh IPv4/IPv6/MAC/DNS/hostname identity for whatever\n"
+              << "spoof categories are active and re-applies them. This may bounce the\n"
+              << "network adapter and briefly drop connectivity. Takes no options.\n";
+}
+
 void handle_rotate(const std::vector<std::string>& args) {
     // FIX C4100: Mark unreferenced parameter
     (void)args;
@@ -3055,12 +3162,20 @@ void handle_rotate(const std::vector<std::string>& args) {
     }
 }
 
+static void crypto_print_usage() {
+    std::cout << "Usage: ncp crypto <action> [args]\n"
+              << "  keygen                          Generate an Ed25519 keypair\n"
+              << "  random <N>                      Print N random bytes (hex)\n"
+              << "  hash <algo> <data>              algo: sha256, sha512, blake2b (default sha256)\n"
+              << "  sign <message> <secret_key_hex> Ed25519 signature\n"
+              << "  verify <message> <sig_hex> <public_key_hex>\n";
+}
+
 void handle_crypto(const std::vector<std::string>& args) {
     std::string action = get_arg(args, 0);
-    
+
     if (action.empty()) {
-        std::cerr << "Usage: ncp crypto <action> [args]\n";
-        std::cerr << "Actions: keygen, random, hash, sign, verify\n";
+        crypto_print_usage();
         return;
     }
     
@@ -3173,12 +3288,17 @@ void handle_crypto(const std::vector<std::string>& args) {
     }
 }
 
+static void network_print_usage() {
+    std::cout << "Usage: ncp network <action>\n"
+              << "  interfaces   List network interfaces and their addresses\n"
+              << "  stats        Show packet/byte counters\n";
+}
+
 void handle_network(const std::vector<std::string>& args) {
     std::string action = get_arg(args, 0);
-    
+
     if (action.empty()) {
-        std::cerr << "Usage: ncp network <action>\n";
-        std::cerr << "Actions: interfaces, stats\n";
+        network_print_usage();
         return;
     }
     
@@ -3206,13 +3326,19 @@ void handle_network(const std::vector<std::string>& args) {
     }
 }
 
+static void license_print_usage() {
+    std::cout << "Usage: ncp license <action>\n"
+              << "  hwid                     Print the host/hardware ID used for licensing\n"
+              << "  info [file]              Show the stored license (default license.key)\n"
+              << "  validate [file]          Verify the stored license\n"
+              << "  activate <NCP-XXXXX-key> [--server <url>] [file]\n";
+}
+
 void handle_license(const std::vector<std::string>& args) {
     std::string action = get_arg(args, 0);
-    
+
     if (action.empty()) {
-        std::cerr << "Usage: ncp license <action>\n";
-        std::cerr << "Actions: hwid, info, validate, activate\n";
-        std::cerr << "  activate <NCP-XXXXX-key> [--server <url>] [file]\n";
+        license_print_usage();
         return;
     }
     
@@ -3301,6 +3427,35 @@ void handle_license(const std::vector<std::string>& args) {
     else {
         std::cerr << "[!] Unknown license action: " << action << "\n";
     }
+}
+
+static void dpi_print_usage() {
+    std::cout << "Usage: ncp dpi [options]\n"
+              << "  --port N              Listen port, PROXY mode (default 8881)\n"
+              << "  --target HOST         Target host for PROXY mode (default example.com)\n"
+              << "  --target-port N       Target port (default 443)\n"
+              << "  --preset NAME         tspu, beeline, mts, megafon, tele2, mobile, auto\n"
+              << "  --split-pos N         TCP split at byte N (default 2)\n"
+              << "  --no-split            Disable TCP splitting\n"
+              << "  --noise-size N        Fake noise payload size (default 64)\n"
+              << "  --no-noise            Disable noise\n"
+              << "  --fake-ttl N          TTL of the fake packet (default 1)\n"
+              << "  --no-fake             Disable fake packets\n"
+              << "  --no-disorder         Disable segment reordering\n"
+              << "  --hostlist FILE       Selective desync: only hosts from FILE\n"
+              << "  --hostlist-exclude F  Selective desync: exclude hosts from FILE\n"
+              << "  --ipset FILE          Selective desync: only IPs/networks from FILE\n"
+              << "  --kill-switch         Drop all direct outbound traffic (Windows driver\n"
+              << "                        mode only; dangerous, explicit opt-in)\n"
+              << "  --no-kill-switch      Force the kill switch off\n"
+              << "  --ks-allow HOST:PORT  Kill-switch allow-list entry\n"
+              << "\n"
+#ifdef _WIN32
+              << "On Windows this runs in WinDivert DRIVER mode and transparently\n"
+              << "intercepts traffic until Ctrl+C — it requires administrator rights.\n";
+#else
+              << "On Linux this runs a local PROXY on --port; point clients at it.\n";
+#endif
 }
 
 void handle_dpi(const std::vector<std::string>& args) {
@@ -3419,12 +3574,19 @@ void handle_dpi(const std::vector<std::string>& args) {
     }
 }
 
+static void i2p_print_usage() {
+    std::cout << "Usage: ncp i2p <action>\n"
+              << "  start [--sam-host H] [--sam-port N] [--tunnel-length N]\n"
+              << "        Connect to the local I2P SAM bridge (default 127.0.0.1:7656)\n"
+              << "  stop        Tear the tunnel down\n"
+              << "  status      Show tunnel and router statistics\n";
+}
+
 void handle_i2p(const std::vector<std::string>& args) {
     std::string action = get_arg(args, 0);
-    
+
     if (action.empty()) {
-        std::cerr << "Usage: ncp i2p <action>\n";
-        std::cerr << "Actions: start, stop, status\n";
+        i2p_print_usage();
         return;
     }
     
@@ -3484,6 +3646,13 @@ void handle_i2p(const std::vector<std::string>& args) {
     }
 }
 
+static void mimic_print_usage() {
+    std::cout << "Usage: ncp mimic <type|current|off>\n"
+              << "  Types: http, https, dns, quic, websocket, bittorrent, skype, zoom\n"
+              << "  current   Show the saved mimicry profile\n"
+              << "  off       Clear the saved profile (default engine behaviour)\n";
+}
+
 void handle_mimic(const std::vector<std::string>& args) {
     std::string type = get_arg(args, 0);
 
@@ -3507,8 +3676,7 @@ void handle_mimic(const std::vector<std::string>& args) {
     }
     
     if (type.empty()) {
-        std::cerr << "Usage: ncp mimic <type|current|off>\n";
-        std::cerr << "Types: http, https, dns, quic, websocket, bittorrent, skype, zoom\n";
+        mimic_print_usage();
         return;
     }
     
@@ -3587,9 +3755,8 @@ static std::string mimicry_config_path() {
 // ============================================================================
 // ncp proxy — local SOCKS5/HTTP desync proxy (no admin required)
 // ============================================================================
-void handle_proxy(const std::vector<std::string>& args) {
-    if (has_flag(args, "--help") || has_flag(args, "-h")) {
-        std::cout << "Usage: ncp proxy [options]\n"
+static void proxy_print_usage() {
+    std::cout << "Usage: ncp proxy [options]\n"
                   << "  --port N              Listen port (default 1080, 0 = ephemeral)\n"
                   << "  --bind ADDR           Listen address (default 127.0.0.1)\n"
                   << "  --preset NAME         Base DPI preset for desync strategy\n"
@@ -3617,8 +3784,9 @@ void handle_proxy(const std::vector<std::string>& args) {
                   << "                        obfs4 IP:PORT FINGERPRINT cert=... iat-mode=0\n"
                   << "  --pt-obfs4 PATH       lyrebird/obfs4proxy binary (for obfs4 bridges)\n"
                   << "  --pt-snowflake PATH   snowflake-client binary (for Snowflake bridges)\n";
-        return;
-    }
+}
+
+void handle_proxy(const std::vector<std::string>& args) {
     ncp::DesyncProxy::Config cfg;
     int proxy_port = get_option_port(args, "--port", 1080);
     if (proxy_port < 0) { g_exit_code = 1; return; }
@@ -3879,21 +4047,21 @@ void handle_proxy(const std::vector<std::string>& args) {
 // ============================================================================
 // ncp blockcheck — automatic strategy selection
 // ============================================================================
+static void blockcheck_print_usage() {
+    std::cout << "Usage: ncp blockcheck [options]\n"
+              << "  --domains a,b,c       Domains to probe (default: built-in list)\n"
+              << "  --timeout MS          Per-probe timeout (default 5000)\n"
+              << "  --parallel N          Concurrent domains per strategy (default 4, max 32)\n"
+              << "  --validate N          Confirmation rounds for top candidates (default 1, max 8)\n"
+              << "  --validate-candidates N  Max candidates to confirm (default 3)\n"
+              << "  --full-sweep          Do not stop after a fully validated winner\n"
+              << "  --doh                 Resolve proxied targets via DNS-over-HTTPS\n"
+              << "  --json                Print report as JSON\n"
+              << "  --out FILE            Save report JSON to FILE\n"
+              << "  --apply FILE          Write only a stable winning profile as JSON\n";
+}
+
 void handle_blockcheck(const std::vector<std::string>& args) {
-    if (has_flag(args, "--help") || has_flag(args, "-h")) {
-        std::cout << "Usage: ncp blockcheck [options]\n"
-                  << "  --domains a,b,c       Domains to probe (default: built-in list)\n"
-                  << "  --timeout MS          Per-probe timeout (default 5000)\n"
-                  << "  --parallel N          Concurrent domains per strategy (default 4, max 32)\n"
-                  << "  --validate N          Confirmation rounds for top candidates (default 1, max 8)\n"
-                  << "  --validate-candidates N  Max candidates to confirm (default 3)\n"
-                  << "  --full-sweep          Do not stop after a fully validated winner\n"
-                  << "  --doh                 Resolve proxied targets via DNS-over-HTTPS\n"
-                  << "  --json                Print report as JSON\n"
-                  << "  --out FILE            Save report JSON to FILE\n"
-                  << "  --apply FILE          Write only a stable winning profile as JSON\n";
-        return;
-    }
     ncp::BlockChecker::Config cfg;
     cfg.timeout_ms = std::max(1, std::min(120000,
         get_option_int(args, "--timeout", 5000)));
@@ -4010,6 +4178,25 @@ static const std::map<std::string, std::vector<std::string>>& autopilot_presets(
     return presets;
 }
 
+static void autopilot_print_usage() {
+    std::cout << "Usage: ncp autopilot <action> [options]\n"
+              << "  status [--json]        Show learned per-host strategies\n"
+              << "  learn <domain>         Probe all strategies for domain, store the best\n"
+              << "                         (--doh: resolve probe targets via DNS-over-HTTPS)\n"
+              << "  learn-batch a,b,c      Learn independent domains concurrently\n"
+              << "  learn-preset <name>    Learn all domains of an app: discord|youtube|x\n"
+              << "  --parallel N           Concurrent host learns (default 4, max 16)\n"
+              << "  reset [domain]         Drop one record (or all, if omitted)\n"
+              << "  enable                 Persistently enable AutoPilot (proxy picks it up)\n"
+              << "  disable                Persistently disable AutoPilot\n"
+              << "\n"
+              << "AutoPilot learns which desync strategy works for each host by live\n"
+              << "probing (TLS ClientHello over TCP/443 through a temporary local proxy),\n"
+              << "applies it inside `ncp proxy`, watches live traffic for degradation\n"
+              << "(RST/timeout) and re-learns automatically in the background.\n"
+              << "DB: " << ncp::AutoPilot::default_db_path() << "\n";
+}
+
 void handle_autopilot(const std::vector<std::string>& args) {
     // first non-flag token = action
     std::string action;
@@ -4019,23 +4206,8 @@ void handle_autopilot(const std::vector<std::string>& args) {
         if (action.empty()) { action = a; continue; }
         if (positional.empty()) { positional = a; continue; }
     }
-    if (action.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
-        std::cout << "Usage: ncp autopilot <action> [options]\n"
-                  << "  status [--json]        Show learned per-host strategies\n"
-                  << "  learn <domain>         Probe all strategies for domain, store the best\n"
-                  << "                         (--doh: resolve probe targets via DNS-over-HTTPS)\n"
-                  << "  learn-batch a,b,c      Learn independent domains concurrently\n"
-                  << "  learn-preset <name>    Learn all domains of an app: discord|youtube|x\n"
-                  << "  --parallel N           Concurrent host learns (default 4, max 16)\n"
-                  << "  reset [domain]         Drop one record (or all, if omitted)\n"
-                  << "  enable                 Persistently enable AutoPilot (proxy picks it up)\n"
-                  << "  disable                Persistently disable AutoPilot\n"
-                  << "\n"
-                  << "AutoPilot learns which desync strategy works for each host by live\n"
-                  << "probing (TLS ClientHello over TCP/443 through a temporary local proxy),\n"
-                  << "applies it inside `ncp proxy`, watches live traffic for degradation\n"
-                  << "(RST/timeout) and re-learns automatically in the background.\n"
-                  << "DB: " << ncp::AutoPilot::default_db_path() << "\n";
+    if (action.empty()) {
+        autopilot_print_usage();
         return;
     }
 
@@ -4200,12 +4372,12 @@ void handle_autopilot(const std::vector<std::string>& args) {
 // ============================================================================
 // ncp import-zapret — import zapret CLI strategy
 // ============================================================================
+static void import_zapret_print_usage() {
+    std::cout << "Usage: ncp import-zapret (--args \"<zapret flags>\" | --file LIST.TXT)\n"
+              << "  Parses zapret CLI flags and prints the resulting strategy profile as JSON.\n";
+}
+
 void handle_import_zapret(const std::vector<std::string>& args) {
-    if (has_flag(args, "--help") || has_flag(args, "-h")) {
-        std::cout << "Usage: ncp import-zapret (--args \"<zapret flags>\" | --file LIST.TXT)\n"
-                  << "  Parses zapret CLI flags and prints the resulting strategy profile as JSON.\n";
-        return;
-    }
     std::string cmdline = get_option(args, "--args", "");
     std::string file = get_option(args, "--file", "");
     if (cmdline.empty() && file.empty()) {
@@ -4260,7 +4432,7 @@ static void spa_print_usage() {
 }
 
 void handle_spa(const std::vector<std::string>& args) {
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         spa_print_usage();
         return;
     }
@@ -4480,7 +4652,7 @@ void handle_reality(const std::vector<std::string>& args) {
     // (secret keys required for truncated-token verification), prints the
     // effective configuration and runs RealityServer until SIGINT.
     // --dry-run validates the configuration without opening the socket.
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         reality_print_usage();
         return;
     }
@@ -4678,7 +4850,7 @@ static bool stegodns_load_signing_key(const std::string& path,
 }
 
 void handle_stegodns(const std::vector<std::string>& args) {
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         stegodns_print_usage();
         return;
     }
@@ -5402,7 +5574,7 @@ void handle_porthop(const std::vector<std::string>& args) {
     // serve binds the whole port range (SO_REUSEPORT), registers the allowed
     // --session-id values and echoes payloads with ACKs; client sends
     // --message to the currently scheduled port and hops on loss/timeout.
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         porthop_print_usage();
         return;
     }
@@ -5824,7 +5996,7 @@ static void mimicry_catalog_print_usage() {
 }
 
 void handle_mimicry_catalog(const std::vector<std::string>& args) {
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         mimicry_catalog_print_usage();
         return;
     }
@@ -5956,7 +6128,7 @@ static bool fog_parse_id(const std::string& hex, ncp::FogPeerId& id) {
 }
 
 void handle_fog(const std::vector<std::string>& args) {
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         fog_print_usage();
         return;
     }
@@ -6091,7 +6263,7 @@ void handle_xdp(const std::vector<std::string>& args) {
     // counters from the pinned statistics map, set/clear the selective-drop
     // port and probe kernel BPF support. All map access goes through raw
     // bpf(2) syscalls guarded to Linux (stubs elsewhere).
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         xdp_print_usage();
         return;
     }
@@ -6219,7 +6391,7 @@ static void cps_print_usage() {
 }
 
 void handle_cps(const std::vector<std::string>& args) {
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         cps_print_usage();
         return;
     }
@@ -6328,7 +6500,7 @@ static ncp::ScopedTrustPolicy trust_load_policy(
 }
 
 void handle_trust(const std::vector<std::string>& args) {
-    if (args.empty() || has_flag(args, "--help") || has_flag(args, "-h")) {
+    if (args.empty()) {
         trust_print_usage();
         return;
     }

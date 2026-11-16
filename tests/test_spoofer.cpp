@@ -134,11 +134,22 @@ TEST_F(SpooferTest, SpoofConfig_DefaultDohServers) {
     EXPECT_TRUE(has_cloudflare);
 }
 
-TEST_F(SpooferTest, SpoofConfig_DefaultFlags) {
+// R18-06: every spoof category must be off by default. Enabling one rewrites
+// the live network, so a caller that just writes `SpoofConfig{}` must opt in.
+// The old defaults (ipv4/mac/dns/hw/disk/DHCP all true) meant any caller other
+// than the CLI silently broke the machine's networking.
+TEST_F(SpooferTest, SpoofConfig_DefaultFlagsAreAllFalse) {
     NetworkSpoofer::SpoofConfig cfg;
-    EXPECT_TRUE(cfg.spoof_ipv4);
-    EXPECT_TRUE(cfg.spoof_mac);
-    EXPECT_TRUE(cfg.spoof_dns);
+    EXPECT_FALSE(cfg.spoof_ipv4);
+    EXPECT_FALSE(cfg.spoof_ipv6);
+    EXPECT_FALSE(cfg.spoof_mac);
+    EXPECT_FALSE(cfg.spoof_dns);
+    EXPECT_FALSE(cfg.spoof_hostname);
+    EXPECT_FALSE(cfg.spoof_hw_info);
+    EXPECT_FALSE(cfg.spoof_smbios);
+    EXPECT_FALSE(cfg.spoof_disk_serial);
+    EXPECT_FALSE(cfg.spoof_dhcp_client_id);
+    EXPECT_FALSE(cfg.spoof_tcp_fingerprint);
 }
 
 // ── Enable / Disable Without Network ─────────────────────────────────────────

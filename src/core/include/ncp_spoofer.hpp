@@ -35,13 +35,19 @@ public:
         static TcpFingerprintProfile MacOS12();
     };
     
-    // Configuration for spoofing behavior
+    // Configuration for spoofing behavior.
+    //
+    // R18-06: every spoof category defaults to OFF. Enabling one changes the
+    // live network (static address, adapter bounce, resolver rewrite), so a
+    // caller that just writes `SpoofConfig{}` must opt in explicitly. The CLI
+    // in src/cli/main.cpp sets exactly what it needs.
     struct SpoofConfig {
-        bool spoof_ipv4 = true;
-        bool spoof_ipv6 = true;
-        bool spoof_mac = true;
-        bool spoof_dns = true;
-        bool spoof_hw_info = true;
+        bool spoof_ipv4 = false;
+        bool spoof_ipv6 = false;
+        bool spoof_mac = false;
+        bool spoof_dns = false;
+        bool spoof_hw_info = false;
+        bool spoof_hostname = false;
         bool enable_chaffing = false;
         
         // ==================== PHASE 1: SMBIOS / DMI Serials ====================
@@ -55,11 +61,11 @@ public:
         std::string custom_bios_version;       // e.g., "F20a"
         
         // ==================== PHASE 2: Disk Serials ====================
-        bool spoof_disk_serial = true;         // Disk serial number spoofing
+        bool spoof_disk_serial = false;        // Disk serial number spoofing (not supported)
         std::string custom_disk_serial;        // Empty = random
         
         // ==================== PHASE 3: DHCP Client ID ====================
-        bool spoof_dhcp_client_id = true;      // DHCP Option 61 spoofing
+        bool spoof_dhcp_client_id = false;     // DHCP Option 61 spoofing (not supported)
         std::string custom_dhcp_client_id;     // Empty = use spoofed MAC
         
         // ==================== PHASE 4: TCP/IP Fingerprint ====================
@@ -151,7 +157,10 @@ public:
         std::string mac_address;
         std::string hostname;
         std::vector<std::string> dns_servers;
-        
+        // True when the adapter address came from DHCP. Restore must hand the
+        // adapter back to DHCP instead of pinning the lease as static.
+        bool ipv4_dhcp = false;
+
         // Full resolv.conf backup for complete restoration
         // (preserves search/domain/options directives, not just nameservers)
         std::vector<std::string> resolv_conf_lines;
@@ -256,7 +265,12 @@ private:
     // Platform-specific implementations
     bool save_original_identity(const std::string& interface_name);
     bool restore_original_identity();
-    
+
+    // Netmask to reuse when writing an IPv4 address (falls back to /24 only
+    // when the adapter's original mask could not be read).
+    std::string ipv4_mask_or_default() const;
+    std::string ipv4_prefix_or_default() const;
+
     bool apply_ipv4(const std::string& ipv4);
     bool apply_ipv6(const std::string& ipv6);
     bool apply_mac(const std::string& mac);
@@ -276,7 +290,35 @@ private:
     
     // Auto-rotation thread
     void rotation_thread_func();
-    
+
+    // ---- Restore journal (R18-04) -------------------------------------------
+    // Every change that is actually applied is recorded here, together with
+    // the value it replaced, so disable() can undo it in reverse order. This
+    // covers the categories the old restore_original_identity() never touched
+    // (IPv6, SMBIOS, hw serial, disk serial, DHCP client ID, TCP fingerprint).
+    enum class JournalEntry {
+        IPv4, IPv6, Mac, Dns, Hostname, HwInfo, Smbios, DiskSerial,
+        DhcpClientId, TcpFingerprint
+    };
+    struct JournalItem {
+        JournalEntry what;
+        std::string original_value;   // empty = "nothing to restore"
+        std::string applied_value;
+    };
+    std::vector<JournalItem> journal_;   // GUARDED_BY(mu_)
+
+    void journal_record(JournalEntry what, const std::string& original,
+                        const std::string& applied);
+    bool journal_undo_one(const JournalItem& item);
+    void journal_clear();
+    void journal_update_applied(JournalEntry what, const std::string& applied);
+
+    // Undo helpers for the categories whose inverse is not "apply the old
+    // value": IPv6 was *added* next to the real address, and IPv4 restore has
+    // to respect DHCP-vs-static.
+    bool undo_ipv4(const std::string& original);
+    bool remove_ipv6(const std::string& spoofed);
+
     std::atomic<bool> enabled_{false};
     std::atomic<bool> rotation_running_{false};
     std::thread rotation_thread_;
