@@ -925,6 +925,30 @@ static int get_option_int(const std::vector<std::string>& args, const std::strin
     }
 }
 
+// Read a TCP/UDP port option and validate it at the CLI boundary.
+// Returns -1 when the value is present but out of range, so callers can fail
+// instead of truncating it through static_cast<uint16_t> (a negative value
+// would wrap to a large port, and 0 can never accept a connection).
+static int get_option_port(const std::vector<std::string>& args,
+                           const std::string& option, int default_val) {
+    std::string val = get_option(args, option);
+    if (val.empty()) return default_val;
+    int port = 0;
+    try {
+        port = std::stoi(val);
+    } catch (...) {
+        std::cerr << "[!] Invalid " << option << " value: " << val
+                  << " (must be 1-65535)\n";
+        return -1;
+    }
+    if (port < 1 || port > 65535) {
+        std::cerr << "[!] Invalid " << option << " " << port
+                  << " (must be 1-65535)\n";
+        return -1;
+    }
+    return port;
+}
+
 // Split a comma-separated option value, trimming whitespace and dropping
 // empty tokens (used by --auto-candidates / --auto-hosts).
 static std::vector<std::string> split_csv_option(const std::string& csv) {
@@ -3287,10 +3311,14 @@ void handle_dpi(const std::vector<std::string>& args) {
     config.mode = DPI::DPIMode::PROXY;
 #endif
     // FIX C4244: Explicit cast for int to uint16_t conversion
-    config.listen_port = static_cast<uint16_t>(get_option_int(args, "--port", 8881));
+    int listen_port = get_option_port(args, "--port", 8881);
+    if (listen_port < 0) return;
+    config.listen_port = static_cast<uint16_t>(listen_port);
     config.target_host = get_option(args, "--target", "example.com");
     // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
-    config.target_port = static_cast<uint16_t>(get_option_int(args, "--target-port", 443));
+    int target_port = get_option_port(args, "--target-port", 443);
+    if (target_port < 0) return;
+    config.target_port = static_cast<uint16_t>(target_port);
     config.enable_tcp_split = !has_flag(args, "--no-split");
     config.split_position = get_option_int(args, "--split-pos", 2);
     config.enable_noise = !has_flag(args, "--no-noise");
@@ -3405,7 +3433,9 @@ void handle_i2p(const std::vector<std::string>& args) {
         cfg.sam_host = get_option(args, "--sam-host", "127.0.0.1");
         // FIX C4244: Explicit cast for int to uint16_t conversion
         // FIX C4244: Use static_cast<uint16_t> to avoid int to uint16_t conversion warning
-        cfg.sam_port = static_cast<uint16_t>(get_option_int(args, "--sam-port", 7656));
+        int sam_port = get_option_port(args, "--sam-port", 7656);
+        if (sam_port < 0) return;
+        cfg.sam_port = static_cast<uint16_t>(sam_port);
         cfg.enable_garlic_routing = true;
         cfg.tunnel_length = get_option_int(args, "--tunnel-length", 3);
         cfg.random_tunnel_selection = true;
@@ -3584,7 +3614,9 @@ void handle_proxy(const std::vector<std::string>& args) {
         return;
     }
     ncp::DesyncProxy::Config cfg;
-    cfg.port = static_cast<uint16_t>(get_option_int(args, "--port", 1080));
+    int proxy_port = get_option_port(args, "--port", 1080);
+    if (proxy_port < 0) return;
+    cfg.port = static_cast<uint16_t>(proxy_port);
     cfg.listen_host = get_option(args, "--bind", "127.0.0.1");
 
     // Base strategy: preset or safe default (split-2 + split-at-SNI)
