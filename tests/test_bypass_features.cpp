@@ -476,3 +476,94 @@ TEST(Blockcheck, ReportJson) {
     EXPECT_NE(j.find("\"best_strategy\": \"split-2\""), std::string::npos);
     EXPECT_NE(j.find("\"success\": 3"), std::string::npos);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ClientHello wire format — regression for the extension-length bug
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// build_client_hello() previously declared extension lengths that did not
+// match the bytes it wrote (supported_groups and signature_algorithms omitted
+// their 2-byte list-length prefix from the declared size; key_share was off by
+// two at both levels). Real TLS servers reject such a hello with a fatal
+// decode_error alert, which silently broke every blockcheck probe.
+//
+// Existing tests parsed the hello back with the matching parser, so both sides
+// shared the same wrong numbers and agreed. These checks instead verify the
+// wire format structurally: declared lengths must tile the extension block
+// exactly, and the inner list lengths must match their extents. A malformed
+// length breaks the tiling, so this fails without needing a live server.
+
+TEST(ClientHello, ExtensionLengthsTileExactly) {
+    auto ch = BlockChecker::build_client_hello("example.com");
+    ASSERT_GT(ch.size(), 50u);
+
+    // Record header: type, version(2), length(2); then handshake header.
+    ASSERT_EQ(ch[0], 0x16) << "not a handshake record";
+    ASSERT_EQ(ch[5], 0x01) << "not a ClientHello";
+    const size_t hs_len = (static_cast<size_t>(ch[6]) << 16) |
+                          (static_cast<size_t>(ch[7]) << 8) |
+                          static_cast<size_t>(ch[8]);
+    ASSERT_EQ(hs_len + 9, ch.size()) << "handshake length disagrees with buffer";
+
+    size_t p = 9;
+    p += 2;                       // client_version
+    p += 32;                      // random
+    const size_t sid_len = ch[p]; p += 1 + sid_len;
+    ASSERT_LT(p + 2, ch.size());
+    const size_t cs_len = (static_cast<size_t>(ch[p]) << 8) | ch[p + 1];
+    p += 2 + cs_len;
+    ASSERT_LT(p, ch.size());
+    const size_t comp_len = ch[p]; p += 1 + comp_len;
+    ASSERT_LT(p + 2, ch.size());
+    const size_t ext_total = (static_cast<size_t>(ch[p]) << 8) | ch[p + 1];
+    p += 2;
+
+    ASSERT_EQ(p + ext_total, ch.size())
+        << "extensions block length does not match the record";
+
+    size_t seen = 0;
+    while (seen < ext_total) {
+        ASSERT_LE(p + 4, ch.size()) << "truncated extension header";
+        const unsigned type = (static_cast<unsigned>(ch[p]) << 8) | ch[p + 1];
+        const size_t elen = (static_cast<size_t>(ch[p + 2]) << 8) | ch[p + 3];
+        p += 4;
+        ASSERT_LE(p + elen, ch.size())
+            << "extension " << type << " overruns the record";
+
+        // supported_groups / signature_algorithms: data begins with a 2-byte
+        // list length that must account for the whole body.
+        if (type == 0x000A || type == 0x000D) {
+            ASSERT_GE(elen, 2u);
+            const size_t list = (static_cast<size_t>(ch[p]) << 8) | ch[p + 1];
+            ASSERT_EQ(list + 2, elen)
+                << "extension " << type << " list length mismatch";
+        }
+        // key_share: data begins with a 2-byte client_shares length.
+        if (type == 0x0033) {
+            ASSERT_GE(elen, 2u);
+            const size_t shares = (static_cast<size_t>(ch[p]) << 8) | ch[p + 1];
+            ASSERT_EQ(shares + 2, elen) << "key_share client_shares mismatch";
+        }
+
+        p += elen;
+        seen += 4 + elen;
+    }
+    EXPECT_EQ(seen, ext_total) << "extension lengths do not tile the block";
+}
+
+TEST(ClientHello, ServerNameExtensionIsWellFormed) {
+    const std::string host = "www.example.com";
+    auto ch = BlockChecker::build_client_hello(host);
+
+    // The SNI list entry must appear intact, which only holds if the record and
+    // handshake length fields are consistent.
+    std::string raw(reinterpret_cast<const char*>(ch.data()), ch.size());
+    EXPECT_NE(raw.find(host), std::string::npos)
+        << "SNI hostname not present in the built hello";
+
+    // Parse it back and require the parser to recover exactly what was written.
+    auto info = parse_tls_client_hello(ch.data(), ch.size());
+    EXPECT_TRUE(info.valid);
+    EXPECT_EQ(info.sni, host);
+    EXPECT_EQ(info.sni_value_len, host.size());
+}
