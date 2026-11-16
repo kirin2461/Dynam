@@ -745,6 +745,14 @@ void handle_sysproxy(const std::vector<std::string>& args) {
     }
     if (action == "on") {
         int port = get_option_int(args, "--port", 1080);
+        // Reject out-of-range ports before they reach the registry: a port of 0
+        // (or a negative value wrapping through uint16_t) would be written to
+        // the system proxy setting as-is and break every proxy-aware app.
+        if (port < 1 || port > 65535) {
+            std::cerr << "[!] Invalid port " << port
+                      << " (must be 1-65535); system proxy left unchanged\n";
+            return;
+        }
         std::string err;
         if (!sysproxy_apply(static_cast<uint16_t>(port), &err)) {
             std::cerr << "[!] sysproxy on failed: " << err << "\n";
