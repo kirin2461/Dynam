@@ -231,7 +231,10 @@ jobs:
             # the annotation API caps how much it returns per check run, so
             # the failing gtest case and the TSan report must come first —
             # putting "[ RUN" progress lines first pushed them past the cap.
-            grep -E "WARNING: ThreadSanitizer|SUMMARY: ThreadSanitizer|\[  FAILED  \]|Failure|Expected:|Which is:|\[  SKIPPED \]" \
+            # Only true failure lines. Do NOT match bare words like "Failure":
+            # they appear inside passing test NAMES (e.g.
+            # E2ETest.PaddingUnpadFailureRejected) and consume the cap.
+            grep -E "WARNING: ThreadSanitizer|SUMMARY: ThreadSanitizer|\[  FAILED  \]|^Failure$|^Expected:|^Which is:" \
               test_output.log | head -60 \
               | sed -e "s/%/%25/g" -e "s/\\r//g" \
               | while IFS= read -r line; do echo "::error::$line"; done
