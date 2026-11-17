@@ -27,6 +27,38 @@ from pathlib import Path
 from flask import jsonify, request
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Input validation for values that become `ncp` argv elements
+#
+# R17-WEB-05: subprocess calls already use argument lists (no shell), but a
+# value starting with '-' is still parsed by the CLI as an OPTION. `ncp`
+# handlers scan argv for the first token not starting with '-', so `--` as an
+# end-of-options marker is NOT honoured (ArgumentParser::parse_and_execute and
+# handle_autopilot simply skip any '-'-prefixed token). Validation is therefore
+# the only guard: a positional must never start with '-' and must look like a
+# hostname.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Hostname or wildcard (*.example.com). Reused by the hostlist routes.
+_HOST_RE = re.compile(
+    r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+    r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+# Plain DNS name for values passed as single positional argv elements
+# (autopilot learn/reset, blockcheck --domains entries). No wildcard, no
+# leading '-' (excluded by the character class), max 253 chars.
+_DOMAIN_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+    r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+
+
+def _valid_domain(value: str) -> bool:
+    """True if `value` is safe to pass to `ncp` as a positional argument."""
+    return (isinstance(value, str)
+            and 0 < len(value) <= 253
+            and _DOMAIN_RE.match(value) is not None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Module-level state
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -661,23 +693,42 @@ def register_bypass_routes(app, ctx):
                 stats = json.loads(stats_file.read_text().strip())
         except Exception:
             stats = None
+        ap_db, _ap_recs, ap_err = _read_autopilot_db()
         return jsonify({
             "running": running,
             "stats": stats,
-            "autopilot_enabled": _read_autopilot_db()[0].get("enabled", False),
+            "autopilot_enabled": ap_db.get("enabled", False),
+            "autopilot_db_error": ap_err,
         })
 
     def _read_autopilot_db():
-        """Returns (db_dict, records_list). Missing/corrupt → empty."""
+        """Returns (db_dict, records_list, error_or_None).
+
+        R17-WEB-07: a missing file is normal ("nothing learned yet") and yields
+        no error. A file that exists but cannot be parsed is NOT: the C++ writer
+        may be mid-write, or the DB is damaged. Returning "no records" in that
+        case showed "Нет выученных хостов" in the panel and hid the problem.
+        """
+        p = _autopilot_db_path()
         try:
-            p = _autopilot_db_path()
-            if p.exists():
-                db = json.loads(p.read_text())
-                recs = db.get("records", {}) or {}
-                return db, recs
-        except Exception:
-            pass
-        return {}, {}
+            if not p.exists():
+                return {}, {}, None
+        except OSError as e:
+            return {}, {}, f"{type(e).__name__}: {e}"
+        try:
+            raw = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            return {}, {}, f"не удалось прочитать {p.name}: {e}"
+        try:
+            db = json.loads(raw)
+        except ValueError as e:
+            return {}, {}, f"JSON повреждён ({p.name}): {e}"
+        if not isinstance(db, dict):
+            return {}, {}, f"неверный формат {p.name}: ожидался объект"
+        recs = db.get("records", {}) or {}
+        if not isinstance(recs, dict):
+            return {}, {}, f"неверный формат {p.name}: records не объект"
+        return db, recs, None
 
     @app.route("/api/monitor/events")
     def api_monitor_events():
@@ -716,9 +767,13 @@ def register_bypass_routes(app, ctx):
 
     @app.route("/api/monitor/autopilot")
     def api_monitor_autopilot():
-        db, recs = _read_autopilot_db()
+        db, recs, db_error = _read_autopilot_db()
         out = []
+        # R17-WEB-07: a record whose value is not an object must not 500 the
+        # whole endpoint; skip it and keep the rest of the table usable.
         for host, r in recs.items():
+            if not isinstance(r, dict):
+                continue
             out.append({
                 "host": host,
                 "strategy": r.get("strategy", "?"),
@@ -733,12 +788,22 @@ def register_bypass_routes(app, ctx):
         return jsonify({
             "enabled": db.get("enabled", False),
             "records": out,
+            # R17-WEB-07: explicit, so the panel can distinguish "nothing
+            # learned yet" from "the DB could not be read".
+            "error": db_error,
             "db_path": str(_autopilot_db_path()),
             "learn": dict(_ap_learn),
         })
 
     def _run_ap_learn(domain, use_doh):
         global _ap_learn
+        # R17-WEB-05: defence in depth — the route validates too, but this
+        # function is the one that builds argv, so re-check here.
+        if not _valid_domain(domain):
+            with _ap_learn_lock:
+                _ap_learn["running"] = False
+                _ap_learn["error"] = "invalid domain"
+            return
         args = [ncp_binary, "autopilot", "learn", domain, "--timeout", "6000"]
         if use_doh:
             args.append("--doh")
@@ -810,7 +875,11 @@ def register_bypass_routes(app, ctx):
             return _engine_missing_response()
         body = request.get_json(force=True) or {}
         domain = (body.get("domain") or "").strip().lower()
-        if not domain or " " in domain or "/" in domain:
+        # R17-WEB-05: the old check only rejected spaces and '/', so a value
+        # like "--help" reached `ncp autopilot learn --help` and was parsed as
+        # an option (the CLI skips every '-'-prefixed token, so `--` cannot
+        # shield it either). Validate as a hostname, like /api/hostlist/add.
+        if not _valid_domain(domain):
             return jsonify({"ok": False, "error": "Некорректный домен"}), 400
         with _ap_learn_lock:
             if _ap_learn["running"]:
@@ -829,6 +898,9 @@ def register_bypass_routes(app, ctx):
             return _engine_missing_response()
         body = request.get_json(force=True) or {}
         domain = (body.get("domain") or "").strip().lower()
+        # R17-WEB-05: same positional-argument hazard as .../learn.
+        if domain and not _valid_domain(domain):
+            return jsonify({"ok": False, "error": "Некорректный домен"}), 400
         args = [ncp_binary, "autopilot", "reset"] + ([domain] if domain else [])
         try:
             subprocess.run(args, capture_output=True, timeout=15)
@@ -864,6 +936,9 @@ def register_bypass_routes(app, ctx):
                 "--timeout", str(timeout_ms),
                 "--out", str(out_path)]
         if domains:
+            # R17-WEB-05: comma-joined into a single argv element, but each
+            # entry must still be a real hostname — the CLI splits on ','
+            # and feeds them to the resolver.
             args += ["--domains", ",".join(domains)]
         try:
             proc = subprocess.run(args, capture_output=True, text=True,
@@ -900,7 +975,17 @@ def register_bypass_routes(app, ctx):
                 return jsonify({"ok": False, "error": "Подбор уже выполняется"}), 409
             body = request.get_json(force=True) or {}
             domains = body.get("domains") or []
-            timeout_ms = int(body.get("timeout_ms", 4000))
+            # R17-WEB-05: each entry becomes part of `ncp blockcheck --domains`.
+            if not isinstance(domains, list) or len(domains) > 64:
+                return jsonify({"ok": False, "error": "Некорректный список доменов"}), 400
+            domains = [str(d).strip().lower() for d in domains]
+            if any(not _valid_domain(d) for d in domains):
+                return jsonify({"ok": False, "error": "Некорректный домен в списке"}), 400
+            try:
+                timeout_ms = int(body.get("timeout_ms", 4000))
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "Некорректный timeout_ms"}), 400
+            timeout_ms = max(100, min(timeout_ms, 120000))
             _blockcheck["running"] = True
             _blockcheck["started"] = time.time()
             _blockcheck["report"] = None
@@ -966,11 +1051,9 @@ def register_bypass_routes(app, ctx):
         return jsonify({"entries": entries, "path": str(autohl_path)})
 
     # hostname или wildcard вида *.example.com (без пробелов/слешей/переводов
-    # строк — иначе возможна инъекция строк в autohostlist.txt)
-    _HOST_RE = re.compile(
-        r"^(\*\.)?[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-        r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
-
+    # строк — иначе возможна инъекция строк в autohostlist.txt). Определение
+    # вынесено на уровень модуля (см. _HOST_RE выше), чтобы им можно было
+    # валидировать и аргументы для `ncp`.
     @app.route("/api/hostlist/add", methods=["POST"])
     def api_hostlist_add():
         body = request.get_json(force=True) or {}
@@ -1152,11 +1235,51 @@ def register_bypass_routes(app, ctx):
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
 
-    @app.route("/api/update/install", methods=["POST"])
-    def api_update_install():
+    # R17-WEB-08: download_and_install() can block for up to 120 s (urlopen
+    # timeout in ncp_update.py). Running it inline held one Werkzeug request
+    # thread and showed no progress. Start it in a background thread and let
+    # the panel poll /api/update/install/status.
+    _update_install = {
+        "running": False,
+        "started": 0.0,
+        "finished": None,
+        "result": None,
+        "error": None,
+    }
+    _update_install_lock = threading.Lock()
+
+    def _run_update_install():
         try:
             import ncp_update
             result = ncp_update.download_and_install()
-            return jsonify(result)
         except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 500
+            result = {"ok": False, "error": str(e)}
+        with _update_install_lock:
+            _update_install["result"] = result
+            _update_install["error"] = None if result.get("ok") else \
+                (result.get("error") or "unknown error")
+            _update_install["running"] = False
+            _update_install["finished"] = time.time()
+
+    @app.route("/api/update/install", methods=["POST"])
+    def api_update_install():
+        with _update_install_lock:
+            if _update_install["running"]:
+                return jsonify({"ok": False, "error": "busy"}), 409
+            _update_install.update({"running": True, "started": time.time(),
+                                    "finished": None, "result": None,
+                                    "error": None})
+        push_log("INFO", "Обновление: загрузка и проверка подписи…")
+        threading.Thread(target=_run_update_install, daemon=True).start()
+        return jsonify({"ok": True, "running": True}), 202
+
+    @app.route("/api/update/install/status")
+    def api_update_install_status():
+        with _update_install_lock:
+            return jsonify({
+                "running": _update_install["running"],
+                "elapsed": round(time.time() - _update_install["started"], 1)
+                           if _update_install["started"] else 0,
+                "result": _update_install["result"],
+                "error": _update_install["error"],
+            })

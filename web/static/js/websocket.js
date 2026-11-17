@@ -35,6 +35,10 @@ class NCPWebSocket {
         path: socketPath,
         transports: ['websocket', 'polling'],
         reconnection: false, // we handle reconnection ourselves
+        // R17-WEB-04: the server refuses /ws without the per-start API token.
+        // It is injected into the page as <meta name="ncp-token"> by the
+        // index route, readable only by this same-origin page.
+        auth: { token: this._getToken() },
       });
 
       this._socket.on('connect', () => {
@@ -77,6 +81,12 @@ class NCPWebSocket {
       return base.replace(/\/+$/, '') + '/socket.io';
     }
     return '/socket.io';
+  }
+
+  _getToken() {
+    // R17-WEB-04: per-start token injected into the served page only.
+    // Read it lazily so a reconnect picks up a rotated token.
+    return document.querySelector('meta[name="ncp-token"]')?.content || '';
   }
 
   _scheduleReconnect() {

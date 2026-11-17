@@ -34,6 +34,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <map>
@@ -73,39 +74,49 @@ struct TurnServerConfig {
     size_t max_datagrams_per_poll = 64;
 };
 
+// Counters are atomic because stats() hands out a reference that callers read
+// from their own thread while poll() — the owner thread — updates them. With
+// plain uint64_t this was a real data race, not a test artifact: TSan reported
+// it in TurnServer_UnauthenticatedAllocateChallenged401 and others, where the
+// test asserts on stats() while its ServerRunner thread is inside poll().
+// Atomics cost nothing measurable here (counter increments, no contention on a
+// single writer) and, unlike a mutex, add no lock to the per-datagram path.
+//
+// These members are also the reason TurnServerStats is non-copyable; nothing
+// copies it — callers read individual fields through the reference.
 struct TurnServerStats {
-    uint64_t allocations_active = 0;      // current live allocations (gauge)
-    uint64_t allocations_total = 0;       // successful Allocate count
-    uint64_t refresh_total = 0;
-    uint64_t deleted_via_refresh = 0;
-    uint64_t expired_allocations = 0;     // natural expiry (wall clock)
-    uint64_t expired_permissions = 0;
-    uint64_t expired_channels = 0;
+    std::atomic<uint64_t> allocations_active{0};   // live allocations (gauge)
+    std::atomic<uint64_t> allocations_total{0};    // successful Allocate count
+    std::atomic<uint64_t> refresh_total{0};
+    std::atomic<uint64_t> deleted_via_refresh{0};
+    std::atomic<uint64_t> expired_allocations{0};  // natural expiry (wall clock)
+    std::atomic<uint64_t> expired_permissions{0};
+    std::atomic<uint64_t> expired_channels{0};
 
-    uint64_t auth_challenges_401 = 0;     // 401 sent (missing/bad auth)
-    uint64_t stale_nonce_438 = 0;         // 438 sent (expired nonce)
-    uint64_t bad_nonce_rejected = 0;      // nonce signature invalid
-    uint64_t unknown_user_rejected = 0;
-    uint64_t bad_realm_rejected = 0;
-    uint64_t bad_integrity_rejected = 0;  // MESSAGE-INTEGRITY mismatch
+    std::atomic<uint64_t> auth_challenges_401{0};  // 401 sent (missing/bad auth)
+    std::atomic<uint64_t> stale_nonce_438{0};      // 438 sent (expired nonce)
+    std::atomic<uint64_t> bad_nonce_rejected{0};   // nonce signature invalid
+    std::atomic<uint64_t> unknown_user_rejected{0};
+    std::atomic<uint64_t> bad_realm_rejected{0};
+    std::atomic<uint64_t> bad_integrity_rejected{0};  // MESSAGE-INTEGRITY mismatch
 
-    uint64_t replay_cache_hits = 0;       // retransmitted request -> cached resp
-    uint64_t malformed_dropped = 0;       // undecodable datagrams, silent drop
-    uint64_t bad_fingerprint_dropped = 0;
-    uint64_t no_allocation_dropped = 0;   // data plane from unknown 5-tuple
-    uint64_t permission_denied_dropped = 0; // peer traffic w/o permission
-    uint64_t unknown_channel_dropped = 0;
-    uint64_t quota_rejected = 0;          // 486/508 responses
-    uint64_t bad_request_400 = 0;
-    uint64_t unsupported_transport_442 = 0;
-    uint64_t allocation_mismatch_437 = 0;
+    std::atomic<uint64_t> replay_cache_hits{0};    // retransmitted -> cached resp
+    std::atomic<uint64_t> malformed_dropped{0};    // undecodable datagrams
+    std::atomic<uint64_t> bad_fingerprint_dropped{0};
+    std::atomic<uint64_t> no_allocation_dropped{0};      // data, unknown 5-tuple
+    std::atomic<uint64_t> permission_denied_dropped{0};  // peer w/o permission
+    std::atomic<uint64_t> unknown_channel_dropped{0};
+    std::atomic<uint64_t> quota_rejected{0};             // 486/508 responses
+    std::atomic<uint64_t> bad_request_400{0};
+    std::atomic<uint64_t> unsupported_transport_442{0};
+    std::atomic<uint64_t> allocation_mismatch_437{0};
 
-    uint64_t send_indications_relayed = 0;
-    uint64_t data_indications_sent = 0;
-    uint64_t channel_data_to_peer = 0;
-    uint64_t channel_data_to_client = 0;
-    uint64_t bytes_relayed_to_peer = 0;
-    uint64_t bytes_relayed_to_client = 0;
+    std::atomic<uint64_t> send_indications_relayed{0};
+    std::atomic<uint64_t> data_indications_sent{0};
+    std::atomic<uint64_t> channel_data_to_peer{0};
+    std::atomic<uint64_t> channel_data_to_client{0};
+    std::atomic<uint64_t> bytes_relayed_to_peer{0};
+    std::atomic<uint64_t> bytes_relayed_to_client{0};
 };
 
 class TurnServer {

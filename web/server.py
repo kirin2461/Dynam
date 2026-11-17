@@ -8,6 +8,7 @@ Runs on port 8085.
 import os
 import sys
 import json
+import hmac
 import time
 import uuid
 import hashlib
@@ -24,7 +25,7 @@ from collections import deque
 import psutil
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, ConnectionRefusedError
 
 # ─── License verification ────────────────────────────────────────────────────
 # ncp_license.py лежит рядом с server.py в web/
@@ -306,8 +307,27 @@ def _api_guard():
             return jsonify({"ok": False, "error": "forbidden_origin"}), 403
     return None
 app.config["SECRET_KEY"] = os.urandom(24).hex()
-CORS(app, origins=["http://127.0.0.1:8085", "http://localhost:8085"])
-socketio = SocketIO(app, cors_allowed_origins=["http://127.0.0.1:8085", "http://localhost:8085"], async_mode="threading")
+
+# R17-WEB-03: the panel's own origin must match the port it is actually served
+# on. It comes from NCP_WEB_PORT (default 8085) — hard-coding 8085 here meant
+# that on any other port Socket.IO rejected the panel's own connection as
+# cross-origin, so live stats/logs/AutoPilot updates silently stopped.
+def _web_port() -> int:
+    try:
+        p = int(os.environ.get("NCP_WEB_PORT", "8085"))
+    except (TypeError, ValueError):
+        p = 8085
+    return p if 1 <= p <= 65535 else 8085
+
+
+WEB_PORT = _web_port()
+_ALLOWED_ORIGINS = [
+    f"http://127.0.0.1:{WEB_PORT}",
+    f"http://localhost:{WEB_PORT}",
+    f"http://[::1]:{WEB_PORT}",
+]
+CORS(app, origins=_ALLOWED_ORIGINS)
+socketio = SocketIO(app, cors_allowed_origins=_ALLOWED_ORIGINS, async_mode="threading")
 
 # ─── State ───────────────────────────────────────────────────────────────────
 state = {
@@ -2200,9 +2220,28 @@ def api_selftest_run():
 
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────
+# R17-WEB-04: the /ws stream carries log lines and stats (hostnames, learned
+# strategies). These handlers are NOT covered by _api_guard (it only guards
+# /api/*), so before this check any local process could subscribe with a plain
+# Socket.IO client and read them. The connect handler now requires the same
+# per-start token as the REST API, passed in the Socket.IO `auth` payload.
+
+def _ws_auth_ok(auth) -> bool:
+    token = ""
+    if isinstance(auth, dict):
+        token = auth.get("token") or ""
+    elif isinstance(auth, str):
+        token = auth
+    if not isinstance(token, str) or not token:
+        return False
+    return hmac.compare_digest(token, _API_TOKEN)
+
 
 @socketio.on("connect", namespace="/ws")
-def ws_connect():
+def ws_connect(auth=None):
+    if not _ws_auth_ok(auth):
+        logger.warning("WebSocket connection refused: missing/invalid token")
+        raise ConnectionRefusedError("forbidden_token")
     push_log("DEBUG", "WebSocket client connected")
     emit("connected", {"ts": time.time()})
 
@@ -2307,7 +2346,7 @@ try:
         "config_dir": CONFIG_PATH.parent,
         "exe_dir": EXE_DIR,
         "api_token": _API_TOKEN,
-        "web_port": int(os.environ.get("NCP_WEB_PORT", 8085)),
+        "web_port": WEB_PORT,
         "web_host": "127.0.0.1",
         "product_version": _PRODUCT_VERSION,
         "engine_stats_file": ENGINE_STATS_FILE,
@@ -2341,7 +2380,7 @@ if __name__ == "__main__":
 
     _initial_logs()
 
-    port = int(os.environ.get("NCP_WEB_PORT", 8085))
+    port = WEB_PORT
 
     # Windows tray icon (frozen builds only, best-effort)
     if FROZEN and platform.system() == "Windows":
@@ -2373,4 +2412,35 @@ if __name__ == "__main__":
                 pass
         threading.Thread(target=_open_browser, daemon=True).start()
 
-    socketio.run(app, host="127.0.0.1", port=port, debug=False, allow_unsafe_werkzeug=True)
+    # R17-WEB-06: do not silently serve a production control panel with the
+    # Werkzeug *development* server. Prefer waitress (a real WSGI server) when
+    # installed; only fall back to Werkzeug, and say so loudly rather than
+    # hiding it behind allow_unsafe_werkzeug=True.
+    #
+    # Socket.IO is registered on `app` itself (socketio.init_app), so serving
+    # `app` through waitress still answers /socket.io. Transports negotiate
+    # down to polling because waitress does not upgrade to WebSocket; the
+    # client already lists polling as a fallback, so live updates keep working.
+    #
+    # Set NCP_WEB_DEV_SERVER=1 to force the old debug server (e.g. to use the
+    # Werkzeug reloader during development).
+    _use_dev_server = os.environ.get("NCP_WEB_DEV_SERVER") == "1"
+    _waitress_serve = None
+    if not _use_dev_server:
+        try:
+            from waitress import serve as _waitress_serve
+        except ImportError:
+            _waitress_serve = None
+
+    if _waitress_serve is not None:
+        logger.info("Serving with waitress (production WSGI server)")
+        _waitress_serve(app, host="127.0.0.1", port=port, threads=8)
+    else:
+        if not _use_dev_server:
+            logger.warning(
+                "waitress is not installed - falling back to the Werkzeug "
+                "development server. Install it (pip install waitress) or set "
+                "NCP_WEB_DEV_SERVER=1 to silence this warning."
+            )
+        socketio.run(app, host="127.0.0.1", port=port, debug=False,
+                     allow_unsafe_werkzeug=True)

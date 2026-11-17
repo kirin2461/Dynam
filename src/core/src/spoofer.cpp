@@ -48,6 +48,11 @@ static bool is_command_allowed(const std::string& cmd_name) {
     return ALLOWED_COMMANDS.find(cmd_name) != ALLOWED_COMMANDS.end();
 }
 
+// Dotted netmask for a prefix length (24 -> "255.255.255.0"). Defined next to
+// the other address helpers; declared here because save_original_identity()
+// uses it while capturing the adapter's original mask.
+static std::string prefix_to_netmask(unsigned prefix);
+
 // Validate command arguments against injection.
 // On Windows, allow spaces (adapter FriendlyNames like "Local Area Connection")
 // because execute_command_safe() uses CreateProcessA with the full command line
@@ -70,13 +75,28 @@ static bool is_safe_argument(const std::string& arg) {
     return true;
 }
 
-static std::string execute_command_safe(const std::string& command, const std::vector<std::string>& args) {
+// Result of a whitelisted child process. Success is decided by the exit code,
+// never by the text of the output: `netsh`/`reg`/`ip` are localized, so
+// searching for the English word "Error" reported Russian "Ошибка" runs as
+// success (R18-09). `exit_code` is -1 when the process could not be started or
+// was rejected by the whitelist/argument checks.
+struct CommandResult {
+    int exit_code = -1;
+    std::string output;
+
+    bool ok() const { return exit_code == 0; }
+};
+
+static CommandResult execute_command_safe(const std::string& command, const std::vector<std::string>& args) {
+    CommandResult res;
     if (!is_command_allowed(command)) {
-        return "Error: Command not allowed";
+        res.output = "Error: Command not allowed";
+        return res;
     }
     for (const auto& arg : args) {
         if (!is_safe_argument(arg)) {
-            return "Error: Invalid argument detected";
+            res.output = "Error: Invalid argument detected";
+            return res;
         }
     }
 
@@ -97,7 +117,7 @@ static std::string execute_command_safe(const std::string& command, const std::v
 
     // Convert UTF-8 command line to wide string
     int wlen = MultiByteToWideChar(CP_UTF8, 0, cmd_line.c_str(), -1, nullptr, 0);
-    if (wlen <= 0) return "Error: encoding";
+    if (wlen <= 0) { res.output = "Error: encoding"; return res; }
     std::vector<wchar_t> wcmd(wlen);
     MultiByteToWideChar(CP_UTF8, 0, cmd_line.c_str(), -1, wcmd.data(), wlen);
 
@@ -108,14 +128,15 @@ static std::string execute_command_safe(const std::string& command, const std::v
     std::string result;
     HANDLE hReadPipe, hWritePipe;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), NULL, TRUE};
-    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) return "Error: pipe";
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) { res.output = "Error: pipe"; return res; }
     si.hStdOutput = hWritePipe;
     si.hStdError = hWritePipe;
     si.dwFlags |= STARTF_USESTDHANDLES;
     if (!CreateProcessW(NULL, wcmd.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
         CloseHandle(hReadPipe);
         CloseHandle(hWritePipe);
-        return "Error: exec";
+        res.output = "Error: exec";
+        return res;
     }
     CloseHandle(hWritePipe);
     DWORD bytesRead;
@@ -125,14 +146,18 @@ static std::string execute_command_safe(const std::string& command, const std::v
     }
     CloseHandle(hReadPipe);
     WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD child_exit = 1;
+    if (!GetExitCodeProcess(pi.hProcess, &child_exit)) child_exit = 1;
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
-    return result;
+    res.exit_code = static_cast<int>(child_exit);
+    res.output = std::move(result);
+    return res;
 #else
     int pipefd[2];
-    if (pipe(pipefd) == -1) return "Error: pipe";
+    if (pipe(pipefd) == -1) { res.output = "Error: pipe"; return res; }
     pid_t pid = fork();
-    if (pid == -1) { close(pipefd[0]); close(pipefd[1]); return "Error: fork"; }
+    if (pid == -1) { close(pipefd[0]); close(pipefd[1]); res.output = "Error: fork"; return res; }
     if (pid == 0) {
         close(pipefd[0]);
         dup2(pipefd[1], STDOUT_FILENO);
@@ -156,7 +181,11 @@ static std::string execute_command_safe(const std::string& command, const std::v
     close(pipefd[0]);
     int status;
     waitpid(pid, &status, 0);
-    return result;
+    // Report the real exit status: execvp failure surfaces as _exit(127).
+    if (WIFEXITED(status)) res.exit_code = WEXITSTATUS(status);
+    else res.exit_code = -1;
+    res.output = std::move(result);
+    return res;
 #endif
 }
 
@@ -184,6 +213,7 @@ bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig
     if (config_.spoof_mac) {
         std::string new_mac = config_.custom_mac.empty() ? generate_random_mac() : config_.custom_mac;
         if (apply_mac(new_mac)) {
+            journal_record(JournalEntry::Mac, original_identity_.mac_address, new_mac);
             status_.current_mac = new_mac;
             status_.mac_spoofed = true;
             status_.last_mac_rotation = std::chrono::steady_clock::now();
@@ -193,6 +223,7 @@ bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig
     if (config_.spoof_ipv4) {
         std::string new_ip = config_.custom_ipv4.empty() ? generate_random_ipv4() : config_.custom_ipv4;
         if (apply_ipv4(new_ip)) {
+            journal_record(JournalEntry::IPv4, original_identity_.ipv4_address, new_ip);
             status_.current_ipv4 = new_ip;
             status_.ipv4_spoofed = true;
             status_.last_ipv4_rotation = std::chrono::steady_clock::now();
@@ -202,6 +233,7 @@ bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig
     if (config_.spoof_ipv6) {
         std::string new_ipv6 = config_.custom_ipv6.empty() ? generate_random_ipv6() : config_.custom_ipv6;
         if (apply_ipv6(new_ipv6)) {
+            journal_record(JournalEntry::IPv6, original_identity_.ipv6_address, new_ipv6);
             status_.current_ipv6 = new_ipv6;
             status_.ipv6_spoofed = true;
             status_.last_ipv6_rotation = std::chrono::steady_clock::now();
@@ -210,18 +242,45 @@ bool NetworkSpoofer::enable(const std::string& interface_name, const SpoofConfig
 
     if (config_.spoof_dns && !config_.custom_dns_servers.empty()) {
         if (apply_dns(config_.custom_dns_servers)) {
+            std::string dns_original;
+            for (size_t i = 0; i < original_identity_.dns_servers.size(); ++i) {
+                if (i) dns_original += ",";
+                dns_original += original_identity_.dns_servers[i];
+            }
+            journal_record(JournalEntry::Dns, dns_original,
+                           config_.custom_dns_servers[0]);
             status_.current_dns = config_.custom_dns_servers;
             status_.dns_spoofed = true;
             status_.last_dns_rotation = std::chrono::steady_clock::now();
         } else { success = false; }
     }
 
+    // R18-02: apply_hw_info() returns false on every platform because a board
+    // serial lives in read-only firmware data. That is "not supported", not
+    // "the enable failed": warn, leave hw_info_spoofed false so status reports
+    // the truth, and let the supported categories carry on.
     if (config_.spoof_hw_info) {
         std::string new_serial = config_.custom_hw_serial.empty() ? generate_random_hw_serial() : config_.custom_hw_serial;
         if (apply_hw_info(new_serial)) {
+            journal_record(JournalEntry::HwInfo, original_identity_.original_board_serial, new_serial);
             status_.current_hw_serial = new_serial;
             status_.hw_info_spoofed = true;
             status_.last_hw_info_rotation = std::chrono::steady_clock::now();
+        } else {
+            std::cerr << "[!] Hardware-info (board serial) spoofing is not supported "
+                         "on this platform - nothing was changed\n";
+        }
+    }
+
+    if (config_.spoof_hostname) {
+        std::string new_host = config_.custom_hostname.empty()
+                                   ? generate_random_hostname()
+                                   : config_.custom_hostname;
+        if (apply_hostname(new_host)) {
+            journal_record(JournalEntry::Hostname, original_identity_.hostname, new_host);
+            status_.current_hostname = new_host;
+            status_.hostname_spoofed = true;
+            status_.last_hostname_rotation = std::chrono::steady_clock::now();
         } else { success = false; }
     }
 
@@ -255,9 +314,9 @@ bool NetworkSpoofer::disable() {
         std::cerr << "[!] Warning: Primary restore failed, attempting DHCP renewal...\n";
         auto dhcp_result = execute_command_safe("ipconfig", {"/renew"});
         auto flush_result = execute_command_safe("ipconfig", {"/flushdns"});
-        
+
         // Consider success if DHCP renewal succeeded
-        success = (dhcp_result.find("Error") == std::string::npos);
+        success = dhcp_result.ok();
         
         // Fallback 2: Force DNS cache flush even if other operations failed
         execute_command_safe("ipconfig", {"/registerdns"});
@@ -265,13 +324,13 @@ bool NetworkSpoofer::disable() {
         // Fallback 1: Restart networking service on Linux
         std::cerr << "[!] Warning: Primary restore failed, attempting network restart...\n";
         auto systemd_result = execute_command_safe("systemctl", {"restart", "NetworkManager"});
-        success = (systemd_result.find("Error") == std::string::npos);
-        
+        success = systemd_result.ok();
+
         // Fallback 2: Restart dhclient if systemd failed
         if (!success) {
             auto dhclient_result = execute_command_safe("dhclient", {"-r"});
             dhclient_result = execute_command_safe("dhclient", {});
-            success = (dhclient_result.find("Error") == std::string::npos);
+            success = dhclient_result.ok();
         }
 #endif
     }
@@ -308,6 +367,11 @@ bool NetworkSpoofer::rotate_ipv6() {
     std::string old = status_.current_ipv6;
     std::string n = generate_random_ipv6();
     if (apply_ipv6(n)) {
+        // apply_ipv6() adds rather than replaces; drop the previous spoofed
+        // address so rotations do not pile up random IPv6s on the adapter,
+        // and point the journal at the one now present.
+        if (!old.empty()) remove_ipv6(old);
+        journal_update_applied(JournalEntry::IPv6, n);
         status_.current_ipv6 = n;
         status_.last_ipv6_rotation = std::chrono::steady_clock::now();
         if (rotation_callback_) rotation_callback_("ipv6", old, n);
@@ -355,7 +419,7 @@ bool NetworkSpoofer::rotate_dns() {
 
 bool NetworkSpoofer::rotate_hostname() {
     std::lock_guard<std::mutex> lock(mu_);
-    if (!enabled_) return false;
+    if (!enabled_ || !config_.spoof_hostname) return false;
     std::string n = generate_random_hostname();
     if (apply_hostname(n)) {
         status_.current_hostname = n;
@@ -389,7 +453,7 @@ bool NetworkSpoofer::rotate_all() {
     if (config_.spoof_mac) s &= rotate_mac();
     if (config_.spoof_dns) s &= rotate_dns();
     if (config_.spoof_hw_info) s &= rotate_hw_info();
-    s &= rotate_hostname();
+    if (config_.spoof_hostname) s &= rotate_hostname();
     return s;
 }
 
@@ -592,8 +656,36 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
                 char ip[INET_ADDRSTRLEN];
                 inet_ntop(AF_INET, &((sockaddr_in*)ua->Address.lpSockaddr)->sin_addr, ip, sizeof(ip));
                 original_identity_.ipv4_address = ip;
+                // R18-07: keep the mask and prefix so a restore does not fall
+                // back to a hard-coded /24.
+                uint8_t plen = ua->OnLinkPrefixLength;
+                if (plen >= 8 && plen <= 30)
+                    original_identity_.ipv4_netmask = prefix_to_netmask(plen);
+            } else if (ua->Address.lpSockaddr->sa_family == AF_INET6) {
+                char ip6[INET6_ADDRSTRLEN];
+                inet_ntop(AF_INET6, &((sockaddr_in6*)ua->Address.lpSockaddr)->sin6_addr,
+                          ip6, sizeof(ip6));
+                // Skip link-local (fe80::/10) — only a routable address is
+                // worth restoring.
+                if (std::string(ip6).rfind("fe80", 0) != 0)
+                    original_identity_.ipv6_address = ip6;
             }
         }
+        // Default gateway (first IPv4 next-hop of the adapter).
+        for (auto gw = addr->FirstGatewayAddress; gw; gw = gw->Next) {
+            if (gw->Address.lpSockaddr->sa_family == AF_INET) {
+                char gwa[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &((sockaddr_in*)gw->Address.lpSockaddr)->sin_addr,
+                          gwa, sizeof(gwa));
+                original_identity_.ipv4_gateway = gwa;
+                break;
+            }
+        }
+        // R18-07: remember whether the address came from DHCP, so restore puts
+        // the adapter back on DHCP instead of pinning a stale lease as static.
+        original_identity_.ipv4_dhcp =
+            (addr->Flags & IP_ADAPTER_DHCP_ENABLED) != 0 ||
+            addr->Dhcpv4Server.iSockaddrLength > 0;
         break;
     }
     // R14-H01: No free() needed - std::vector handles cleanup automatically
@@ -646,6 +738,28 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
     char hostname[256];
     if (gethostname(hostname, sizeof(hostname)) == 0)
         original_identity_.hostname = hostname;
+
+    // Save the adapter's current DNS servers so restore can put them back
+    // (the old Windows restore always wrote `static`, even when the adapter
+    // had used DHCP-provided resolvers). The adapter list is still live in
+    // `buffer` from the lookup above.
+    for (PIP_ADAPTER_ADDRESSES addr = addresses; addr; addr = addr->Next) {
+        if (!addr->FriendlyName) continue;
+        std::wstring friendly_w = addr->FriendlyName;
+        bool matched = (!name_utf8.empty() && friendly_w == name_utf8) ||
+                       (!name_acp.empty() && friendly_w == name_acp) ||
+                       (!name_oem.empty() && friendly_w == name_oem);
+        if (!matched) continue;
+        for (auto dns = addr->FirstDnsServerAddress; dns; dns = dns->Next) {
+            if (dns->Address.lpSockaddr->sa_family == AF_INET) {
+                char ip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &((sockaddr_in*)dns->Address.lpSockaddr)->sin_addr,
+                          ip, sizeof(ip));
+                original_identity_.dns_servers.push_back(ip);
+            }
+        }
+        break;
+    }
     return true;
 #else
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -701,35 +815,122 @@ bool NetworkSpoofer::save_original_identity(const std::string& interface_name) {
 #endif
 }
 
-bool NetworkSpoofer::restore_original_identity() {
-    bool success = true;
-    const auto& id = original_identity_;
-    if (status_.mac_spoofed && !id.mac_address.empty())
-        success &= apply_mac(id.mac_address);
-    if (status_.ipv4_spoofed && !id.ipv4_address.empty())
-        success &= apply_ipv4(id.ipv4_address);
-    if (status_.dns_spoofed && !id.dns_servers.empty()) {
+// ==================== Restore journal (R18-04) ====================
+void NetworkSpoofer::journal_record(JournalEntry what, const std::string& original,
+                                    const std::string& applied) {
+    journal_.push_back({what, original, applied});
+}
+
+void NetworkSpoofer::journal_clear() {
+    journal_.clear();
+}
+
+// A rotation replaces the applied value but not the original: keep the
+// original recorded by enable() and only track what is on the adapter now.
+void NetworkSpoofer::journal_update_applied(JournalEntry what,
+                                            const std::string& applied) {
+    for (auto it = journal_.rbegin(); it != journal_.rend(); ++it) {
+        if (it->what == what) { it->applied_value = applied; return; }
+    }
+}
+
+// Undo a single journaled change. Entries with an empty original value have
+// nothing to put back (the category had no prior value); they are reported as
+// handled so they do not fail the whole restore.
+bool NetworkSpoofer::journal_undo_one(const JournalItem& item) {
+    switch (item.what) {
+        case JournalEntry::Mac:
+            if (item.original_value.empty()) return true;
+            return apply_mac(item.original_value);
+        case JournalEntry::IPv4:
+            return undo_ipv4(item.original_value);
+        case JournalEntry::IPv6:
+            // apply_ipv6() *adds* an address next to the real one, so undo
+            // deletes the spoofed address. Re-adding the original (the
+            // obvious inverse) would leave the random IPv6 on the adapter.
+            if (item.applied_value.empty()) return true;
+            return remove_ipv6(item.applied_value);
+        case JournalEntry::Dns:
 #ifndef _WIN32
-        // FIX: Restore full resolv.conf content (search/domain directives too)
-        if (!id.resolv_conf_lines.empty()) {
-            std::ofstream resolv("/etc/resolv.conf", std::ios::trunc);
-            if (resolv.is_open()) {
-                for (const auto& line : id.resolv_conf_lines) {
+            // Restore the whole resolv.conf (search/domain/options and the
+            // original nameservers), not just the nameserver lines.
+            if (!original_identity_.resolv_conf_lines.empty()) {
+                std::ofstream resolv("/etc/resolv.conf", std::ios::trunc);
+                if (!resolv.is_open()) return false;
+                for (const auto& line : original_identity_.resolv_conf_lines)
                     resolv << line << "\n";
-                }
-                resolv.close();
-            } else {
-                success = false;
+                return true;
             }
-        } else {
-            success &= apply_dns(id.dns_servers);
-        }
+#endif
+            {
+                std::vector<std::string> servers;
+                std::istringstream ss(item.original_value);
+                std::string part;
+                while (std::getline(ss, part, ','))
+                    if (!part.empty()) servers.push_back(part);
+                if (servers.empty()) return true;
+                return apply_dns(servers);
+            }
+        case JournalEntry::Hostname:
+            if (item.original_value.empty()) return true;
+            return apply_hostname(item.original_value);
+        // These five never apply successfully on any platform any more
+        // (R18-01/02/03/05), so there is nothing to undo. They are in the enum
+        // so the journal stays complete if a platform ever supports them.
+        case JournalEntry::HwInfo:
+        case JournalEntry::Smbios:
+        case JournalEntry::DiskSerial:
+        case JournalEntry::DhcpClientId:
+        case JournalEntry::TcpFingerprint:
+            return true;
+    }
+    return true;
+}
+
+// R18-07: put IPv4 back the way it was. A DHCP adapter is returned to DHCP
+// (re-pinning the old lease as a static address — the previous behaviour —
+// breaks as soon as the lease moves). A static adapter gets its original
+// address, mask and gateway back via apply_ipv4().
+bool NetworkSpoofer::undo_ipv4(const std::string& original) {
+    const auto& iface = original_identity_.interface_name;
+    if (original_identity_.ipv4_dhcp) {
+#ifdef _WIN32
+        return execute_command_safe("netsh", {
+            "interface", "ip", "set", "address",
+            "name=\"" + iface + "\"", "source=dhcp"
+        }).ok();
 #else
-        success &= apply_dns(id.dns_servers);
+        // The DHCP client re-adds its lease once the spoofed address is gone.
+        (void)iface;
+        return true;
 #endif
     }
-    if (status_.hostname_spoofed && !id.hostname.empty())
-        success &= apply_hostname(id.hostname);
+    if (original.empty()) return true;
+    return apply_ipv4(original);
+}
+
+bool NetworkSpoofer::remove_ipv6(const std::string& spoofed) {
+    const auto& iface = original_identity_.interface_name;
+#ifdef _WIN32
+    return execute_command_safe("netsh", {
+        "interface", "ipv6", "delete", "address",
+        "interface=\"" + iface + "\"", "address=" + spoofed
+    }).ok();
+#else
+    return execute_command_safe("ip", {
+        "-6", "addr", "del", spoofed + "/64", "dev", iface
+    }).ok();
+#endif
+}
+
+// Replaces the old restore_original_identity() body: undo every journaled
+// change in reverse order. Kept under the original name because disable() is
+// its only caller.
+bool NetworkSpoofer::restore_original_identity() {
+    bool success = true;
+    for (auto it = journal_.rbegin(); it != journal_.rend(); ++it)
+        success &= journal_undo_one(*it);
+    journal_.clear();
     return success;
 }
 
@@ -738,17 +939,22 @@ bool NetworkSpoofer::apply_ipv4(const std::string& ipv4) {
     if (ipv4.empty()) return false;
     const auto& iface = original_identity_.interface_name;
 #ifdef _WIN32
-    // Quote adapter name for netsh (FriendlyNames may contain spaces)
-    std::string result = execute_command_safe("netsh", {
+    // Quote adapter name for netsh (FriendlyNames may contain spaces).
+    // The original mask and gateway are carried over: the old hard-coded
+    // 255.255.255.0 dropped the gateway and left an unroutable adapter.
+    std::vector<std::string> argv = {
         "interface", "ip", "set", "address",
-        "name=\"" + iface + "\"", "static", ipv4, "255.255.255.0"
-    });
-    return result.find("Error") == std::string::npos;
+        "name=\"" + iface + "\"", "static", ipv4, ipv4_mask_or_default()
+    };
+    if (!original_identity_.ipv4_gateway.empty())
+        argv.push_back(original_identity_.ipv4_gateway);
+    return execute_command_safe("netsh", argv).ok();
 #else
-    std::string result = execute_command_safe("ip", {
-        "addr", "replace", ipv4 + "/24", "dev", iface
+    // Preserve the original prefix length instead of forcing /24.
+    CommandResult result = execute_command_safe("ip", {
+        "addr", "replace", ipv4 + "/" + ipv4_prefix_or_default(), "dev", iface
     });
-    return result.find("Error") == std::string::npos;
+    return result.ok();
 #endif
 }
 
@@ -756,17 +962,55 @@ bool NetworkSpoofer::apply_ipv6(const std::string& ipv6) {
     if (ipv6.empty()) return false;
     const auto& iface = original_identity_.interface_name;
 #ifdef _WIN32
-    std::string result = execute_command_safe("netsh", {
+    CommandResult result = execute_command_safe("netsh", {
         "interface", "ipv6", "add", "address",
         "interface=\"" + iface + "\"", "address=" + ipv6
     });
-    return result.find("Error") == std::string::npos;
+    return result.ok();
 #else
-    std::string result = execute_command_safe("ip", {
+    CommandResult result = execute_command_safe("ip", {
         "-6", "addr", "add", ipv6 + "/64", "dev", iface
     });
-    return result.find("Error") == std::string::npos;
+    return result.ok();
 #endif
+}
+
+// Dotted netmask for a prefix length (24 -> "255.255.255.0").
+static std::string prefix_to_netmask(unsigned prefix) {
+    if (prefix > 32) prefix = 32;
+    uint32_t mask = prefix == 0 ? 0 : (0xFFFFFFFFu << (32 - prefix));
+    std::ostringstream oss;
+    oss << ((mask >> 24) & 0xFF) << '.' << ((mask >> 16) & 0xFF) << '.'
+        << ((mask >> 8) & 0xFF) << '.' << (mask & 0xFF);
+    return oss.str();
+}
+
+// IPv4 mask to use when writing an address: the one the adapter had before
+// spoofing, or /24 as a last resort when nothing was captured.
+std::string NetworkSpoofer::ipv4_mask_or_default() const {
+    return original_identity_.ipv4_netmask.empty()
+               ? std::string("255.255.255.0")
+               : original_identity_.ipv4_netmask;
+}
+
+// Prefix length derived from the saved dotted netmask (e.g. 255.255.255.0 -> 24).
+std::string NetworkSpoofer::ipv4_prefix_or_default() const {
+    const std::string& mask = original_identity_.ipv4_netmask;
+    unsigned a = 0, b = 0, c = 0, d = 0;
+    if (std::sscanf(mask.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4) {
+        auto ones = [](unsigned octet) {
+            int n = 0;
+            for (int bit = 7; bit >= 0; --bit)
+                if (octet & (1u << bit)) ++n;
+            return n;
+        };
+        // Only a contiguous mask has a meaningful prefix length.
+        if (a >= b && b >= c && c >= d) {
+            int prefix = ones(a) + ones(b) + ones(c) + ones(d);
+            if (prefix >= 8 && prefix <= 30) return std::to_string(prefix);
+        }
+    }
+    return "24";
 }
 
 // FIX #49.1: apply_mac() on Windows now writes NetworkAddress to the registry
@@ -804,7 +1048,7 @@ bool NetworkSpoofer::apply_mac(const std::string& mac) {
             "/f"
         });
 
-        if (reg_result.find("Error") != std::string::npos) {
+        if (!reg_result.ok()) {
             return false; // Registry write failed — don't bounce the interface
         }
     } else {
@@ -818,7 +1062,7 @@ bool NetworkSpoofer::apply_mac(const std::string& mac) {
     std::cerr << "[!] This will cause a brief network disconnection (5-10 seconds).\n";
     std::cerr << "[!] Ensure you have physical or console access before proceeding.\n";
     std::cerr << "[!] Remote sessions (SSH/RDP) may be interrupted.\n";
-    std::string result = execute_command_safe("netsh", {
+    CommandResult result = execute_command_safe("netsh", {
         "interface", "set", "interface", "name=\"" + iface + "\"", "admin=disable"
     });
 
@@ -827,7 +1071,7 @@ bool NetworkSpoofer::apply_mac(const std::string& mac) {
         "interface", "set", "interface", "name=\"" + iface + "\"", "admin=enable"
     });
 
-    return result.find("Error") == std::string::npos;
+    return result.ok();
 #else
     // R11-H01: Warn about network drop — MAC spoofing disconnects the adapter
     std::cerr << "[!] WARNING: MAC spoofing will temporarily disable the network interface.\n";
@@ -835,11 +1079,11 @@ bool NetworkSpoofer::apply_mac(const std::string& mac) {
     std::cerr << "[!] Ensure you have physical or console access before proceeding.\n";
     std::cerr << "[!] Remote sessions (SSH) may be interrupted.\n";
     execute_command_safe("ip", {"link", "set", iface, "down"});
-    std::string result = execute_command_safe("ip", {
+    CommandResult result = execute_command_safe("ip", {
         "link", "set", iface, "address", mac
     });
     execute_command_safe("ip", {"link", "set", iface, "up"});
-    return result.find("Error") == std::string::npos;
+    return result.ok();
 #endif
 }
 
@@ -848,21 +1092,22 @@ bool NetworkSpoofer::apply_dns(const std::vector<std::string>& dns_servers) {
 #ifdef _WIN32
     const auto& iface = original_identity_.interface_name;
     bool first = true;
+    bool ok = true;
     for (const auto& dns : dns_servers) {
         if (first) {
-            execute_command_safe("netsh", {
+            ok &= execute_command_safe("netsh", {
                 "interface", "ip", "set", "dns",
                 "name=\"" + iface + "\"", "static", dns
-            });
+            }).ok();
             first = false;
         } else {
-            execute_command_safe("netsh", {
+            ok &= execute_command_safe("netsh", {
                 "interface", "ip", "add", "dns",
                 "name=\"" + iface + "\"", dns, "index=2"
-            });
+            }).ok();
         }
     }
-    return true;
+    return ok;
 #else
     // FIX: Preserve existing search/domain/options directives from resolv.conf
     // instead of blindly truncating the entire file.
@@ -912,17 +1157,13 @@ bool NetworkSpoofer::apply_hostname(const std::string& hostname) {
 
 bool NetworkSpoofer::apply_hw_info(const std::string& serial) {
     if (serial.empty()) return false;
-#ifdef _WIN32
-    return true;
-#else
-    std::ofstream sf("/sys/class/dmi/id/board_serial", std::ios::trunc);
-    if (sf.is_open()) {
-        sf << serial;
-        sf.close();
-        return true;
-    }
+    // R18-02: hardware serials are read from firmware (SMBIOS/DMI) or the
+    // disk's identify page. Neither can be changed from user mode, and the
+    // files that expose them under /sys are read-only. Report "not supported"
+    // instead of returning true so the caller never claims a spoof that did
+    // not happen.
+    (void)serial;
     return false;
-#endif
 }
 
 // ==================== TCP/IP Fingerprint Profiles ====================
@@ -1063,65 +1304,26 @@ bool NetworkSpoofer::set_custom_disk_serial(const std::string& disk_serial) {
 }
 
 // ==================== Platform-specific: SMBIOS Spoofing (3-arg) ====================
-bool NetworkSpoofer::apply_smbios(const std::string& board_serial, 
-                                   const std::string& system_serial, 
+bool NetworkSpoofer::apply_smbios(const std::string& board_serial,
+                                   const std::string& system_serial,
                                    const std::string& uuid) {
     if (board_serial.empty() && system_serial.empty() && uuid.empty()) return false;
-    
-#ifdef _WIN32
-    const std::string base_key = "HARDWARE\\DESCRIPTION\\System\\BIOS";
-    
-    HKEY hKey;
-    LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, base_key.c_str(), 0, KEY_SET_VALUE, &hKey);
-    if (result != ERROR_SUCCESS) {
-        return false;
-    }
-    
-    bool success = true;
-    
-    if (!board_serial.empty()) {
-        result = RegSetValueExA(hKey, "BaseBoardSerialNumber", 0, REG_SZ, 
-                                (const BYTE*)board_serial.c_str(), static_cast<DWORD>(board_serial.length() + 1));
-        if (result != ERROR_SUCCESS) success = false;
-    }
-    
-    if (!system_serial.empty()) {
-        result = RegSetValueExA(hKey, "SystemSerialNumber", 0, REG_SZ,
-                                (const BYTE*)system_serial.c_str(), static_cast<DWORD>(system_serial.length() + 1));
-        if (result != ERROR_SUCCESS) success = false;
-    }
-    
-    if (!uuid.empty()) {
-        result = RegSetValueExA(hKey, "SystemProductName", 0, REG_SZ,
-                                (const BYTE*)uuid.c_str(), static_cast<DWORD>(uuid.length() + 1));
-        if (result != ERROR_SUCCESS) success = false;
-    }
-    
-    RegCloseKey(hKey);
-    return success;
-#else
-    bool success = true;
-    
-    if (!board_serial.empty()) {
-        std::ofstream sf("/sys/class/dmi/id/board_serial", std::ios::trunc);
-        if (sf.is_open()) { sf << board_serial; sf.close(); }
-        else { success = false; }
-    }
-    
-    if (!system_serial.empty()) {
-        std::ofstream sf("/sys/class/dmi/id/product_serial", std::ios::trunc);
-        if (sf.is_open()) { sf << system_serial; sf.close(); }
-        else { success = false; }
-    }
-    
-    if (!uuid.empty()) {
-        std::ofstream sf("/sys/class/dmi/id/product_uuid", std::ios::trunc);
-        if (sf.is_open()) { sf << uuid; sf.close(); }
-        else { success = false; }
-    }
-    
-    return success;
-#endif
+
+    // R18-03: SMBIOS/DMI data lives in firmware tables that WMI and almost
+    // every identity consumer read directly; they cannot be changed from user
+    // mode. The old Windows path wrote HKLM\HARDWARE\DESCRIPTION\System\BIOS,
+    // which Windows rebuilds from firmware on every boot, and stored the
+    // generated UUID in SystemProductName — a field that means "product name",
+    // not UUID — so it corrupted the visible product name until reboot while
+    // changing nothing real.
+    //
+    // Per-process SMBIOS hiding on Linux is provided separately by the
+    // LD_PRELOAD shim in smbios_hook.cpp; that is the only supported form and
+    // it is opt-in per process, not a system-wide change. See smbios_hook.cpp.
+    (void)board_serial;
+    (void)system_serial;
+    (void)uuid;
+    return false;
 }
 
 // ==================== Platform-specific: SMBIOS Spoofing (8-arg, delegates to 3-arg) ====================
@@ -1135,46 +1337,57 @@ bool NetworkSpoofer::apply_smbios(
     [[maybe_unused]] const std::string& system_product,
     const std::string& system_serial)
 {
-    std::string uuid;
-    if (!config_.custom_system_uuid.empty()) {
-        uuid = config_.custom_system_uuid;
-    } else {
-        uuid = generate_random_uuid();
-    }
-    return apply_smbios(board_serial, system_serial, uuid);
+    // Six of the eight fields have no storage in the firmware tables and are
+    // deliberately ignored. Pass the UUID only when the caller set one — a
+    // freshly generated random UUID was previously written into
+    // SystemProductName, which is not a UUID field at all (R18-03).
+    return apply_smbios(board_serial, system_serial, config_.custom_system_uuid);
 }
 
 // ==================== Platform-specific: Disk Serial Spoofing ====================
 bool NetworkSpoofer::apply_disk_serial(const std::string& disk_serial) {
     if (disk_serial.empty()) return false;
-    
-#ifdef _WIN32
-    const std::string base_key = "SYSTEM\\CurrentControlSet\\Services\\disk\\Enum";
-    
-    HKEY hKey;
-    LONG result = RegOpenKeyExA(HKEY_LOCAL_MACHINE, base_key.c_str(), 0, KEY_SET_VALUE, &hKey);
-    if (result != ERROR_SUCCESS) {
-        return false;
-    }
-    
-    result = RegSetValueExA(hKey, "0", 0, REG_SZ, 
-                            (const BYTE*)disk_serial.c_str(), static_cast<DWORD>(disk_serial.length() + 1));
-    
-    RegCloseKey(hKey);
-    return (result == ERROR_SUCCESS);
-#else
+    // R18-01: this used to write the generated value into value "0" of
+    // HKLM\SYSTEM\CurrentControlSet\Services\disk\Enum. That value is the
+    // first disk's device instance path (e.g. "SCSI\Disk&Ven_..."), not a
+    // serial, so the write achieved nothing for the real serial — which comes
+    // from the drive's IDENTIFY data — while corrupting the enumeration list
+    // for every program that reads it. A disk serial cannot be changed from
+    // user mode; report "not supported" on every platform.
+    (void)disk_serial;
     return false;
-#endif
 }
 
 // ==================== Platform-specific: DHCP Client ID Spoofing ====================
 bool NetworkSpoofer::apply_dhcp_client_id(const std::string& interface_name, const std::string& client_id) {
     if (client_id.empty()) return false;
 #ifdef _WIN32
-    auto result = execute_command_safe("netsh", {"interface", "ipv4", "set", "interface", "\"" + interface_name + "\"", "dhcpclientid="+client_id});
-    return result.find("Error") == std::string::npos;
+    // R18-05: netsh has no `dhcpclientid=` parameter (it accepted the argument
+    // silently and did nothing), and Windows exposes no supported way to set
+    // the DHCP option-61 client identifier. Report "not supported" rather than
+    // claiming a change.
+    (void)interface_name;
+    return false;
 #else
-        (void)interface_name;
+    // R18-05: this only works when the legacy ISC dhclient is the active DHCP
+    // client, which most current distributions no longer use. Detect the
+    // client first and refuse — with a reason — when it is NetworkManager or
+    // systemd-networkd, where the file below is ignored.
+    {
+        std::ifstream nm("/etc/NetworkManager/NetworkManager.conf");
+        if (nm.is_open()) {
+            std::cerr << "[!] DHCP client ID spoofing is not supported with "
+                         "NetworkManager (set ipv4.dhcp-client-id instead)\n";
+            return false;
+        }
+        std::ifstream snd("/etc/systemd/network");
+        if (snd.is_open()) {
+            std::cerr << "[!] DHCP client ID spoofing is not supported with "
+                         "systemd-networkd (set ClientIdentifier= in the .network file)\n";
+            return false;
+        }
+    }
+    (void)interface_name;
     // FIX P1: Read-modify-write to prevent duplicate entries on repeated calls
     std::vector<std::string> existing_lines;
     {
@@ -1192,7 +1405,7 @@ bool NetworkSpoofer::apply_dhcp_client_id(const std::string& interface_name, con
     dhcp_conf << "send dhcp-client-identifier \"" << client_id << "\";\n";
     dhcp_conf.close();
     auto result = execute_command_safe("systemctl", {"restart", "dhclient"});
-    return result.find("Error") == std::string::npos;
+    return result.ok();
 #endif
 }
 
@@ -1204,22 +1417,29 @@ bool NetworkSpoofer::apply_tcp_fingerprint(const TcpFingerprintProfile& profile)
 
 bool NetworkSpoofer::apply_tcp_fingerprint_impl(const TcpFingerprintProfile& profile) {
 #ifdef _WIN32
+    // R18-08: only DefaultTTL has any effect on modern Windows.
+    //   * TcpWindowSize is ignored — receive-window auto-tuning has overridden
+    //     it since Vista, so writing it changed nothing.
+    //   * TcpMaxSegmentSize was written to the Parameters\Interfaces *parent*
+    //     key, which applies to no interface at all.
+    // Both writes are removed; leaving them produced false "applied" status and
+    // polluted the registry. DefaultTTL itself is journaled for restore.
     std::string reg_path = "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters";
-    auto result1 = execute_command_safe("reg", {"add", reg_path, "/v", "DefaultTTL", "/t", "REG_DWORD", "/d", std::to_string(profile.ttl), "/f"});
-    auto result2 = execute_command_safe("reg", {"add", reg_path, "/v", "TcpWindowSize", "/t", "REG_DWORD", "/d", std::to_string(profile.window_size), "/f"});
-    auto result3 = execute_command_safe("reg", {"add", reg_path + "\\Interfaces", "/v", "TcpMaxSegmentSize", "/t", "REG_DWORD", "/d", std::to_string(profile.mss), "/f"});
-    return result1.find("Error") == std::string::npos && 
-           result2.find("Error") == std::string::npos && 
-           result3.find("Error") == std::string::npos;
+    auto result = execute_command_safe("reg", {"add", reg_path, "/v", "DefaultTTL",
+                                               "/t", "REG_DWORD",
+                                               "/d", std::to_string(profile.ttl), "/f"});
+    return result.ok();
 #else
-    std::ofstream("/proc/sys/net/ipv4/ip_default_ttl") << profile.ttl;
-    execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_window_scaling=1"});
-    execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_rmem=4096 " + std::to_string(profile.window_size) + " " + std::to_string(profile.window_size*2)});
-    execute_command_safe("ip", {"link", "set", "dev", original_identity_.interface_name, "mtu", std::to_string(profile.mss + 40)});
+    // Global sysctls only. The interface MTU is deliberately not touched: the
+    // old code set it to mss+40, which silently broke PMTU for every socket on
+    // the host and was never restored (R18-08).
+    std::ofstream("/proc/sys/net/ipv4/ip_default_ttl") << static_cast<int>(profile.ttl);
+    bool ok = execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_window_scaling=1"}).ok();
+    ok &= execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_rmem=4096 " + std::to_string(profile.window_size) + " " + std::to_string(profile.window_size*2)}).ok();
     if (profile.sack_permitted) {
-        execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_sack=1"});
+        ok &= execute_command_safe("sysctl", {"-w", "net.ipv4.tcp_sack=1"}).ok();
     }
-    return true;
+    return ok;
 #endif
 }
 

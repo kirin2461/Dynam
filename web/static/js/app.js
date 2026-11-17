@@ -377,8 +377,10 @@ function updateOverviewSubsystems(data) {
       row.style.padding = 'var(--sp-2) 0';
       el.appendChild(row);
     }
+    // R17-WEB-02: labels here are constants, but escape anyway so a future
+    // server-driven module list cannot turn this into an injection point.
     row.innerHTML = `
-      <span class="toggle-name">${m.label}</span>
+      <span class="toggle-name">${escapeHtml(m.label)}</span>
       <span class="badge badge--${m.active ? 'active' : 'inactive'}">${m.active ? 'Активен' : 'Неактивен'}</span>
     `;
   });
@@ -400,9 +402,13 @@ function appendLogEntry(entry) {
   if (appState.logFilter !== 'ALL' && entry.level !== appState.logFilter) return;
   if (appState.logSearch && !entry.msg.toLowerCase().includes(appState.logSearch)) return;
 
+  // R17-WEB-02: entry.level is server-supplied and appears in a class
+  // attribute, so it must be escaped too (ts as well, for the same reason).
+  // padEnd on a non-string would throw, hence String().
+  const lvl = String(entry.level ?? '');
   const el = document.createElement('div');
   el.className = 'log-entry';
-  el.innerHTML = `<span class="log-ts">${entry.ts}</span><span class="log-level log-level--${entry.level}">${entry.level.padEnd(5)}</span><span class="log-msg">${escapeHtml(entry.msg)}</span>`;
+  el.innerHTML = `<span class="log-ts">${escapeHtml(entry.ts)}</span><span class="log-level log-level--${escapeHtml(lvl)}">${escapeHtml(lvl.padEnd(5))}</span><span class="log-msg">${escapeHtml(entry.msg)}</span>`;
   viewer.appendChild(el);
 
   // Auto-scroll
@@ -622,18 +628,24 @@ function renderDpiOperators() {
   const grid = document.getElementById('dpi-operator-grid');
   if (!grid) return;
 
+  // R17-WEB-02: no inline onclick — the id goes into data-operator and the
+  // handler is attached below. (escapeHtml inside onclick is NOT enough: the
+  // HTML parser decodes &#39; back to ' before the JS is compiled.)
   grid.innerHTML = dpiOperators.map(op => {
     const icon = OPERATOR_ICONS[op.id] || '📶';
     const label = OPERATOR_LABELS[op.id] || op.label;
     const isActive = op.id === selectedOperator;
     return `
-      <div class="preset-card${isActive ? ' active' : ''}" data-operator="${escapeHtml(op.id)}" onclick="selectDpiOperator('${escapeHtml(op.id)}')">
-        <div class="preset-card__icon">${icon}</div>
+      <div class="preset-card${isActive ? ' active' : ''}" data-operator="${escapeHtml(op.id)}">
+        <div class="preset-card__icon">${escapeHtml(icon)}</div>
         <div class="preset-card__name">${escapeHtml(label)}</div>
         <div class="preset-card__desc" style="font-size:0.65rem;opacity:.7">${escapeHtml(op.description)}</div>
       </div>
     `;
   }).join('');
+  grid.querySelectorAll('.preset-card[data-operator]').forEach(card => {
+    card.addEventListener('click', () => selectDpiOperator(card.dataset.operator));
+  });
 
   // Update badge
   const badge = document.getElementById('dpi-operator-badge');
@@ -717,8 +729,9 @@ function renderZapretProfiles() {
 
   // Add "disabled" option
   const noneActive = !selectedZapretProfile;
+  // R17-WEB-02: data-profile + delegated listener instead of inline onclick.
   let html = `
-    <div class="preset-card${noneActive ? ' active' : ''}" onclick="selectZapretProfile('')">
+    <div class="preset-card${noneActive ? ' active' : ''}" data-profile="">
       <div class="preset-card__icon">🚫</div>
       <div class="preset-card__name">Выключен</div>
       <div class="preset-card__desc" style="font-size:0.65rem;opacity:.7">Без zapret</div>
@@ -729,15 +742,18 @@ function renderZapretProfiles() {
     const icon = ZAPRET_PROFILE_ICONS[p.id] || p.icon || '📦';
     const isActive = p.id === selectedZapretProfile;
     return `
-      <div class="preset-card${isActive ? ' active' : ''}" onclick="selectZapretProfile('${escapeHtml(p.id)}')">
-        <div class="preset-card__icon">${icon}</div>
+      <div class="preset-card${isActive ? ' active' : ''}" data-profile="${escapeHtml(p.id)}">
+        <div class="preset-card__icon">${escapeHtml(icon)}</div>
         <div class="preset-card__name" style="font-size:0.75rem">${escapeHtml(p.label)}</div>
-        <div class="preset-card__desc" style="font-size:0.6rem;opacity:.7">${p.chains.length} chains</div>
+        <div class="preset-card__desc" style="font-size:0.6rem;opacity:.7">${escapeHtml(p.chains ? p.chains.length : 0)} chains</div>
       </div>
     `;
   }).join('');
 
   grid.innerHTML = html;
+  grid.querySelectorAll('.preset-card[data-profile]').forEach(card => {
+    card.addEventListener('click', () => selectZapretProfile(card.dataset.profile));
+  });
 
   // Badge
   const badge = document.getElementById('zapret-profile-badge');
@@ -784,7 +800,8 @@ function renderZapretChainDetails() {
       : '';
 
     const ports = ch.ports || '';
-    const repeats = ch.repeats ? `\u00d7${ch.repeats}` : '';
+    // R17-WEB-02: repeat count is server data; escape before it reaches HTML.
+    const repeats = ch.repeats ? `\u00d7${escapeHtml(ch.repeats)}` : '';
 
     // Build detailed extras — v72.x features
     let extras = [];
@@ -850,14 +867,19 @@ async function loadNetworkInterfaces() {
 function renderInterfaceTable(ifaces) {
   const tbody = document.getElementById('iface-tbody');
   if (!tbody) return;
+  // R17-WEB-02: interface names are network-supplied; data-iface + listener
+  // rather than an inline onclick, and escape every interpolated field.
   tbody.innerHTML = ifaces.map(i => `
     <tr>
       <td>${escapeHtml(i.name)}</td>
-      <td>${i.ips.join(', ') || '—'}</td>
+      <td>${escapeHtml(Array.isArray(i.ips) ? i.ips.join(', ') : (i.ips || '—')) || '—'}</td>
       <td><span class="badge ${i.up ? 'badge--active' : 'badge--inactive'}">${i.up ? 'Активен' : 'Выкл'}</span></td>
-      <td><button class="btn btn--sm" onclick="selectInterface('${escapeHtml(i.name)}')">Выбрать</button></td>
+      <td><button class="btn btn--sm" data-iface="${escapeHtml(i.name)}">Выбрать</button></td>
     </tr>
   `).join('');
+  tbody.querySelectorAll('button[data-iface]').forEach(btn => {
+    btn.addEventListener('click', () => selectInterface(btn.dataset.iface));
+  });
 }
 
 function populateInterfaceSelect(ifaces) {
@@ -899,19 +921,24 @@ function renderE2ESessions(sessions) {
     list.innerHTML = '<div class="text-muted text-sm" style="padding:var(--sp-4)">Нет активных сессий</div>';
     return;
   }
+  // R17-WEB-02: s.peer / s.cipher are server- or network-supplied. `id` is
+  // also interpolated into an onclick attribute, so it must be escaped too.
   list.innerHTML = sessions.map(s => `
     <div class="item-row">
       <div class="item-row__icon">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       </div>
       <div class="item-row__body">
-        <div class="item-row__title">${s.id} — ${s.peer}</div>
-        <div class="item-row__sub">${s.cipher}${s.pq_enabled ? ' + Kyber1024' : ''} · ${s.msg_count} сообщений</div>
+        <div class="item-row__title">${escapeHtml(s.id)} — ${escapeHtml(s.peer)}</div>
+        <div class="item-row__sub">${escapeHtml(s.cipher)}${s.pq_enabled ? ' + Kyber1024' : ''} · ${escapeHtml(s.msg_count)} сообщений</div>
       </div>
-      <span class="badge badge--${s.status === 'active' ? 'active' : 'warn'}">${s.status}</span>
-      <button class="btn btn--sm btn--danger" onclick="deleteE2ESession('${s.id}')">✕</button>
+      <span class="badge badge--${s.status === 'active' ? 'active' : 'warn'}">${escapeHtml(s.status)}</span>
+      <button class="btn btn--sm btn--danger" data-e2e-del="${escapeHtml(s.id)}">✕</button>
     </div>
   `).join('');
+  list.querySelectorAll('button[data-e2e-del]').forEach(btn => {
+    btn.addEventListener('click', () => deleteE2ESession(btn.dataset.e2eDel));
+  });
 }
 
 async function createE2ESession() {
@@ -945,19 +972,24 @@ function renderI2PTunnels(tunnels) {
     list.innerHTML = '<div class="text-muted text-sm" style="padding:var(--sp-4)">Нет активных туннелей</div>';
     return;
   }
+  // R17-WEB-02: t.type / t.destination come from the tunnel record (user- or
+  // network-supplied); t.id also lands in an onclick attribute.
   list.innerHTML = tunnels.map(t => `
     <div class="item-row">
       <div class="item-row__icon" style="background:var(--purple-dim);color:var(--purple);">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
       </div>
       <div class="item-row__body">
-        <div class="item-row__title">${t.id} (${t.type})</div>
-        <div class="item-row__sub">${t.hops} хопов · ${t.destination}</div>
+        <div class="item-row__title">${escapeHtml(t.id)} (${escapeHtml(t.type)})</div>
+        <div class="item-row__sub">${escapeHtml(t.hops)} хопов · ${escapeHtml(t.destination)}</div>
       </div>
-      <span class="badge badge--${t.status === 'ready' ? 'active' : 'warn'}">${t.status}</span>
-      <button class="btn btn--sm btn--danger" onclick="deleteI2PTunnel('${t.id}')">✕</button>
+      <span class="badge badge--${t.status === 'ready' ? 'active' : 'warn'}">${escapeHtml(t.status)}</span>
+      <button class="btn btn--sm btn--danger" data-i2p-del="${escapeHtml(t.id)}">✕</button>
     </div>
   `).join('');
+  list.querySelectorAll('button[data-i2p-del]').forEach(btn => {
+    btn.addEventListener('click', () => deleteI2PTunnel(btn.dataset.i2pDel));
+  });
 }
 
 async function createI2PTunnel() {
@@ -1041,7 +1073,7 @@ function renderLicense(lic) {
     flist.innerHTML = allModules.map(m => {
       const active = activeModules.includes(m);
       return `<div class="toggle-wrap" style="padding:var(--sp-2) 0">
-        <span class="toggle-name">${MODULE_NAMES[m]}</span>
+        <span class="toggle-name">${escapeHtml(MODULE_NAMES[m])}</span>
         <span class="badge ${active ? 'badge--active' : 'badge--locked'}">${active ? '✓ Доступно' : '🔒 Заблокирован'}</span>
       </div>`;
     }).join('');
@@ -1194,11 +1226,13 @@ function renderSelfTestHistory(history) {
     el.innerHTML = '<div class="text-muted text-sm">Нет результатов</div>';
     return;
   }
+  // R17-WEB-02: h.ts / h.time are timestamps echoed from the engine; escape
+  // even though a well-behaved engine sends a number.
   el.innerHTML = history.slice(-5).reverse().map(h =>
     `<div style="display:flex;justify-content:space-between;font-size:var(--text-sm);padding:2px 0;border-bottom:1px solid var(--border)">
-      <span class="text-muted">${h.ts || h.time || '—'}</span>
-      <span class="badge badge--${h.score >= 90 ? 'active' : h.score >= 70 ? 'warn' : 'error'}">${h.score}/100</span>
-      <span class="text-muted">${h.issues} проблем</span>
+      <span class="text-muted">${escapeHtml(h.ts || h.time || '—')}</span>
+      <span class="badge badge--${h.score >= 90 ? 'active' : h.score >= 70 ? 'warn' : 'error'}">${escapeHtml(h.score)}/100</span>
+      <span class="text-muted">${escapeHtml(h.issues)} проблем</span>
     </div>`
   ).join('');
 }
@@ -1256,9 +1290,13 @@ function setSlider(id, val, displayId) {
   if (displayId) setEl(displayId, val ?? 0);
 }
 
+// R17-WEB-01/02: single canonical HTML escaper for every value that reaches
+// innerHTML. Escapes the five characters that matter in both element text and
+// double- or single-quoted attribute values (including `onclick="...('${x}')"`).
+// `_esc()` below is a hoisted alias so the older call sites keep working.
 function escapeHtml(str) {
-  // R7-WEB-06: Also escape single quotes to prevent DOM XSS in onclick handlers
-  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  return String(str).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function formatNumber(n) {
@@ -1537,7 +1575,7 @@ async function loadTgProxies() {
       return `
         <div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--surface-2);border-radius:8px;">
           <span style="font-weight:600;min-width:40px;">${escapeHtml(p.location || '??')}</span>
-          <span class="text-sm" style="flex:1;font-family:var(--font-mono);">${escapeHtml(p.server)}:${p.port}</span>
+          <span class="text-sm" style="flex:1;font-family:var(--font-mono);">${escapeHtml(p.server)}:${escapeHtml(p.port)}</span>
           ${statusBadge}
           ${connectBtn}
         </div>`;
@@ -1789,8 +1827,8 @@ async function bypassBlockcheckPoll() {
     tr.style.borderTop = '1px solid var(--border)';
     if (isBest) tr.style.color = 'var(--green, #0c0)';
     tr.innerHTML = `<td style="padding:4px">${_esc(r.strategy)}${isBest ? ' ★' : ''}</td>
-      <td style="padding:4px">${r.success}/${r.total}</td>
-      <td style="padding:4px">${r.success ? Math.round(r.avg_latency_ms) + ' ms' : '—'}</td>
+      <td style="padding:4px">${_esc(r.success)}/${_esc(r.total)}</td>
+      <td style="padding:4px">${r.success ? _esc(Math.round(r.avg_latency_ms)) + ' ms' : '—'}</td>
       <td style="padding:4px"><button class="btn btn--sm" data-strat="${_esc(r.strategy)}">Применить</button></td>`;
     tr.querySelector('button').addEventListener('click', () => {
       bypassBlockcheckApply(st.report, r.strategy);
@@ -1837,12 +1875,12 @@ async function bypassAvailabilityCheck() {
       const row = document.createElement('div');
       row.style.cssText = 'display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid var(--border)';
       const directBadge = site.direct.ok
-        ? `<span class="badge badge--active">${site.direct.latency_ms} ms</span>`
+        ? `<span class="badge badge--active">${_esc(site.direct.latency_ms)} ms</span>`
         : `<span class="badge badge--inactive">${_esc(site.direct.fail || 'недоступен')}</span>`;
       let proxyBadge = '<span class="text-muted text-sm">прокси выкл</span>';
       if (site.via_proxy) {
         proxyBadge = site.via_proxy.ok
-          ? `<span class="badge badge--active">${site.via_proxy.latency_ms} ms</span>`
+          ? `<span class="badge badge--active">${_esc(site.via_proxy.latency_ms)} ms</span>`
           : `<span class="badge badge--inactive">${_esc(site.via_proxy.fail || 'недоступен')}</span>`;
       }
       row.innerHTML = `<span class="text-sm">${_esc(site.name)}</span>
@@ -1947,10 +1985,14 @@ async function bypassDetectorLoad() {
       block_cleared: ['Доступ восстановлен', 'var(--green,#0c0)'],
     };
     for (const e of r.events.reverse()) {
-      const [label, color] = KIND_LABELS[e.kind] || [e.kind, 'var(--text-secondary)'];
+      // R17-WEB-02: an unknown event kind used to flow straight into innerHTML
+      // as the label. Keep the fixed colour and escape the fallback label.
+      const known = Object.hasOwn(KIND_LABELS, e.kind) ? KIND_LABELS[e.kind] : null;
+      const label = known ? known[0] : e.kind;
+      const color = known ? known[1] : 'var(--text-secondary)';
       const row = document.createElement('div');
       const ts = e.ts ? new Date(e.ts * 1000).toLocaleTimeString() : '';
-      row.innerHTML = `<span class="text-sm"><span style="color:${color}">●</span> ${label}: <b>${_esc(e.host)}</b> <span class="text-muted">${ts}</span></span>`;
+      row.innerHTML = `<span class="text-sm"><span style="color:${color}">●</span> ${_esc(label)}: <b>${_esc(e.host)}</b> <span class="text-muted">${_esc(ts)}</span></span>`;
       box.appendChild(row);
     }
     if (!r.events.length) {
@@ -1982,14 +2024,34 @@ async function bypassUpdateCheck() {
   }
 }
 
+let _updateInstallPoll = null;
+
 async function bypassUpdateInstall() {
   if (!confirm('Скачать и установить обновление? Приложение перезапустится.')) return;
   const status = document.getElementById('bypass-update-status');
   status.textContent = 'Остановка защиты перед обновлением…';
   try { await apiFetch('/api/stop', {method: 'POST'}); } catch (_) {}
   status.textContent = 'Загрузка и проверка подписи…';
+  // R17-WEB-08: the install now runs in a background thread; poll for status.
   const r = await apiFetch('/update/install', {method: 'POST'});
-  status.textContent = r.ok ? (r.message || 'Установлено') : ('Ошибка: ' + (r.error || '?'));
+  if (!r.ok && !r.running) {
+    status.textContent = 'Ошибка: ' + (r.error || '?');
+    return;
+  }
+  if (_updateInstallPoll) clearInterval(_updateInstallPoll);
+  _updateInstallPoll = setInterval(async () => {
+    const st = await apiFetch('/update/install/status');
+    if (st.running) {
+      status.textContent = `Загрузка и проверка подписи… ${st.elapsed}s`;
+      return;
+    }
+    clearInterval(_updateInstallPoll);
+    _updateInstallPoll = null;
+    const res = st.result || {};
+    status.textContent = res.ok
+      ? (res.message || 'Установлено')
+      : ('Ошибка: ' + (st.error || '?'));
+  }, 1500);
 }
 
 // ── autostart ──
@@ -2054,6 +2116,19 @@ function _monSet(id, val) {
   if (el) el.textContent = val;
 }
 
+// R17-WEB-01: outcome -> colour. Fixed allowlist: a server-supplied outcome
+// string is only ever used as a *key*; anything unknown falls back to grey and
+// is escaped at the call site. Object.hasOwn keeps "constructor"/"toString"
+// from resolving to a prototype member.
+const _MON_OUTCOME_COLORS = Object.freeze({
+  ok: '#3fb950', rst: '#e5534b', timeout: '#d29922',
+  connect_fail: '#e5534b', connect_rst: '#e5534b',
+});
+function _monOutcomeColor(outcome) {
+  return (typeof outcome === 'string' && Object.hasOwn(_MON_OUTCOME_COLORS, outcome))
+    ? _MON_OUTCOME_COLORS[outcome] : '#8b949e';
+}
+
 async function monitorStatsPoll() {
   const data = await apiFetch('/monitor/stats');
   if (!data) return;
@@ -2082,16 +2157,18 @@ async function monitorEventsPoll() {
   for (const ev of (data.events || [])) {
     const t = new Date((ev.ts || 0) * 1000).toLocaleTimeString();
     const div = document.createElement('div');
+    // R17-WEB-01: ev.host / ev.strategy / ev.result come from the SOCKS CONNECT
+    // line (ncp_proxy.cpp) and can hold arbitrary bytes — never interpolate
+    // them raw. Colours come only from the fixed `colors` map.
     if (ev.ev === 'connect') {
-      div.innerHTML = `<span style="color:var(--text-secondary)">${t}</span> → <b>${ev.host}</b>:${ev.port} <span class="badge" style="font-size:0.7em">${ev.strategy || 'base'}</span>`;
+      div.innerHTML = `<span style="color:var(--text-secondary)">${escapeHtml(t)}</span> → <b>${escapeHtml(ev.host)}</b>:${escapeHtml(ev.port)} <span class="badge" style="font-size:0.7em">${escapeHtml(ev.strategy || 'base')}</span>`;
       _monHosts[ev.host] = {strategy: ev.strategy || 'base', outcome: '…', bytes: 0};
     } else if (ev.ev === 'outcome') {
-      const colors = {ok: '#3fb950', rst: '#e5534b', timeout: '#d29922', connect_fail: '#e5534b', connect_rst: '#e5534b'};
-      const c = colors[ev.result] || '#8b949e';
-      div.innerHTML = `<span style="color:var(--text-secondary)">${t}</span> ⏱ <b>${ev.host}</b> → <span style="color:${c}">${ev.result}</span>`;
+      const c = _monOutcomeColor(ev.result);
+      div.innerHTML = `<span style="color:var(--text-secondary)">${escapeHtml(t)}</span> ⏱ <b>${escapeHtml(ev.host)}</b> → <span style="color:${c}">${escapeHtml(ev.result)}</span>`;
       if (_monHosts[ev.host]) _monHosts[ev.host].outcome = ev.result;
     } else if (ev.ev === 'close') {
-      div.innerHTML = `<span style="color:var(--text-secondary)">${t}</span> ✓ <b>${ev.host}</b> ↓${_monFmtBytes(ev.s2c)} ↑${_monFmtBytes(ev.c2s)} ${ev.ms}ms`;
+      div.innerHTML = `<span style="color:var(--text-secondary)">${escapeHtml(t)}</span> ✓ <b>${escapeHtml(ev.host)}</b> ↓${_monFmtBytes(ev.s2c)} ↑${_monFmtBytes(ev.c2s)} ${escapeHtml(ev.ms)}ms`;
       if (_monHosts[ev.host]) _monHosts[ev.host].bytes = (ev.s2c || 0) + (ev.c2s || 0);
     }
     feed.appendChild(div);
@@ -2106,12 +2183,13 @@ function monitorRenderHosts() {
   if (!tbody) return;
   const hosts = Object.keys(_monHosts);
   if (!hosts.length) return;
-  const colors = {ok: '#3fb950', rst: '#e5534b', timeout: '#d29922', connect_fail: '#e5534b', connect_rst: '#e5534b'};
   tbody.innerHTML = hosts.map(h => {
     const r = _monHosts[h];
+    // R17-WEB-01: host is the SOCKS CONNECT target — attacker-controlled.
+    // Colour comes from the fixed map only, never from the outcome string.
     const oc = r.outcome === '…' ? '<span style="color:var(--text-secondary)">…</span>'
-      : `<span style="color:${colors[r.outcome] || '#8b949e'}">${r.outcome}</span>`;
-    return `<tr><td>${h}</td><td><code>${r.strategy}</code></td><td>${oc}</td><td>${_monFmtBytes(r.bytes)}</td></tr>`;
+      : `<span style="color:${_monOutcomeColor(r.outcome)}">${escapeHtml(r.outcome)}</span>`;
+    return `<tr><td>${escapeHtml(h)}</td><td><code>${escapeHtml(r.strategy)}</code></td><td>${oc}</td><td>${_monFmtBytes(r.bytes)}</td></tr>`;
   }).join('');
 }
 
@@ -2141,6 +2219,12 @@ async function monitorAutopilotPoll() {
   }
   const tbody = document.getElementById('mon-ap-records');
   if (!tbody) return;
+  // R17-WEB-07: a corrupt/partially-written autopilot.json must be reported,
+  // not rendered as "no records" (which reads as "nothing learned yet").
+  if (data.error) {
+    tbody.innerHTML = `<tr><td colspan="4" style="color:#d29922">БД AutoPilot повреждена или недоступна: ${escapeHtml(data.error)}</td></tr>`;
+    return;
+  }
   const recs = data.records || [];
   if (!recs.length) {
     tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Нет выученных хостов — нажмите «Обучить»</td></tr>';
@@ -2150,7 +2234,7 @@ async function monitorAutopilotPoll() {
     const status = r.degraded
       ? '<span style="color:#d29922">degraded — переобучение</span>'
       : '<span style="color:#3fb950">активна</span>';
-    return `<tr><td>${r.host}</td><td><code>${r.strategy}</code></td><td>${r.successes}/${r.failures}</td><td>${status}</td></tr>`;
+    return `<tr><td>${escapeHtml(r.host)}</td><td><code>${escapeHtml(r.strategy)}</code></td><td>${escapeHtml(r.successes)}/${escapeHtml(r.failures)}</td><td>${status}</td></tr>`;
   }).join('');
 }
 
@@ -2269,11 +2353,15 @@ function pentestRender(results) {
     tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text-secondary)">Пентест ещё не запускался</td></tr>';
     return;
   }
+  // R17-WEB-02: colour and label come from fixed maps; an unknown status must
+  // not inject markup through the fallback label.
   tbody.innerHTML = results.map(r => {
-    const color = PENTEST_STATUS_COLOR[r.status] || '#8b949e';
-    const label = PENTEST_STATUS_RU[r.status] || r.status;
+    const color = Object.hasOwn(PENTEST_STATUS_COLOR, r.status)
+      ? PENTEST_STATUS_COLOR[r.status] : '#8b949e';
+    const label = Object.hasOwn(PENTEST_STATUS_RU, r.status)
+      ? PENTEST_STATUS_RU[r.status] : r.status;
     return `<tr><td>${escapeHtml(r.title || r.id)}</td>`
-      + `<td><span style="color:${color};font-weight:600">${label}</span></td>`
+      + `<td><span style="color:${color};font-weight:600">${escapeHtml(label)}</span></td>`
       + `<td>${escapeHtml(r.details || '—')}</td>`
       + `<td>${escapeHtml(r.recommendation || '—')}</td></tr>`;
   }).join('');

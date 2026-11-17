@@ -3,5 +3,6 @@ flask-cors>=4.0.0
 flask-socketio>=5.3.6
 psutil>=5.9.8
 eventlet>=0.35.2
+waitress>=3.0.0
 cryptography>=41.0.0
 fpdf2>=2.7.9,<3

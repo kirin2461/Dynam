@@ -1160,6 +1160,27 @@ NetworkStats Network::get_stats() const {
         }
         return sys;
     }
+#else
+    // Windows: when no capture session populated stats_, report system-wide
+    // counters from the IP Helper API (aggregate of non-loopback interfaces),
+    // mirroring the Linux /proc/net/dev path above.
+    if (stats_.packets_sent == 0 && stats_.packets_received == 0 &&
+        stats_.bytes_sent == 0 && stats_.bytes_received == 0) {
+        NetworkStats sys;
+        PMIB_IF_TABLE2 table = nullptr;
+        if (GetIfTable2(&table) == NO_ERROR && table) {
+            for (ULONG i = 0; i < table->NumEntries; ++i) {
+                const MIB_IF_ROW2& row = table->Table[i];
+                if (row.Type == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+                sys.bytes_received += row.InOctets;
+                sys.packets_received += row.InUcastPkts + row.InNUcastPkts;
+                sys.bytes_sent += row.OutOctets;
+                sys.packets_sent += row.OutUcastPkts + row.OutNUcastPkts;
+            }
+            FreeMibTable(table);
+        }
+        return sys;
+    }
 #endif
     return stats_;
 }

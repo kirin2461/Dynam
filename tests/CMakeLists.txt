@@ -65,6 +65,7 @@ add_executable(ncp_tests
     test_geneva.cpp
     test_packet_interceptor.cpp
     test_spoofer.cpp
+    test_spoofer_safety.cpp  # R18-01/02/03/05/06: honest status + safe defaults
     test_db.cpp
     test_doh.cpp
     test_security_classes.cpp

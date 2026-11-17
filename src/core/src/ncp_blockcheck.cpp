@@ -238,14 +238,14 @@ std::vector<uint8_t> BlockChecker::build_client_hello(const std::string& sni) {
     ext.insert(ext.end(), sni.begin(), sni.end());
     // supported_versions (TLS 1.3 + 1.2)
     e16(0x002B); e16(5); ext.push_back(4); e16(0x0304); e16(0x0303);
-    // supported_groups
-    e16(0x000A); e16(6); e16(0x001D); e16(0x0017);
+    // supported_groups (extension_data = 2-byte list length + entries)
+    e16(0x000A); e16(6); e16(4); e16(0x001D); e16(0x0017);
     // ec_point_formats
     e16(0x000B); e16(2); ext.push_back(1); ext.push_back(0);
-    // signature_algorithms
-    e16(0x000D); e16(8); e16(0x0403); e16(0x0804); e16(0x0401); e16(0x0501);
-    // key_share (x25519, 32 zero bytes — enough to elicit ServerHello/HRR)
-    e16(0x0033); e16(36); e16(34); e16(0x001D); e16(32);
+    // signature_algorithms (extension_data = 2-byte list length + algorithms)
+    e16(0x000D); e16(10); e16(8); e16(0x0403); e16(0x0804); e16(0x0401); e16(0x0501);
+    // key_share (x25519; extension_data = 2-byte client_shares length + entry)
+    e16(0x0033); e16(38); e16(36); e16(0x001D); e16(32);
     for (int i = 0; i < 32; ++i) ext.push_back(static_cast<uint8_t>(i + 1));
 
     h16(static_cast<uint16_t>(ext.size()));

@@ -201,6 +201,10 @@ struct NcpConnectionDirector::Impl {
     uint64_t transition_commits_reported = 0;
     uint64_t transition_aborts_reported = 0;
     uint64_t transition_feedback_timeouts = 0;
+    // R17-10: previous telemetry snapshot, for change detection in
+    // publish_views(). Kept sorted by session id (poll thread only).
+    std::vector<std::pair<SessionId, MimicrySessionView>> snapshot_buf;
+    std::vector<std::pair<SessionId, MimicrySessionView>> last_snapshot;
     // ---- counters: mutated from foreign threads ----
     std::atomic<uint64_t> requests_enqueued{0};
     std::atomic<uint64_t> requests_dropped_full{0};
@@ -240,24 +244,89 @@ struct NcpConnectionDirector::Impl {
 
     /// Refresh exists/established/transition_capable for every live session.
     /// feedback_pending is owned by the request path and left untouched.
+    ///
+    /// R17-10: only writes when a value actually changed. poll() runs at up to
+    /// ~40 Hz per session and every iteration rebuilt the whole map, which
+    /// allocated under req_mutex on every tick even when nothing had moved.
+    /// These three flags change on handshake completion and profile
+    /// transitions — not per datagram — so the common case is a look-up only.
     void refresh_gates() {
         std::lock_guard<std::mutex> lk(req_mutex);
         for (auto& kv : sessions) {
             Gate& g = gates[kv.first];
-            g.exists = true;
-            g.established = kv.second.adapter->is_established();
-            g.transition_capable = kv.second.adapter->transition_capable();
+            const bool established = kv.second.adapter->is_established();
+            const bool transition_capable = kv.second.adapter->transition_capable();
+            if (!g.exists || g.established != established ||
+                g.transition_capable != transition_capable) {
+                g.exists = true;
+                g.established = established;
+                g.transition_capable = transition_capable;
+            }
         }
     }
 
     /// Poll thread: republish the complete flattened telemetry snapshot
     /// (<= max_sessions entries; trivial cost). Runs after each poll() and
     /// on session create/remove so observers never see a stale registry.
-    void publish_views() {
-        std::unordered_map<SessionId, MimicrySessionView> views;
-        views.reserve(sessions.size());
+    ///
+    /// R17-10: the snapshot is rebuilt only when it differs from the last one
+    /// published. poll() runs per receive timeout (~40 Hz), and the old code
+    /// re-flattened every session into a fresh unordered_map under the
+    /// provider mutex on every tick even when no counter had moved. Comparing
+    /// a sorted, reused buffer keeps an idle tick allocation-free and
+    /// lock-free; only a real change builds the map and takes the provider
+    /// mutex. `last_snapshot` is poll-thread only.
+    /// Field-by-field comparison of two id-sorted view snapshots.
+    static bool views_equal(const MimicrySessionView& a, const MimicrySessionView& b) {
+        return a.session_id == b.session_id &&
+               a.established == b.established &&
+               a.transition_capable == b.transition_capable &&
+               a.transition_state == b.transition_state &&
+               a.active_profile_id == b.active_profile_id &&
+               a.active_profile_revision == b.active_profile_revision &&
+               a.has_pending_profile == b.has_pending_profile &&
+               a.pending_profile_id == b.pending_profile_id &&
+               a.pending_profile_revision == b.pending_profile_revision &&
+               a.profile_epoch == b.profile_epoch &&
+               a.crypto_epoch == b.crypto_epoch &&
+               a.transitions_effective == b.transitions_effective &&
+               a.transitions_aborted == b.transitions_aborted &&
+               a.transitions_timed_out == b.transitions_timed_out &&
+               a.e2e_messages_sent == b.e2e_messages_sent &&
+               a.e2e_messages_received == b.e2e_messages_received &&
+               a.mtu_budget_rejections == b.mtu_budget_rejections &&
+               a.ingress_dropped == b.ingress_dropped;
+    }
+
+    static bool snapshot_equal(
+        const std::vector<std::pair<SessionId, MimicrySessionView>>& a,
+        const std::vector<std::pair<SessionId, MimicrySessionView>>& b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            if (a[i].first != b[i].first) return false;
+            if (!views_equal(a[i].second, b[i].second)) return false;
+        }
+        return true;
+    }
+
+    void publish_views(uint64_t /*now_ms*/, bool force = false) {
+        // Flatten into a reused, id-sorted buffer (stable ordering is what
+        // makes the comparison meaningful — the sessions map is unordered).
+        snapshot_buf.clear();
+        snapshot_buf.reserve(sessions.size());
         for (const auto& kv : sessions)
-            views.emplace(kv.first, make_view(kv.first, kv.second.adapter->stats()));
+            snapshot_buf.emplace_back(kv.first,
+                                      make_view(kv.first, kv.second.adapter->stats()));
+        std::sort(snapshot_buf.begin(), snapshot_buf.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        if (!force && snapshot_equal(snapshot_buf, last_snapshot)) return;
+        last_snapshot = snapshot_buf;
+
+        std::unordered_map<SessionId, MimicrySessionView> views;
+        views.reserve(snapshot_buf.size());
+        for (const auto& item : snapshot_buf)
+            views.emplace(item.first, item.second);
         provider->publish(std::move(views));
     }
 
@@ -481,7 +550,9 @@ NcpConnectionDirector::Error NcpConnectionDirector::add_session(SessionId id) {
     impl_->sessions.emplace(id, std::move(se));
     impl_->gate_insert(id);
     ++impl_->sessions_created;
-    impl_->publish_views();
+    // Publishing the session set is not optional — force it past the
+    // rate limit so an observer never sees a registry missing a live session.
+    impl_->publish_views(0, /*force=*/true);
     return Error::NONE;
 }
 
@@ -493,7 +564,7 @@ NcpConnectionDirector::Error NcpConnectionDirector::remove_session(
     impl_->sessions.erase(it);
     impl_->gate_erase(id);
     ++impl_->sessions_removed;
-    impl_->publish_views();
+    impl_->publish_views(0, /*force=*/true);
     return Error::NONE;
 }
 
@@ -616,8 +687,11 @@ std::vector<NcpConnectionDirector::Egress> NcpConnectionDirector::poll(
 
     // 4. Publish the cross-thread gate snapshot + the read-only telemetry
     //    snapshot (session views for mimicry_provider() observers).
+    //    R17-10: refresh_gates() writes only on change, and publish_views()
+    //    coalesces to 4 Hz, so a 40 Hz poll loop no longer rebuilds both
+    //    structures on every idle tick.
     impl_->refresh_gates();
-    impl_->publish_views();
+    impl_->publish_views(now_ms);
 
     // 5. Emit: control first (prioritized, never paced), then paced data
     //    that is due.
