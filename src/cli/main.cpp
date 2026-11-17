@@ -70,7 +70,9 @@
 #include <iphlpapi.h>
 #include <wininet.h>
 #include <direct.h>
+#include <tlhelp32.h>
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "advapi32.lib")
 #else
 #include <unistd.h>
 #include <sys/stat.h>
@@ -169,11 +171,71 @@ std::sig_atomic_t g_running = 0;
 static int g_exit_code = 0;
 
 // ============================================================================
+// WinDivert driver cleanup
+// ============================================================================
+// WinDivert installs WinDivert64.sys as a kernel service on first open. The
+// driver stays loaded after the last handle is closed and is only removed at
+// reboot, so a finished `ncp run`/`ncp dpi` left it running indefinitely.
+// Stop it when ncp exits. Best effort and silent: skipped when another ncp.exe
+// is still alive (it may hold a handle), and when the process lacks the rights
+// to control services (non-elevated runs could not have loaded it anyway).
+#ifdef _WIN32
+static bool other_ncp_running() {
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return true;  // unknown: don't stop
+    const DWORD self = GetCurrentProcessId();
+    bool found = false;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        if (pe.th32ProcessID != self && _wcsicmp(pe.szExeFile, L"ncp.exe") == 0) {
+            found = true;
+            break;
+        }
+    }
+    CloseHandle(snap);
+    return found;
+}
+
+static void stop_windivert_driver() {
+    if (other_ncp_running()) return;
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return;
+    SC_HANDLE svc = OpenServiceW(scm, L"WinDivert",
+                                 SERVICE_STOP | SERVICE_QUERY_STATUS);
+    if (svc) {
+        SERVICE_STATUS st{};
+        if (QueryServiceStatus(svc, &st) && st.dwCurrentState != SERVICE_STOPPED)
+            ControlService(svc, SERVICE_CONTROL_STOP, &st);
+        CloseServiceHandle(svc);
+    }
+    CloseServiceHandle(scm);
+}
+
+// Closing the console window, logoff and shutdown terminate the process
+// without returning from main(), so atexit() alone would miss them.
+static BOOL WINAPI console_close_handler(DWORD type) {
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT ||
+        type == CTRL_SHUTDOWN_EVENT) {
+        stop_windivert_driver();
+    }
+    return FALSE;  // let the default handling (and SIGINT for Ctrl+C) proceed
+}
+#endif
+
+// ============================================================================
 // Signal handler
 // ============================================================================
 
 void signal_handler(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) {
+    bool stop_request = (signal == SIGINT || signal == SIGTERM);
+#ifdef SIGBREAK
+    // Windows: Ctrl+Break, and `ncp stop` (which sends CTRL_BREAK_EVENT to the
+    // running instance) arrive as SIGBREAK. Unhandled, its default action
+    // kills the process at once, skipping all cleanup.
+    stop_request = stop_request || signal == SIGBREAK;
+#endif
+    if (stop_request) {
         // SAFETY: Only async-signal-safe operations in signal handler
         g_running = 0;
     }
@@ -1140,6 +1202,12 @@ void handle_xdp(const std::vector<std::string>& args);
 int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
+#ifdef SIGBREAK
+    std::signal(SIGBREAK, signal_handler);
+#endif
+#ifdef _WIN32
+    SetConsoleCtrlHandler(console_close_handler, TRUE);
+#endif
 
     ArgumentParser parser("ncp", NCP_VERSION_STRING);
 
@@ -1170,6 +1238,13 @@ int main(int argc, char* argv[]) {
 
     parser.parse_and_execute(argc, argv);
 
+#ifdef _WIN32
+    // g_app is a global, so its modules (and their WinDivert handles) would
+    // otherwise only be destroyed after main() returns. Release them first:
+    // the driver cannot stop while a handle is open.
+    g_app.reset();
+    stop_windivert_driver();
+#endif
     return g_exit_code;
 }
 
