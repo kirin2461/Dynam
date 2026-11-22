@@ -58,7 +58,20 @@ struct Endpoint {
     static E2EConfig make_e2e_config() {
         E2EConfig c;
         c.enable_padding = false;  // deterministic wire sizes
+        // Production handshake is identity-signed: the responder side of
+        // this fixture signs, and the initiator verifies. A shared static
+        // identity keeps the wire size deterministic.
+        c.server_identity = shared_identity();
         return c;
+    }
+
+    static std::shared_ptr<ServerIdentity> shared_identity() {
+        static std::shared_ptr<ServerIdentity> id = [] {
+            auto p = std::make_shared<ServerIdentity>();
+            p->generate();
+            return p;
+        }();
+        return id;
     }
 
     Endpoint() : e2e(make_e2e_config()) { keys = e2e.generate_key_pair(); }

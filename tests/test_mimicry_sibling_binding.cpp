@@ -43,6 +43,7 @@
 
 #include "ncp_mimicry_fsm.hpp"
 #include "ncp_mimicry_session.hpp"
+#include "test_identity.hpp"
 
 #include <array>
 #include <memory>
@@ -187,6 +188,7 @@ struct SibPair {
         const auto* desc = catalog.find(stable_id, stable_rev);
         NcpMimicrySession::Config base;
         base.e2e_config.enable_padding = false;  // deterministic wire sizes
+        base.e2e_config.server_identity = test_server_identity();
         base.catalog = &catalog;
         base.mimic_config.wire_version = 3;
         base.mimic_config.enable_timing_mimicry = false;

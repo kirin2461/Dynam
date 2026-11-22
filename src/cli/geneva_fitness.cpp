@@ -190,6 +190,21 @@ DPI::FitnessResult geneva_probe_fitness(const DPI::GenevaStrategy& strategy,
         }
         if (packets.empty()) return res;  // e.g. pure-DROP strategy: nothing to send
 
+        // ── Wire amplification: what this strategy actually emits relative
+        //    to the ClientHello it transforms. The GA scores this, so a
+        //    strategy that connects by spraying duplicates/fragments is not
+        //    ranked equal to one that connects cheaply. ──
+        {
+            uint64_t out_bytes = 0;
+            for (const auto& p : packets) out_bytes += p.size();
+            const double payload = static_cast<double>(hello.size());
+            if (payload > 0.0) {
+                const double ratio =
+                    (static_cast<double>(out_bytes) - payload) / payload;
+                res.overhead_ratio = ratio > 0.0 ? ratio : 0.0;  // DROP can go negative
+            }
+        }
+
         // ── TAMPER_TTL simplification: first produced packet goes out with
         //    a low TTL (fake dies mid-path, poisons stateful DPI), the rest
         //    with normal TTL — mirrors the WinDivert fake+ttl path. ──

@@ -24,6 +24,7 @@ add_executable(ncp_tests
     test_e2e.cpp
     test_paranoid.cpp
     test_secure_memory.cpp
+    test_server_identity.cpp
     test_i2p.cpp
     test_tor_manager.cpp      # Managed Tor + PT tests
     test_kill_switch.cpp        # Kill switch filter tests
@@ -33,6 +34,7 @@ add_executable(ncp_tests
     test_orchestrator.cpp
     test_adversarial.cpp
     test_flow_shaper.cpp
+    test_optimal_transport.cpp  # W1 distance + quantile shaper
     test_burst_morpher.cpp
     test_protocol_morph.cpp
     test_port_knock.cpp
@@ -57,6 +59,8 @@ add_executable(ncp_tests
     test_mimicry_session_v2.cpp    # Transition protocol v2 (arbitrary masks) tests
     test_udp_profile_transition_v2.cpp  # Real-UDP v2 evidence (loss parity, storm recovery)
     test_desync_confuse.cpp   # M3: TCP state confusion builders tests
+    test_shaping_delay.cpp    # Inline (per-packet) delay budget of shaping modules
+    test_strategy_synth.cpp   # Per-destination strategy synthesis
     test_aemm.cpp             # M9: Reed-Solomon erasure coding tests
     test_fog.cpp               # M7: fog mesh relay tests
     test_semfluid.cpp          # M8: semantic fluid transport tests

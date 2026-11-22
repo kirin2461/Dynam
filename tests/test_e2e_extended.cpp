@@ -60,11 +60,19 @@ void restore_then_rotate_roundtrip(const E2EConfig& config) {
 class E2EExtendedTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // The production handshake is identity-signed; every session in
+        // this fixture gets the same responder identity so the ratchet
+        // tests exercise the real (verified) handshake path.
+        ASSERT_TRUE(identity->generate());
+        x448_config.server_identity = identity;
+        p256_config.server_identity = identity;
         // Configs for each protocol
         x448_config.key_exchange = KeyExchangeProtocol::X448;
         p256_config.key_exchange = KeyExchangeProtocol::ECDH_P256;
     }
-    
+
+    std::shared_ptr<ServerIdentity> identity =
+        std::make_shared<ServerIdentity>();
     E2EConfig x448_config;
     E2EConfig p256_config;
 };

@@ -142,11 +142,13 @@ std::chrono::microseconds BehavioralCloak::shape_packet(size_t packet_size, bool
     if (burst_state_ == BurstState::BURSTING) {
         base_delay = compute_burst_delay_();
         ++packets_in_current_burst_;
-    } else {
-        // We are in IDLE — the caller should honour get_idle_duration().
-        // Return a minimal delay.
-        base_delay = compute_idle_delay_();
     }
+    // else: the burst just ended. That packet used to sleep the model's full
+    // idle gap (idle_min_ms..idle_max_ms == 2-8 s for chrome_casual) *inline*,
+    // on the DPI capture thread, once per burst -- which stalled every flow
+    // queued behind it and added seconds to TLS handshakes.  The idle gap is
+    // honoured through get_idle_duration() by callers that can actually wait;
+    // here it contributes nothing.
 
     last_packet_time_ = std::chrono::steady_clock::now();
     stats_.packets_shaped.fetch_add(1, std::memory_order_relaxed);
@@ -159,7 +161,19 @@ std::chrono::microseconds BehavioralCloak::shape_packet(size_t packet_size, bool
         base_delay += std::chrono::microseconds(noise_us);
     }
 
-    return base_delay + extra_ratio_delay;
+    // shape_packet() is called inline from the packet loop, so whatever we
+    // return is slept on the capture thread while other flows wait.  Clamp the
+    // combined result (burst delay + ratio penalty + threat noise) to the
+    // configured inline budget; the model's millisecond-scale intervals stay
+    // available to callers that shape at session granularity.
+    int64_t total_us = base_delay.count() + extra_ratio_delay.count();
+    if (total_us < 0) total_us = 0;
+    if (config_.max_inline_delay_us <= 0) {
+        total_us = 0;
+    } else if (total_us > config_.max_inline_delay_us) {
+        total_us = config_.max_inline_delay_us;
+    }
+    return std::chrono::microseconds(total_us);
 }
 
 std::chrono::milliseconds BehavioralCloak::get_idle_duration() {

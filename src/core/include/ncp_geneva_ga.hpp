@@ -2,6 +2,7 @@
 #define NCP_GENEVA_GA_HPP
 
 #include "ncp_geneva_engine.hpp"
+#include <algorithm>
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -24,17 +25,33 @@ struct FitnessResult {
     double  packet_loss    = 1.0;     // Secondary: 0.0 = no loss, 1.0 = total
     int     retry_count    = 0;       // How many retries were needed
 
+    // Wire amplification produced by the strategy: extra bytes emitted
+    // relative to the payload it transformed. 0.0 = no overhead, 1.0 = the
+    // strategy sent twice the payload. Filled from the packets the engine
+    // actually produced; left at 0.0 by evaluators that cannot measure it.
+    double  overhead_ratio = 0.0;
+
+    // Points removed per 1.0 of overhead, and the point at which further
+    // overhead stops counting (5x payload and worse rank the same).
+    static constexpr double kOverheadWeight = 40.0;
+    static constexpr double kOverheadCap    = 4.0;
+
     // Combined scalar fitness: higher = better
-    // connected gives a massive bonus; latency and loss are penalties
+    // connected gives a massive bonus; latency, loss and amplification are
+    // penalties. The overhead term is what stops the GA from converging on a
+    // high-amplification strategy that merely happens to connect: at equal
+    // latency/loss, the cheaper strategy wins.
     double score() const {
         if (!connected) return 0.0;
         // Base 1000 for successful connect
         // Subtract latency penalty (capped at 500)
         // Subtract loss penalty (up to 300)
+        // Subtract amplification penalty (capped at 160)
         double s = 1000.0;
         s -= std::min(latency_ms * 0.5, 500.0);
         s -= packet_loss * 300.0;
         s -= retry_count * 50.0;
+        s -= std::min(std::max(overhead_ratio, 0.0), kOverheadCap) * kOverheadWeight;
         return std::max(s, 1.0);  // Floor at 1.0 if connected
     }
 };

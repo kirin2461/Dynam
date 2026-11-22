@@ -29,6 +29,7 @@
 
 #include "ncp_mimicry_fsm.hpp"
 #include "ncp_mimicry_session.hpp"
+#include "test_identity.hpp"
 
 #include <array>
 #include <memory>
@@ -141,6 +142,7 @@ struct FsmPair {
         const auto* desc = cat.catalog.find(stable_id, 1);
         NcpMimicrySession::Config base;
         base.e2e_config.enable_padding = false;  // deterministic wire sizes
+        base.e2e_config.server_identity = test_server_identity();
         base.stable_profile = profile_ref_from_descriptor(*desc);
         base.stable_layout = profile_layout_from_descriptor(*desc);
         base.stable_mimic = TrafficMimicry::MimicProfile::GENERIC_UDP;
@@ -371,6 +373,7 @@ struct VariantPair {
               bool srv_disable_variants = false) {
         NcpMimicrySession::Config base;
         base.e2e_config.enable_padding = false;  // deterministic wire sizes
+        base.e2e_config.server_identity = test_server_identity();
         base.catalog = &catalog;
         base.mimic_config.wire_version = 3;
         base.mimic_config.enable_timing_mimicry = false;

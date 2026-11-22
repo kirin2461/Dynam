@@ -72,6 +72,16 @@ struct BehavioralCloakConfig {
     bool shape_idle    = true;   ///< Enforce idle gap durations
     bool shape_ratios  = true;   ///< Enforce upload/download ratio
     bool inject_fake_idle = true; ///< Inject keepalive-like packets during idle
+
+    /// Hard ceiling for the delay returned by shape_packet(), in microseconds.
+    ///
+    /// shape_packet() runs inline on the DPI capture thread for every
+    /// intercepted segment, so the model's burst intervals (50-200 ms, meant to
+    /// describe *application* think-time that the OS already produces on its
+    /// own) must not be replayed there: a three-segment ClientHello would add
+    /// up to ~600 ms per handshake, and every flow queued behind the packet
+    /// stalls for the whole sleep.  0 disables inline shaping delays entirely.
+    int64_t max_inline_delay_us = 2000;
 };
 
 // ===== Statistics =====
@@ -120,6 +130,10 @@ public:
      * Consults the active model to enforce:
      *   - Burst inter-packet intervals (shape_bursts)
      *   - Upload ratio corrections (shape_ratios)
+     *
+     * The result is clamped to config().max_inline_delay_us because this runs
+     * inline on the DPI capture thread.  The burst-end idle gap is NOT applied
+     * here -- ask get_idle_duration() for it instead.
      *
      * @param packet_size  Payload size in bytes.
      * @param is_upload    true = outbound packet.

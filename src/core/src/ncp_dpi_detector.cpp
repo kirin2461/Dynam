@@ -3,6 +3,7 @@
 
 #include <fstream>
 #include <chrono>
+#include <algorithm>
 
 namespace ncp {
 
@@ -18,6 +19,20 @@ void DpiDetector::set_event_callback(EventCallback cb) {
 void DpiDetector::set_log_file(const std::string& path) {
     std::lock_guard<std::mutex> lk(mu_);
     log_path_ = path;
+}
+
+void DpiDetector::set_block_ttl(std::chrono::milliseconds ttl) {
+    std::lock_guard<std::mutex> lk(mu_);
+    block_ttl_ = ttl.count() < 0 ? std::chrono::milliseconds(0) : ttl;
+}
+
+bool DpiDetector::expire_locked(HostState& st,
+                                std::chrono::steady_clock::time_point now) const {
+    if (!st.blocked || block_ttl_.count() <= 0) return false;
+    if (now - st.blocked_at < block_ttl_) return false;
+    st.blocked = false;
+    st.consecutive_timeouts = 0;
+    return true;
 }
 
 const char* DpiDetector::kind_to_string(EventKind k) {
@@ -60,6 +75,7 @@ void DpiDetector::emit(Event&& e) {
         e.ts_unix = now_unix();
         kind_counts_[static_cast<int>(e.kind)]++;
         total_++;
+        hosts_[e.host].events++;
         if (ring_.size() >= capacity_) ring_.pop_front();
         ring_.push_back(e);
         if (!log_path_.empty()) log_line = event_to_json(e);
@@ -82,7 +98,9 @@ void DpiDetector::on_connect_reset(const std::string& host_in) {
     if (host.empty()) return;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        hosts_[host].blocked = true;
+        HostState& st = hosts_[host];
+        st.blocked = true;
+        st.blocked_at = std::chrono::steady_clock::now();
     }
     Event ev{EventKind::TCP_RESET_PRE, host, "connection reset by peer during connect", 0};
     emit(std::move(ev));
@@ -93,7 +111,9 @@ void DpiDetector::on_reset_after_hello(const std::string& host_in) {
     if (host.empty()) return;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        hosts_[host].blocked = true;
+        HostState& st = hosts_[host];
+        st.blocked = true;
+        st.blocked_at = std::chrono::steady_clock::now();
     }
     Event ev{EventKind::RST_INJECTION, host,
              "RST received after TLS ClientHello before any application data", 0};
@@ -111,6 +131,7 @@ void DpiDetector::on_timeout(const std::string& host_in) {
         count = ++st.consecutive_timeouts;
         if (count >= timeout_threshold_ && !st.blocked) {
             st.blocked = true;
+            st.blocked_at = std::chrono::steady_clock::now();
             fire = true;
         }
     }
@@ -131,6 +152,7 @@ void DpiDetector::on_success(const std::string& host_in) {
         st.consecutive_timeouts = 0;
         if (st.blocked) {
             st.blocked = false;
+            st.blocked_at = {};
             cleared = true;
         }
     }
@@ -163,9 +185,39 @@ size_t DpiDetector::events_of_kind(EventKind k) const {
 std::vector<std::string> DpiDetector::blocked_hosts() const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<std::string> out;
-    for (const auto& kv : hosts_)
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& kv : hosts_) {
+        expire_locked(kv.second, now);
         if (kv.second.blocked) out.push_back(kv.first);
+    }
     return out;
+}
+
+std::vector<DpiDetector::HostReport> DpiDetector::host_reports() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<HostReport> out;
+    out.reserve(hosts_.size());
+    const auto now = std::chrono::steady_clock::now();
+    for (auto& kv : hosts_) {
+        expire_locked(kv.second, now);
+        HostReport r;
+        r.host = kv.first;
+        r.blocked = kv.second.blocked;
+        r.consecutive_timeouts = kv.second.consecutive_timeouts;
+        r.events = kv.second.events;
+        out.push_back(std::move(r));
+    }
+    std::sort(out.begin(), out.end(),
+              [](const HostReport& a, const HostReport& b) { return a.host < b.host; });
+    return out;
+}
+
+void DpiDetector::reset_all() {
+    std::lock_guard<std::mutex> lk(mu_);
+    ring_.clear();
+    hosts_.clear();
+    kind_counts_.clear();
+    total_ = 0;
 }
 
 } // namespace ncp

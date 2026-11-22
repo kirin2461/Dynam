@@ -235,6 +235,7 @@ TEST(BlockcheckNetwork, AcceptsFragmentedSocks5AndTlsHeaders) {
     ::close(listener);
     EXPECT_TRUE(server_ok.load());
     EXPECT_TRUE(result.ok);
+    EXPECT_TRUE(result.tcp_connected);
     EXPECT_EQ(result.fail_reason, "");
 }
 #endif

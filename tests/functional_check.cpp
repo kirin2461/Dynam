@@ -85,7 +85,15 @@ static void test_crypto() {
 
 static void test_e2e() {
     std::cout << "\n== E2E (X25519 + KEM + keys) ==\n";
-    E2ESession alice, bob;
+    // The handshake is identity-signed in production; wire the responder
+    // identity so this check exercises the real path. E2ESession is
+    // deliberately non-copyable, so the responder is constructed with its
+    // config instead of default-constructed and then assigned.
+    E2EConfig bob_cfg;
+    bob_cfg.server_identity = std::make_shared<ServerIdentity>();
+    CHECK("e2e identity keygen", bob_cfg.server_identity->generate());
+
+    E2ESession alice, bob(bob_cfg);
 
     auto alice_keys = alice.generate_key_pair();
     auto bob_keys = bob.generate_key_pair();

@@ -7,6 +7,7 @@
 #include <gtest/gtest.h>
 #include "ncp_reference_profile_catalog.hpp"
 #include "ncp_mimicry_session.hpp"
+#include "test_identity.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1046,6 +1047,7 @@ struct RefBuiltinPair {
     void init(bool cli_v2, bool srv_v2) {
         NcpMimicrySession::Config base;
         base.e2e_config.enable_padding = false;
+        base.e2e_config.server_identity = test_server_identity();
         base.catalog = &catalog;
         base.stable_profile = profile_ref_from_descriptor(
             *catalog.find(kReferenceQuicProfileId, 1));

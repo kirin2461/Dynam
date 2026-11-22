@@ -41,6 +41,28 @@ struct TimeCorrelationBreakerConfig {
     double min_jitter_ms   = 10.0;   ///< Lower bound on jitter injected
     size_t sample_window   = 50;     ///< Sliding window for CV calculation
     bool   auto_adjust     = true;   ///< Increase jitter when CV < min_cv
+    //
+    // NOTE: the defaults above are sized for *session* granularity -- one
+    // jitter per connection or request, where tens to hundreds of milliseconds
+    // are invisible.  Wiring this into a per-packet path needs
+    // inline_packet_path() instead; see its documentation.
+
+    /// Configuration for the inline packet path (one delay per TCP segment).
+    ///
+    /// The packet path runs on the DPI capture thread, so the session-sized
+    /// defaults (10-500 ms, auto-scaled up to 5x and further at HIGH threat)
+    /// would add seconds to a single handshake and stall every flow queued
+    /// behind the packet.  This variant bounds a segment to a few milliseconds
+    /// -- still enough decorrelation to break sub-millisecond timing
+    /// fingerprints -- and disables CV auto-adjust, which has no session-level
+    /// signal to work with when it only sees individual packets.
+    static TimeCorrelationBreakerConfig inline_packet_path() {
+        TimeCorrelationBreakerConfig cfg;
+        cfg.min_jitter_ms = 0.5;
+        cfg.max_jitter_ms = 4.0;
+        cfg.auto_adjust   = false;
+        return cfg;
+    }
 };
 
 // ===== Statistics =====

@@ -300,6 +300,11 @@ BlockcheckProbe BlockChecker::probe_via_socks5(uint16_t proxy_port,
     }
     if (rrep[0] != 0x05) { p.fail_reason = "proxy"; return p; }
     if (rrep[1] != 0x00) { p.fail_reason = "connect"; return p; }
+    // REP=0x00 means the proxy opened the TCP connection to the target, so
+    // from here on a failed TLS handshake is a TLS-layer failure, not a
+    // connect failure. The field is operator-visible (JSON), so leaving it
+    // false on this path would misreport every proxied probe.
+    p.tcp_connected = true;
     // Consume the complete BOUND.ADDR/BOUND.PORT according to ATYP so no
     // SOCKS5 framing bytes can be mistaken for the subsequent TLS record.
     size_t tail_len = 0;
@@ -350,6 +355,7 @@ BlockcheckProbe BlockChecker::probe_direct(const std::string& domain, int timeou
     const auto t0 = std::chrono::steady_clock::now();
     bc_socket_t s = bc_connect(domain.c_str(), 443, timeout_ms, &p.fail_reason);
     if (s == BC_INVALID_SOCK) return p;
+    p.tcp_connected = true;
     struct G { bc_socket_t s; ~G() { BC_CLOSE(s); } } g{s};
     auto ch = build_client_hello(domain);
     if (!bc_send_all(s, ch.data(), ch.size())) { p.fail_reason = "rst"; return p; }

@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 
 #include "ncp_connection_director.hpp"
+#include "test_identity.hpp"
 
 #include <atomic>
 #include <deque>
@@ -115,6 +116,7 @@ NcpMimicrySession::Config make_session_template(
     NcpMimicrySession::Config c;
     c.role = role;
     c.e2e_config.enable_padding = false;  // deterministic wire sizes
+    c.e2e_config.server_identity = test_server_identity();
     c.stable_profile = profile_ref_from_descriptor(*desc);
     c.stable_layout = profile_layout_from_descriptor(*desc);
     c.stable_mimic = TrafficMimicry::MimicProfile::GENERIC_UDP;

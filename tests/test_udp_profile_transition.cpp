@@ -268,6 +268,14 @@ struct Endpoint {
     E2ESession e2e{[] {
         E2EConfig c;
         c.enable_padding = false;  // deterministic wire sizes
+        // Production handshake is identity-signed. One process-wide static
+        // identity so both endpoints agree and wire sizes stay stable.
+        static std::shared_ptr<ServerIdentity> id = [] {
+            auto p = std::make_shared<ServerIdentity>();
+            p->generate();
+            return p;
+        }();
+        c.server_identity = id;
         return c;
     }()};
     KeyPair keys;

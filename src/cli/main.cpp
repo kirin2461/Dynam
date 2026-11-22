@@ -42,6 +42,7 @@
 #include "ncp_autopilot.hpp"
 #include "ncp_preset_autopilot.hpp"
 #include "ncp_spa.hpp"
+#include "ncp_server_identity.hpp"
 #include "ncp_reality.hpp"
 #include "ncp_stegodns.hpp"
 #include "ncp_porthop.hpp"
@@ -896,10 +897,15 @@ void handle_sysproxy(const std::vector<std::string>& args) {
 static bool ncp_pid_alive(long pid) {
     if (pid <= 0) return false;
 #ifdef _WIN32
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+    // OpenProcess alone is not enough: a terminated process object remains
+    // openable while any handle to it exists (the parent shell's Process
+    // object, for example). A signaled object means "already exited".
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
                            static_cast<DWORD>(pid));
-    if (h) { CloseHandle(h); return true; }
-    return false;
+    if (!h) return false;
+    const DWORD wr = WaitForSingleObject(h, 0);
+    CloseHandle(h);
+    return wr == WAIT_TIMEOUT;
 #else
     return ::kill(static_cast<pid_t>(pid), 0) == 0;
 #endif
@@ -920,6 +926,33 @@ static void ncp_write_state(const std::string& modules_csv) {
 
 static void ncp_clear_state() {
     std::remove(ncp_state_file().c_str());
+}
+
+// `ncp stop` cannot rely on CTRL_BREAK alone (GenerateConsoleCtrlEvent works
+// only inside a process group, and broadcasting to a shared console hits
+// unrelated processes), so the state file doubles as a control channel: a
+// "stop":1 field is written by the stopping process and polled once a second
+// by the run loop.
+static bool ncp_request_stop(long pid, long started, const std::string& modules) {
+#ifdef _WIN32
+    CreateDirectoryA(ncp_state_dir().c_str(), nullptr);
+#else
+    ::mkdir(ncp_state_dir().c_str(), 0700);
+#endif
+    std::ofstream f(ncp_state_file(), std::ios::trunc);
+    if (!f.is_open()) return false;
+    f << "{\"pid\":" << pid
+      << ",\"started\":" << started
+      << ",\"modules\":\"" << modules << "\",\"stop\":1}\n";
+    return f.good();
+}
+
+static bool ncp_stop_requested() {
+    std::ifstream f(ncp_state_file());
+    if (!f.is_open()) return false;
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    return content.find("\"stop\":1") != std::string::npos;
 }
 
 struct NcpRunState {
@@ -1158,6 +1191,7 @@ void handle_autopilot(const std::vector<std::string>& args);
 void handle_sysproxy(const std::vector<std::string>& args);
 void handle_import_zapret(const std::vector<std::string>& args);
 void handle_spa(const std::vector<std::string>& args);
+void handle_identity(const std::vector<std::string>& args);
 void handle_reality(const std::vector<std::string>& args);
 void handle_stegodns(const std::vector<std::string>& args);
 void handle_porthop(const std::vector<std::string>& args);
@@ -1185,6 +1219,7 @@ static void autopilot_print_usage();
 static void sysproxy_print_usage();
 static void import_zapret_print_usage();
 static void spa_print_usage();
+static void identity_print_usage();
 static void reality_print_usage();
 static void stegodns_print_usage();
 static void porthop_print_usage();
@@ -1228,6 +1263,7 @@ int main(int argc, char* argv[]) {
     parser.add_command("import-zapret", "Import zapret CLI strategy into NCP profile", handle_import_zapret, {"--args <zapret-args> | --file f", "[--out profile.json]"}, import_zapret_print_usage);
     parser.add_command("spa", "Ed25519 Single Packet Authorization (keygen/knock/serve)", handle_spa, {"<keygen|knock|serve>", "[--out prefix]", "[--key f.key]", "[--allow-port N]", "[--port 54117]", "[--proto tcp]", "[--ttl S]", "[--authorized-keys f]", "[--set-name ncp_spa_allow]", "[--default-ttl 300]", "[--max-ttl 86400]", "[--dry-run]"}, spa_print_usage);
     parser.add_command("reality", "XTLS-Reality-style fallback server (Enterprise)", handle_reality, {"serve", "--listen <port>", "--fallback <host:port>", "--internal <host:port>", "--key-file <f>", "[--dry-run]"}, reality_print_usage);
+    parser.add_command("identity", "Long-term server identity (keygen/show)", handle_identity, {"<keygen|show>", "[--out <path>]", "[--key <path>]"}, identity_print_usage);
     parser.add_command("stegodns", "Zero-Knowledge steganographic DNS records (Enterprise)", handle_stegodns, {"<encode|decode>", "[options]"}, stegodns_print_usage);
     parser.add_command("porthop", "UDP port-hopping transport demo (Enterprise)", handle_porthop, {"<serve|client>", "[options]"}, porthop_print_usage);
     parser.add_command("mimicry-catalog", "Validate/inspect external mimicry profile catalog files", handle_mimicry_catalog, {"<validate|list> <path>"}, mimicry_catalog_print_usage);
@@ -1276,6 +1312,8 @@ static void write_module_stats_json(const std::string& path) {
           << ",\"packets_fragmented\":" << v.packets_fragmented.load()
           << ",\"fake_packets_sent\":" << v.fake_packets_sent.load()
           << ",\"packets_dropped\":" << v.packets_dropped.load()
+          << ",\"strategy_fallbacks\":" << v.strategy_fallbacks.load()
+          << ",\"strategy_locked\":" << v.strategy_locked.load()
           << ",\"send_errors\":" << v.send_errors.load()
           << ",\"connections_handled\":" << v.connections_handled.load()
           << ",\"interception_active\":" << (g_app.dpi_bypass->interception_active() ? 1 : 0)
@@ -1406,6 +1444,10 @@ static void write_module_stats_json(const std::string& path) {
           << ",\"region_switches\":" << v.region_switches.load()
           << ",\"health_checks\":" << v.health_checks.load()
           << ",\"dead_nodes_detected\":" << v.dead_nodes_detected.load() << "}";
+    }
+    // Per-destination strategy synthesis / preset fallback
+    if (g_app.dpi_bypass) {
+        j << ",\"strategy\":" << g_app.dpi_bypass->strategy_report_json();
     }
     // Preset AutoPilot section (present only in --auto / --preset auto mode)
     if (g_app.preset_autopilot) {
@@ -1601,6 +1643,8 @@ static void run_print_usage() {
                   << "  --auto-escalate       Auto mode: allow escalation beyond presets (L2\n"
                   << "                        augmentations, then L3 Geneva GA evolution) [default]\n"
                   << "  --no-auto-escalate    Auto mode: presets only (classic v1 autopilot)\n"
+                  << "  --synth               Synthesize desync strategies per destination on\n"
+                  << "                        live traffic until one gets an answer\n"
                   << "  --hostlist FILE       Selective desync: only hosts from FILE\n"
                   << "  --hostlist-exclude F  Selective desync: exclude hosts from FILE\n"
                   << "  --ipset FILE          Selective desync: only IPs/networks from FILE\n"
@@ -1882,6 +1926,13 @@ void handle_run(const std::vector<std::string>& args) {
             }
         }
         std::cout << "[*] DPI preset: " << DPI::preset_to_string(chosen_preset) << "\n";
+        // --synth: build strategies per destination from the live traffic
+        // instead of trusting the preset's desync knobs.
+        const bool synth_mode = has_flag(args, "--synth");
+        g_app.dpi_bypass->set_strategy_synthesis(synth_mode);
+        if (synth_mode) {
+            std::cout << "[*] Strategy synthesis: ON (per-destination, tuned on live traffic)\n";
+        }
         
         if (!g_app.dpi_bypass->initialize(dpi_cfg) || !g_app.dpi_bypass->start()) {
             std::cerr << "[!] Warning: DPI bypass failed to start (continuing without it)\n";
@@ -2066,7 +2117,8 @@ void handle_run(const std::vector<std::string>& args) {
         // 10. Time Correlation Breaker
         if (!has_flag(args, "--no-time-break")) {
             try {
-                TimeCorrelationBreakerConfig tcb_cfg;
+                TimeCorrelationBreakerConfig tcb_cfg =
+                    TimeCorrelationBreakerConfig::inline_packet_path();
                 g_app.time_breaker = std::make_unique<DPI::TimeCorrelationBreaker>(tcb_cfg);
                 std::cout << "[+] Time Correlation Breaker active\n";
             } catch (const std::exception& ex) {
@@ -2470,6 +2522,15 @@ void handle_run(const std::vector<std::string>& args) {
         while (g_running) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
 
+            // Cross-process shutdown (`ncp stop` from another console).
+            // Checked every tick: the console-signal route is best-effort.
+            if (ncp_stop_requested()) {
+                std::cout << "[*] Stop requested by ncp stop — shutting down\n"
+                          << std::flush;
+                g_running = 0;
+                break;
+            }
+
             // Hot-apply the latest Geneva GA winner to the DPI bypass.
             // Runs on the main thread: dpi_bypass is owned here, so there is
             // no race with module teardown, and update_config() is safe to
@@ -2621,6 +2682,8 @@ void handle_run(const std::vector<std::string>& args) {
                       << " fragmented=" << ds.packets_fragmented.load()
                       << " fakes=" << ds.fake_packets_sent.load()
                       << " dropped=" << ds.packets_dropped.load()
+                      << " fallbacks=" << ds.strategy_fallbacks.load()
+                      << " locked=" << ds.strategy_locked.load()
                       << " send_errors=" << ds.send_errors.load()
                       << " conns=" << ds.connections_handled.load() << "\n";
         }
@@ -2816,22 +2879,82 @@ void handle_stop(const std::vector<std::string>& args) {
             }
             std::cout << "[*] Sending shutdown signal to ncp run (pid "
                       << st.pid << ")...\n";
+            // The state-file flag is polled by the run loop every second.
+            const bool queued = ncp_request_stop(st.pid, st.started, st.modules);
 #ifdef _WIN32
-            // CTRL_BREAK works only within the same console group; fall back
-            // to TerminateProcess (graceful cleanup may be skipped).
-            if (!GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
-                                          static_cast<DWORD>(st.pid))) {
-                HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE,
-                                       static_cast<DWORD>(st.pid));
-                if (h) {
-                    std::cerr << "[!] Graceful signal unavailable; terminating process\n";
-                    TerminateProcess(h, 0);
-                    CloseHandle(h);
+            bool terminated = false;
+            HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                                   FALSE, static_cast<DWORD>(st.pid));
+            const DWORD open_err = h ? 0 : GetLastError();
+            if (!queued && h) {
+                // No graceful channel at all: fall back to a hard kill.
+                std::cerr << "[!] No graceful shutdown channel; terminating process\n";
+                TerminateProcess(h, 1);
+                terminated = true;
+            }
+            DWORD exit_code = STILL_ACTIVE;
+            bool have_code = false;
+            if (h) {
+                // The run loop polls the request once a second; full module
+                // teardown (iptables/spoofer restore) takes up to ~25 s.
+                const DWORD wr = WaitForSingleObject(h, 90000);
+                if (wr == WAIT_TIMEOUT && !terminated) {
+                    std::cerr << "[!] No response after 90 s; terminating process\n";
+                    TerminateProcess(h, 1);
+                    terminated = true;
+                    WaitForSingleObject(h, 5000);
+                }
+                have_code = GetExitCodeProcess(h, &exit_code) != 0;
+                CloseHandle(h);
+                // The process object stays openable while any other handle to
+                // it exists (the parent shell's Process object, for one), so
+                // ncp_pid_alive() would lie here. The exit code is authoritative.
+                if (have_code && exit_code == STILL_ACTIVE) {
+                    std::cerr << "[!] Process still running after 90 s\n";
+                    return;
+                }
+            } else {
+                if (open_err == ERROR_ACCESS_DENIED) {
+                    // The target runs at a higher integrity level (elevated
+                    // `ncp run`): we cannot even observe it, let alone wait
+                    // for it. Never report success and never drop the state
+                    // file it will keep polling.
+                    std::cerr << "[!] Shutdown request queued, but access denied to pid "
+                              << st.pid << " (elevated run) - cannot verify.\n"
+                              << "    Rerun `ncp stop` elevated.\n";
+                    g_exit_code = 1;
+                    return;
+                }
+                // OpenProcess failed: fall back to liveness polling.
+                for (int i = 0; i < 900 && ncp_pid_alive(st.pid); ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                if (ncp_pid_alive(st.pid)) {
+                    std::cerr << "[!] Process still running after 90 s\n";
+                    return;
                 }
             }
+            ncp_clear_state();
+            // Only a clean exit means the shutdown path actually restored
+            // the hostname/DNS; a forced kill skips it and must not be
+            // reported as "settings restored".
+            if (terminated) {
+                std::cerr << "[!] ncp run was terminated without cleanup (exit "
+                          << exit_code << ")\n"
+                          << "    Hostname/DNS/proxy settings may be left as-is; "
+                             "check them manually.\n";
+                g_exit_code = 1;
+            } else if (have_code && exit_code != 0) {
+                std::cerr << "[!] ncp run exited with code " << exit_code
+                          << "; settings may not be fully restored\n";
+                g_exit_code = 1;
+            } else if (!have_code) {
+                std::cout << "[+] ncp run stopped (exit code unavailable)\n";
+            } else {
+                std::cout << "[+] ncp run stopped, settings restored\n";
+            }
+            return;
 #else
-            ::kill(static_cast<pid_t>(st.pid), SIGINT);
-#endif
+            if (!queued) ::kill(static_cast<pid_t>(st.pid), SIGINT);
             // Wait for the process to actually exit, up to 90 s.
             // (The state file is removed at the START of the run cleanup,
             // long before the slow iptables/spoofer restore completes, so
@@ -2847,6 +2970,7 @@ void handle_stop(const std::vector<std::string>& args) {
             ncp_clear_state();
             std::cout << "[+] ncp run stopped, settings restored\n";
             return;
+#endif
         }
     }
 
@@ -4626,6 +4750,11 @@ void handle_spa(const std::vector<std::string>& args) {
                   << "  Companion firewall rule (per protected port):\n"
                   << "    " << ncp::IpSetAccessController::iptables_rule_hint(6, 22, set_name) << "\n";
 
+        if (dry_run) {
+            std::cout << "[*] Dry run — configuration OK, not listening.\n";
+            return;
+        }
+
         ncp::SpaDaemon daemon(server, static_cast<uint16_t>(port), bind_addr);
         if (!daemon.start()) {
             std::cerr << "[!] Failed to start SPA daemon on UDP " << bind_addr << ":" << port << "\n";
@@ -4645,6 +4774,72 @@ void handle_spa(const std::vector<std::string>& args) {
     std::cerr << "[!] Unknown spa action: " << action << "\n";
     g_exit_code = 1;
     spa_print_usage();
+}
+
+// ============================================================================
+// ncp identity — long-term server identity (keygen/show)
+// ============================================================================
+
+static void identity_print_usage() {
+    std::cout << "Usage: ncp identity <action> [options]\n"
+              << "  keygen [--out <path>]   Create the server identity (default: "
+              << ncp::default_identity_path() << "); prints the fingerprint\n"
+              << "  show [--key <path>]     Print the fingerprint and Ed25519 public key\n";
+}
+
+static std::string identity_hex(const std::vector<uint8_t>& bytes) {
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.reserve(bytes.size() * 2);
+    for (uint8_t b : bytes) {
+        out.push_back(kHex[(b >> 4) & 0x0F]);
+        out.push_back(kHex[b & 0x0F]);
+    }
+    return out;
+}
+
+void handle_identity(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        identity_print_usage();
+        return;
+    }
+    const std::string action = args[0];
+
+    if (action == "keygen") {
+        const std::string path = get_option(args, "--out", ncp::default_identity_path());
+        std::string err;
+        // Idempotent: re-running keygen must not rotate the key, because
+        // every client that pinned this server would then see a key change.
+        auto identity = ncp::load_or_create_identity(path, &err);
+        if (!identity) {
+            std::cerr << "[!] " << err << "\n";
+            g_exit_code = 1;
+            return;
+        }
+        std::cout << "[+] Server identity: " << path << " (keep it secret)\n"
+                  << "    fingerprint: " << identity->fingerprint_text() << "\n"
+                  << "    Compare this out of band with what clients pin on first connect.\n";
+        return;
+    }
+
+    if (action == "show") {
+        const std::string path = get_option(args, "--key", ncp::default_identity_path());
+        ncp::ServerIdentity identity;
+        if (!identity.load_keyfile(path)) {
+            std::cerr << "[!] Cannot load server identity from " << path
+                      << " (run `ncp identity keygen` on the server first)\n";
+            g_exit_code = 1;
+            return;
+        }
+        std::cout << "identity:    " << path << "\n"
+                  << "fingerprint: " << identity.fingerprint_text() << "\n"
+                  << "public_key:  " << identity_hex(identity.public_key()) << "\n";
+        return;
+    }
+
+    std::cerr << "[!] Unknown identity action: " << action << "\n";
+    g_exit_code = 1;
+    identity_print_usage();
 }
 
 // ============================================================================
