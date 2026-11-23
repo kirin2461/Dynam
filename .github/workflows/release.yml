@@ -265,10 +265,13 @@ jobs:
             2. `ncp-gui.exe` — Web GUI (панель на http://localhost:8085), либо `ncp-qt.exe` — десктопный Qt-интерфейс.
             3. CLI: `ncp.exe run` / `ncp.exe dpi` требуют прав администратора (WinDivert driver mode).
 
-            ### Изменения с v1.7.2
-            - **Preset AutoPilot («запустил и забыл»)**: режим `--preset auto` / «Auto-detect» в GUI — при подключении NCP сам прогоняет TLS/443-пробы по пресетам операторов, выбирает лучший по успеху и RTT, горячо переключает стратегию при деградации (без рестарта движка). Статус «Авто» на дашборде веб-GUI. Флаги тюнинга: `--auto-interval`, `--auto-timeout`, `--auto-candidates`, `--auto-hosts`, `--auto-cooldown`.
-            - Исправлен запуск движка из веб-GUI (trial-secret mismatch)
-            - `/api/version` и бейдж версии в шапке показывают реальную версию продукта
+            ### Изменения с v1.7.6
+            - **Синтез DPI-стратегий на лету (`--synth`)**: стратегия под каждый адрес назначения собирается из генов split/order/fake, лестница из 12 кандидатов упорядочивается по сглаженным по Лапласу win-rate; раздел `strategy` в JSON статистики.
+            - **Адаптивный клиент**: `blockcheck` с `--parallel` / `--validate` / `--apply` и `--full-sweep`; параллельное обучение AutoPilot (`learn-batch`, параллельный `learn-preset`) с отказом от дублирующего обучения того же хоста.
+            - **Защищённые транспорты**: `RealQuicEndpoint` в `NcpConnectionDirector`, native Dynam TURN (клиент и сервер), SSH AutoDeploy — с автоматическими и изолированными lab/interop-проверками.
+            - **Идентичность сервера и пиннинг**: Ed25519-подпись транскрипта рукопожатия, TOFU-хранилище `PinnedServerStore`, команды `ncp identity keygen|show`.
+            - **Исправлено**: `blockcheck` не работал вообще (неверные длины расширений ClientHello); коды возврата CLI (25 путей, включая 20 сайтов usage); валидация портов (`sysproxy`, `proxy`); счётчики интерфейсов Windows (`GetIfTable2`); XSS в веб-панели (W-01..W-08); гонка данных `TurnServerStats`; `crypto random <n>`; вывод porthop; скаляры P-256; выгрузка драйвера WinDivert при выходе.
+            - **Тесты**: 1464 запущено, 1456 пройдено, 8 пропущено (I2P без SAM-моста), 0 упавших.
           generate_release_notes: true
           files: |
             ncp-linux-x64/ncp-linux-x64.tar.gz

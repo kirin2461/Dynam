@@ -6,24 +6,70 @@
 
 ## Current Status
 
-**Version**: 1.7.6
-**CMake Version**: 1.7.6 (synced)
+**Version**: 1.8.0
+**CMake Version**: 1.8.0 (synced)
 
-### Latest update — adaptive client and protected transports
+### What's new in 1.8.0 — strategy synthesis, adaptive client, protected transports
 
-- **Automatic fragmentation selection without manual presets.** `ncp blockcheck`
-  checks domains in parallel (`--parallel`), repeats promising candidates
-  (`--validate`), rejects unstable winners, and writes a profile only after
-  confirmation (`--apply`). Use `--full-sweep` to check every strategy.
-- **Parallel AutoPilot learning.** Independent hosts are learned concurrently;
-  duplicate in-flight learning of the same host is rejected. Added
+- **On-the-fly DPI strategy synthesis (`--synth`).** New `ncp_strategy_synth`
+  builds a per-destination desync strategy from three genes (split / order /
+  fake) and applies it to the effective per-packet config. A 12-candidate
+  ladder is ordered by Laplace-smoothed global win rates: success means the
+  client payload passed the end of the ClientHello record, failure means the
+  ClientHello was retransmitted at the same seq or the flow went silent (>3 s)
+  when a new connection to the same destination started. Exhausting the ladder
+  starts a new round. Without `--synth` the strategy is
+  `{preset, sni/in-order/no-fake}`; the stats JSON gains a `strategy` section.
+- **Adaptive client.** `ncp blockcheck` checks domains in parallel
+  (`--parallel`), re-validates the leaders (`--validate`), rejects unstable
+  winners, and writes a profile only after confirmation (`--apply`);
+  `--full-sweep` checks every strategy. AutoPilot learns independent hosts
+  concurrently (4 tasks by default, up to 16) with atomic DB persistence and
+  rejects duplicate in-flight learning of the same host; added
   `ncp autopilot learn-batch` and parallel `learn-preset`.
-- **Protected transport integration.** Protected Dynam sessions are connected
-  to `NcpConnectionDirector` through `RealQuicEndpoint`; native Dynam TURN and
-  SSH AutoDeploy are included with automated and isolated lab/interop tests.
+- **Protected transports.** Protected Dynam sessions are wired into
+  `NcpConnectionDirector` through `RealQuicEndpoint`, with native Dynam TURN
+  (client and server) and SSH AutoDeploy, covered by automated and isolated
+  lab/interop tests.
+- **Server identity and pinning.** `ServerIdentity` signs the handshake
+  transcript bound to the responder's ephemeral key; `PinnedServerStore` is an
+  SSH-style TOFU store (`E2EConfig::pin_store` / `pin_host`), so a changed
+  server key aborts the handshake. New `ncp identity keygen|show`.
+  `ServerRoster` classifies LAN/loopback peers, including IPv4-mapped IPv6.
+- **Traffic shaping.** 1-D Wasserstein-1 distance and exact quantile shaping
+  (`ncp_optimal_transport`), with W1 scoring in the AdversaryTester. Inline
+  delay is now capped (2 ms) and clamped at every hook site (50 ms), which
+  fixes multi-second TLS handshakes in driver mode.
+- **UDP DPI evidence gate.** Whole-capture nDPI/TShark verdicts,
+  DPI-confidence checks, negative controls, and session-disjoint capture
+  validation for mimicry/porthop experiments.
 - **Verification boundary.** These results do not claim a live external bypass
   of specific services or attribution of network anomalies to a particular
   DPI/TSPU device.
+
+#### Fixed in 1.8.0
+
+- **`blockcheck` could never work.** `build_client_hello()` declared three
+  extension lengths that did not match the bytes it wrote, so every real TLS
+  server answered with a fatal `decode_error` and all 14 strategies failed on
+  every domain. Corrected (verified against `example.com:443`: fatal alert 50 →
+  `ServerHello`); `geneva_fitness` shared the same builder.
+- **CLI exit codes.** 25 failure paths — including all 20 `*_print_usage()`
+  error sites — printed an error and exited 0; they now exit non-zero
+  (`--help` and empty-args stay at 0).
+- **Port validation.** `sysproxy --port 0` wrote `127.0.0.1:0` into WinINET and
+  broke proxy-aware applications; `proxy --port -1` bound 65535 and
+  `proxy --port 0` an unpredictable ephemeral port. Range-checked before use at
+  every site.
+- **Windows interface counters.** `get_stats()` returned zeros because the
+  `/proc/net/dev` fallback was compiled out on Windows; it now uses
+  `GetIfTable2`.
+- **Web panel security.** Panel XSS and related defects (W-01..W-08) fixed.
+- **Data race.** `TurnServerStats` counters are atomic (TSAN-clean).
+- **Smaller fixes.** `crypto random <n>` honours the documented byte count;
+  `porthop` echoes the real peer; P-256 private scalars are padded to a fixed
+  32 bytes; the WinDivert driver is unloaded when `ncp` exits; CI reports
+  failing tests as annotations on Linux, Windows, and macOS.
 
 ### What's new in 1.7.0 — AWG 3.1 hardening + NUЦ scoped trust + auto-installer
 
@@ -65,7 +111,7 @@
 - **v1.5.3 — in-app help system.** Plain-language guides for every feature («Справка» section, contextual «?» buttons), DNS DHCP auto-recovery, blockcheck timeout raised to 600 s.
 
 - ✅ **Build**: Linux (GCC 9+) and Windows (mingw-w64 cross-build verified — statically linked `ncp.exe`; MSVC also supported) via CMake + Ninja.
-- ✅ **Tests**: 786 tests — 778 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
+- ✅ **Tests**: 1464 tests — 1456 passed, 8 skipped (I2P integration tests require a live SAM bridge), 0 failed.
 - ✅ **MASTER_ORCHESTRATOR 100% COMPLETE**: Full 7-stage pipeline with anti-ML, steganography, and behavioral cloaking implemented.
 - ✅ **Web GUI**: Flask-based control panel in `web/` (license activation, module toggles, live logs, start/stop, live per-module engine stats).
 - ✅ **Licensing**: automatic 7-day trial on first launch (all 19 modules), Ed25519-signed keys issued by the standalone `ncp-keygen` tool.
@@ -194,7 +240,7 @@ build from source instead. Details and environment variables: [`npm/README.md`](
 
 ```bash
 cd build
-./bin/ncp_tests            # full suite: 786 tests
+./bin/ncp_tests            # full suite: 1464 tests
 ```
 
 The suite is host-safe: paranoid-mode tests never touch the firewall, and no test requires root network changes. I2P tests skip automatically when no SAM bridge is reachable. The DPI Lab adds 22 reassembler unit tests (`scripts/lab/test_reassembler.py`).
@@ -645,5 +691,5 @@ quit) and can register itself in autostart (HKCU `Run` on Windows,
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
 ---
-**Last Updated**: October 31, 2026
-**Version**: 1.7.6
+**Last Updated**: November 23, 2026
+**Version**: 1.8.0
