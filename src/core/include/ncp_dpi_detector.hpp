@@ -18,6 +18,7 @@
 #include <unordered_map>
 #include <mutex>
 #include <cstdint>
+#include <chrono>
 #include <functional>
 
 namespace ncp {
@@ -61,6 +62,23 @@ public:
     // hosts currently considered blocked (rst or timeout)
     std::vector<std::string> blocked_hosts() const;
 
+    // ── Per-host report (Task 3) ──
+    struct HostReport {
+        std::string host;
+        bool blocked = false;
+        int consecutive_timeouts = 0;
+        uint64_t events = 0;
+    };
+    /// Snapshot of every host seen so far, sorted by host name.
+    std::vector<HostReport> host_reports() const;
+
+    /// Expire a block automatically after `ttl` with no re-confirmation.
+    /// Zero (the default) keeps the previous "until success" behaviour.
+    void set_block_ttl(std::chrono::milliseconds ttl);
+
+    /// Drop all hosts, counters and buffered events (not the log file).
+    void reset_all();
+
     static const char* kind_to_string(EventKind k);
     static std::string event_to_json(const Event& e);
 
@@ -70,13 +88,20 @@ private:
     struct HostState {
         int consecutive_timeouts = 0;
         bool blocked = false;
+        uint64_t events = 0;
+        std::chrono::steady_clock::time_point blocked_at{};
     };
+
+    // Clear `st` if its block has outlived block_ttl_. Caller holds mu_.
+    bool expire_locked(HostState& st, std::chrono::steady_clock::time_point now) const;
 
     mutable std::mutex mu_;
     std::deque<Event> ring_;
     size_t capacity_;
     int timeout_threshold_;
-    std::unordered_map<std::string, HostState> hosts_;
+    std::chrono::milliseconds block_ttl_{0};
+    // Mutable: lazy block expiry updates HostState inside const queries.
+    mutable std::unordered_map<std::string, HostState> hosts_;
     std::unordered_map<int, size_t> kind_counts_;
     size_t total_ = 0;
     std::string log_path_;

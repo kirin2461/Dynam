@@ -29,6 +29,7 @@
 #include <thread>
 #include <memory>
 #include "ncp_csprng.hpp"
+#include "ncp_optimal_transport.hpp"
 
 namespace ncp {
 namespace DPI {
@@ -103,6 +104,13 @@ struct FlowShaperConfig {
 
     bool enable_flow_dummy = true;
     double dummy_ratio = 0.05;
+
+    /// Draw target sizes from a per-block permutation of the reference
+    /// multiset (QuantileShaper) instead of i.i.d. sampling of the histogram.
+    /// Each complete block then reproduces the reference size multiset
+    /// exactly, so the empirical size distribution matches it bit for bit
+    /// rather than only in expectation.
+    bool enable_quantile_shaping = true;
 
     static FlowShaperConfig web_browsing();
     static FlowShaperConfig video_stream();
@@ -223,6 +231,14 @@ public:
     // ===== Size Shaping =====
     std::vector<std::vector<uint8_t>> reshape_size(const std::vector<uint8_t>& packet);
     size_t select_target_size();
+
+    /// Packets per exact-shaping block, or 0 when quantile shaping is off.
+    /// One complete block emits the reference size multiset exactly.
+    size_t shaping_block_size() const;
+
+    /// Copy of the reference size multiset currently being replayed.
+    /// Empty when quantile shaping is off.
+    std::vector<size_t> shaping_reference() const;
 
     // ===== Timing =====
     std::chrono::microseconds next_delay();

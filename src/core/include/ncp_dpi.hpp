@@ -8,10 +8,12 @@
 #include <atomic>
 #include <functional>
 #include <cstdint>
+#include <chrono>
 #include <mutex>
 #include <shared_mutex>
 #include <sstream>
 #include <optional>
+#include <unordered_map>
 
 namespace ncp {
 namespace DPI {
@@ -519,6 +521,11 @@ struct DPIStats {
     std::atomic<uint64_t> send_errors{0};
     // QUIC force-TCP: outbound QUIC datagrams intentionally dropped
     std::atomic<uint64_t> packets_dropped{0};
+    // Strategy synthesis: a destination moved on to its next candidate
+    // strategy because the current one got no answer.
+    std::atomic<uint64_t> strategy_fallbacks{0};
+    // Strategy synthesis: a destination found a strategy that works.
+    std::atomic<uint64_t> strategy_locked{0};
 
         DPIStats() = default;
     DPIStats(const DPIStats& other)
@@ -530,7 +537,9 @@ struct DPIStats {
           bytes_received(other.bytes_received.load()),
           connections_handled(other.connections_handled.load()),
           send_errors(other.send_errors.load()),
-          packets_dropped(other.packets_dropped.load()) {}
+          packets_dropped(other.packets_dropped.load()),
+          strategy_fallbacks(other.strategy_fallbacks.load()),
+          strategy_locked(other.strategy_locked.load()) {}
     DPIStats& operator=(const DPIStats& other) {
         if (this != &other) {
             packets_total.store(other.packets_total.load());
@@ -542,6 +551,8 @@ struct DPIStats {
             connections_handled.store(other.connections_handled.load());
             send_errors.store(other.send_errors.load());
             packets_dropped.store(other.packets_dropped.load());
+            strategy_fallbacks.store(other.strategy_fallbacks.load());
+            strategy_locked.store(other.strategy_locked.load());
         }
         return *this;
     }
@@ -556,6 +567,8 @@ struct DPIStats {
         connections_handled.store(0);
         send_errors.store(0);
         packets_dropped.store(0);
+        strategy_fallbacks.store(0);
+        strategy_locked.store(0);
     }
 
     DPIStats snapshot() const noexcept {
@@ -587,9 +600,24 @@ struct ModuleHooks {
     std::function<void(const uint8_t* packet, uint32_t packet_len)> post_process;
 
     // Called to get delay in microseconds before sending a real segment.
-    // Return value <= 0 means no delay. Sanity cap is applied in the loop.
+    // Return value <= 0 means no delay. The value is clamped by the caller to
+    // kMaxInlineSendDelayUs -- see clamp_inline_send_delay_us().
     std::function<int64_t(const uint8_t* packet, uint32_t packet_len)> get_send_delay_us;
 };
+
+// Ceiling on the delay a module hook may insert on the capture thread, in
+// microseconds.  The hook runs inline between two WinDivert receives, so the
+// sleep blocks *every* flow that has a packet queued behind this one, not just
+// the connection being shaped.  Modules that want to shape at session
+// granularity must do it off the capture thread; whatever they return here gets
+// truncated to this budget.
+constexpr int64_t kMaxInlineSendDelayUs = 50000;
+
+/// Clamp a module-hook delay to [0, kMaxInlineSendDelayUs].
+inline int64_t clamp_inline_send_delay_us(int64_t delay_us) {
+    if (delay_us <= 0) return 0;
+    return delay_us > kMaxInlineSendDelayUs ? kMaxInlineSendDelayUs : delay_us;
+}
 
 class DPIBypass {
 public:
@@ -614,6 +642,18 @@ public:
 
     DPIStats get_stats() const;
     void reset_stats();
+
+    /// Strategy synthesis: when on, every destination is driven through a
+    /// ladder of generated desync strategies until one gets an answer, and
+    /// the preset's own desync knobs are ignored.  When off (default), the
+    /// preset is used and a destination that does not answer it falls back
+    /// to a single in-order split without fakes.  Thread-safe, takes effect
+    /// on the next ClientHello.
+    void set_strategy_synthesis(bool enabled);
+    bool strategy_synthesis() const;
+    /// JSON object describing the active synthesizer (candidates with their
+    /// win rates, destination counts).  Thread-safe.
+    std::string strategy_report_json() const;
 
     void set_log_callback(LogCallback callback);
     void set_config_change_callback(ConfigChangeCallback callback);

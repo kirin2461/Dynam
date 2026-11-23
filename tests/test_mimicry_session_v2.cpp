@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 
 #include "ncp_mimicry_session.hpp"
+#include "test_identity.hpp"
 
 #include <algorithm>
 #include <array>
@@ -180,6 +181,7 @@ struct V2Pair {
         const auto* desc = cat.baseline();
         NcpMimicrySession::Config base;
         base.e2e_config.enable_padding = false;  // deterministic wire sizes
+        base.e2e_config.server_identity = test_server_identity();
         base.stable_profile = profile_ref_from_descriptor(*desc);
         base.stable_layout = profile_layout_from_descriptor(*desc);
         base.stable_mimic = MimicProfile::GENERIC_UDP;

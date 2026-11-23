@@ -17,6 +17,7 @@
  */
 
 #include "../include/ncp_adversary_tester.hpp"
+#include "../include/ncp_optimal_transport.hpp"
 #include <algorithm>
 #include <numeric>
 #include <cmath>
@@ -252,6 +253,123 @@ double AdversaryTester::burst_anomaly_score(
 }
 
 // ══════════════════════════════════════════════════════════
+// SizeErrorLearner
+// ══════════════════════════════════════════════════════════
+
+SizeErrorLearner::SizeErrorLearner() : SizeErrorLearner(Params{}) {}
+
+SizeErrorLearner::SizeErrorLearner(const Params& params) : params_(params) {}
+
+void SizeErrorLearner::set_params(const Params& params) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    params_ = params;
+}
+
+SizeErrorLearner::Params SizeErrorLearner::get_params() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return params_;
+}
+
+double SizeErrorLearner::sigmoid(double z) {
+    if (z >= 0.0) return 1.0 / (1.0 + std::exp(-z));
+    const double e = std::exp(z);
+    return e / (1.0 + e);
+}
+
+std::array<double, 8> SizeErrorLearner::normalize(const SizeErrorFeatures& f) {
+    auto clamp01 = [](double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); };
+    std::array<double, 8> x{};
+    x[0] = clamp01(f.size_mean / 1500.0);   // scale to a typical MTU
+    x[1] = clamp01(f.size_cv / 3.0);
+    x[2] = clamp01(f.frac_small);
+    x[3] = clamp01(f.frac_large);
+    x[4] = clamp01(f.error_rate);
+    x[5] = clamp01(f.timing_cov / 5.0);
+    x[6] = clamp01(f.burst_anomaly);
+    x[7] = clamp01(f.ks_distance);
+    return x;
+}
+
+SizeErrorFeatures SizeErrorLearner::from_snapshot(const FlowSnapshot& snap,
+                                                  double error_rate) {
+    SizeErrorFeatures f;
+    if (!snap.packet_sizes.empty()) {
+        double sum = 0.0;
+        size_t small = 0;
+        size_t large = 0;
+        for (size_t s : snap.packet_sizes) {
+            sum += static_cast<double>(s);
+            if (s <= 128) ++small;
+            if (s >= 1200) ++large;
+        }
+        const double n = static_cast<double>(snap.packet_sizes.size());
+        const double mean = sum / n;
+        double var = 0.0;
+        for (size_t s : snap.packet_sizes) {
+            const double d = static_cast<double>(s) - mean;
+            var += d * d;
+        }
+        var /= n;
+        f.size_mean = mean;
+        f.size_cv = (mean > 0.0) ? std::sqrt(var) / mean : 0.0;
+        f.frac_small = static_cast<double>(small) / n;
+        f.frac_large = static_cast<double>(large) / n;
+    }
+    f.error_rate = (error_rate < 0.0) ? 0.0 : (error_rate > 1.0 ? 1.0 : error_rate);
+    return f;
+}
+
+double SizeErrorLearner::predict(const SizeErrorFeatures& f) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (samples_ < params_.min_samples) {
+        // Transparent prior: errors and KS deviation raise detection risk.
+        const double ks = std::min(1.0, std::max(0.0, f.ks_distance));
+        double p = 0.15 + 0.45 * f.error_rate + 0.40 * ks;
+        return std::min(0.98, std::max(0.02, p));
+    }
+    const auto x = normalize(f);
+    double z = bias_;
+    for (size_t i = 0; i < x.size(); ++i) z += w_[i] * x[i];
+    return sigmoid(z);
+}
+
+void SizeErrorLearner::observe(const SizeErrorFeatures& f, bool detected) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto x = normalize(f);
+    double z = bias_;
+    for (size_t i = 0; i < x.size(); ++i) z += w_[i] * x[i];
+    const double p = sigmoid(z);
+    const double g = p - (detected ? 1.0 : 0.0);
+    const double lr = params_.learning_rate;
+    for (size_t i = 0; i < w_.size(); ++i) {
+        w_[i] -= lr * (g * x[i] + params_.l2 * w_[i]);
+        w_[i] = std::min(20.0, std::max(-20.0, w_[i]));
+    }
+    bias_ = std::min(20.0, std::max(-20.0, bias_ - lr * g));
+    ++samples_;
+}
+
+size_t SizeErrorLearner::samples() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return samples_;
+}
+
+std::array<double, 9> SizeErrorLearner::weights() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::array<double, 9> out{};
+    for (size_t i = 0; i < 8; ++i) out[i] = w_[i];
+    out[8] = bias_;
+    return out;
+}
+
+void SizeErrorLearner::reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    w_.fill(0.0);
+    bias_ = 0.0;
+    samples_ = 0;
+}
+
+// ══════════════════════════════════════════════════════════
 // Constructor / Config
 // ══════════════════════════════════════════════════════════
 
@@ -297,6 +415,30 @@ std::vector<TestReport> AdversaryTester::get_history() const {
 void AdversaryTester::clear_history() {
     std::lock_guard<std::mutex> lock(mutex_);
     history_.clear();
+}
+
+// ══════════════════════════════════════════════════════════
+// Size/error learning (Task 1)
+// ══════════════════════════════════════════════════════════
+
+void AdversaryTester::record_error() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_window_.error_count++;
+}
+
+void AdversaryTester::set_size_learner(std::shared_ptr<SizeErrorLearner> learner) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    learner_ = std::move(learner);
+}
+
+std::shared_ptr<SizeErrorLearner> AdversaryTester::get_size_learner() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return learner_;
+}
+
+double AdversaryTester::last_detection_probability() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_prob_;
 }
 
 // ══════════════════════════════════════════════════════════
@@ -397,6 +539,27 @@ std::optional<DetectionFeedback> AdversaryTester::evaluate_window_locked(bool fo
     // 3. KS distance
     scores.ks_distance = ks_distance(current_window_.packet_sizes, ref);
 
+    // 3b. Wasserstein-1: the byte-priced version of the same comparison.
+    // The reference profile stores only a CDF at bucket boundaries, so the
+    // reference sample is rebuilt by placing each bucket's probability mass at
+    // its boundary - that is exactly the distribution the CDF encodes.
+    {
+        std::vector<std::pair<size_t, double>> hist;
+        hist.reserve(ref.size_buckets.size());
+        double prev_cdf = 0.0;
+        for (size_t i = 0; i < ref.size_buckets.size() && i < ref.size_cdf.size(); ++i) {
+            const double cdf = std::min(1.0, std::max(0.0, ref.size_cdf[i]));
+            const double mass = cdf - prev_cdf;
+            if (mass > 0.0) hist.emplace_back(ref.size_buckets[i], mass);
+            prev_cdf = cdf;
+        }
+        std::vector<size_t> ref_samples = expand_size_histogram(hist, 256);
+        if (!ref_samples.empty() && !current_window_.packet_sizes.empty()) {
+            scores.w1_distance =
+                w1_distance_sizes(current_window_.packet_sizes, ref_samples);
+        }
+    }
+
     // 4. Size variance ratio
     if (current_window_.packet_sizes.size() >= 2 && ref.expected_size_variance > 0.0) {
         double sum = 0.0;
@@ -439,6 +602,28 @@ std::optional<DetectionFeedback> AdversaryTester::evaluate_window_locked(bool fo
     report.strategy_tested = current_strategy_;
     report.timestamp = std::chrono::steady_clock::now();
     report.detected = (scores.aggregate_stealth() < config_.detection_threshold);
+
+    // Task 1: learned detection estimate from windowed size/error features.
+    // The learner both predicts and is updated from this evaluation, so the
+    // estimate improves as flows accumulate.
+    if (learner_) {
+        const size_t total = current_window_.packet_count
+                           + current_window_.error_count;
+        const double err_rate = (total > 0)
+            ? static_cast<double>(current_window_.error_count) /
+              static_cast<double>(total)
+            : 0.0;
+        SizeErrorFeatures f =
+            SizeErrorLearner::from_snapshot(current_window_, err_rate);
+        // Sizes and error rate come from the window; the remaining three
+        // features are already computed by the heuristics above.
+        f.timing_cov = scores.timing_cov;
+        f.burst_anomaly = scores.burst_anomaly;
+        f.ks_distance = scores.ks_distance;
+        report.learned_detection_probability = learner_->predict(f);
+        learner_->observe(f, report.detected);
+        last_prob_ = report.learned_detection_probability;
+    }
 
     // Update stats
     stats_.evaluations_run++;

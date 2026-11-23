@@ -23,6 +23,17 @@ void establish_x25519(E2ESession& initiator, E2ESession& responder) {
     ASSERT_TRUE(responder.is_established());
 }
 
+/// Helper for tests that construct sessions directly: make an E2EConfig
+/// for a responder that presents a long-term identity.
+E2EConfig signed_responder_config(
+    const std::shared_ptr<ServerIdentity>& identity,
+    KeyExchangeProtocol proto = KeyExchangeProtocol::X25519) {
+    E2EConfig cfg;
+    cfg.key_exchange = proto;
+    cfg.server_identity = identity;
+    return cfg;
+}
+
 std::vector<uint8_t> bytes(const char* text) {
     return std::vector<uint8_t>(text, text + std::strlen(text));
 }
@@ -33,9 +44,21 @@ class E2ETest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Initialize libsodium if needed
+        ASSERT_TRUE(responder_identity->generate());
+        // Every session in this fixture is handed the responder identity;
+        // initiators ignore it, responders sign with it.
+        default_config.server_identity = responder_identity;
     }
-    
+
     E2EConfig default_config;
+
+    // The production handshake is identity-signed. Tests that exercise the
+    // ratchet are not testing anonymous-peers, so give the responder a
+    // real identity and let the initiator verify it — otherwise every one
+    // of these would just be asserting that an unauthenticated server is
+    // refused, which is covered separately by test_server_identity.
+    std::shared_ptr<ServerIdentity> responder_identity =
+        std::make_shared<ServerIdentity>();
 };
 
 // ---- Key Generation Tests ----

@@ -32,6 +32,417 @@ static constexpr platform_socket_t INVALID_SOCK = -1;
 
 namespace ncp {
 
+namespace {
+
+// A SAM command parameter is interpolated directly into a newline-terminated
+// command line, so it must never contain whitespace, CR/LF or control bytes —
+// otherwise a crafted tunnel name / hostname / key would inject extra SAM
+// commands (e.g. "foo\nSESSION REMOVE ID=victim").
+bool sam_token_ok(const std::string& token) {
+    if (token.empty() || token.size() > 1024) return false;
+    for (unsigned char c : token) {
+        if (c <= 0x20 || c == 0x7F) return false;
+    }
+    return true;
+}
+
+// Validate a reply line: it must start with the expected status prefix AND be
+// a success. Matching on the prefix (instead of a bare find("RESULT=OK"))
+// prevents a stray token from a previous, desynchronised reply being accepted.
+bool sam_reply_ok(const std::string& response, const char* prefix) {
+    const size_t plen = std::strlen(prefix);
+    if (response.size() < plen) return false;
+    if (response.compare(0, plen, prefix) != 0) return false;
+    return response.find("RESULT=OK") != std::string::npos;
+}
+
+// SAM accepts tunnel length 0..7 and quantity 1..6. Out-of-range values make
+// SESSION CREATE fail; clamp to the protocol's legal window.
+int clamp_sam_opt(int value, int lo, int hi) {
+    if (value < lo) return lo;
+    if (value > hi) return hi;
+    return value;
+}
+
+// ── Small socket helpers for the inbound (server) path ────────────────────
+// accept_inbound_stream() opens its own SAM control connection, so it cannot
+// reuse Impl's single socket. These mirror the connect logic in initialize().
+
+void close_plain_socket(platform_socket_t s) {
+    if (s == INVALID_SOCK) return;
+#ifdef _WIN32
+    closesocket(s);
+#else
+    close(s);
+#endif
+}
+
+platform_socket_t sam_open(const std::string& host, uint16_t port, int timeout_ms) {
+    platform_socket_t s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s == INVALID_SOCK) return INVALID_SOCK;
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, host.c_str(), &addr.sin_addr) != 1) {
+        close_plain_socket(s);
+        return INVALID_SOCK;
+    }
+
+#ifdef _WIN32
+    u_long mode = 1;
+    ioctlsocket(s, FIONBIO, &mode);
+    int rc = connect(s, (struct sockaddr*)&addr, sizeof(addr));
+    if (rc == SOCKET_ERROR && WSAGetLastError() != WSAEWOULDBLOCK) {
+        close_plain_socket(s);
+        return INVALID_SOCK;
+    }
+    fd_set wset;
+    FD_ZERO(&wset);
+    FD_SET(s, &wset);
+    struct timeval tv{ timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    if (select(0, nullptr, &wset, nullptr, &tv) <= 0) {
+        close_plain_socket(s);
+        return INVALID_SOCK;
+    }
+    int err = 0;
+    int elen = sizeof(err);
+    getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&err, &elen);
+    if (err != 0) {
+        close_plain_socket(s);
+        return INVALID_SOCK;
+    }
+    mode = 0;
+    ioctlsocket(s, FIONBIO, &mode);
+    DWORD rcv = static_cast<DWORD>(timeout_ms);
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcv, sizeof(rcv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&rcv, sizeof(rcv));
+#else
+    int flags = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, flags | O_NONBLOCK);
+    int rc = connect(s, (struct sockaddr*)&addr, sizeof(addr));
+    if (rc < 0 && errno != EINPROGRESS) {
+        close_plain_socket(s);
+        return INVALID_SOCK;
+    }
+    struct pollfd pfd = { s, POLLOUT, 0 };
+    if (poll(&pfd, 1, timeout_ms) <= 0) {
+        close_plain_socket(s);
+        return INVALID_SOCK;
+    }
+    int err = 0;
+    socklen_t elen = sizeof(err);
+    getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &elen);
+    if (err != 0) {
+        close_plain_socket(s);
+        return INVALID_SOCK;
+    }
+    fcntl(s, F_SETFL, flags);
+    struct timeval tv{ timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+    return s;
+}
+
+// Never let a peer that closed early kill us with SIGPIPE on POSIX.
+#ifdef MSG_NOSIGNAL
+static constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+static constexpr int kSendFlags = 0;
+#endif
+
+bool send_all(platform_socket_t s, const std::string& bytes) {
+    size_t off = 0;
+    while (off < bytes.size()) {
+        ssize_t n = send(s, bytes.data() + off,
+                         static_cast<int>(bytes.size() - off), kSendFlags);
+        if (n <= 0) return false;
+        off += static_cast<size_t>(n);
+    }
+    return true;
+}
+
+// Read one '\n'-terminated line. Reads a byte at a time on purpose: on the
+// inbound path the peer's first payload bytes may arrive in the same TCP
+// segment as the "PEER DESTINATION=" line, and a bulk recv() would swallow
+// them. Lines here are small (SAM status + one destination), so the syscall
+// overhead is irrelevant.
+bool recv_line(platform_socket_t s, std::string& out) {
+    out.clear();
+    char c = 0;
+    for (;;) {
+        ssize_t n = recv(s, &c, 1, 0);
+        if (n <= 0) return false;
+        out.push_back(c);
+        if (c == '\n') return true;
+        if (out.size() > 64 * 1024) return false;  // runaway line guard
+    }
+}
+
+} // namespace
+
+// ===== I2PPeerFilter ======================================================
+
+I2PPeerFilter::I2PPeerFilter() { set_config(Config{}); }
+
+I2PPeerFilter::I2PPeerFilter(const Config& config) { set_config(config); }
+
+std::string I2PPeerFilter::normalize_dest(const std::string& dest) {
+    size_t b = dest.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    size_t e = dest.find_last_not_of(" \t\r\n");
+    return dest.substr(b, e - b + 1);
+}
+
+void I2PPeerFilter::set_config(const Config& config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_ = config;
+    allow_.clear();
+    block_.clear();
+    for (const auto& d : config.allowlist) {
+        std::string n = normalize_dest(d);
+        if (!n.empty()) allow_.insert(std::move(n));
+    }
+    for (const auto& d : config.blocklist) {
+        std::string n = normalize_dest(d);
+        if (!n.empty()) block_.insert(std::move(n));
+    }
+}
+
+I2PPeerFilter::Config I2PPeerFilter::get_config() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_;
+}
+
+I2PPeerFilter::Decision I2PPeerFilter::check(
+    const std::string& peer_dest,
+    std::chrono::system_clock::time_point now)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    const std::string dest = normalize_dest(peer_dest);
+    if (dest.empty()) {
+        ++rejected_;
+        return {false, "empty-destination"};
+    }
+    if (block_.count(dest)) {
+        ++rejected_;
+        return {false, "blocklisted"};
+    }
+    if (!allow_.empty() && !allow_.count(dest)) {
+        ++rejected_;
+        return {false, "not-allowlisted"};
+    }
+
+    PeerState& st = peers_[dest];
+
+    // Slide the rate-limit window forward.
+    const auto cutoff = now - config_.rate_window;
+    while (!st.recent.empty() && st.recent.front() < cutoff) {
+        st.recent.pop_front();
+    }
+
+    if (config_.max_concurrent_per_peer != 0 &&
+        st.open >= config_.max_concurrent_per_peer) {
+        ++rejected_;
+        return {false, "too-many-open"};
+    }
+    if (config_.max_new_per_window != 0 &&
+        st.recent.size() >= config_.max_new_per_window) {
+        ++rejected_;
+        return {false, "rate-limited"};
+    }
+
+    ++st.open;
+    st.recent.push_back(now);
+    ++accepted_;
+    return {true, "allowed"};
+}
+
+void I2PPeerFilter::release(const std::string& peer_dest) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = peers_.find(normalize_dest(peer_dest));
+    if (it == peers_.end()) return;
+    if (it->second.open > 0) it->second.open--;
+}
+
+size_t I2PPeerFilter::accepted_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return accepted_;
+}
+
+size_t I2PPeerFilter::rejected_count() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return rejected_;
+}
+
+std::vector<std::string> I2PPeerFilter::blocked_peers() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {block_.begin(), block_.end()};
+}
+
+void I2PPeerFilter::reset_counters() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    accepted_ = 0;
+    rejected_ = 0;
+    peers_.clear();
+}
+
+// ===== I2POutboundPolicy ==================================================
+
+I2POutboundPolicy::I2POutboundPolicy() { set_config(Config{}); }
+
+I2POutboundPolicy::I2POutboundPolicy(const Config& config) { set_config(config); }
+
+std::string I2POutboundPolicy::normalize_destination(const std::string& dest) {
+    size_t b = dest.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) return {};
+    size_t e = dest.find_last_not_of(" \t\r\n");
+    return dest.substr(b, e - b + 1);
+}
+
+bool I2POutboundPolicy::valid_destination_format(const std::string& dest_in) {
+    const std::string dest = normalize_destination(dest_in);
+    if (dest.empty() || dest.size() > 4096) return false;
+
+    // Injection guard: a destination is interpolated into a SAM command line.
+    for (unsigned char c : dest) {
+        if (c <= 0x20 || c == 0x7F) return false;
+    }
+
+    static const std::string kSuffix = ".i2p";
+    const bool is_name = dest.size() > kSuffix.size() &&
+        dest.compare(dest.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+    if (is_name) {
+        const std::string host = dest.substr(0, dest.size() - kSuffix.size());
+        if (host.empty()) return false;
+        if (host.front() == '.' || host.back() == '.') return false;
+        if (host.find("..") != std::string::npos) return false;
+        for (unsigned char c : host) {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                            (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    // Base64 destination. SAM emits standard base64; '~' appears in some
+    // encodings in place of '/' and '=' is used as padding.
+    if (dest.size() < 32) return false;
+    for (unsigned char c : dest) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                        (c >= '0' && c <= '9') || c == '+' || c == '/' ||
+                        c == '~' || c == '=' || c == '-' || c == '_';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+void I2POutboundPolicy::set_config(const Config& config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_ = config;
+    allow_.clear();
+    block_.clear();
+    for (const auto& d : config.allowlist) {
+        std::string n = normalize_destination(d);
+        if (!n.empty()) allow_.insert(std::move(n));
+    }
+    for (const auto& d : config.blocklist) {
+        std::string n = normalize_destination(d);
+        if (!n.empty()) block_.insert(std::move(n));
+    }
+}
+
+I2POutboundPolicy::Config I2POutboundPolicy::get_config() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_;
+}
+
+I2POutboundPolicy::Decision I2POutboundPolicy::check(
+    const std::string& session_id, const std::string& dest_in) const
+{
+    const std::string dest = normalize_destination(dest_in);
+    if (dest.empty()) return {false, "empty-destination"};
+
+    // Always enforce the command-line injection guard; the config flag only
+    // controls the stricter hostname/base64 shape check.
+    for (unsigned char c : dest) {
+        if (c <= 0x20 || c == 0x7F) return {false, "invalid-destination"};
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (config_.validate_format && !valid_destination_format(dest)) {
+        return {false, "invalid-destination"};
+    }
+    if (block_.count(dest)) return {false, "blocklisted"};
+
+    // An explicit allowlist fixes the acceptable set, so pinning adds nothing.
+    if (!allow_.empty()) {
+        if (!allow_.count(dest)) return {false, "not-allowlisted"};
+        return {true, "allowed"};
+    }
+
+    if (config_.pin_first_destination && !session_id.empty()) {
+        auto it = pins_.find(session_id);
+        if (it != pins_.end() && it->second.destination != dest) {
+            return {false, "destination-changed"};
+        }
+    }
+    return {true, "allowed"};
+}
+
+void I2POutboundPolicy::pin(const std::string& session_id,
+                            const std::string& dest_in) {
+    if (session_id.empty()) return;
+    const std::string dest = normalize_destination(dest_in);
+    if (dest.empty()) return;
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (pins_.count(session_id)) return;   // never silently re-point a session
+    Pin p;
+    p.session_id = session_id;
+    p.destination = dest;
+    p.pinned_at = std::chrono::system_clock::now();
+    pins_[session_id] = std::move(p);
+}
+
+bool I2POutboundPolicy::is_pinned(const std::string& session_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return pins_.count(session_id) != 0;
+}
+
+bool I2POutboundPolicy::pinned_destination(const std::string& session_id,
+                                           std::string& out_dest) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = pins_.find(session_id);
+    if (it == pins_.end()) return false;
+    out_dest = it->second.destination;
+    return true;
+}
+
+std::vector<I2POutboundPolicy::Pin> I2POutboundPolicy::pins() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<Pin> out;
+    out.reserve(pins_.size());
+    for (const auto& kv : pins_) out.push_back(kv.second);
+    std::sort(out.begin(), out.end(), [](const Pin& a, const Pin& b) {
+        return a.session_id < b.session_id;
+    });
+    return out;
+}
+
+void I2POutboundPolicy::unpin(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pins_.erase(session_id);
+}
+
+void I2POutboundPolicy::clear_pins() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pins_.clear();
+}
+
 // Impl definition with SAM Bridge connection
 struct I2PManager::Impl {
     platform_socket_t sam_socket = INVALID_SOCK;
@@ -47,8 +458,13 @@ struct I2PManager::Impl {
         if (sam_socket == INVALID_SOCK) return false;
         
         std::string full_cmd = cmd + "\n";
-        ssize_t sent = send(sam_socket, full_cmd.c_str(), static_cast<int>(full_cmd.length()), 0);
-        if (sent <= 0) return false;
+        size_t off = 0;
+        while (off < full_cmd.size()) {
+            ssize_t sent = send(sam_socket, full_cmd.data() + off,
+                                static_cast<int>(full_cmd.size() - off), 0);
+            if (sent <= 0) return false;
+            off += static_cast<size_t>(sent);
+        }
         
         char buffer[4096];
         response.clear();
@@ -57,7 +473,9 @@ struct I2PManager::Impl {
             if (received <= 0) {
                 // received == 0  -> connection closed
                 // received <  0  -> error or timeout (EAGAIN/WSAETIMEDOUT)
-                return !response.empty();
+                // Either way the reply line is incomplete: fail closed rather
+                // than return a truncated line that might parse as success.
+                return false;
             }
             buffer[received] = '\0';
             response.append(buffer, received);
@@ -87,13 +505,23 @@ struct I2PManager::Impl {
         while (true) {
             ssize_t received = recv(sam_socket, buffer, sizeof(buffer) - 1, 0);
             if (received <= 0) {
-                return !response.empty();
+                return false;
             }
             buffer[received] = '\0';
             response.append(buffer, received);
             if (response.find('\n') != std::string::npos) break;
         }
         return true;
+    }
+
+    // Best-effort teardown of a SAM session. Without this the router keeps the
+    // session (and its tunnel pools) alive after the local entry is dropped.
+    bool remove_session(const std::string& session_id) {
+        if (sam_socket == INVALID_SOCK) return false;
+        if (!sam_token_ok(session_id)) return false;
+        std::string response;
+        return send_sam_command("SESSION REMOVE ID=" + session_id, response) &&
+               sam_reply_ok(response, "SESSION STATUS");
     }
 
     void close_sam() {
@@ -114,6 +542,19 @@ I2PManager::I2PManager() : impl_(std::make_unique<Impl>()), is_initialized_(fals
 I2PManager::~I2PManager() {
     if (impl_) {
         impl_->close_sam();
+    }
+    // Close any accepted inbound streams so their sockets are not leaked.
+    std::lock_guard<std::mutex> lock(inbound_mutex_);
+    for (const auto& pair : inbound_peers_) {
+        close_plain_socket(static_cast<platform_socket_t>(pair.first));
+    }
+    inbound_peers_.clear();
+    {
+        std::lock_guard<std::mutex> olock(outbound_mutex_);
+        for (const auto& pair : outbound_streams_) {
+            close_plain_socket(static_cast<platform_socket_t>(pair.first));
+        }
+        outbound_streams_.clear();
     }
 }
 
@@ -185,6 +626,11 @@ bool I2PManager::initialize(const Config& config) {
     DWORD recv_timeout_ms = 10000;
     setsockopt(impl_->sam_socket, SOL_SOCKET, SO_RCVTIMEO,
                (const char*)&recv_timeout_ms, sizeof(recv_timeout_ms));
+    // Bound send() the same way so a stuck SAM bridge cannot wedge the thread
+    // mid-write (STREAM SEND / garlic payloads can be large).
+    DWORD send_timeout_ms = 10000;
+    setsockopt(impl_->sam_socket, SOL_SOCKET, SO_SNDTIMEO,
+               (const char*)&send_timeout_ms, sizeof(send_timeout_ms));
 #else
     if (connect_result < 0 && errno != EINPROGRESS) {
         impl_->close_sam();
@@ -217,6 +663,8 @@ bool I2PManager::initialize(const Config& config) {
     recv_timeout.tv_usec = 0;
     setsockopt(impl_->sam_socket, SOL_SOCKET, SO_RCVTIMEO,
                &recv_timeout, sizeof(recv_timeout));
+    setsockopt(impl_->sam_socket, SOL_SOCKET, SO_SNDTIMEO,
+               &recv_timeout, sizeof(recv_timeout));
 #endif
     
     // SAM Handshake: HELLO VERSION
@@ -226,7 +674,7 @@ bool I2PManager::initialize(const Config& config) {
         return false;
     }
     
-    if (response.find("HELLO REPLY RESULT=OK") == std::string::npos) {
+    if (!sam_reply_ok(response, "HELLO REPLY")) {
         impl_->close_sam();
         return false;
     }
@@ -276,7 +724,14 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
     if (!is_active()) return false;
     
     std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
-    
+
+    // Tunnel name becomes the SAM session ID on the wire — reject anything
+    // that could inject a second command or a malformed ID.
+    if (!sam_token_ok(name)) return false;
+    // remote_dest, when provided, is recorded locally only (not sent here),
+    // but keep it sane so a later STREAM CONNECT cannot be injection-abused.
+    if (!remote_dest.empty() && !sam_token_ok(remote_dest)) return false;
+
     // SAM v3 has no distinct "server" session STYLE — STREAM is the only
     // stream style and serves both directions. The client/server distinction
     // is expressed through the DESTINATION below: TRANSIENT for outbound-only
@@ -289,28 +744,41 @@ bool I2PManager::create_tunnel(const std::string& name, uint16_t local_port,
         // TRANSIENT tunnel masquerading as a server tunnel.
         return false;
     }
-    
+
+    const int in_len  = clamp_sam_opt(config_.tunnel_length, 0, 7);
+    const int in_qty  = clamp_sam_opt(config_.tunnel_quantity, 1, 6);
+
+    // Reusing an existing session ID makes the bridge reject SESSION CREATE
+    // (duplicate destination/session); drop the stale session first.
+    if (tunnels_.count(name)) {
+        impl_->remove_session(name);
+        tunnels_.erase(name);
+    }
+
     std::ostringstream cmd;
     cmd << "SESSION CREATE STYLE=" << style
         << " ID=" << name
         << " DESTINATION=" << (type == TunnelType::CLIENT ? "TRANSIENT" : current_dest_)
-        << " inbound.length=" << config_.tunnel_length
-        << " outbound.length=" << config_.tunnel_length
-        << " inbound.quantity=" << config_.tunnel_quantity
-        << " outbound.quantity=" << config_.tunnel_quantity;
+        << " inbound.length=" << in_len
+        << " outbound.length=" << in_len
+        << " inbound.quantity=" << in_qty
+        << " outbound.quantity=" << in_qty;
     
     std::string response;
     if (!impl_->send_sam_command(cmd.str(), response)) {
         return false;
     }
     
-    if (response.find("SESSION STATUS RESULT=OK") == std::string::npos) {
+    if (!sam_reply_ok(response, "SESSION STATUS")) {
         return false;
     }
     
     size_t dest_pos = response.find("DESTINATION=");
     if (dest_pos != std::string::npos) {
-        impl_->destination_keys = response.substr(dest_pos + 12);
+        size_t start = dest_pos + 12;
+        size_t end = response.find_first_of(" \t\r\n", start);
+        impl_->destination_keys = response.substr(start,
+            end == std::string::npos ? std::string::npos : end - start);
     }
     
     TunnelInfo info;
@@ -329,29 +797,50 @@ bool I2PManager::create_server_tunnel(const std::string& name, uint16_t local_po
     if (!is_active()) return false;
     
     std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
-    
+
+    if (!sam_token_ok(name)) return false;
+
+    // A server tunnel must be reachable, which requires a persistent
+    // destination. Without one SESSION CREATE would fall back to a transient,
+    // unreachable destination — fail honestly instead.
+    if (current_dest_.empty()) return false;
+
+    // FROM_PORT is not a SAM session parameter; the serve port is a property
+    // of the STREAM ACCEPT loop, not SESSION CREATE. Sending it would be an
+    // unknown key at best. The tunnel length/quantity options are the ones
+    // the bridge actually honours.
+    const int in_len = clamp_sam_opt(config_.tunnel_length, 0, 7);
+    const int in_qty = clamp_sam_opt(config_.tunnel_quantity, 1, 6);
+
     std::ostringstream cmd;
     cmd << "SESSION CREATE STYLE=STREAM ID=" << name
         << " DESTINATION=" << current_dest_
-        << " FROM_PORT=" << local_port;
+        << " inbound.length=" << in_len
+        << " outbound.length=" << in_len
+        << " inbound.quantity=" << in_qty
+        << " outbound.quantity=" << in_qty;
     
     std::string response;
     if (!impl_->send_sam_command(cmd.str(), response)) {
         return false;
     }
     
-    if (response.find("SESSION STATUS RESULT=OK") != std::string::npos) {
-        TunnelInfo info;
-        info.tunnel_id = name;
-        info.type = TunnelType::SERVER;
-        info.local_dest = current_dest_;
-        info.created = std::chrono::system_clock::now();
-        info.expires = info.created + std::chrono::hours(
-            config_.destination_expiration_hours);
-        tunnels_[name] = info;
-        return true;
+    if (!sam_reply_ok(response, "SESSION STATUS")) {
+        return false;
     }
-    return false;
+
+    TunnelInfo info;
+    info.tunnel_id = name;
+    info.type = TunnelType::SERVER;
+    info.local_dest = current_dest_;
+    // Remember the local serve port so callers can correlate the tunnel with
+    // the STREAM ACCEPT loop that owns it.
+    info.remote_dest = ":" + std::to_string(local_port);
+    info.created = std::chrono::system_clock::now();
+    info.expires = info.created + std::chrono::hours(
+        config_.destination_expiration_hours);
+    tunnels_[name] = info;
+    return true;
 }
 
 std::vector<I2PManager::TunnelInfo> I2PManager::get_active_tunnels() const {
@@ -624,6 +1113,14 @@ I2PManager::Statistics I2PManager::get_statistics() const {
     std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     Statistics stats{};
     stats.active_tunnels = tunnels_.size();
+    stats.peers_rejected = peer_filter_.rejected_count();
+    stats.peers_accepted = peer_filter_.accepted_count();
+    {
+        std::lock_guard<std::mutex> olock(outbound_mutex_);
+        stats.outbound_established = outbound_established_;
+        stats.outbound_rejected = outbound_rejected_;
+        stats.outbound_failed = outbound_failed_;
+    }
     
     // Aggregate bytes across all tunnels
     for (const auto& pair : tunnels_) {
@@ -673,12 +1170,20 @@ bool I2PManager::send_garlic_message(const std::string& destination,
                                      const std::vector<uint8_t>& message)
 {
     if (!is_active()) return false;
-    
+
+    // The destination becomes part of a SAM command line.
+    const std::string target =
+        I2POutboundPolicy::normalize_destination(destination);
+    if (!sam_token_ok(target) ||
+        !I2POutboundPolicy::valid_destination_format(target)) {
+        return false;
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     
     // Send via SAM datagram (garlic messages are typically datagram-based)
     std::ostringstream cmd;
-    cmd << "RAW SEND DESTINATION=" << destination
+    cmd << "RAW SEND DESTINATION=" << target
         << " SIZE=" << message.size();
     
     std::string response;
@@ -699,10 +1204,19 @@ bool I2PManager::send_garlic_message(const std::string& destination,
 // ==================== Network Database ====================
 
 std::string I2PManager::lookup_destination(const std::string& hostname) {
+    // The name is interpolated into a SAM command line; reject anything that
+    // could inject a second command. (Short local aliases are still allowed
+    // here — only the returned VALUE has to be a well-formed destination.)
+    const std::string name =
+        I2POutboundPolicy::normalize_destination(hostname);
+    if (!sam_token_ok(name)) {
+        return "";
+    }
+
     // Check cache first
     {
         std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
-        auto it = netdb_cache_.find(hostname);
+        auto it = netdb_cache_.find(name);
         if (it != netdb_cache_.end()) {
             return it->second;
         }
@@ -712,7 +1226,7 @@ std::string I2PManager::lookup_destination(const std::string& hostname) {
     
     // SAM NAMING LOOKUP
     std::string response;
-    if (!impl_->send_sam_command("NAMING LOOKUP NAME=" + hostname, response)) {
+    if (!impl_->send_sam_command("NAMING LOOKUP NAME=" + name, response)) {
         return "";
     }
     
@@ -722,12 +1236,19 @@ std::string I2PManager::lookup_destination(const std::string& hostname) {
         if (val_pos != std::string::npos) {
             size_t val_start = val_pos + 6;
             size_t val_end = response.find('\n', val_start);
-            std::string dest = response.substr(val_start,
-                val_end != std::string::npos ? val_end - val_start : std::string::npos);
+            std::string dest = I2POutboundPolicy::normalize_destination(
+                response.substr(val_start,
+                    val_end != std::string::npos ? val_end - val_start : std::string::npos));
+
+            // A bridge/remote answer must be a well-formed destination; never
+            // cache or return something that cannot be dialled safely.
+            if (!I2POutboundPolicy::valid_destination_format(dest)) {
+                return "";
+            }
             
             // Cache the result
             std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
-            netdb_cache_[hostname] = dest;
+            netdb_cache_[name] = dest;
             return dest;
         }
     }
@@ -836,6 +1357,404 @@ bool I2PManager::enable_path_selection_randomization(bool enable) {
 void I2PManager::set_cover_traffic_rate(size_t bytes_per_minute) {
     std::lock_guard<std::mutex> lock(mutex_);  // FIX #95
     config_.cover_traffic_bytes_per_minute = bytes_per_minute;
+}
+
+// ==================== Server-side inbound handling ====================
+
+void I2PManager::set_peer_filter(const I2PPeerFilter::Config& config) {
+    peer_filter_.set_config(config);
+}
+
+I2PPeerFilter::Config I2PManager::get_peer_filter_config() const {
+    return peer_filter_.get_config();
+}
+
+size_t I2PManager::rejected_peer_count() const {
+    return peer_filter_.rejected_count();
+}
+
+size_t I2PManager::accepted_peer_count() const {
+    return peer_filter_.accepted_count();
+}
+
+void I2PManager::set_inbound_peer_callback(InboundPeerCallback cb) {
+    std::lock_guard<std::mutex> lock(inbound_mutex_);
+    inbound_cb_ = std::move(cb);
+}
+
+intptr_t I2PManager::accept_inbound_stream(const std::string& session_id,
+                                           std::string& peer_dest,
+                                           int timeout_seconds) {
+    peer_dest.clear();
+
+    if (!is_active()) return -1;
+    // session_id is interpolated into a SAM command line — reject injection.
+    if (!sam_token_ok(session_id)) return -1;
+    if (timeout_seconds <= 0) timeout_seconds = 30;
+
+    // Copy connection parameters under the lock: initialize() may rewrite
+    // config_ concurrently.
+    std::string sam_host;
+    uint16_t sam_port = 0;
+    bool session_known = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Never send a STREAM ACCEPT for a session this manager did not
+        // create: the ID is interpolated into the command line.
+        session_known = tunnels_.find(session_id) != tunnels_.end();
+        sam_host = config_.sam_host;
+        sam_port = config_.sam_port;
+    }
+    if (!session_known) return -1;
+
+    platform_socket_t s = sam_open(sam_host, sam_port, timeout_seconds * 1000);
+    if (s == INVALID_SOCK) return -1;
+
+    if (!send_all(s, "STREAM ACCEPT ID=" + session_id + " SILENT=false\n")) {
+        close_plain_socket(s);
+        return -1;
+    }
+
+    // The bridge acknowledges the accept request immediately...
+    std::string status;
+    if (!recv_line(s, status) || !sam_reply_ok(status, "STREAM STATUS")) {
+        close_plain_socket(s);
+        return -1;
+    }
+
+    // ...then blocks until a peer connects and announces itself. With
+    // SILENT=false the peer destination line precedes the raw stream data.
+    std::string peer_line;
+    if (!recv_line(s, peer_line)) {
+        close_plain_socket(s);
+        return -1;
+    }
+    static const std::string kPeer = "PEER DESTINATION=";
+    size_t pos = peer_line.find(kPeer);
+    if (pos == std::string::npos) {
+        close_plain_socket(s);
+        return -1;
+    }
+    size_t begin = pos + kPeer.size();
+    size_t end = peer_line.find_first_of(" \t\r\n", begin);
+    peer_dest = peer_line.substr(begin,
+        end == std::string::npos ? std::string::npos : end - begin);
+    if (peer_dest.empty()) {
+        close_plain_socket(s);
+        return -1;
+    }
+
+    // Apply the server-side peer policy before handing the stream back.
+    const I2PPeerFilter::Decision decision =
+        peer_filter_.check(peer_dest, std::chrono::system_clock::now());
+
+    // Tell the observer outside all locks (the callback may do file I/O).
+    InboundPeerCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(inbound_mutex_);
+        cb = inbound_cb_;
+    }
+    if (cb) cb(peer_dest, decision.allow, decision.reason);
+
+    if (!decision.allow) {
+        close_plain_socket(s);
+        return -1;
+    }
+
+    const intptr_t handle = static_cast<intptr_t>(s);
+    {
+        std::lock_guard<std::mutex> lock(inbound_mutex_);
+        inbound_peers_[handle] = peer_dest;
+    }
+    return handle;
+}
+
+ptrdiff_t I2PManager::read_inbound_stream(intptr_t handle, void* buf, size_t len) {
+    if (handle < 0 || buf == nullptr || len == 0) return -1;
+    const int chunk = (len > 0x7fffffffULL)
+        ? 0x7fffffff
+        : static_cast<int>(len);
+    // Winsock recv() takes char*, POSIX takes void*; the cast is valid for both.
+    ssize_t n = recv(static_cast<platform_socket_t>(handle),
+                     static_cast<char*>(buf), chunk, 0);
+    return static_cast<ptrdiff_t>(n);
+}
+
+bool I2PManager::close_inbound_stream(intptr_t handle) {
+    if (handle < 0) return false;
+    std::string peer;
+    {
+        std::lock_guard<std::mutex> lock(inbound_mutex_);
+        auto it = inbound_peers_.find(handle);
+        if (it == inbound_peers_.end()) return false;
+        peer = it->second;
+        inbound_peers_.erase(it);
+    }
+    close_plain_socket(static_cast<platform_socket_t>(handle));
+    peer_filter_.release(peer);
+    return true;
+}
+
+// ==================== Client-side outbound handling ====================
+
+void I2PManager::set_outbound_policy(const I2POutboundPolicy::Config& config) {
+    outbound_policy_.set_config(config);
+}
+
+I2POutboundPolicy::Config I2PManager::get_outbound_policy() const {
+    return outbound_policy_.get_config();
+}
+
+std::vector<I2POutboundPolicy::Pin> I2PManager::pinned_destinations() const {
+    return outbound_policy_.pins();
+}
+
+void I2PManager::clear_pinned_destinations() {
+    outbound_policy_.clear_pins();
+}
+
+void I2PManager::set_outbound_event_callback(OutboundEventCallback cb) {
+    std::lock_guard<std::mutex> lock(outbound_mutex_);
+    outbound_cb_ = std::move(cb);
+}
+
+uint64_t I2PManager::emit_outbound(const std::string& session_id,
+                                   const std::string& dest,
+                                   OutboundOutcome outcome,
+                                   const char* reason) {
+    OutboundRecord rec;
+    rec.session_id = session_id;
+    rec.destination = dest;
+    rec.established = (outcome == OutboundOutcome::ESTABLISHED);
+    rec.reason = reason;
+    rec.timestamp = std::chrono::system_clock::now();
+
+    OutboundEventCallback cb;
+    {
+        std::lock_guard<std::mutex> lock(outbound_mutex_);
+        rec.id = next_outbound_id_++;
+        switch (outcome) {
+            case OutboundOutcome::ESTABLISHED: ++outbound_established_; break;
+            case OutboundOutcome::REJECTED:    ++outbound_rejected_;    break;
+            case OutboundOutcome::FAILED:      ++outbound_failed_;      break;
+        }
+        outbound_ring_.push_back(rec);
+        while (outbound_ring_.size() > kOutboundRingCapacity) {
+            outbound_ring_.pop_front();
+        }
+        cb = outbound_cb_;
+    }
+    if (cb) cb(rec);
+    return rec.id;
+}
+
+std::vector<I2PManager::OutboundRecord> I2PManager::outbound_history(
+    size_t max_count) const
+{
+    std::lock_guard<std::mutex> lock(outbound_mutex_);
+    std::vector<OutboundRecord> out;
+    const size_t n = std::min(max_count, outbound_ring_.size());
+    out.reserve(n);
+    for (size_t i = outbound_ring_.size() - n; i < outbound_ring_.size(); ++i) {
+        out.push_back(outbound_ring_[i]);
+    }
+    return out;
+}
+
+intptr_t I2PManager::connect_outbound_stream(const std::string& session_id,
+                                             const std::string& dest,
+                                             int timeout_seconds) {
+    if (!is_active()) return -1;
+    if (!sam_token_ok(session_id)) return -1;
+    if (timeout_seconds <= 0) timeout_seconds = 30;
+
+    const std::string target = I2POutboundPolicy::normalize_destination(dest);
+    const I2POutboundPolicy::Decision decision =
+        outbound_policy_.check(session_id, target);
+    if (!decision.allow) {
+        emit_outbound(session_id, target, OutboundOutcome::REJECTED,
+                      decision.reason);
+        return -1;
+    }
+
+    std::string sam_host;
+    uint16_t sam_port = 0;
+    bool session_known = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Never send a STREAM CONNECT for a session this manager did not
+        // create: the ID is interpolated into the command line.
+        session_known = tunnels_.find(session_id) != tunnels_.end();
+        if (session_known) {
+            sam_host = config_.sam_host;
+            sam_port = config_.sam_port;
+        }
+    }
+    if (!session_known) {
+        emit_outbound(session_id, target, OutboundOutcome::FAILED,
+                      "unknown-session");
+        return -1;
+    }
+
+    platform_socket_t s = sam_open(sam_host, sam_port, timeout_seconds * 1000);
+    if (s == INVALID_SOCK) {
+        emit_outbound(session_id, target, OutboundOutcome::FAILED,
+                      "sam-unreachable");
+        return -1;
+    }
+
+    static const std::string kSuffix = ".i2p";
+    const bool by_name = target.size() > kSuffix.size() &&
+        target.compare(target.size() - kSuffix.size(), kSuffix.size(), kSuffix) == 0;
+
+    std::string cmd = "STREAM CONNECT ID=" + session_id + " ";
+    cmd += by_name ? "NAME=" : "DESTINATION=";
+    cmd += target;
+    cmd += " SILENT=false\n";
+
+    if (!send_all(s, cmd)) {
+        close_plain_socket(s);
+        emit_outbound(session_id, target, OutboundOutcome::FAILED, "send-failed");
+        return -1;
+    }
+
+    std::string status;
+    if (!recv_line(s, status) || !sam_reply_ok(status, "STREAM STATUS")) {
+        close_plain_socket(s);
+        emit_outbound(session_id, target, OutboundOutcome::FAILED,
+                      "connect-failed");
+        return -1;
+    }
+
+    // With SILENT=false the bridge announces the far-end destination before
+    // any payload.
+    std::string peer_line;
+    if (!recv_line(s, peer_line)) {
+        close_plain_socket(s);
+        emit_outbound(session_id, target, OutboundOutcome::FAILED,
+                      "no-peer-line");
+        return -1;
+    }
+    static const std::string kPeer = "PEER DESTINATION=";
+    const size_t pos = peer_line.find(kPeer);
+    if (pos == std::string::npos) {
+        close_plain_socket(s);
+        emit_outbound(session_id, target, OutboundOutcome::FAILED,
+                      "no-peer-destination");
+        return -1;
+    }
+    const size_t begin = pos + kPeer.size();
+    const size_t end = peer_line.find_first_of(" \t\r\n", begin);
+    const std::string peer_dest = I2POutboundPolicy::normalize_destination(
+        peer_line.substr(begin,
+            end == std::string::npos ? std::string::npos : end - begin));
+    if (peer_dest.empty()) {
+        close_plain_socket(s);
+        emit_outbound(session_id, target, OutboundOutcome::FAILED,
+                      "no-peer-destination");
+        return -1;
+    }
+
+    // When we asked for a full base64 destination, the far end must be
+    // exactly that destination — otherwise we are talking to something else.
+    if (!by_name && peer_dest != target) {
+        close_plain_socket(s);
+        emit_outbound(session_id, target, OutboundOutcome::REJECTED,
+                      "destination-mismatch");
+        return -1;
+    }
+
+    // Bind the session to this destination on first success.
+    outbound_policy_.pin(session_id, target);
+
+    const intptr_t handle = static_cast<intptr_t>(s);
+    const uint64_t id = emit_outbound(session_id, target,
+                                      OutboundOutcome::ESTABLISHED, "connected");
+    {
+        std::lock_guard<std::mutex> lock(outbound_mutex_);
+        OutboundStream st;
+        st.id = id;
+        st.session_id = session_id;
+        st.destination = target;
+        st.started = std::chrono::system_clock::now();
+        outbound_streams_[handle] = std::move(st);
+    }
+    return handle;
+}
+
+ptrdiff_t I2PManager::write_outbound_stream(intptr_t handle, const void* buf,
+                                            size_t len) {
+    if (handle < 0 || buf == nullptr || len == 0) return -1;
+    {
+        std::lock_guard<std::mutex> lock(outbound_mutex_);
+        if (outbound_streams_.find(handle) == outbound_streams_.end()) return -1;
+    }
+    const int chunk = (len > 0x7fffffffULL)
+        ? 0x7fffffff
+        : static_cast<int>(len);
+    ssize_t n = send(static_cast<platform_socket_t>(handle),
+                     static_cast<const char*>(buf), chunk, kSendFlags);
+    if (n > 0) {
+        std::lock_guard<std::mutex> lock(outbound_mutex_);
+        auto it = outbound_streams_.find(handle);
+        if (it != outbound_streams_.end()) {
+            it->second.bytes_sent += static_cast<uint64_t>(n);
+        }
+    }
+    return static_cast<ptrdiff_t>(n);
+}
+
+ptrdiff_t I2PManager::read_outbound_stream(intptr_t handle, void* buf,
+                                           size_t len) {
+    if (handle < 0 || buf == nullptr || len == 0) return -1;
+    {
+        std::lock_guard<std::mutex> lock(outbound_mutex_);
+        if (outbound_streams_.find(handle) == outbound_streams_.end()) return -1;
+    }
+    const int chunk = (len > 0x7fffffffULL)
+        ? 0x7fffffff
+        : static_cast<int>(len);
+    ssize_t n = recv(static_cast<platform_socket_t>(handle),
+                     static_cast<char*>(buf), chunk, 0);
+    return static_cast<ptrdiff_t>(n);
+}
+
+bool I2PManager::close_outbound_stream(intptr_t handle) {
+    if (handle < 0) return false;
+
+    OutboundStream st;
+    {
+        std::lock_guard<std::mutex> lock(outbound_mutex_);
+        auto it = outbound_streams_.find(handle);
+        if (it == outbound_streams_.end()) return false;
+        st = it->second;
+        outbound_streams_.erase(it);
+    }
+
+    close_plain_socket(static_cast<platform_socket_t>(handle));
+
+    // Fold the byte count into the audit record created at connect time.
+    {
+        std::lock_guard<std::mutex> lock(outbound_mutex_);
+        for (auto rit = outbound_ring_.rbegin(); rit != outbound_ring_.rend();
+             ++rit) {
+            if (rit->id == st.id) {
+                rit->bytes_sent = st.bytes_sent;
+                break;
+            }
+        }
+    }
+
+    // Keep tunnel-level byte counters (and therefore Statistics::total_sent)
+    // accurate for traffic sent over this stream.
+    if (st.bytes_sent > 0) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = tunnels_.find(st.session_id);
+        if (it != tunnels_.end()) {
+            it->second.bytes_sent += st.bytes_sent;
+        }
+    }
+    return true;
 }
 
 // ==================== Internal Helpers ====================

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <atomic>
 #include <thread>
+#include <algorithm>
 
 using namespace ncp::DPI;
 
@@ -275,4 +276,98 @@ TEST_F(FlowShaperTest, UpdateConfig_ChangesProfile) {
     auto cfg = FlowShaperConfig::messenger();
     fs.update_config(cfg);
     EXPECT_EQ(fs.get_config().profile, FlowProfile::MESSENGER);
+}
+
+// -- Exact quantile shaping (W1 block guarantee) --
+
+namespace {
+
+// Independent recomputation of the reference CDF straight from the profile's
+// buckets - deliberately NOT via expand_size_histogram(), so the test does not
+// certify the helper that produced the sample set.
+double cdf_at(const SizeDistribution& d, size_t boundary) {
+    double total = 0.0, upto = 0.0;
+    for (const auto& b : d.buckets) total += b.weight;
+    for (const auto& b : d.buckets) if (b.size <= boundary) upto += b.weight;
+    return total > 0.0 ? upto / total : 0.0;
+}
+
+} // namespace
+
+TEST_F(FlowShaperTest, QuantileShaping_OneBlockMatchesReferenceCdf) {
+    FlowShaper fs;                       // web_browsing defaults
+    const size_t block = fs.shaping_block_size();
+    ASSERT_GT(block, 0u);
+
+    const SizeDistribution& d = fs.get_config().size_dist;
+    std::vector<size_t> emitted;
+    emitted.reserve(block);
+    for (size_t i = 0; i < block; ++i) {
+        auto out = fs.reshape_size(make_packet(1));   // 1 byte -> pure padding
+        ASSERT_EQ(out.size(), 1u);
+        emitted.push_back(out[0].size());
+    }
+
+    for (const auto& b : d.buckets) {
+        size_t leq = 0;
+        for (size_t s : emitted) if (s <= b.size) ++leq;
+        const double emp = static_cast<double>(leq) / static_cast<double>(emitted.size());
+        // Tolerance covers integer rounding in the histogram expansion
+        // (<= #buckets / resolution = 6/256).
+        EXPECT_NEAR(emp, cdf_at(d, b.size), 0.03)
+            << "CDF mismatch at bucket " << b.size;
+    }
+
+    // Stronger than the CDF tolerance: one complete block IS the reference
+    // multiset, so W1 between them is exactly zero. This is the assertion that
+    // cannot be satisfied by i.i.d. sampling by luck.
+    std::vector<size_t> sorted_emitted = emitted;
+    std::sort(sorted_emitted.begin(), sorted_emitted.end());
+    EXPECT_EQ(sorted_emitted, fs.shaping_reference());
+    EXPECT_DOUBLE_EQ(w1_distance_sizes(emitted, fs.shaping_reference()), 0.0);
+}
+
+TEST_F(FlowShaperTest, QuantileShaping_SplitPacketsEmitOnlyReferenceSizes) {
+    FlowShaperConfig cfg = FlowShaperConfig::gaming();
+    cfg.enable_quantile_shaping = true;
+    FlowShaper fs;
+    fs.update_config(cfg);
+
+    std::vector<size_t> allowed;
+    for (const auto& b : cfg.size_dist.buckets) allowed.push_back(b.size);
+
+    auto out = fs.reshape_size(make_packet(4096));
+    ASSERT_GT(out.size(), 1u);
+    for (const auto& p : out) {
+        EXPECT_NE(std::find(allowed.begin(), allowed.end(), p.size()), allowed.end())
+            << "emitted " << p.size() << " bytes, not a reference size";
+    }
+    // Nothing is lost: every byte of the original is still present.
+    size_t payload = 0;
+    for (size_t i = 0; i + 1 < out.size(); ++i) payload += out[i].size();
+    EXPECT_LE(payload, 4096u);   // chunks 0..n-2 are full draws
+}
+
+TEST_F(FlowShaperTest, QuantileShaping_DisabledReportsNoBlock) {
+    FlowShaperConfig cfg = FlowShaperConfig::web_browsing();
+    cfg.enable_quantile_shaping = false;
+    FlowShaper fs;
+    fs.update_config(cfg);
+    EXPECT_EQ(fs.shaping_block_size(), 0u);
+}
+
+TEST_F(FlowShaperTest, QuantileShaping_TwoBlocksSameMultisetDifferentOrder) {
+    FlowShaper fs;
+    const size_t block = fs.shaping_block_size();
+    ASSERT_GT(block, 0u);
+
+    std::vector<size_t> a, b;
+    for (size_t i = 0; i < block; ++i) a.push_back(fs.select_target_size());
+    for (size_t i = 0; i < block; ++i) b.push_back(fs.select_target_size());
+
+    auto sa = a, sb = b;
+    std::sort(sa.begin(), sa.end());
+    std::sort(sb.begin(), sb.end());
+    EXPECT_EQ(sa, sb);        // identical multiset
+    EXPECT_NE(a, b);          // fresh permutation per block
 }

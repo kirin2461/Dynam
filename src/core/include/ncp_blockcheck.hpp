@@ -38,6 +38,10 @@ struct BlockcheckProbe {
     std::string fail_reason;
     int latency_ms = 0;
     int round = 0;                // 0 = discovery, >0 = confirmation round
+    // TCP handshake completed even though the TLS stage failed. Distinguishes
+    // "link is down" from "something shaped the TLS record" — the latter is
+    // exactly what our own DPI engine does to a probe running under it.
+    bool tcp_connected = false;
 };
 
 struct BlockcheckStrategyResult {

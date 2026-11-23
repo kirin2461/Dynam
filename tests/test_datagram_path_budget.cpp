@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "ncp_mimicry_session.hpp"
+#include "test_identity.hpp"
 
 namespace ncp {
 namespace {
@@ -22,6 +23,7 @@ struct SessionPair {
                              TrafficMimicry::MimicProfile::GENERIC_UDP) {
         NcpMimicrySession::Config base;
         base.e2e_config.enable_padding = e2e_padding;
+        base.e2e_config.server_identity = test_server_identity();
         base.stable_layout.padding_block_bytes = pd_block;
         base.stable_mimic = mimic;
         base.mimic_config.profile = mimic;

@@ -151,6 +151,9 @@ struct FlowShaper::Impl {
     FlowSendCallback send_callback;
 
     std::vector<double> cumulative_weights;
+    // Active quantile shaper, rebuilt whenever the size distribution changes.
+    // Null when quantile shaping is disabled or the histogram is degenerate.
+    std::unique_ptr<QuantileShaper> quantile;
     std::array<uint8_t, 4> dummy_marker;
     std::array<uint8_t, 32> session_key;
     FlowShaperStats stats;
@@ -186,6 +189,21 @@ struct FlowShaper::Impl {
         double sum = 0.0;
         for (const auto& b : config.size_dist.buckets) { sum += b.weight; cumulative_weights.push_back(sum); }
         if (sum > 0.0) for (auto& w : cumulative_weights) w /= sum;
+
+        quantile.reset();
+        if (!config.enable_quantile_shaping) return;
+        std::vector<std::pair<size_t, double>> hist;
+        hist.reserve(config.size_dist.buckets.size());
+        for (const auto& b : config.size_dist.buckets) {
+            if (b.weight > 0.0) hist.emplace_back(b.size, b.weight);
+        }
+        std::vector<size_t> ref = expand_size_histogram(hist, 256);
+        if (ref.empty()) return;
+        // A zero-sized "packet" cannot carry a byte and would stall the
+        // chunking loop in reshape_size(); such buckets are not shapeable.
+        ref.erase(std::remove(ref.begin(), ref.end(), size_t{0}), ref.end());
+        if (ref.empty()) return;
+        quantile = std::make_unique<QuantileShaper>(std::move(ref));
     }
 };
 
@@ -272,30 +290,68 @@ std::vector<ShapedPacket> FlowShaper::shape_sync(const std::vector<uint8_t>& pac
 }
 
 std::vector<std::vector<uint8_t>> FlowShaper::reshape_size(const std::vector<uint8_t>& packet) {
-    size_t target = select_target_size();
-    if (packet.size() <= target) {
-        std::vector<uint8_t> padded = packet;
-        padded.resize(target);
-        if (target > packet.size()) ncp::csprng_fill(padded.data() + packet.size(), target - packet.size());
-        return { padded };
-    }
-    // Simple split for now
+    // Every emitted packet is exactly one target size drawn from the shaper,
+    // so a complete block of draws reproduces the reference multiset. A packet
+    // larger than its target is split, and each chunk consumes its own draw -
+    // otherwise a single 3 kB write would deposit a dozen copies of one size
+    // into the empirical distribution and destroy the shape being targeted.
+    static constexpr size_t kMaxShapedChunks = 256;
+
     std::vector<std::vector<uint8_t>> chunks;
-    for (size_t i = 0; i < packet.size(); i += target) {
-        size_t sz = std::min(target, packet.size() - i);
-        chunks.emplace_back(packet.begin() + i, packet.begin() + i + sz);
+    chunks.reserve(1);
+    size_t offset = 0;
+    while (offset < packet.size()) {
+        size_t target = select_target_size();
+        if (target == 0) target = 1;   // defensive: never stall
+        const size_t take = std::min(target, packet.size() - offset);
+
+        std::vector<uint8_t> chunk(packet.begin() + static_cast<std::ptrdiff_t>(offset),
+                                   packet.begin() + static_cast<std::ptrdiff_t>(offset + take));
+        if (take < target) {
+            chunk.resize(target);
+            ncp::csprng_fill(chunk.data() + take, target - take);
+        }
+        chunks.push_back(std::move(chunk));
+        offset += take;
+
+        if (chunks.size() >= kMaxShapedChunks && offset < packet.size()) {
+            // Pathological input (a reference made of very small sizes against
+            // a multi-megabyte packet). Emit the remainder as one padded
+            // packet rather than an unbounded number of chunks.
+            const size_t rest = packet.size() - offset;
+            size_t tail_size = std::max(select_target_size(), rest);
+            std::vector<uint8_t> tail(packet.begin() + static_cast<std::ptrdiff_t>(offset),
+                                      packet.end());
+            tail.resize(tail_size);
+            ncp::csprng_fill(tail.data() + rest, tail_size - rest);
+            chunks.push_back(std::move(tail));
+            break;
+        }
     }
+    if (chunks.size() > 1) impl_->stats.packets_split.fetch_add(1);
     return chunks;
 }
 
 size_t FlowShaper::select_target_size() {
     std::shared_lock<std::shared_mutex> lock(impl_->config_mutex);
+    if (impl_->quantile) return impl_->quantile->next();
     if (impl_->cumulative_weights.empty()) return 1460;
     double r = ncp::csprng_double();
     for (size_t i = 0; i < impl_->cumulative_weights.size(); ++i) {
         if (r <= impl_->cumulative_weights[i]) return impl_->config.size_dist.buckets[i].size;
     }
     return impl_->config.size_dist.buckets.back().size;
+}
+
+size_t FlowShaper::shaping_block_size() const {
+    std::shared_lock<std::shared_mutex> lock(impl_->config_mutex);
+    return impl_->quantile ? impl_->quantile->block_size() : 0;
+}
+
+std::vector<size_t> FlowShaper::shaping_reference() const {
+    std::shared_lock<std::shared_mutex> lock(impl_->config_mutex);
+    if (!impl_->quantile) return {};
+    return impl_->quantile->reference();   // copy; ref_ is immutable after ctor
 }
 
 std::chrono::microseconds FlowShaper::next_delay() {

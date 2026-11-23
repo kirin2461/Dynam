@@ -1,4 +1,5 @@
 #include "ncp_dpi.hpp"
+#include "ncp_strategy_synth.hpp"
 #include "ncp_ipfrag.hpp"
 #include "ncp_quic.hpp"
 #include "ncp_dpi_advanced.hpp"
@@ -60,6 +61,13 @@ namespace ncp {
 namespace DPI {
 
 namespace {
+
+std::string ipv4_to_string(uint32_t host_order_addr) {
+    return std::to_string((host_order_addr >> 24) & 0xFFu) + "." +
+           std::to_string((host_order_addr >> 16) & 0xFFu) + "." +
+           std::to_string((host_order_addr >> 8) & 0xFFu) + "." +
+           std::to_string(host_order_addr & 0xFFu);
+}
 
 std::string to_lower_copy(const std::string& s) {
     std::string out = s;
@@ -281,6 +289,16 @@ public:
     // Protected by hooks_mutex_; snapshot in windivert_loop before the loop.
     mutable std::mutex hooks_mutex_;
     ModuleHooks hooks_;
+    // Per-destination strategy synthesis; guarded by synth_mutex_ (the capture
+    // thread is the only writer, stats readers take the lock briefly).
+    mutable std::mutex synth_mutex_;
+    StrategySynthesizer synth_ladder_{synthesized_strategy_ladder()};
+    StrategySynthesizer synth_preset_{preset_with_in_order_fallback()};
+    std::atomic<bool> synthesis_enabled_{false};
+
+    StrategySynthesizer& active_synth_() {
+        return synthesis_enabled_.load(std::memory_order_relaxed) ? synth_ladder_ : synth_preset_;
+    }
 
     // Zapret chain-based DPI: when active, windivert_loop consults chains
     // instead of the single global DPIConfig for desync parameters.
@@ -2187,6 +2205,56 @@ public:
                 }
             }
 
+            // -- Strategy synthesis -------------------------------------------
+            // Every new ClientHello is a trial of the destination's current
+            // candidate strategy; the client's own follow-up data proves it
+            // worked, a retransmitted ClientHello proves it did not and goes
+            // out with the next candidate.  See ncp_strategy_synth.hpp.
+            {
+                const uint32_t dst_ip = ntohl(ip_header->DstAddr);
+                const uint16_t src_port = ntohs(tcp_header->SrcPort);
+                const uint32_t seq = ntohl(tcp_header->SeqNum);
+                std::string synth_log;
+                {
+                    std::lock_guard<std::mutex> lk(synth_mutex_);
+                    StrategySynthesizer& synth = active_synth_();
+                    if (is_client_hello) {
+                        // A large ClientHello spans several segments; only
+                        // data past the whole record proves a ServerHello.
+                        const uint32_t record_len = 5u +
+                            ((static_cast<uint32_t>(tcp_payload[3]) << 8) | tcp_payload[4]);
+                        const std::string dest = sni_hostname.empty()
+                            ? ipv4_to_string(dst_ip) : sni_hostname;
+                        const auto trial = synth.on_client_hello(
+                            dest, dst_ip, src_port, dst_port, seq,
+                            std::max<uint32_t>(record_len, payload_len));
+                        const StrategyGenes& genes =
+                            synth.candidates()[static_cast<size_t>(trial.candidate)];
+                        apply_genes(genes, effective_cfg);
+                        if (trial.switched) {
+                            std::lock_guard<std::mutex> lock(stats_mutex);
+                            stats.strategy_fallbacks.fetch_add(1);
+                        }
+                        if (trial.exhausted) {
+                            synth_log = "synth: " + dest + " - every candidate failed, "
+                                        "starting a new round with " + genes.name();
+                        }
+                    } else {
+                        const auto v = synth.on_data(dst_ip, src_port, dst_port, seq);
+                        if (v.newly_locked) {
+                            {
+                                std::lock_guard<std::mutex> lock(stats_mutex);
+                                stats.strategy_locked.fetch_add(1);
+                            }
+                            synth_log = "synth: " + v.destination + " works with " +
+                                synth.candidates()[static_cast<size_t>(v.candidate)].name() +
+                                " (attempt " + std::to_string(v.attempts) + ")";
+                        }
+                    }
+                }
+                if (!synth_log.empty()) log(synth_log);
+            }
+
             if (!is_client_hello || !effective_cfg.enable_tcp_split) {
                 // CRIT-1: check return value (non-ClientHello passthrough)
                 if (!WinDivertSend(wd_handle_, packet, packet_len, nullptr, &addr)) {
@@ -2458,9 +2526,11 @@ public:
                         ModuleHooks hooks_snap;
                         { std::lock_guard<std::mutex> lk(hooks_mutex_); hooks_snap = hooks_; }
                         if (hooks_snap.get_send_delay_us) {
-                            int64_t delay_us = hooks_snap.get_send_delay_us(
-                                real_pkt.data(), static_cast<uint32_t>(real_pkt.size()));
-                            if (delay_us > 0 && delay_us < 10000000) {
+                            int64_t delay_us = clamp_inline_send_delay_us(
+                                hooks_snap.get_send_delay_us(
+                                    real_pkt.data(),
+                                    static_cast<uint32_t>(real_pkt.size())));
+                            if (delay_us > 0) {
                                 std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
                             }
                         }
@@ -2545,9 +2615,11 @@ public:
                         ModuleHooks hooks_snap;
                         { std::lock_guard<std::mutex> lk(hooks_mutex_); hooks_snap = hooks_; }
                         if (hooks_snap.get_send_delay_us) {
-                            int64_t delay_us = hooks_snap.get_send_delay_us(
-                                real_pkt.data(), static_cast<uint32_t>(real_pkt.size()));
-                            if (delay_us > 0 && delay_us < 10000000) {
+                            int64_t delay_us = clamp_inline_send_delay_us(
+                                hooks_snap.get_send_delay_us(
+                                    real_pkt.data(),
+                                    static_cast<uint32_t>(real_pkt.size())));
+                            if (delay_us > 0) {
                                 std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
                             }
                         }
@@ -2607,9 +2679,11 @@ public:
                         ModuleHooks hooks_snap;
                         { std::lock_guard<std::mutex> lk(hooks_mutex_); hooks_snap = hooks_; }
                         if (hooks_snap.get_send_delay_us) {
-                            int64_t delay_us = hooks_snap.get_send_delay_us(
-                                real_pkt.data(), static_cast<uint32_t>(real_pkt.size()));
-                            if (delay_us > 0 && delay_us < 10000000) {
+                            int64_t delay_us = clamp_inline_send_delay_us(
+                                hooks_snap.get_send_delay_us(
+                                    real_pkt.data(),
+                                    static_cast<uint32_t>(real_pkt.size())));
+                            if (delay_us > 0) {
                                 std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
                             }
                         }
@@ -3354,6 +3428,36 @@ bool DPIBypass::update_config(const DPIConfig& config) {
 void DPIBypass::reset_stats() {
     std::lock_guard<std::mutex> lock(impl_->stats_mutex);
     impl_->stats.reset();
+}
+
+void DPIBypass::set_strategy_synthesis(bool enabled) {
+    impl_->synthesis_enabled_.store(enabled);
+}
+
+bool DPIBypass::strategy_synthesis() const {
+    return impl_->synthesis_enabled_.load();
+}
+
+std::string DPIBypass::strategy_report_json() const {
+    std::lock_guard<std::mutex> lk(impl_->synth_mutex_);
+    const bool synth = impl_->synthesis_enabled_.load();
+    const StrategySynthesizer& s = synth ? impl_->synth_ladder_ : impl_->synth_preset_;
+    std::ostringstream os;
+    os << "{\"mode\":\"" << (synth ? "synthesis" : "preset+fallback") << "\""
+       << ",\"destinations\":" << s.tracked_destinations()
+       << ",\"pending_flows\":" << s.pending_flows()
+       << ",\"wins\":" << s.wins()
+       << ",\"failures\":" << s.failures()
+       << ",\"switches\":" << s.switches()
+       << ",\"candidates\":[";
+    for (size_t i = 0; i < s.candidates().size(); ++i) {
+        if (i) os << ",";
+        os << "{\"name\":\"" << s.candidates()[i].name() << "\",\"score\":"
+           << static_cast<int>(s.global_score(static_cast<int>(i)) * 1000.0 + 0.5) / 1000.0
+           << "}";
+    }
+    os << "]}";
+    return os.str();
 }
 
 void DPIBypass::set_config_change_callback(ConfigChangeCallback callback) {

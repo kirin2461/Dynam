@@ -24,6 +24,7 @@ set(NCP_CORE_SRC_SOURCES
     src/network.cpp
     src/spoofer.cpp
     src/ncp_dpi.cpp
+    src/ncp_strategy_synth.cpp           # Per-destination strategy synthesis
     src/ncp_dpi_zapret.cpp
     # Bypass feature set (hostlists, proxy mode, blockcheck, detectors)
     src/ncp_hostlist.cpp
@@ -54,10 +55,13 @@ set(NCP_CORE_SRC_SOURCES
     # Anti ML-TSPU modules (Phase 1-5)
     src/ncp_adversarial.cpp      # Phase 1: adversarial padding
     src/ncp_flow_shaper.cpp      # Phase 2: flow-level traffic shaping
+    src/ncp_optimal_transport.cpp # 1-D Wasserstein-1 + exact quantile shaping
     src/ncp_probe_resist.cpp     # Phase 3: active probing resistance
     src/ncp_orchestrator.cpp     # Phase 4: unified pipeline orchestrator
     src/ncp_port_knock.cpp       # Phase 5: port knocking (TOTP/SPA/covert)
     src/ncp_spa.cpp              # Enterprise SPA (Ed25519 + ipset)
+    src/ncp_server_identity.cpp  # Long-term server identity + known_servers pin store
+    src/ncp_server_roster.cpp    # Server-side connection roster + LAN classification
     src/ncp_reality.cpp          # Enterprise M1: XTLS-Reality-style fallback
     src/ncp_stegodns.cpp         # Enterprise M4: steganographic DNS discovery
     src/ncp_porthop.cpp          # M2: UDP port-hopping transport
@@ -128,6 +132,7 @@ set(NCP_CORE_SRC_SOURCES
     include/ncp_geneva_engine.hpp
     include/ncp_adversarial.hpp
     include/ncp_flow_shaper.hpp
+    include/ncp_optimal_transport.hpp
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
     include/ncp_port_knock.hpp
@@ -197,6 +202,7 @@ set(NCP_CORE_INCLUDE_HEADERS
     # Anti ML-TSPU headers (Phase 1-5)
     include/ncp_adversarial.hpp
     include/ncp_flow_shaper.hpp
+    include/ncp_optimal_transport.hpp
     include/ncp_probe_resist.hpp
     include/ncp_orchestrator.hpp
     include/ncp_port_knock.hpp

@@ -1,5 +1,6 @@
 #include "../include/ncp_e2e.hpp"
 #include "../include/ncp_secure_memory.hpp"
+#include "../include/ncp_server_identity.hpp"
 #include <sodium.h>
 #include <sstream>
 #include <iomanip>
@@ -389,6 +390,50 @@ void append_blob(std::vector<uint8_t>& out, const uint8_t* data, size_t len) {
 void append_blob(std::vector<uint8_t>& out, const SecureMemory& mem) { append_blob(out, mem.data(), mem.size()); }
 void append_blob(std::vector<uint8_t>& out, const std::vector<uint8_t>& vec) { append_blob(out, vec.data(), vec.size()); }
 
+/**
+ * Append the signed identity trailer to a key-exchange response.
+ *
+ * Layout (see ncp_server_identity.hpp):
+ *   [1] flag | [32] server Ed25519 pubkey | [64] signature
+ *
+ * The signature covers the binding digest of (request hash, responder
+ * ephemeral key). Binding the responder's ephemeral key is what stops an
+ * on-path attacker from keeping a valid signature while substituting a
+ * key of their own — signing only the request hash would authenticate
+ * the transcript but not the key agreement.
+ *
+ * Fail-closed: if an identity is configured but signing fails, the
+ * trailer is NOT written and the caller must abort rather than emit an
+ * unsigned response that a permissive peer could accept. Returning false
+ * signals that.
+ */
+bool append_identity_trailer(std::vector<uint8_t>& response,
+                             const std::shared_ptr<ServerIdentity>& identity,
+                             const uint8_t request_hash[32],
+                             const SecureMemory& responder_pubkey) {
+    if (!identity || !identity->has_key()) return true;  // anonymous responder
+
+    uint8_t binding[32];
+    // SecureMemory -> bytes: the ephemeral public key is public material,
+    // so a plain copy into a local vector is the right conversion here.
+    const std::vector<uint8_t> pubkey_bytes(responder_pubkey.data(),
+                                            responder_pubkey.data() + responder_pubkey.size());
+    if (!handshake_binding_digest(request_hash, pubkey_bytes, binding)) {
+        return false;
+    }
+    const std::vector<uint8_t> sig = identity->sign_transcript(binding);
+    const std::vector<uint8_t> pk = identity->public_key();
+    if (sig.size() != server_identity_wire::kSignatureBytes ||
+        pk.size() != server_identity_wire::kPublicKeyBytes) {
+        return false;
+    }
+
+    response.push_back(server_identity_wire::kSignedResponseFlag);
+    response.insert(response.end(), pk.begin(), pk.end());
+    response.insert(response.end(), sig.begin(), sig.end());
+    return true;
+}
+
 // SecureMemory is move-only by design; this is the explicit, deliberate
 // byte-copy used to build tentative ratchet state that is discarded unless
 // the inbound message authenticates.
@@ -459,6 +504,12 @@ struct E2ESession::Impl {
 
     SecureMemory sending_chain_key;
     SecureMemory receiving_chain_key;
+
+    // Server identity as presented during the handshake. Empty when the
+    // handshake was anonymous (or when this side is the responder).
+    std::vector<uint8_t> peer_identity_key;
+    bool peer_identity_verified = false;
+    bool peer_identity_pinned = false;
 
     explicit Impl(const E2EConfig& cfg) : config(cfg) {
         generate_session_id();
@@ -848,7 +899,14 @@ std::vector<uint8_t> E2ESession::process_key_exchange_request(const std::vector<
         uint8_t hash[32];
         crypto_generichash(hash, 32, request.data(), request.size(), nullptr, 0);
         response.insert(response.end(), hash, hash + 32);
-        
+
+        if (!append_identity_trailer(response, pImpl_->config.server_identity,
+                                     hash, local_keys.public_key)) {
+            throw std::runtime_error(
+                "E2ESession::process_key_exchange_request: server identity "
+                "signing failed; refusing to emit an unauthenticated response");
+        }
+
         pImpl_->remote_ratchet_pub = peer_public;
         pImpl_->is_initiator = false;
         init_ratchet_keys();
@@ -875,6 +933,17 @@ std::vector<uint8_t> E2ESession::process_key_exchange_request(const std::vector<
     crypto_generichash(hash, 32, request.data(), request.size(), nullptr, 0);
     response.insert(response.end(), hash, hash + 32);
 
+    if (!append_identity_trailer(response, pImpl_->config.server_identity,
+                                 hash, local_keys.public_key)) {
+        // The session state was already advanced above. Tear it back down:
+        // returning an unsigned response here would be exactly the silent
+        // downgrade this feature exists to prevent.
+        pImpl_->state = E2ESessionState::SessionExpired;
+        throw std::runtime_error(
+            "E2ESession::process_key_exchange_request: server identity "
+            "signing failed; refusing to emit an unauthenticated response");
+    }
+
     return response;
 }
 
@@ -895,6 +964,7 @@ bool E2ESession::complete_key_exchange(const std::vector<uint8_t>& response, con
     // R7-SEC-03: Verify transcript hash with correct offset for each protocol.
     // For DH protocols (X25519, X448, P256): hash is at response[4 + pk_len]
     // For Kyber1024: hash is at response[4 + pk_len + 2 + ct_len] (after ciphertext)
+    size_t identity_trailer_offset = 0;
     if (response[0] == 0x20) {
         size_t hash_offset = 4 + pk_len;
 
@@ -918,9 +988,78 @@ bool E2ESession::complete_key_exchange(const std::vector<uint8_t>& response, con
         if (sodium_memcmp(received_hash, pImpl_->last_kx_request_hash.data(), 32) != 0) {
             return false; // Hash mismatch
         }
+        identity_trailer_offset = hash_offset + 32;
     }
 
     std::vector<uint8_t> peer_public(response.begin() + 4, response.begin() + 4 + pk_len);
+
+    // ── Server identity verification ──────────────────────────────────────
+    //
+    // The trailer authenticates the peer's long-term identity and binds the
+    // responder's ephemeral key into the signature. Rules, in order of
+    // strictness:
+    //   - trailer present but malformed/forged  -> reject (never a downgrade)
+    //   - trailer absent and require_server_identity -> reject
+    //   - trailer absent and not required       -> accept, but record that
+    //                                              the peer is unverified
+    // A signature is only meaningful when the response carried a transcript
+    // hash; without one there is nothing to bind, so it is treated as
+    // unsigned.
+    bool have_identity = false;
+    if (identity_trailer_offset != 0 &&
+        response.size() > identity_trailer_offset &&
+        response[identity_trailer_offset] == server_identity_wire::kSignedResponseFlag) {
+        const size_t need = identity_trailer_offset + server_identity_wire::kTrailerBytes;
+        if (response.size() < need) return false;  // truncated trailer
+
+        std::vector<uint8_t> id_key(
+            response.begin() + identity_trailer_offset + 1,
+            response.begin() + identity_trailer_offset + 1 + server_identity_wire::kPublicKeyBytes);
+        std::vector<uint8_t> id_sig(
+            response.begin() + identity_trailer_offset + 1 + server_identity_wire::kPublicKeyBytes,
+            response.begin() + need);
+
+        uint8_t binding[32];
+        if (!handshake_binding_digest(pImpl_->last_kx_request_hash.data(),
+                                      peer_public, binding)) {
+            return false;
+        }
+        if (!ServerIdentity::verify_transcript(binding, id_key, id_sig)) {
+            return false;  // forged or corrupted identity
+        }
+        bool pinned = false;
+        if (pImpl_->config.pin_store && !pImpl_->config.pin_host.empty()) {
+            const PinCheckResult pin = pImpl_->config.pin_store->check(
+                pImpl_->config.pin_host, id_key, /*trust_on_first_use=*/true);
+            if (pin.verdict == PinVerdict::Changed) {
+                // A valid signature from a *different* long-term key is what
+                // a MITM with its own identity looks like. It is a hard
+                // failure, not a re-trust: the operator must remove the old
+                // pin deliberately after checking the new fingerprint.
+                pImpl_->peer_identity_key.clear();
+                pImpl_->peer_identity_verified = false;
+                pImpl_->peer_identity_pinned = false;
+                pImpl_->state = E2ESessionState::SessionExpired;
+                return false;
+            }
+            pinned = (pin.verdict == PinVerdict::Match);
+        }
+        pImpl_->peer_identity_key = std::move(id_key);
+        pImpl_->peer_identity_verified = true;
+        pImpl_->peer_identity_pinned = pinned;
+        have_identity = true;
+    }
+
+    if (!have_identity) {
+        pImpl_->peer_identity_key.clear();
+        pImpl_->peer_identity_verified = false;
+        pImpl_->peer_identity_pinned = false;
+        if (pImpl_->config.require_server_identity) {
+            // Anonymous responder, and the client refuses to continue.
+            pImpl_->state = E2ESessionState::SessionExpired;
+            return false;
+        }
+    }
 
     // For Kyber1024: response includes ciphertext from receiver
     if (local_keys.protocol == KeyExchangeProtocol::Kyber1024 && response.size() >= 4u + pk_len + 2) {
@@ -1509,6 +1648,28 @@ bool E2ESession::restore_session_state(const std::vector<uint8_t>& data) {
 }
 
 E2ESessionState E2ESession::get_state() const { return pImpl_->state; }
+bool E2ESession::peer_identity_verified() const {
+    std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
+    return pImpl_->peer_identity_verified;
+}
+
+std::vector<uint8_t> E2ESession::peer_identity_key() const {
+    std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
+    return pImpl_->peer_identity_key;
+}
+
+IdentityFingerprint E2ESession::peer_identity_fingerprint() const {
+    std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
+    IdentityFingerprint fp{};
+    fingerprint_of_public_key(pImpl_->peer_identity_key, fp);
+    return fp;
+}
+
+bool E2ESession::peer_identity_pinned() const {
+    std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);
+    return pImpl_->peer_identity_pinned;
+}
+
 bool E2ESession::is_established() const { std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex); return pImpl_->state == E2ESessionState::SessionEstablished; }
 bool E2ESession::is_expired() const { 
     std::lock_guard<std::recursive_mutex> lock(pImpl_->mutex);

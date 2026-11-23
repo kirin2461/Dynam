@@ -10,9 +10,13 @@
 #include "ncp_zapret_import.hpp"
 #include "ncp_proxy.hpp"
 #include "ncp_dpi_detector.hpp"
+#include "ncp_adversary_tester.hpp"
 #include "ncp_blockcheck.hpp"
 
 #include <fstream>
+#include <memory>
+#include <thread>
+#include <chrono>
 
 #include "ncp_test_temp.hpp"
 #include <cstring>
@@ -566,4 +570,247 @@ TEST(ClientHello, ServerNameExtensionIsWellFormed) {
     EXPECT_TRUE(info.valid);
     EXPECT_EQ(info.sni, host);
     EXPECT_EQ(info.sni_value_len, host.size());
+}
+
+// ==============================================================================
+// SizeErrorLearner + AdversaryTester learning (Task 1)
+// ==============================================================================
+
+TEST(SizeErrorLearner, PriorBeforeMinSamples) {
+    ncp::DPI::SizeErrorLearner learner;
+    ncp::DPI::SizeErrorFeatures f;
+    f.error_rate = 0.0;
+    f.ks_distance = 0.0;
+    double clean = learner.predict(f);
+    EXPECT_GE(clean, 0.0);
+    EXPECT_LE(clean, 1.0);
+    EXPECT_DOUBLE_EQ(clean, 0.15);  // pristine window: the prior's floor
+
+    f.error_rate = 1.0;
+    f.ks_distance = 1.0;
+    double bad = learner.predict(f);
+    EXPECT_GT(bad, clean) << "errors + KS deviation must raise detection risk";
+    EXPECT_DOUBLE_EQ(bad, 0.98);  // most suspicious window saturates the clamp
+}
+
+TEST(SizeErrorLearner, FromSnapshotComputesStats) {
+    ncp::DPI::FlowSnapshot snap;
+    snap.packet_sizes = {100, 100, 200, 1400};
+    auto f = ncp::DPI::SizeErrorLearner::from_snapshot(snap, 0.25);
+    EXPECT_DOUBLE_EQ(f.size_mean, 450.0);
+    EXPECT_GT(f.size_cv, 0.0);
+    EXPECT_DOUBLE_EQ(f.frac_small, 0.5);    // 100,100 <= 128
+    EXPECT_DOUBLE_EQ(f.frac_large, 0.25);   // 1400 >= 1200
+    EXPECT_DOUBLE_EQ(f.error_rate, 0.25);
+}
+
+TEST(SizeErrorLearner, ObserveCountsSamples) {
+    ncp::DPI::SizeErrorLearner learner;
+    ncp::DPI::SizeErrorFeatures f;
+    learner.observe(f, true);
+    learner.observe(f, false);
+    EXPECT_EQ(learner.samples(), 2u);
+    auto w = learner.weights();
+    EXPECT_EQ(w.size(), 9u);
+}
+
+TEST(SizeErrorLearner, LearnsSeparablePattern) {
+    ncp::DPI::SizeErrorLearner::Params p;
+    p.min_samples = 0;      // go straight to the learned model
+    p.learning_rate = 0.3;
+    ncp::DPI::SizeErrorLearner learner(p);
+
+    ncp::DPI::SizeErrorFeatures good;
+    good.error_rate = 0.0;
+    good.ks_distance = 0.0;
+    ncp::DPI::SizeErrorFeatures bad;
+    bad.error_rate = 1.0;
+    bad.ks_distance = 1.0;
+
+    for (int i = 0; i < 400; ++i) {
+        learner.observe(good, false);
+        learner.observe(bad, true);
+    }
+    EXPECT_GT(learner.predict(bad), learner.predict(good));
+    EXPECT_GT(learner.predict(bad), 0.6);
+    EXPECT_LT(learner.predict(good), 0.4);
+}
+
+TEST(SizeErrorLearner, ResetClearsModel) {
+    ncp::DPI::SizeErrorLearner learner;
+    ncp::DPI::SizeErrorFeatures f;
+    learner.observe(f, true);
+    learner.reset();
+    EXPECT_EQ(learner.samples(), 0u);
+    auto w = learner.weights();
+    for (double v : w) EXPECT_DOUBLE_EQ(v, 0.0);
+}
+
+TEST(AdversaryTesterLearning, NoProbabilityWithoutLearner) {
+    ncp::DPI::AdversaryTesterConfig cfg;
+    cfg.window_packets = 8;   // above the packets we record, so no auto-evaluation
+    ncp::DPI::AdversaryTester tester(cfg);
+    EXPECT_DOUBLE_EQ(tester.last_detection_probability(), -1.0);
+
+    for (int i = 0; i < 3; ++i) tester.record_packet(std::vector<uint8_t>(300, 7));
+    auto report = tester.evaluate_flow();
+    EXPECT_DOUBLE_EQ(report.learned_detection_probability, -1.0);
+    EXPECT_DOUBLE_EQ(tester.last_detection_probability(), -1.0);
+}
+
+TEST(AdversaryTesterLearning, AttachedLearnerProducesEstimate) {
+    ncp::DPI::AdversaryTesterConfig cfg;
+    cfg.window_packets = 8;
+    ncp::DPI::AdversaryTester tester(cfg);
+    auto learner = std::make_shared<ncp::DPI::SizeErrorLearner>();
+    tester.set_size_learner(learner);
+    ASSERT_NE(tester.get_size_learner(), nullptr);
+
+    for (int i = 0; i < 3; ++i) tester.record_packet(std::vector<uint8_t>(300, 7));
+    tester.record_error();
+    auto report = tester.evaluate_flow();
+
+    ASSERT_EQ(report.snapshot.packet_count, 3u);
+    EXPECT_GE(report.learned_detection_probability, 0.0);
+    EXPECT_LE(report.learned_detection_probability, 1.0);
+    EXPECT_EQ(learner->samples(), 1u);
+    EXPECT_DOUBLE_EQ(tester.last_detection_probability(),
+                     report.learned_detection_probability);
+}
+
+// ==============================================================================
+// DpiDetector per-host reports (Task 3)
+// ==============================================================================
+
+TEST(DpiDetectorReports, HostReportsSortedAndCounted) {
+    DpiDetector d(16, 1);
+    d.on_reset_after_hello("zeta.example");
+    d.on_timeout("alpha.example");
+    d.on_timeout("alpha.example");
+
+    auto reports = d.host_reports();
+    ASSERT_EQ(reports.size(), 2u);
+    EXPECT_EQ(reports[0].host, "alpha.example");   // sorted
+    EXPECT_EQ(reports[1].host, "zeta.example");
+    EXPECT_EQ(reports[0].events, 1u);              // only the blocking timeout emits an event
+    EXPECT_EQ(reports[0].consecutive_timeouts, 2);
+    EXPECT_TRUE(reports[0].blocked);               // timeout threshold 1
+    EXPECT_TRUE(reports[1].blocked);               // rst marks blocked
+}
+
+TEST(DpiDetectorReports, ResetAllClearsState) {
+    DpiDetector d(16, 1);
+    d.on_reset_after_hello("x.example");
+    ASSERT_EQ(d.total_events(), 1u);
+
+    d.reset_all();
+    EXPECT_EQ(d.total_events(), 0u);
+    EXPECT_TRUE(d.host_reports().empty());
+    EXPECT_TRUE(d.blocked_hosts().empty());
+    EXPECT_TRUE(d.recent_events(10).empty());
+}
+
+TEST(DpiDetectorReports, BlockTtlExpires) {
+    DpiDetector d(16, 1);
+    d.set_block_ttl(std::chrono::milliseconds(1));
+    d.on_reset_after_hello("t.example");
+    EXPECT_FALSE(d.blocked_hosts().empty());
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    EXPECT_TRUE(d.blocked_hosts().empty()) << "block should expire after its TTL";
+    auto reports = d.host_reports();
+    ASSERT_EQ(reports.size(), 1u);
+    EXPECT_FALSE(reports[0].blocked);
+}
+
+// ==============================================================================
+// Wasserstein-1 size-shape metric (W1 upgrade)
+// ==============================================================================
+
+TEST(AdversaryTesterW1, UniformMaxSizeFlowScoresFarFromReference) {
+    ncp::DPI::AdversaryTesterConfig cfg;
+    cfg.window_packets = 64;               // above what we record: no auto-eval
+    ncp::DPI::AdversaryTester tester(cfg);
+
+    // Constant 1460-byte packets are the pathological "pad everything to MTU"
+    // flow: a DPI's size model sees a point mass, not a browser.
+    for (int i = 0; i < 20; ++i)
+        tester.record_packet(std::vector<uint8_t>(1460, 0x41));
+
+    auto report = tester.evaluate_flow();
+    ASSERT_EQ(report.snapshot.packet_count, 20u);
+    // Reference web_browsing mass sits at 64..1460; W1 of a point mass at 1460
+    // is E|1460 - X| > 1000 bytes.
+    EXPECT_GT(report.scores.w1_distance, 800.0);
+}
+
+TEST(AdversaryTesterW1, ReferenceShapedFlowScoresLow) {
+    ncp::DPI::AdversaryTesterConfig cfg;
+    cfg.window_packets = 64;
+    ncp::DPI::AdversaryTester tester(cfg);
+
+    // Proportions of the web_browsing size model: 52(.30) 150(.15) 350(.10)
+    // 580(.08) 1200(.12) 1460(.25). Emit that mix directly.
+    //
+    // The residual is not zero: ReferenceProfile stores only a CDF at bucket
+    // boundaries, so the reconstructed reference places each bucket's mass at
+    // its upper boundary. A browser mode at 52 bytes is therefore priced as 64.
+    // That discretisation bias is bounded by one bucket width and is why the
+    // threshold below is ~3x looser than the uniform-MTU case.
+    static const size_t sizes[]  = {52, 150, 350, 580, 1200, 1460};
+    static const int    counts[] = { 6,   3,   2,   2,    2,    5};
+    for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); ++k)
+        for (int i = 0; i < counts[k]; ++i)
+            tester.record_packet(std::vector<uint8_t>(sizes[k], 0x41));
+
+    auto report = tester.evaluate_flow();
+    // ~264 bytes by hand: mass displacement, not detection failure.
+    EXPECT_LT(report.scores.w1_distance, 300.0);
+}
+
+// A bound alone cannot distinguish "correctly low" from "not computed at all":
+// with W1 stubbed to 0 the previous test passes vacuously. This one compares
+// the two flows in the same units, so a zero-vs-zero implementation fails.
+TEST(AdversaryTesterW1, UniformPaddingScoresWorseThanReferenceMix) {
+    auto w1_for = [](bool uniform_max) {
+        ncp::DPI::AdversaryTesterConfig cfg;
+        cfg.window_packets = 64;
+        ncp::DPI::AdversaryTester tester(cfg);
+        if (uniform_max) {
+            for (int i = 0; i < 20; ++i)
+                tester.record_packet(std::vector<uint8_t>(1460, 0x41));
+        } else {
+            static const size_t sizes[]  = {52, 150, 350, 580, 1200, 1460};
+            static const int    counts[] = { 6,   3,   2,   2,    2,    5};
+            for (size_t k = 0; k < sizeof(sizes) / sizeof(sizes[0]); ++k)
+                for (int i = 0; i < counts[k]; ++i)
+                    tester.record_packet(std::vector<uint8_t>(sizes[k], 0x41));
+        }
+        return tester.evaluate_flow().scores.w1_distance;
+    };
+
+    const double uniform = w1_for(true);
+    const double mixed   = w1_for(false);
+    EXPECT_GT(uniform, 2.0 * mixed);
+}
+TEST(HeuristicScoresW1, DisplacedSizesLowerStealth) {
+    ncp::DPI::HeuristicScores base{};
+    base.entropy_score = 0.95;
+    base.chi_squared_pvalue = 0.8;
+    base.ks_distance = 0.0;
+    base.w1_distance = 0.0;
+    base.size_variance_ratio = 1.0;
+    base.timing_cov = 0.0;
+    base.burst_anomaly = 0.0;
+
+    ncp::DPI::HeuristicScores shifted = base;
+    shifted.w1_distance = 600.0;      // every size displaced by 600 bytes
+
+    EXPECT_GT(base.aggregate_stealth(), shifted.aggregate_stealth());
+    // W_W1 = 0.05 with a 75-byte half-mark: 600 bytes leaves ~0.0056 of the term.
+    EXPECT_NEAR(base.aggregate_stealth() - shifted.aggregate_stealth(),
+                0.05 * (1.0 - 1.0 / (1.0 + 600.0 / 75.0)), 1e-9);
+    EXPECT_NEAR(shifted.aggregate_stealth(),
+                0.25 * 0.95 + 0.25 * 0.8 + 0.10 * 1.0 + 0.05 * (1.0 / 9.0) +
+                0.10 * 1.0 + 0.15 * 1.0 + 0.10 * 1.0, 1e-9);
 }

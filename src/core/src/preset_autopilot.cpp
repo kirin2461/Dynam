@@ -208,6 +208,7 @@ public:
 
     // ── v2 escalation state (under m unless noted) ──
     int level = 0;                          // 0 direct, 1 preset, 2 augmented, 3 geneva
+    int escalations_total = 0;              // L2/L3 episodes entered (incl. no-preset ones)
     std::vector<std::string> active_features;  // applied L2 rungs (+ geneva marker)
     long live_score = 0;                    // score of the currently applied config
     int deescalate_ok_rounds = 0;           // consecutive rounds with healthy direct
@@ -444,13 +445,19 @@ public:
             std::lock_guard<std::mutex> lk(m);
             hosts = cfg.probe_hosts;
         }
+        bool tcp_reachable = false;
         for (const auto& h : hosts) {
             BlockcheckProbe q = direct_probe(h, kQuickProbeTimeoutMs);
             if (stop_flag.load()) return false;
             if (q.ok) return true;
+            // TCP completed but the TLS stage did not. Under system-wide
+            // interception the probe is itself shaped by the live preset, so
+            // a TLS timeout here says nothing about the link being down.
+            // Let the selection stage decide instead of declaring degraded-net.
+            if (q.tcp_connected) tcp_reachable = true;
             if (last_out) *last_out = q;
         }
-        return false;
+        return tcp_reachable;
     }
 
     // ── STARTUP-SELECTION (SPEC §5.1) — runs once, no lock while probing ──
@@ -972,6 +979,7 @@ public:
                 }
             }
             episode_active = true;
+            ++escalations_total;
             max_rungs = cfg.augment_max_rungs;
             min_acc = cfg.min_acceptable_score;
             hyst = cfg.hysteresis_pct;
@@ -982,14 +990,21 @@ public:
         } guard{m, episode_active};
 
         // Base preset: the highest-scoring candidate even below the threshold
-        // (L2 = best preset + augmentations); fall back to the current preset
-        // or the first candidate when no scores exist at all.
+        // (L2 = best preset + augmentations).
+        //
+        // Only a candidate with POSITIVE evidence may replace the live config.
+        // If every candidate scored 0, the probes measured nothing at all
+        // (every reference host failed at the same stage) and swapping a
+        // possibly working fallback for an arbitrary preset is a coin flip
+        // that can take connectivity down — augment the live config instead
+        // and leave its preset untouched.
         DPI::DPIPreset base = DPI::DPIPreset::NONE;
         CandidateScore base_cs;
         const CandidateScore* best_any = nullptr;
         for (const auto& s : sel.scores)
             if (!best_any || s.score > best_any->score) best_any = &s;
-        if (best_any) {
+        const bool have_evidence = best_any && best_any->score > 0;
+        if (have_evidence) {
             base = best_any->preset;
             base_cs = *best_any;
         } else {
@@ -1006,7 +1021,14 @@ public:
         }
 
         // ── L2: apply the base preset (event reason="escalation-l2") ──
-        apply_winner(base, base_cs, "escalation-l2", 0, /*target_level=*/2);
+        if (have_evidence) {
+            apply_winner(base, base_cs, "escalation-l2", 0, /*target_level=*/2);
+        } else {
+            std::lock_guard<std::mutex> lk(m);
+            // No measured winner: keep the live (fallback) configuration and
+            // still enter the augmentation level so rungs get probed on it.
+            level = 2;
+        }
         {
             std::lock_guard<std::mutex> lk(m);
             if (note == "apply-failed") return true;  // engine rejected; stay
@@ -1394,6 +1416,7 @@ std::string PresetAutoPilot::to_stats_json() const {
       << ",\"baseline_rtt_ms\":" << impl_->baseline_rtt_ms
       << ",\"consec_fail_rounds\":" << impl_->consec_fail_rounds
       << ",\"switches_total\":" << impl_->switches_total
+      << ",\"escalations_total\":" << impl_->escalations_total
       << ",\"last_switch_ts\":" << impl_->last_switch_ts
       << ",\"last_probe\":{\"host\":\"" << pa_json_escape(impl_->last_probe.domain)
       << "\",\"ok\":" << (impl_->last_probe.ok ? "true" : "false")

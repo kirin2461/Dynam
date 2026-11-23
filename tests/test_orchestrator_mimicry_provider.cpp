@@ -32,6 +32,7 @@
 #include "ncp_mimicry_session_provider.hpp"
 #include "ncp_orchestrator.hpp"
 #include "ncp_profile_transition.hpp"
+#include "test_identity.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -119,6 +120,7 @@ NcpMimicrySession::Config make_session_template(
     NcpMimicrySession::Config c;
     c.role = role;
     c.e2e_config.enable_padding = false;  // deterministic wire sizes
+    c.e2e_config.server_identity = test_server_identity();
     c.stable_profile = profile_ref_from_descriptor(*desc);
     c.stable_layout = profile_layout_from_descriptor(*desc);
     c.stable_mimic = TrafficMimicry::MimicProfile::GENERIC_UDP;

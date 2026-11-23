@@ -37,6 +37,7 @@
 #include <mutex>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <optional>
 
 namespace ncp {
@@ -48,6 +49,7 @@ struct HeuristicScores {
     double entropy_score;       ///< 0.0 (obvious plaintext) — 1.0 (indistinguishable from random)
     double chi_squared_pvalue;  ///< >0.05 = passes, <0.01 = definitely detected
     double ks_distance;         ///< <0.1 = good mimicry, >0.3 = poor
+    double w1_distance = 0.0;   ///< Wasserstein-1 (bytes) vs reference; 0 = identical shape
     double size_variance_ratio; ///< observed_var / reference_var; ~1.0 = good
     double timing_cov;          ///< coefficient of variation σ/μ; close to reference = good
     double burst_anomaly;       ///< 0.0 = normal, 1.0 = extreme anomaly
@@ -55,22 +57,34 @@ struct HeuristicScores {
     /// Weighted aggregate stealth score: 0.0 = detected, 1.0 = invisible.
     /// Initial weights are hardcoded; ncp_ml_orchestrator (Phase 2) can
     /// learn optimal weights from real-world data.
+    ///
+    /// Size shape is scored twice on purpose: KS bounds the CDF gap, W1 prices
+    /// the actual displacement in bytes. KS alone is insensitive to a uniform
+    /// shift of every packet, which is exactly the failure mode of naive
+    /// padding; W1 sees it. KS keeps the larger share of the size budget
+    /// because W1 is in bytes and its scale is workload-dependent.
     double aggregate_stealth() const {
         constexpr double W_ENTROPY  = 0.25;
         constexpr double W_CHI2     = 0.25;
-        constexpr double W_KS       = 0.15;
+        constexpr double W_KS       = 0.10;
+        constexpr double W_W1       = 0.05;
         constexpr double W_SIZE_VAR = 0.10;
         constexpr double W_TIMING   = 0.15;
         constexpr double W_BURST    = 0.10;
 
+        // Half-marks at 75 bytes: a flow whose sizes are displaced by one
+        // average packet header's worth already loses half the W1 component.
+        constexpr double W1_SCALE_BYTES = 75.0;
+
         double e = entropy_score;
         double c = chi_squared_pvalue > 1.0 ? 1.0 : chi_squared_pvalue;
         double k = 1.0 - (ks_distance > 1.0 ? 1.0 : ks_distance);
+        double w = 1.0 / (1.0 + std::fabs(w1_distance) / W1_SCALE_BYTES);
         double s = 1.0 / (1.0 + std::fabs(size_variance_ratio - 1.0));
         double t = 1.0 / (1.0 + std::fabs(timing_cov));
         double b = 1.0 - (burst_anomaly > 1.0 ? 1.0 : burst_anomaly);
 
-        return W_ENTROPY * e + W_CHI2 * c + W_KS * k +
+        return W_ENTROPY * e + W_CHI2 * c + W_KS * k + W_W1 * w +
                W_SIZE_VAR * s + W_TIMING * t + W_BURST * b;
     }
 
@@ -99,6 +113,66 @@ struct FlowSnapshot {
     double running_entropy_sum = 0.0;    ///< Σ per-packet shannon_entropy
     double running_chi2_sum = 0.0;       ///< Σ per-packet chi2 p-value
     size_t content_samples = 0;          ///< Number of packets with content metrics
+
+    // Connection errors observed in the same window (feed via record_error()).
+    size_t error_count = 0;
+};
+
+// ===== Online size/error learner (Task 1) =====
+//
+// Learns how windowed packet-size statistics and connection-error rates
+// relate to detection. A tiny logistic model updated by SGD — deliberately
+// dependency-free and inspectable. Until min_samples observations exist,
+// predict() returns a transparent heuristic prior.
+struct SizeErrorFeatures {
+    double size_mean = 0.0;    ///< mean payload size, bytes
+    double size_cv = 0.0;      ///< stddev / mean (0 if mean == 0)
+    double frac_small = 0.0;   ///< fraction of packets <= 128 B
+    double frac_large = 0.0;   ///< fraction of packets >= 1200 B
+    double error_rate = 0.0;   ///< errors / (packets + errors), [0,1]
+    double timing_cov = 0.0;   ///< coefficient of variation of IATs
+    double burst_anomaly = 0.0;///< [0,1] from burst_anomaly_score()
+    double ks_distance = 0.0;  ///< [0,1] from KS test
+};
+
+class SizeErrorLearner {
+public:
+    struct Params {
+        double learning_rate = 0.05;
+        double l2 = 0.001;
+        size_t min_samples = 8;
+    };
+
+    SizeErrorLearner();
+    explicit SizeErrorLearner(const Params& params);
+
+    void set_params(const Params& params);
+    Params get_params() const;
+
+    /// Estimated probability that this window is detected, [0,1].
+    double predict(const SizeErrorFeatures& f) const;
+
+    /// Update the model from an observed outcome (detected = true/false).
+    void observe(const SizeErrorFeatures& f, bool detected);
+
+    size_t samples() const;
+    /// Nine values: eight feature weights followed by the bias.
+    std::array<double, 9> weights() const;
+    void reset();
+
+    /// Derive features from a collected window plus an explicit error rate.
+    static SizeErrorFeatures from_snapshot(const FlowSnapshot& snapshot,
+                                           double error_rate);
+
+private:
+    static double sigmoid(double z);
+    static std::array<double, 8> normalize(const SizeErrorFeatures& f);
+
+    mutable std::mutex mutex_;
+    Params params_;
+    std::array<double, 8> w_{};
+    double bias_ = 0.0;
+    size_t samples_ = 0;
 };
 
 // ===== Reference Profile for KS-test and variance =====
@@ -156,6 +230,9 @@ struct TestReport {
     AdversarialStrategy strategy_tested;
     std::chrono::steady_clock::time_point timestamp;
     bool detected;         ///< aggregate_stealth < threshold
+    /// Learned P(detected) from the attached SizeErrorLearner, or -1 when no
+    /// learner is attached / the report came from a benchmark.
+    double learned_detection_probability = -1.0;
 };
 
 // ===== Main Class =====
@@ -225,6 +302,20 @@ public:
     std::vector<TestReport> get_history() const;
     void clear_history();
 
+    // ===== Size/error learning (Task 1) =====
+
+    /// Record a connection error (connect failure, RST, timeout) observed in
+    /// the current window. Errors feed SizeErrorFeatures::error_rate.
+    void record_error();
+
+    /// Attach a learner. When set, every flow evaluation also updates the
+    /// model and records its estimate in TestReport.
+    void set_size_learner(std::shared_ptr<SizeErrorLearner> learner);
+    std::shared_ptr<SizeErrorLearner> get_size_learner() const;
+
+    /// Most recent learned P(detected), or -1 before the first evaluation.
+    double last_detection_probability() const;
+
 private:
     /// Evaluate current window. Returns optional pending feedback
     /// (to be fired outside the lock).
@@ -247,6 +338,10 @@ private:
 
     // Feedback output
     FeedbackCallback feedback_cb_;
+
+    // Size/error learner (optional)
+    std::shared_ptr<SizeErrorLearner> learner_;
+    double last_prob_ = -1.0;
 };
 
 } // namespace DPI

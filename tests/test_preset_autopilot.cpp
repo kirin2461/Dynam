@@ -167,11 +167,42 @@ TEST(PresetAutoPilotStartup, NoNetworkGoesDegradedNet) {
     EXPECT_LT(ms, 2000);
 }
 
+// Under system-wide interception the connectivity probe is shaped by our own
+// live preset: TCP can complete while the TLS stage times out. That must not be
+// reported as degraded-net (a dead link) — selection must still run and pick a
+// preset that works.
+TEST(PresetAutoPilotStartup, ShapedTlsProbeDoesNotTripDegradedNet) {
+    std::atomic<int64_t> now{1000};
+    PresetAutoPilot::Config cfg;
+    cfg.candidates = {DPIPreset::RUNET_TSPU};
+    cfg.probe_hosts = {"a.test", "b.test"};
+    cfg.probe_timeout_ms = 100;
+    cfg.monitor_probe_timeout_ms = 100;
+    cfg.monitor_interval_sec = 0;
+    cfg.now_fn = [&now] { return now.load(); };
+    cfg.probe_fn = [](DPIPreset p, const std::string& h, int timeout) {
+        if (timeout == 2000) {  // quick connectivity gate
+            BlockcheckProbe q = mk_probe(h, false, 0, "timeout");
+            q.tcp_connected = true;  // TCP ok, TLS eaten by the live preset
+            return q;
+        }
+        return p == DPIPreset::RUNET_TSPU ? mk_probe(h, true, 40)
+                                          : mk_probe(h, false, 0);
+    };
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] {
+        return pa.current_preset() == DPIPreset::RUNET_TSPU;
+    }));
+    EXPECT_NE(pa.mode_string(), "degraded-net");
+    pa.stop();
+}
+
 // A blocked first reference host (youtube.com throttled by DPI while other
 // hosts answer) must NOT be mistaken for a dead network: the connectivity
 // gate succeeds on ANY reachable host and selection proceeds.
-TEST(PresetAutoPilotStartup, BlockedFirstHostDoesNotTripDegradedNet) {
-    ProbeBehavior pb;
+TEST(PresetAutoPilotStartup, BlockedFirstHostDoesNotTripDegradedNet) {    ProbeBehavior pb;
     {
         std::lock_guard<std::mutex> lk(pb.m);
         pb.direct_first_host_fails = true;  // a.test blocked, b/c.test answer
@@ -543,6 +574,34 @@ TEST(Escalation, AllPresetsFail_GoesToL2) {
     EXPECT_EQ(j.find("\"geneva\":"), std::string::npos);
 }
 
+// ── 1b. ZeroEvidenceKeepsLiveConfig ─────────────────────────────────────────
+// When every candidate scores 0 the probes measured nothing at all; swapping
+// the live (fallback) preset for an arbitrary candidate is a coin flip that
+// can take connectivity down. Augmentation may run, the preset must not move.
+TEST(Escalation, ZeroEvidenceKeepsLiveConfig) {
+    EscProbe ep;
+    {
+        std::lock_guard<std::mutex> lk(ep.m);
+        ep.live_ok = false;    // rungs fail too
+        ep.direct_ok = false;
+    }
+    std::atomic<int64_t> now{1000};
+    auto cfg = mk_esc_cfg(ep, now);
+
+    PresetAutoPilot pa;
+    ASSERT_TRUE(pa.start(nullptr, cfg));
+    ASSERT_TRUE(wait_for([&] {
+        return pa.to_stats_json().find("\"note\":\"geneva-unavailable\"") !=
+               std::string::npos;
+    }));
+    pa.stop();
+
+    const std::string j = pa.to_stats_json();
+    EXPECT_EQ(j.find("\"escalation-l2\""), std::string::npos)
+        << "no base preset may be applied without positive evidence";
+    EXPECT_EQ(pa.current_preset(), DPIPreset::NONE);  // fallback kept
+}
+
 // ── 2. RungRevertOnNoImprovement ────────────────────────────────────────────
 TEST(Escalation, RungRevertOnNoImprovement) {
     EscProbe ep;
@@ -719,14 +778,17 @@ TEST(Escalation, CooldownRespected) {
     auto cfg = mk_esc_cfg(ep, now);  // escalation_cooldown_sec = 300 (default)
     // no evolver_factory and no geneva_fitness → episodes end at L2
     // (note="geneva-unavailable"), making repeated episodes observable via
-    // switches_total.
+    // escalations_total.
+    //
+    // A no-evidence episode applies no base preset (switches_total stays 0),
+    // so the episode counter — not the switch counter — is the observable.
 
     PresetAutoPilot pa;
     ASSERT_TRUE(pa.start(nullptr, cfg));
     ASSERT_TRUE(wait_for([&] {
         return pa.to_stats_json().find("geneva-unavailable") != std::string::npos;
     }));
-    EXPECT_NE(pa.to_stats_json().find("\"switches_total\":1"), std::string::npos);
+    EXPECT_NE(pa.to_stats_json().find("\"escalations_total\":1"), std::string::npos);
 
     // Past the 60 s anti-storm floor but inside the escalation cooldown:
     // degradation re-selection runs, but the second L2 entry is gated.
@@ -735,13 +797,13 @@ TEST(Escalation, CooldownRespected) {
         return pa.to_stats_json().find("escalation-cooldown") != std::string::npos;
     }));
     std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_NE(pa.to_stats_json().find("\"switches_total\":1"), std::string::npos)
+    EXPECT_NE(pa.to_stats_json().find("\"escalations_total\":1"), std::string::npos)
         << "second episode must be blocked by escalation_cooldown_sec";
 
     // Past the cooldown → the second episode runs.
     now.store(1000 + 300);
     ASSERT_TRUE(wait_for([&] {
-        return pa.to_stats_json().find("\"switches_total\":2") != std::string::npos;
+        return pa.to_stats_json().find("\"escalations_total\":2") != std::string::npos;
     }));
     pa.stop();
 }

@@ -303,6 +303,23 @@ TEST_F(GenevaGATest, GetTopN_ReturnsNResults) {
     EXPECT_LE(top3.size(), 3u); // may have fewer if population is small
 }
 
+// Manual (synchronous) evolution — start() never called, so running_ is
+// false. evolve_one_generation() must still evaluate the freshly bred
+// children; otherwise selection operates on 0-fitness individuals forever.
+TEST_F(GenevaGATest, EvolveOneGeneration_Synchronous_EvaluatesChildren) {
+    GenevaGA ga;
+    ga.set_config(small_config());
+    ga.set_fitness_evaluator(mock_evaluator());
+    ga.set_target("127.0.0.1", 443);
+    ga.initialize_population();
+
+    ASSERT_FALSE(ga.is_running());
+    ga.evolve_one_generation();
+
+    EXPECT_GT(ga.get_stats().total_evaluations, 0u);
+    EXPECT_GT(ga.get_best().fitness.score(), 0.0);
+}
+
 TEST_F(GenevaGATest, GetStats_AfterGeneration) {
     GenevaGA ga;
     ga.set_config(small_config());
@@ -322,6 +339,122 @@ TEST_F(GenevaGATest, FitnessScore_ConnectedBaseIsHigh) {
     r.latency_ms  = 10.0;
     r.packet_loss = 0.0;
     EXPECT_GT(r.score(), 900.0);
+}
+
+TEST_F(GenevaGATest, FitnessScore_OverheadPenalizedAtEqualLatency) {
+    FitnessResult cheap;
+    cheap.connected = true;
+    cheap.latency_ms = 20.0;
+    cheap.packet_loss = 0.0;
+    cheap.overhead_ratio = 0.0;
+
+    FitnessResult expensive = cheap;
+    expensive.overhead_ratio = 2.0;   // three times the payload on the wire
+
+    EXPECT_GT(cheap.score(), expensive.score());
+    EXPECT_NEAR(cheap.score() - expensive.score(),
+                FitnessResult::kOverheadWeight * 2.0, 1e-9);
+}
+
+TEST_F(GenevaGATest, FitnessScore_OverheadPenaltyIsCapped) {
+    FitnessResult a;
+    a.connected = true;
+    a.latency_ms = 10.0;
+    a.packet_loss = 0.0;
+    a.overhead_ratio = FitnessResult::kOverheadCap;
+
+    FitnessResult b = a;
+    b.overhead_ratio = 1000.0;        // pathological amplification
+    EXPECT_DOUBLE_EQ(a.score(), b.score());
+
+    // Negative ratios are clamped, not rewarded.
+    FitnessResult c = a;
+    c.overhead_ratio = -5.0;
+    a.overhead_ratio = 0.0;
+    EXPECT_DOUBLE_EQ(a.score(), c.score());
+}
+
+TEST_F(GenevaGATest, FitnessScore_OverheadNeverDropsBelowFloor) {
+    FitnessResult r;
+    r.connected = true;
+    r.latency_ms = 5000.0;            // latency penalty saturates
+    r.packet_loss = 1.0;              // loss penalty saturates
+    r.retry_count = 100;
+    r.overhead_ratio = FitnessResult::kOverheadCap;
+    EXPECT_DOUBLE_EQ(r.score(), 1.0);
+}
+
+TEST_F(GenevaGATest, LowOverheadStrategyOutranksHighOverhead) {
+    GenevaGA ga;
+    GAConfig cfg = small_config();
+    cfg.population_size = 1;
+    cfg.elite_count = 0;
+    cfg.seed_presets = false;
+    cfg.min_steps = 1;
+    cfg.max_steps = 1;
+    ga.set_config(cfg);
+    ga.set_target("127.0.0.1", 443);
+
+    // Amplification grows with step count; latency is identical, so the ONLY
+    // thing separating the two genomes is the overhead term.
+    ga.set_fitness_evaluator(
+        [](const GenevaStrategy& s, const std::string&, uint16_t, int) -> FitnessResult {
+            FitnessResult r;
+            r.connected = true;
+            r.latency_ms = 10.0;
+            r.packet_loss = 0.0;
+            r.overhead_ratio = 0.5 * static_cast<double>(s.steps.size());
+            return r;
+        });
+
+    ga.initialize_population();       // one single-step genome
+
+    GenevaStrategy heavy;
+    for (int i = 0; i < 6; ++i) {
+        heavy.steps.push_back({GenevaAction::FRAGMENT, 0, 8, "fragment(8)"});
+    }
+    ga.inject_strategy(heavy);
+    ga.evaluate_population();
+
+    // Compare the two genomes by score, not by population order: a tie is
+    // exactly the regression this test exists to catch.
+    FitnessResult light, heavy_fit;
+    bool got_light = false, got_heavy = false;
+    for (const auto& ind : ga.get_top_n(64)) {
+        if (ind.strategy.steps.size() == 1) { light = ind.fitness; got_light = true; }
+        if (ind.strategy.steps.size() == 6) { heavy_fit = ind.fitness; got_heavy = true; }
+    }
+    ASSERT_TRUE(got_light);
+    ASSERT_TRUE(got_heavy);
+    EXPECT_LT(light.overhead_ratio, heavy_fit.overhead_ratio);
+    EXPECT_GT(light.score(), heavy_fit.score());
+}
+
+TEST_F(GenevaGATest, EvaluateIndividualAggregatesOverhead) {
+    GenevaGA ga;
+    GAConfig cfg = small_config();
+    cfg.population_size = 1;
+    cfg.seed_presets = false;
+    cfg.min_steps = 1;
+    cfg.max_steps = 1;
+    cfg.fitness_probes = 4;
+    ga.set_config(cfg);
+    ga.set_target("127.0.0.1", 443);
+    ga.set_fitness_evaluator(
+        [](const GenevaStrategy&, const std::string&, uint16_t, int) -> FitnessResult {
+            FitnessResult r;
+            r.connected = true;
+            r.latency_ms = 10.0;
+            r.packet_loss = 0.0;
+            r.overhead_ratio = 1.5;   // identical on every probe
+            return r;
+        });
+
+    ga.initialize_population();
+    ga.evaluate_population();
+
+    // Without aggregation the value would be lost in evaluate_individual().
+    EXPECT_DOUBLE_EQ(ga.get_best().fitness.overhead_ratio, 1.5);
 }
 
 TEST_F(GenevaGATest, FitnessScore_NotConnectedIsZero) {

@@ -32,6 +32,7 @@
 #include <vector>
 
 #include "ncp_transport_config.hpp"
+#include "test_identity.hpp"
 
 namespace ncp {
 namespace {
@@ -211,6 +212,7 @@ NcpMimicrySession::Config base_session_config(NcpMimicrySession::Role role) {
     NcpMimicrySession::Config c;
     c.role = role;
     c.e2e_config.enable_padding = false;
+    c.e2e_config.server_identity = test_server_identity();
     c.mimic_config.wire_version = 3;
     c.mimic_config.enable_size_mimicry = false;
     c.path_mtu_bytes = 1500;

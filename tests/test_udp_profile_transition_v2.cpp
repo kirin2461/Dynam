@@ -51,6 +51,7 @@
 
 #include "ncp_porthop.hpp"
 #include "ncp_mimicry_session.hpp"
+#include "test_identity.hpp"
 
 #include <sodium.h>
 
@@ -422,6 +423,7 @@ NcpMimicrySession::Config make_adapter_cfg(NcpMimicrySession::Role role,
     NcpMimicrySession::Config c;
     c.role = role;
     c.e2e_config.enable_padding = false;  // deterministic wire sizes
+    c.e2e_config.server_identity = test_server_identity();
     c.stable_profile = kBaseRef;
     c.stable_layout = kL0;
     c.stable_mimic = TrafficMimicry::MimicProfile::GENERIC_UDP;

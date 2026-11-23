@@ -3,6 +3,7 @@
 
 // Only depends on secure memory types, NOT on TLS fingerprinting
 #include "ncp_secure_memory.hpp"
+#include "ncp_server_identity.hpp"
 #include <vector>
 #include <string>
 #include <memory>
@@ -95,6 +96,46 @@ struct E2EConfig {
     std::chrono::seconds session_timeout{3600};
     std::chrono::seconds key_rotation_interval{300};
     bool enable_padding = true;
+
+    /**
+     * @brief Server identity key used to sign the key-exchange response.
+     *
+     * Set only on the responder (server). When present, the response
+     * carries a signed trailer (see ncp_server_identity.hpp) and the
+     * session records the identity it presented.
+     *
+     * Empty = anonymous responder. That is a *different* protocol
+     * outcome from "signed but wrong": a client configured with
+     * require_server_identity will reject an anonymous responder.
+     */
+    std::shared_ptr<ServerIdentity> server_identity;
+
+    /**
+     * @brief Client-side enforcement.
+     *
+     * true  -> a response that is unsigned, or whose signature does not
+     *          verify, fails the handshake. complete_key_exchange()
+     *          returns false and the session stays unestablished.
+     * false -> an unsigned response is accepted (previous behaviour),
+     *          but a response that IS signed and fails verification is
+     *          still rejected. A bad signature is never a downgrade
+     *          excuse.
+     *
+     * Defaults to true: the whole point of the change is that a client
+     * should not silently talk to an unauthenticated server.
+     */
+    bool require_server_identity = true;
+
+    /**
+     * @brief Optional known-servers store (client side).
+     *
+     * When set together with pin_host, a verified peer identity is checked
+     * against the store (TOFU on first sight); a changed key aborts the
+     * handshake instead of silently re-trusting.
+     */
+    std::shared_ptr<PinnedServerStore> pin_store;
+    /// Host name recorded in the pin store. Empty disables checking.
+    std::string pin_host;
 };
 
 class E2ESession {
@@ -164,6 +205,39 @@ public:
     // Session management
     E2ESessionState get_state() const;
     bool is_established() const;
+
+    /**
+     * @brief Did this handshake authenticate the peer's identity?
+     *
+     * true only when the responder presented a valid signature over the
+     * handshake binding. An anonymous (unsigned) handshake accepted under
+     * require_server_identity=false reports false here — callers that
+     * display connection status must not claim "verified" on it.
+     */
+    bool peer_identity_verified() const;
+
+    /**
+     * @brief The peer's long-term Ed25519 identity key.
+     *
+     * Empty when the handshake was anonymous. This is a *presented*
+     * identity: it is only meaningful after checking it against a pin
+     * store (PinnedServerStore::check) or after verifying its signature.
+     */
+    std::vector<uint8_t> peer_identity_key() const;
+
+    /// Fingerprint of peer_identity_key(); zero-filled when absent.
+    IdentityFingerprint peer_identity_fingerprint() const;
+
+    /**
+     * @brief Was the peer identity confirmed by the pin store?
+     *
+     * true only when a pin for the configured pin_host already existed and
+     * matched. A first sighting (recorded under TOFU) reports false: the
+     * key is verified but has never been seen before, and callers that
+     * claim "known server" must not treat the two as the same thing.
+     * Always false when no pin store is configured.
+     */
+    bool peer_identity_pinned() const;
     bool is_expired() const;
     /**
      * @brief Spontaneous DH ratchet rotation (sending half).

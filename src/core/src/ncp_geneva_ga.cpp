@@ -189,6 +189,7 @@ FitnessResult GenevaGA::evaluate_individual(const Individual& ind) {
     // Run multiple probes and aggregate
     double total_latency = 0.0;
     double total_loss = 0.0;
+    double total_overhead = 0.0;
     int successes = 0;
     int total_retries = 0;
 
@@ -201,15 +202,22 @@ FitnessResult GenevaGA::evaluate_individual(const Individual& ind) {
         if (r.connected) ++successes;
         total_latency += r.latency_ms;
         total_loss += r.packet_loss;
+        total_overhead += r.overhead_ratio;
         total_retries += r.retry_count;
     }
 
     FitnessResult result;
-    int probes = config_.fitness_probes;
+    // A zero/negative probe count would divide by zero and yield NaN latency;
+    // the loop above would not have run, so connected stays false regardless.
+    int probes = std::max(1, config_.fitness_probes);
     result.connected = (successes > 0);
     result.latency_ms = total_latency / probes;
     result.packet_loss = total_loss / probes;
     result.retry_count = total_retries;
+    // Amplification is a property of the strategy, not of the probe, but it
+    // is averaged like the other secondaries so a caller that reports a
+    // different ratio per probe is handled sanely.
+    result.overhead_ratio = total_overhead / probes;
     return result;
 }
 
@@ -466,9 +474,12 @@ void GenevaGA::evolve_one_generation() {
         const size_t n = new_pop.size();
         unsigned workers = std::thread::hardware_concurrency();
         workers = std::min(6u, std::max(2u, workers / 2));
+        // Background evolution honours request_stop() between individuals; a
+        // manual synchronous call (start() never invoked) must still evaluate.
+        const bool async = running_.load(std::memory_order_relaxed);
         auto worker = [&]() {
             for (;;) {
-                if (!running_.load(std::memory_order_relaxed)) return;
+                if (async && !running_.load(std::memory_order_relaxed)) return;
                 size_t i = eval_next.fetch_add(1, std::memory_order_relaxed);
                 if (i >= n) return;
                 Individual& ind = new_pop[i];
