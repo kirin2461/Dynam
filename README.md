@@ -687,6 +687,321 @@ quit) and can register itself in autostart (HKCU `Run` on Windows,
 - Three-layer architecture: Core Library, CLI, Web GUI.
 - 7-stage Protocol Orchestrator pipeline.
 
+## Math behind the bypass
+
+Every knob that decides whether a flow gets through is a number, and the numbers
+come from formulas that live in the tree. This section lists them with the file
+that evaluates them. Nothing here is a metaphor: if a formula is not in the code
+it is not in this section, and the one place where a configured field is *not*
+yet consumed is called out explicitly.
+
+### 1. Size shaping targets W1, not KS
+
+Both are distances between the observed packet-size distribution and a reference:
+
+```
+KS(P,Q) = sup_x |F_P(x) - F_Q(x)|                       (0..1, scale-free)
+W1(P,Q) = inf over couplings E|X - Y| = ∫ |F_P(x) - F_Q(x)| dx    (bytes)
+```
+
+The second has a closed form in one dimension, and by Kantorovich–Rubinstein
+duality `W1(P,Q) = sup{ E_P[f] - E_Q[f] : f is 1-Lipschitz }`. So a bound
+`W1 <= e` bounds the error of *every* 1-Lipschitz statistic at once — mean,
+median, trimmed means, any smoothed rate estimator. A KS bound does not
+constrain the mean at all, which is the whole point:
+
+| Case | `KS` | Displacement |
+|---|---|---|
+| reference 0…1500 step 150 (n=11), observed shifted +75 | `1/11 ≈ 0.091` — inside the "good mimicry" band | mean off by 75 B |
+| reference profile shifted uniformly by 63 B (64→1, 128→65, …) | `0.0` — no boundary crossed | up to 255 B free inside `(256, 512]` |
+
+`w1_distance()` (`src/core/src/ncp_optimal_transport.cpp:23`) integrates
+*exactly*: on the merged set of distinct sample values both CDFs are constant,
+so the sum `Σ width_i · |F_a(x_i) − F_b(x_i)|` is not an approximation. Cost
+`O((n+m) log(n+m))`. Both inputs empty → `0`; exactly one empty → `+∞`.
+`ks_distance_samples()` (`:69`) is the reference implementation of the first row.
+
+### 2. Exact quantile replay
+
+The matching shaping rule is the monotone rearrangement `T = F_ref⁻¹ ∘ F_obs`,
+implemented in its strongest discrete form — a *block replay*:
+
+```
+ref   = reference multiset, sorted ascending, n = |ref|
+order = Fisher-Yates permutation of 0..n-1, re-drawn once per epoch
+epoch = floor(emitted / n)
+next() = ref[ order[ emitted mod n ] ]                 (ncp_optimal_transport.cpp:126)
+```
+
+A complete block of `n` emitted packets therefore reproduces the reference
+multiset *exactly*: `W1 = 0` and `KS = 0` — equality, not a bound. A partial
+block is a prefix of a permutation, i.e. sampling without replacement, so no
+size can appear more often than the reference contains it. Order inside a block
+is irrelevant to every marginal statistic; it is randomised because a fixed
+order would be a learnable sawtooth.
+
+Weights → multiset (`expand_size_histogram`, `:158`), with `W = Σ w_b`, buckets
+`b`, resolution `R = 256`:
+
+```
+count_b = max( 1, round( (w_b / W) · R ) )
+```
+
+`max(1, ·)` keeps every listed size represented; the proportion error is bounded
+by `#buckets / R` (≈ 0.023 for the six-bucket profile at `R = 256`). The
+default reference (`src/core/src/ncp_flow_shaper.cpp:43`) is:
+
+| size | 52 | 150 | 350 | 580 | 1200 | 1460 |
+|---|---|---|---|---|---|---|
+| weight | 0.30 | 0.15 | 0.10 | 0.08 | 0.12 | 0.25 |
+
+### 3. Stealth score
+
+`HeuristicScores::aggregate_stealth()` (`src/core/include/ncp_adversary_tester.hpp:66`)
+maps seven statistics into `[0,1]` and weights them:
+
+```
+S = 0.25·H + 0.25·p + 0.10·(1 − D_KS) + 0.05·W + 0.10·V + 0.15·T + 0.10·(1 − B)
+
+W = 1 / (1 + |W1| / 75)          # 75 B of mean displacement halves this term
+V = 1 / (1 + |var_ratio − 1|)    # var_ratio = observed var / reference var
+T = 1 / (1 + |CoV|)              # CoV = σ/μ of the inter-packet gaps
+```
+
+Size shape is scored twice on purpose: KS bounds the CDF gap, W1 prices the
+displacement in bytes. All three `1/(1+|x|)` terms saturate, so a 3 kB
+displacement cannot dominate the score the way a linear penalty would. `S` below
+`detection_threshold = 0.5` is reported as detected, and `to_feedback()` reuses
+that cut-off.
+
+The components themselves:
+
+```
+H  = −(1/8) · Σ_{i=0..255} p_i · log2 p_i ,  p_i = count(i) / len   (ncp_adversary_tester.cpp:114)
+χ² = Σ (o_i − e)² / e ,  e = len / 256 ,  k = 255                    (…:134)
+z  = ( (χ²/k)^(1/3) − (1 − 2/(9k)) ) / sqrt( 2/(9k) )                 Wilson–Hilferty
+p  = P(Z > z) via Abramowitz–Stegun 7.1.26                            one-sided p-value
+```
+
+The self-test flags a flow whose mean entropy leaves `[7.5, 8.0]` bits/byte
+(`src/core/src/ncp_self_test_monitor.cpp:437`).
+
+### 4. Learned size-error probability
+
+`SizeErrorLearner` (`ncp_adversary_tester.cpp:322`) is an 8-feature logistic
+regression with hand-set normalisers — no dependency, fully inspectable:
+
+```
+x = ( min(μ/1500, 1), min(CoV/3, 1), frac_{≤128}, frac_{≥1200},
+      error_rate, min(CoV_timing/5, 1), burst_anomaly, D_KS )
+z = b + Σ_{i<8} w_i · x_i
+p = σ(z) = 1 / (1 + e^{−z})
+```
+
+While `samples < 8` it returns a transparent prior instead of an unlearned
+weight vector:
+
+```
+p0 = clamp( 0.15 + 0.45·error_rate + 0.40·D_KS , 0.02 , 0.98 )
+```
+
+Each observation is one step of logistic regression with L2, `lr = 0.05`,
+`λ = 0.001`, weights and bias clamped to `±20`:
+
+```
+g    = p − y                                 (y = 1 if the DPI detected the flow)
+w_i ← clamp₂₀( w_i − lr·(g·x_i + λ·w_i) )
+b   ← clamp₂₀( b  − lr·g )
+```
+
+### 5. Candidate ranking — Laplace smoothing
+
+`StrategySynthesizer::global_score` (`src/core/src/ncp_strategy_synth.cpp:196`)
+is the posterior mean of a `Beta(1,1)`:
+
+```
+score_i = (wins_i + 1) / (wins_i + fails_i + 2)         ∈ (0,1)
+```
+
+Ranking is a *stable* sort on `score`, so ties keep the ladder order — which is
+the prior: cheapest and least intrusive first. The smoothing is what stops a
+lucky single win from outranking a workhorse: `1/1 → 0.667`, `40/45 → 0.872`,
+where the raw rate would say `1.00` and `0.889`.
+
+A candidate is a triple `split × order × fake` drawn from
+`{keep, sni, midsld, pos1, multi} × {keep, in-order, disorder, reverse} ×
+{keep, none, badseq, badsum, low-ttl}`; the shipped ladder is 12 of those,
+ordered by hand, and the set is capped by `kMaxCandidates = 64` because tried-set
+membership is a bitmask.
+
+Trial accounting (`src/core/include/ncp_strategy_synth.hpp:118`, `:282`, `:294`):
+
+- **success** — the client sends payload at or past `seq + len(ClientHello)` on
+  the same flow, which it only does after a ServerHello arrived. The candidate
+  locks for that destination and earns a global win.
+- **failure** — the ClientHello is retransmitted at the same sequence number
+  (nothing was ACKed), or the flow stays silent for `kVerdictTimeout = 3 s` when
+  a new connection to the same destination starts (typical after an injected
+  RST).
+- Only a flow's **first** candidate increments `fails`; later candidates ran on
+  retransmissions the DPI had already seen, so their failure is not charged to
+  them — they keep their clean trial for the destination's next connection.
+- A locked candidate is abandoned after `kLockedFailuresToUnlock = 2` clean
+  failures (one silent flow can be the application's doing, two are the
+  network's). A destination whose every candidate failed starts another round
+  rather than freezing.
+
+Memory is bounded: 512 destinations (evict least-recently-seen), 1024 flows,
+600 s destination TTL, 30 s flow lifetime.
+
+### 6. GA fitness (`ncp geneva`)
+
+`FitnessResult::score()` (`src/core/include/ncp_geneva_ga.hpp:44`) turns one
+probe into a scalar:
+
+```
+score = 1000
+      − min(0.5 · RTT_ms, 500)
+      − 300 · loss                       loss ∈ [0,1]
+      − 50  · retries
+      − 40  · min( max(overhead_ratio, 0), 4 )
+
+score = 0        if the probe did not connect
+score = max(score, 1)  if it did
+```
+
+`overhead_ratio = extra_bytes / payload_bytes`, capped at `4` so a 10× amplifier
+ranks no worse than a 4× one. The term is what stops the population converging
+on a strategy that only connects because it floods. Selection is tournament
+`k = 5` over 64 individuals with 4 elites carried over un-re-evaluated, which is
+also why an elite cannot be displaced by re-scoring noise.
+
+### 7. Split and fake arithmetic
+
+Split position from the SNI offset `o` inside the TCP payload
+(`src/core/src/ncp_dpi.cpp:87`, `:2320`):
+
+```
+split @ SNI    → o
+split @ pos1   → 1
+split @ midsld → o + sld_start + floor( (sld_end − sld_start) / 2 )
+```
+
+For `www.example.com` the second-level domain `example` occupies
+`[sld_start, sld_end) = [4, 11)`, so midsld = `4 + 3 = 7`. Multi-split is the
+sorted, deduplicated set `{1, SNI, midsld, ...user positions}`. The SNI, midsld
+and user positions are used only when `0 < p < payload_len` and skipped
+otherwise, since a split at the very end is a no-op that still costs a packet;
+the leading `1` is always present.
+
+The three fake flavours (`:2400`):
+
+```
+badseq  → seq_fake = seq − payload_len − 1     (mod 2³², nothing ACKs it)
+badsum  → checksum = checksum_after_correct_calc XOR 0x0100
+low-ttl → TTL = 3     expires before the server sees it
+fooling → TTL = 8     reaches the DPI box, the server drops it anyway
+```
+
+How many copies go out is `fake_repeats` on the packet path (default `1`; the
+`beeline` preset raises it to `6` and `mobile` to `2`, because those paths
+reorder harder), and a fixed `2 / 1` split on the WebSocket desync path
+(`:1141`: two copies when `fake_ttl > 2`, one below that — a 3-hop fake cannot
+survive to the server, so a second copy is pure overhead). Auto-TTL (`:2301`)
+derives the fake's TTL from the observed hop count:
+
+```
+init  = 64 if observed_ttl ≤ 64, else 128 if ≤ 128, else 255
+hops  = init − observed_ttl
+TTL   = clamp( hops + autottl_delta , autottl_min , autottl_max ) → clamp [1, 255]
+```
+
+### 8. Timing
+
+Jitter injection (`TimeCorrelationBreaker::compute_jitter`,
+`src/core/src/ncp_time_correlation_breaker.cpp:39`):
+
+```
+J  ~ U [ min_jitter_ms , max_jitter_ms ]        effective bounds by threat level
+if auto_adjust and CV < min_cv:  J ← J · min( min_cv / CV , 5 )
+J ← clamp( J , min_jitter_ms , max_jitter_ms )
+
+CV = σ / μ    over the sliding window of recorded gaps
+```
+
+| threat | min_jitter | max_jitter | min_cv |
+|---|---|---|---|
+| CRITICAL | ×2.0 | ×2.5 | 0.50 |
+| HIGH | ×1.5 | ×1.8 | 0.50 |
+| MEDIUM | ×1.0 | ×1.3 | 0.30 × 1.2 |
+| LOW / normal | ×1.0 | ×1.0 | 0.30 |
+
+The `min(min_cv/CV, 5)` cap is what keeps the feedback loop from running away: a
+badly under-dispersed flow gets at most `5×` the sampled jitter, and the final
+clamp still applies. The whole point is a CoV at or above the threshold, because
+that is the statistic the correlator measures.
+
+Inline path: every module hook goes through `clamp_inline_send_delay_us()`
+(`src/core/include/ncp_dpi.hpp:617`), hard-capped at
+`kMaxInlineSendDelayUs = 50000` µs. The hook runs inline between two WinDivert
+receives, so a sleep there blocks every flow with a packet queued behind it, not
+just the one being shaped — that is what the cap is for. The shaping path
+therefore enforces its own `max_inline_delay_us = 2000` µs
+(`src/core/include/ncp_behavioral_cloak.hpp:84`) and idles outside the packet hook.
+
+Burst model (`src/core/src/ncp_flow_shaper.cpp:60`): 8–35 packets per burst,
+inter-packet gap `U[0.5, 15] ms`, pause `U[1500, 8000] ms`. `next_delay()`
+(`:357`) draws uniformly from `[burst_inter_ms_min, burst_inter_ms_max]` — the
+`timing_distribution` and `pareto_alpha` fields are declared in the profile
+config but not consumed by the scheduler yet, so the gap is uniform whatever the
+profile claims.
+
+### 9. TLS fingerprints
+
+JA3 is byte-identical to what the emulated browser sends, then hashed
+(`src/core/src/tls_fingerprint.cpp:531`):
+
+```
+ja3  = ver ‖ "," ‖ join(ciphers,"-") ‖ "," ‖ join(extensions,"-")
+           ‖ "," ‖ join(curves,"-") ‖ "," ‖ join(point_formats,"-")
+hash = MD5(ja3).hex()          note: "-" inside a field, "," between fields
+```
+
+JA4 is truncated SHA-256 per the FoxIO spec (`:596`):
+
+```
+a   = "t" ‖ ver(2) ‖ sni_flag(d|i) ‖ %02d(#ciphers) ‖ %02d(#extensions)
+b   = SHA256( join(sort(ciphers), ",") ).hex()[:12]
+c   = SHA256( join(sort(extensions), ",") ).hex()[:12]
+ja4 = a ‖ "_" ‖ b ‖ "_" ‖ c
+```
+
+Sorting before hashing is what makes JA4 order-independent and therefore
+comparable across clients; JA3 keeps the original order because real browsers do.
+
+### 10. Mimicry catalog — closed forms
+
+`SizeDistribution` (`src/core/src/ncp_mimicry_stats.cpp:34`) has three families,
+each with mean, standard deviation and CDF in closed form (`Φ(t) = ½(1+erf(t/√2))`,
+`μ` and `σ` are log-space parameters for the lognormal case):
+
+| kind | mean | stddev | CDF |
+|---|---|---|---|
+| `NORMAL` | `μ` | `σ` | `Φ((x−μ)/σ)` |
+| `LOGNORMAL` | `e^{μ+σ²/2}` | `e^{μ+σ²/2}·√(e^{σ²}−1)` | `Φ((ln x−μ)/σ)` |
+| `DISCRETE_MIX` | `Σ wᵢmᵢ` | `√(Σ wᵢ(σᵢ²+mᵢ²) − μ²)` | `Σ wᵢΦ((x−mᵢ)/σᵢ)` |
+
+The discrete mixture's second moment is `Σ wᵢ(σᵢ² + mᵢ²)`, not `Σ wᵢσᵢ²` — the
+`mᵢ²` term is the between-component variance, and dropping it is the usual way
+this formula gets written wrong.
+
+### Where to read more
+
+The transport layer has a full derivation with guarantees, non-guarantees,
+cost analysis and the sabotage runs that falsify each claim:
+[`docs/OPTIMAL_TRANSPORT_SHAPING.md`](docs/OPTIMAL_TRANSPORT_SHAPING.md). Method
+descriptions per layer are in [`docs/methods/`](docs/methods/).
+
 ## License
 Licensed under the GNU Affero General Public License v3.0 (AGPLv3). See [LICENSE](LICENSE) for details.
 
