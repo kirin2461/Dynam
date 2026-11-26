@@ -20,47 +20,6 @@ namespace ncp {
 namespace DPI {
 namespace ECH {
 
-#ifdef HAVE_ECH_HPKE
-
-// ==================== Helper Functions ====================
-
-static uint16_t hpke_kem_to_id(HPKEKem kem) {
-    switch (kem) {
-        case HPKEKem::DHKEM_P256_HKDF_SHA256:    return OSSL_HPKE_KEM_ID_P256;
-        case HPKEKem::DHKEM_P384_HKDF_SHA384:     return OSSL_HPKE_KEM_ID_P384;
-        case HPKEKem::DHKEM_P521_HKDF_SHA512:     return OSSL_HPKE_KEM_ID_P521;
-        case HPKEKem::DHKEM_X25519_HKDF_SHA256:   return OSSL_HPKE_KEM_ID_X25519;
-        case HPKEKem::DHKEM_X448_HKDF_SHA512:     return OSSL_HPKE_KEM_ID_X448;
-        default: return 0;
-    }
-}
-
-static uint16_t hpke_kdf_to_id(HPKEKDF kdf) {
-    switch (kdf) {
-        case HPKEKDF::HKDF_SHA256: return OSSL_HPKE_KDF_ID_HKDF_SHA256;
-        case HPKEKDF::HKDF_SHA384: return OSSL_HPKE_KDF_ID_HKDF_SHA384;
-        case HPKEKDF::HKDF_SHA512: return OSSL_HPKE_KDF_ID_HKDF_SHA512;
-        default: return 0;
-    }
-}
-
-static uint16_t hpke_aead_to_id(HPKEAEAD aead) {
-    switch (aead) {
-        case HPKEAEAD::AES_128_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_128;
-        case HPKEAEAD::AES_256_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_256;
-        case HPKEAEAD::CHACHA20_POLY1305:   return OSSL_HPKE_AEAD_ID_CHACHA_POLY1305;
-        default: return 0;
-    }
-}
-
-static OSSL_HPKE_SUITE make_suite(const HPKECipherSuite& cs) {
-    OSSL_HPKE_SUITE suite;
-    suite.kem_id  = hpke_kem_to_id(cs.kem_id);
-    suite.kdf_id  = hpke_kdf_to_id(cs.kdf_id);
-    suite.aead_id = hpke_aead_to_id(cs.aead_id);
-    return suite;
-}
-
 // ==================== ClientHello Parser Helpers ====================
 
 static bool find_extensions_block(
@@ -109,7 +68,7 @@ static bool find_extensions_block(
     return true;
 }
 
-static std::vector<uint8_t> rewrite_sni(
+std::vector<uint8_t> rewrite_sni(
     const std::vector<uint8_t>& ch,
     const std::string& new_name
 ) {
@@ -205,6 +164,47 @@ static std::vector<uint8_t> rewrite_sni(
     }
 
     return ch;  // SNI not found, return unchanged
+}
+
+#ifdef HAVE_ECH_HPKE
+
+// ==================== Helper Functions ====================
+
+static uint16_t hpke_kem_to_id(HPKEKem kem) {
+    switch (kem) {
+        case HPKEKem::DHKEM_P256_HKDF_SHA256:    return OSSL_HPKE_KEM_ID_P256;
+        case HPKEKem::DHKEM_P384_HKDF_SHA384:     return OSSL_HPKE_KEM_ID_P384;
+        case HPKEKem::DHKEM_P521_HKDF_SHA512:     return OSSL_HPKE_KEM_ID_P521;
+        case HPKEKem::DHKEM_X25519_HKDF_SHA256:   return OSSL_HPKE_KEM_ID_X25519;
+        case HPKEKem::DHKEM_X448_HKDF_SHA512:     return OSSL_HPKE_KEM_ID_X448;
+        default: return 0;
+    }
+}
+
+static uint16_t hpke_kdf_to_id(HPKEKDF kdf) {
+    switch (kdf) {
+        case HPKEKDF::HKDF_SHA256: return OSSL_HPKE_KDF_ID_HKDF_SHA256;
+        case HPKEKDF::HKDF_SHA384: return OSSL_HPKE_KDF_ID_HKDF_SHA384;
+        case HPKEKDF::HKDF_SHA512: return OSSL_HPKE_KDF_ID_HKDF_SHA512;
+        default: return 0;
+    }
+}
+
+static uint16_t hpke_aead_to_id(HPKEAEAD aead) {
+    switch (aead) {
+        case HPKEAEAD::AES_128_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_128;
+        case HPKEAEAD::AES_256_GCM:         return OSSL_HPKE_AEAD_ID_AES_GCM_256;
+        case HPKEAEAD::CHACHA20_POLY1305:   return OSSL_HPKE_AEAD_ID_CHACHA_POLY1305;
+        default: return 0;
+    }
+}
+
+static OSSL_HPKE_SUITE make_suite(const HPKECipherSuite& cs) {
+    OSSL_HPKE_SUITE suite;
+    suite.kem_id  = hpke_kem_to_id(cs.kem_id);
+    suite.kdf_id  = hpke_kdf_to_id(cs.kdf_id);
+    suite.aead_id = hpke_aead_to_id(cs.aead_id);
+    return suite;
 }
 
 // ==================== ECHClientContext Implementation ====================
@@ -465,46 +465,117 @@ bool ECHServerContext::decrypt(
     return true;
 }
 
-// ==================== Utility Functions ====================
-
-bool parse_ech_config(const std::vector<uint8_t>& data, ECHConfig& config) {
-    if (data.size() < 10) {
-        return false;
-    }
-
-    size_t pos = 0;
-
-    // Version (2 bytes)
-    config.version = (data[pos] << 8) | data[pos + 1];
+// Full ECHConfig wire parser (draft-ietf-tls-esni-18):
+//   uint16 version (0xfe0d) | uint16 contents_length |
+//   HpkeKeyConfig: u8 config_id, u16 kem_id, u16 pk_len + pk,
+//                  u16 cipher_suites_len + N*(u16 kdf_id + u16 aead_id) |
+//   u8 maximum_name_length | u8 public_name_len + public_name |
+//   u16 extensions_len + extensions
+// Returns false on any truncation so callers can try the legacy layout.
+static bool parse_ech_config_wire(const std::vector<uint8_t>& data,
+                                  size_t start, ECHConfig& config) {
+    size_t pos = start;
+    if (pos + 4 > data.size()) return false;
+    uint16_t version = (data[pos] << 8) | data[pos + 1];
     pos += 2;
+    if (version != 0xfe0d) return false;
+    uint16_t contents_len = (data[pos] << 8) | data[pos + 1];
+    pos += 2;
+    if (pos + contents_len > data.size()) return false;
+    size_t end = pos + contents_len;
 
-    // Config ID (1 byte)
+    if (pos + 1 > end) return false;
     config.config_id = data[pos++];
-
-    // KEM ID (2 bytes)
+    if (pos + 2 > end) return false;
     uint16_t kem_id = (data[pos] << 8) | data[pos + 1];
     pos += 2;
-
-    // Public key length (2 bytes)
-    if (pos + 2 > data.size()) return false;
+    if (pos + 2 > end) return false;
     uint16_t pk_len = (data[pos] << 8) | data[pos + 1];
     pos += 2;
-
-    // Public key
-    if (pos + pk_len > data.size()) return false;
+    if (pos + pk_len > end) return false;
     config.public_key.assign(data.begin() + pos, data.begin() + pos + pk_len);
     pos += pk_len;
 
-    // Store raw config
+    if (pos + 2 > end) return false;
+    uint16_t cs_len = (data[pos] << 8) | data[pos + 1];
+    pos += 2;
+    if (cs_len % 4 != 0 || pos + cs_len > end) return false;
+    config.cipher_suites.clear();
+    for (size_t k = 0; k < cs_len; k += 4) {
+        uint16_t kdf = (data[pos + k] << 8) | data[pos + k + 1];
+        uint16_t aead = (data[pos + k + 2] << 8) | data[pos + k + 3];
+        config.cipher_suites.push_back(HPKECipherSuite(
+            static_cast<HPKEKem>(kem_id),
+            static_cast<HPKEKDF>(kdf),
+            static_cast<HPKEAEAD>(aead)));
+    }
+    pos += cs_len;
+
+    if (pos + 1 > end) return false;
+    config.maximum_name_length = data[pos++];
+    if (pos + 1 > end) return false;
+    uint8_t name_len = data[pos++];
+    if (name_len == 0 || pos + name_len > end) return false;
+    config.public_name.assign(
+        reinterpret_cast<const char*>(data.data() + pos), name_len);
+    pos += name_len;
+
+    if (pos + 2 > end) return false;
+    uint16_t ext_len = (data[pos] << 8) | data[pos + 1];
+    pos += 2;
+    if (pos + ext_len > end) return false;
+
+    config.version = version;
+    return true;
+}
+
+// ==================== Utility Functions ====================
+
+bool parse_ech_config(const std::vector<uint8_t>& data, ECHConfig& config) {
+    // Reset every field first: callers may reuse a config across parses and
+    // push_back into cipher_suites must not accumulate stale entries.
+    config = ECHConfig{};
+    if (data.size() < 6) return false;
+
+    // Unwrap ECHConfigList (draft-18): uint16 total_length == size-2 and a
+    // version-0xfe0d config follows the 2-byte header.
+    size_t start = 0;
+    if (static_cast<size_t>(((data[0] << 8) | data[1])) == data.size() - 2 &&
+        data[2] == 0xfe && data[3] == 0x0d) {
+        start = 2;
+    }
+    if (data.size() - start < 6) return false;
+
+    // 1) Full wire format (draft-ietf-tls-esni-18): what DNS/DoH carries.
+    if (parse_ech_config_wire(data, start, config)) {
+        config.raw_config = data;
+        return true;
+    }
+
+    // 2) Legacy simplified layout: version(2) config_id(1) kem(2) pk_len(2) pk
+    config = ECHConfig{};
+    size_t pos = start;
+    if (pos + 2 > data.size()) return false;
+    config.version = (data[pos] << 8) | data[pos + 1];
+    pos += 2;
+    if (pos + 1 > data.size()) return false;
+    config.config_id = data[pos++];
+    if (pos + 2 > data.size()) return false;
+    uint16_t kem_id = (data[pos] << 8) | data[pos + 1];
+    pos += 2;
+    if (pos + 2 > data.size()) return false;
+    uint16_t pk_len = (data[pos] << 8) | data[pos + 1];
+    pos += 2;
+    if (pos + pk_len > data.size()) return false;
+    config.public_key.assign(data.begin() + pos, data.begin() + pos + pk_len);
+
     config.raw_config = data;
 
-    // Basic cipher suite setup
     HPKECipherSuite cs;
     cs.kem_id = static_cast<HPKEKem>(kem_id);
-    cs.kdf_id = HPKEKDF::HKDF_SHA256;  // Default
-    cs.aead_id = HPKEAEAD::AES_128_GCM;  // Default
+    cs.kdf_id = HPKEKDF::HKDF_SHA256;
+    cs.aead_id = HPKEAEAD::AES_128_GCM;
     config.cipher_suites.push_back(cs);
-
     return true;
 }
 
@@ -656,8 +727,17 @@ std::vector<uint8_t> apply_ech(
     if (client_hello[0] != 0x16) return client_hello;
     if (client_hello[5] != 0x01) return client_hello;
 
+    // R7-10 (Option B): build the OUTER ClientHello first by rewriting the
+    // SNI to config.public_name so passive DPI never sees the real hostname.
+    // The AAD is this outer CH *without* the ECH extension — the server
+    // reconstructs it by stripping the extension from the wire packet.
+    std::vector<uint8_t> outer = client_hello;
+    if (!config.public_name.empty()) {
+        outer = rewrite_sni(client_hello, config.public_name);
+    }
+
     size_t ext_offset = 0, ext_end = 0;
-    if (!find_extensions_block(client_hello.data(), client_hello.size(),
+    if (!find_extensions_block(outer.data(), outer.size(),
                                ext_offset, ext_end)) {
         return client_hello;
     }
@@ -668,9 +748,7 @@ std::vector<uint8_t> apply_ech(
     }
 
     std::vector<uint8_t> enc, encrypted;
-    std::vector<uint8_t> aad = client_hello;  // use full outer CH as AAD
-
-    if (!ctx.encrypt(client_hello, aad, enc, encrypted)) {
+    if (!ctx.encrypt(client_hello, outer, enc, encrypted)) {
         return client_hello;
     }
 
@@ -714,7 +792,7 @@ std::vector<uint8_t> apply_ech(
     ech_ext.push_back(static_cast<uint8_t>(payload_len & 0xFF));
     ech_ext.insert(ech_ext.end(), ech_payload.begin(), ech_payload.end());
 
-    std::vector<uint8_t> result = client_hello;
+    std::vector<uint8_t> result = outer;
 
     // Append ECH extension to extensions block
     result.insert(result.begin() + ext_end,

@@ -223,6 +223,18 @@ std::vector<uint8_t> apply_ech(
     const ECHConfig& ech_config
 );
 
+/**
+ * @brief Rewrite the SNI hostname in a TLS ClientHello to new_name,
+ *        patching all length fields (record, handshake, extensions).
+ * @param client_hello Original ClientHello including the record layer
+ * @param new_name     Replacement hostname (outer SNI / front domain)
+ * @return Modified ClientHello, or input unchanged when no SNI is found
+ */
+std::vector<uint8_t> rewrite_sni(
+    const std::vector<uint8_t>& client_hello,
+    const std::string& new_name
+);
+
 } // namespace ECH
 } // namespace DPI
 } // namespace ncp

@@ -19,6 +19,9 @@
 namespace ncp {
 namespace DPI {
 
+// Defined in ncp_dpi.cpp (external linkage; not exported via a header).
+int find_sni_hostname_offset(const uint8_t* data, size_t len);
+
 // ==================== Helper Functions ====================
 
 namespace {
@@ -1130,29 +1133,155 @@ std::vector<uint8_t> DPIEvasion::apply_ech(
     return ECH::apply_ech(client_hello, config);
 }
 
+// Case-insensitive ASCII hostname comparison (fronting helpers).
+static bool fronting_iequals(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t idx = 0; idx < a.size(); ++idx) {
+        unsigned char ca = static_cast<unsigned char>(a[idx]);
+        unsigned char cb = static_cast<unsigned char>(b[idx]);
+        if (ca >= 'A' && ca <= 'Z') ca = static_cast<unsigned char>(ca + 32);
+        if (cb >= 'A' && cb <= 'Z') cb = static_cast<unsigned char>(cb + 32);
+        if (ca != cb) return false;
+    }
+    return true;
+}
+
 std::vector<uint8_t> DPIEvasion::apply_domain_fronting(
     const std::vector<uint8_t>& data,
     const std::string& front_domain,
     const std::string& real_domain) {
-    std::vector<uint8_t> result = data;
-
-    // Find and replace SNI hostname with the front domain
-    auto pos = std::search(
-        result.begin(), result.end(),
-        real_domain.begin(), real_domain.end()
-    );
-
-    if (front_domain.size() != real_domain.size()) {
-        NCP_LOG_WARN("domain fronting skipped: length mismatch front=" +
-                     std::to_string(front_domain.size()) + " real=" +
-                     std::to_string(real_domain.size()));
-        return {};
+    // Contract: never fabricate a packet. On any failure the input is
+    // returned unchanged (the old implementation returned {} on length
+    // mismatch, truncating the stream).
+    if (data.empty() || front_domain.empty() || real_domain.empty() ||
+        front_domain == real_domain) {
+        return data;
     }
 
-    if (pos != result.end()) {
-        std::copy(front_domain.begin(), front_domain.end(), pos);
+    // --- 1) TLS ClientHello: rewrite SNI via the length-safe helper ---
+    if (data.size() >= 44 && data[0] == 0x16 && data[5] == 0x01) {
+        int off = find_sni_hostname_offset(data.data(), data.size());
+        if (off >= 2 && static_cast<size_t>(off) + 2 <= data.size()) {
+            uint16_t hn_len = (static_cast<uint16_t>(data[off - 2]) << 8) |
+                              static_cast<uint16_t>(data[off - 1]);
+            if (static_cast<size_t>(off) + hn_len <= data.size()) {
+                std::string current(
+                    reinterpret_cast<const char*>(data.data() + off), hn_len);
+                if (fronting_iequals(current, real_domain)) {
+                    return ECH::rewrite_sni(data, front_domain);
+                }
+            }
+        }
+        return data;  // TLS, but SNI is not the real domain — leave untouched
     }
-    return result;
+
+    // --- 2) HTTP/1.x: rewrite the Host header value ---
+    {
+        static const char* kMethods[] = {"GET", "POST", "HEAD", "PUT",
+                                         "DELETE", "OPTIONS", "PATCH", "CONNECT"};
+        bool is_http1 = data.size() >= 5;
+        if (is_http1) {
+            is_http1 = false;
+            for (const char* m : kMethods) {
+                size_t l = strlen(m);
+                if (data.size() > l && memcmp(data.data(), m, l) == 0 &&
+                    data[l] == ' ') {
+                    is_http1 = true;
+                    break;
+                }
+            }
+        }
+        if (is_http1) {
+            // Find "\r\nHost: " case-insensitively; the value runs to CR/LF.
+            // HTTP/1.x header lines are not length-prefixed, so values of any
+            // length can be swapped in.
+            const std::string needle = "\r\nHost: ";
+            for (size_t idx = 0; idx + needle.size() <= data.size(); ++idx) {
+                bool match = true;
+                for (size_t jdx = 0; jdx < needle.size(); ++jdx) {
+                    unsigned char a = data[idx + jdx];
+                    unsigned char b = static_cast<unsigned char>(needle[jdx]);
+                    if (a >= 'A' && a <= 'Z') a = static_cast<unsigned char>(a + 32);
+                    if (b >= 'A' && b <= 'Z') b = static_cast<unsigned char>(b + 32);
+                    if (a != b) { match = false; break; }
+                }
+                if (!match) continue;
+                size_t vstart = idx + needle.size();
+                size_t vend = vstart;
+                while (vend < data.size() && data[vend] != '\r' &&
+                       data[vend] != '\n') {
+                    ++vend;
+                }
+                std::string value(
+                    reinterpret_cast<const char*>(data.data() + vstart),
+                    vend - vstart);
+                if (fronting_iequals(value, real_domain)) {
+                    std::vector<uint8_t> out;
+                    out.reserve(data.size() - value.size() + front_domain.size());
+                    out.insert(out.end(), data.begin(), data.begin() + vstart);
+                    out.insert(out.end(), front_domain.begin(), front_domain.end());
+                    out.insert(out.end(), data.begin() + vend, data.end());
+                    return out;
+                }
+                return data;  // Host present but different — don't touch
+            }
+            return data;
+        }
+    }
+
+    // --- 3) HTTP/2: best-effort HPACK :authority rewrite ---
+    // Pattern: literal header field with name index 1 (:authority), raw
+    // value: [0x01 | 0x41] [H=0 | 7-bit length] [hostname bytes]. The
+    // containing frame's 24-bit length is patched by the size delta.
+    if (real_domain.size() > 126 || front_domain.size() > 126) return data;
+    {
+        static const char kPreface[] = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+        size_t frame_base;
+        if (data.size() >= 24 && memcmp(data.data(), kPreface, 24) == 0) {
+            frame_base = 24;
+        } else if (data.size() >= 9 && (data[3] == 0x01 || data[3] == 0x09)) {
+            frame_base = 0;  // bare HEADERS/CONTINUATION frame stream
+        } else {
+            return data;
+        }
+
+        std::vector<uint8_t> out = data;
+        size_t pos = frame_base;
+        while (pos + 9 <= out.size()) {
+            uint32_t flen = (static_cast<uint32_t>(out[pos]) << 16) |
+                            (static_cast<uint32_t>(out[pos + 1]) << 8) |
+                            static_cast<uint32_t>(out[pos + 2]);
+            uint8_t ftype = out[pos + 3];
+            if (pos + 9 + flen > out.size()) break;
+            if (ftype == 0x01 || ftype == 0x09) {  // HEADERS / CONTINUATION
+                size_t p = pos + 9;
+                size_t pend = p + flen;
+                for (; p + 2 + real_domain.size() <= pend; ++p) {
+                    if (out[p] != 0x01 && out[p] != 0x41) continue;
+                    if (static_cast<size_t>(out[p + 1]) != real_domain.size())
+                        continue;  // H=0 single-byte length
+                    if (memcmp(&out[p + 2], real_domain.data(),
+                               real_domain.size()) != 0)
+                        continue;
+                    int64_t nflen = static_cast<int64_t>(flen) +
+                                    static_cast<int64_t>(front_domain.size()) -
+                                    static_cast<int64_t>(real_domain.size());
+                    if (nflen < 0 || nflen > 0xFFFFFF) return data;
+                    out[p + 1] = static_cast<uint8_t>(front_domain.size());
+                    out.erase(out.begin() + p + 2,
+                              out.begin() + p + 2 + real_domain.size());
+                    out.insert(out.begin() + p + 2, front_domain.begin(),
+                               front_domain.end());
+                    out[pos]     = static_cast<uint8_t>((nflen >> 16) & 0xFF);
+                    out[pos + 1] = static_cast<uint8_t>((nflen >> 8) & 0xFF);
+                    out[pos + 2] = static_cast<uint8_t>(nflen & 0xFF);
+                    return out;
+                }
+            }
+            pos += 9 + flen;
+        }
+        return data;
+    }
 }
 
 // ==================== Preset Configurations ====================

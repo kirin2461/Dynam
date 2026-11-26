@@ -406,6 +406,87 @@ static void test_tls_padding_rfc7685() {
     std::cout << " OK" << std::endl;
 }
 
+static void test_domain_fronting() {
+    std::cout << "[TEST] apply_domain_fronting..." << std::flush;
+
+    auto contains = [](const std::vector<uint8_t>& h, const std::string& str) {
+        if (str.empty() || h.size() < str.size()) return false;
+        for (size_t i = 0; i + str.size() <= h.size(); ++i)
+            if (std::memcmp(&h[i], str.data(), str.size()) == 0) return true;
+        return false;
+    };
+
+    const std::string real = "real-target.com";   // 15 chars
+    const std::string front = "cdn.short.io";     // 12 chars — differ on purpose
+    const int64_t delta = static_cast<int64_t>(front.size()) -
+                          static_cast<int64_t>(real.size());
+
+    // (1) TLS ClientHello: SNI rewrite with differing lengths must NOT
+    //     return {} (old bug) and must keep length fields consistent.
+    auto ch = make_client_hello(real);
+    auto out = DPIEvasion::apply_domain_fronting(ch, front, real);
+    TEST_CHECK(!out.empty());
+    TEST_CHECK(static_cast<int64_t>(out.size()) ==
+               static_cast<int64_t>(ch.size()) + delta);
+    uint16_t rec_len = (out[3] << 8) | out[4];
+    TEST_CHECK(rec_len == out.size() - 5);
+    uint32_t hs_len = (out[6] << 16) | (out[7] << 8) | out[8];
+    TEST_CHECK(hs_len == out.size() - 9);
+    TEST_CHECK(!contains(out, real));
+    TEST_CHECK(contains(out, front));
+
+    // (2) TLS with SNI != real_domain -> input returned unchanged
+    auto ch2 = make_client_hello("other.example.org");
+    auto out2 = DPIEvasion::apply_domain_fronting(ch2, front, real);
+    TEST_CHECK(out2 == ch2);
+
+    // (3) HTTP/1.1 Host header (value lengths differ)
+    std::string req_s = "GET / HTTP/1.1\r\nHost: real-target.com\r\n\r\n";
+    std::vector<uint8_t> req(req_s.begin(), req_s.end());
+    auto out3 = DPIEvasion::apply_domain_fronting(req, front, real);
+    TEST_CHECK(!out3.empty());
+    std::string s3(out3.begin(), out3.end());
+    TEST_CHECK(s3.find("Host: cdn.short.io") != std::string::npos);
+    TEST_CHECK(s3.find("real-target.com") == std::string::npos);
+
+    // (4) Garbage input -> returned unchanged, never {}
+    std::vector<uint8_t> junk = {0x00,0x11,0x22,0x33,0x44,0x55,
+                                 0x66,0x77,0x88,0x99,0xaa,0xbb};
+    auto out4 = DPIEvasion::apply_domain_fronting(junk, front, real);
+    TEST_CHECK(out4 == junk);
+
+    // (5) HTTP/2 HEADERS frame: HPACK :authority literal rewrite + the
+    //     frame's 24-bit length patched by the size delta
+    std::vector<uint8_t> h2;
+    const char* preface = "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+    h2.insert(h2.end(), preface, preface + 24);
+    std::vector<uint8_t> payload = {0x41, static_cast<uint8_t>(real.size())};
+    payload.insert(payload.end(), real.begin(), real.end());
+    uint32_t L = static_cast<uint32_t>(payload.size());
+    h2.push_back(static_cast<uint8_t>((L >> 16) & 0xFF));
+    h2.push_back(static_cast<uint8_t>((L >> 8) & 0xFF));
+    h2.push_back(static_cast<uint8_t>(L & 0xFF));
+    h2.push_back(0x01);  // HEADERS
+    h2.push_back(0x04);  // END_HEADERS
+    h2.push_back(0x00); h2.push_back(0x00);
+    h2.push_back(0x00); h2.push_back(0x01);  // stream 1
+    h2.insert(h2.end(), payload.begin(), payload.end());
+
+    auto out5 = DPIEvasion::apply_domain_fronting(h2, front, real);
+    TEST_CHECK(!out5.empty());
+    TEST_CHECK(static_cast<int64_t>(out5.size()) ==
+               static_cast<int64_t>(h2.size()) + delta);
+    uint32_t nL = (out5[24] << 16) | (out5[25] << 8) | out5[26];
+    TEST_CHECK(static_cast<int64_t>(nL) ==
+               static_cast<int64_t>(payload.size()) + delta);
+    TEST_CHECK(out5[27] == 0x01);
+    std::string s5(out5.begin() + 33, out5.end());
+    TEST_CHECK(s5.find(front) != std::string::npos);
+    TEST_CHECK(s5.find(real) == std::string::npos);
+
+    std::cout << " OK" << std::endl;
+}
+
 int main() {
     if (sodium_init() < 0)
         test_skip("libsodium initialization failed");
@@ -422,6 +503,8 @@ int main() {
     test_tls_fingerprint_integration();
     test_technique_toggle();
     test_tls_padding_rfc7685();
+
+    test_domain_fronting();
 
     std::cout << "\nAll advanced DPI tests passed!" << std::endl;
     return 0;

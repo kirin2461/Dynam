@@ -84,7 +84,7 @@ static std::vector<uint8_t> base64_decode(const std::string& input) {
 //   opaque public_key[public_key_length]
 //   uint16 cipher_suites_length
 //   HPKESymmetricCipherSuite cipher_suites[cipher_suites_length/4]
-//   uint16 maximum_name_length
+//   uint8  maximum_name_length (draft-18)
 //   uint8  public_name_length
 //   opaque public_name[public_name_length]
 //   uint16 extensions_length
@@ -155,10 +155,11 @@ static bool parse_single_ech_config(const uint8_t* data, size_t data_len,
     }
     off += cs_len;
 
-    // maximum_name_length
-    if (off + 2 > end) return false;
-    config.maximum_name_length = (static_cast<uint16_t>(data[off]) << 8) | data[off + 1];
-    off += 2;
+    // maximum_name_length — uint8 per draft-ietf-tls-esni-18
+    // (was misread as uint16, breaking every real wire-format config)
+    if (off >= end) return false;
+    config.maximum_name_length = data[off];
+    off += 1;
 
     // public_name (length-prefixed, 1 byte length)
     if (off >= end) return false;
@@ -185,7 +186,7 @@ static bool parse_single_ech_config(const uint8_t* data, size_t data_len,
 //   uint16 total_length
 //   ECHConfig configs[...]
 // ---------------------------------------------------------------------------
-static std::vector<ECHConfig> parse_ech_config_list(const uint8_t* data, size_t data_len)
+std::vector<ECHConfig> parse_ech_config_list(const uint8_t* data, size_t data_len)
 {
     std::vector<ECHConfig> configs;
     if (data_len < 2) return configs;

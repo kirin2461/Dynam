@@ -70,6 +70,13 @@ private:
  */
 std::optional<ECHConfig> fetch_ech_config_simple(const std::string& domain);
 
+/**
+ * @brief Parse an ECHConfigList wire blob (uint16 total_length + ECHConfig
+ *        entries). Exposed for unit tests; production callers go through
+ *        ECHConfigFetcher.
+ */
+std::vector<ECHConfig> parse_ech_config_list(const uint8_t* data, size_t data_len);
+
 } // namespace ECH
 } // namespace DPI
 } // namespace ncp

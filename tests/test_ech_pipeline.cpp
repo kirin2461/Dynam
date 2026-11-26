@@ -8,6 +8,7 @@
  */
 
 #include "../src/core/include/ncp_ech.hpp"
+#include "../src/core/include/ncp_ech_fetch.hpp"
 #include "../src/core/include/ncp_dpi_advanced.hpp"
 #include <cassert>
 #include <cstdlib>
@@ -261,6 +262,105 @@ static void test_parse_ech_config_too_short() {
     std::cout << " OK" << std::endl;
 }
 
+// Real ECHConfigList observed via DoH against cloudflare-dns.com
+// (HTTPS RR for cloudflare-ech.com): 2-byte list header + draft-18 wire
+// config. Exercises both the fetch-layer parser (u8 maximum_name_length)
+// and the core parser (list unwrap + full wire format).
+static const uint8_t kRealEchList[] = {
+    0x00,0x45, 0xfe,0x0d, 0x00,0x41, 0x48, 0x00,0x20, 0x00,0x20,
+    0xa8,0xb4,0xba,0xf1,0xbf,0xb7,0x27,0x66,0xc3,0xa4,0xce,0x86,0x34,0xb8,0xbf,0x0e,
+    0xe2,0x9a,0x18,0xdb,0x68,0x9a,0x44,0xdc,0x5d,0xbc,0xbf,0x6d,0x0c,0xf2,0xb6,0x42,
+    0x00,0x04, 0x00,0x01,0x00,0x01, 0x00, 0x12,
+    'c','l','o','u','d','f','l','a','r','e','-','e','c','h','.','c','o','m',
+    0x00,0x00
+};
+
+static void test_parse_full_wire_ech_config() {
+    std::cout << "[TEST] parse_ech_config full wire format..." << std::flush;
+    auto blob = make_test_ech_config_blob();
+    ECHConfig cfg;
+    TEST_CHECK(parse_ech_config(blob, cfg));
+    TEST_CHECK(cfg.version == 0xfe0d);
+    TEST_CHECK(cfg.config_id == 0x42);
+    TEST_CHECK(cfg.public_name == "example.com");
+    TEST_CHECK(cfg.public_key.size() == 32);
+    TEST_CHECK(!cfg.cipher_suites.empty());
+    TEST_CHECK(cfg.cipher_suites[0].kem_id == HPKEKem::DHKEM_X25519_HKDF_SHA256);
+    TEST_CHECK(cfg.raw_config == blob);
+
+    // Legacy simplified layout must keep working (fallback path)
+    auto legacy = make_test_ech_config_blob_legacy();
+    ECHConfig lcfg;
+    TEST_CHECK(parse_ech_config(legacy, lcfg));
+    TEST_CHECK(lcfg.version == 0xfe0d);
+    TEST_CHECK(lcfg.config_id == 0x42);
+    TEST_CHECK(lcfg.public_key.size() == 32);
+    TEST_CHECK(!lcfg.cipher_suites.empty());
+    std::cout << " OK" << std::endl;
+}
+
+static void test_parse_real_ech_config_list() {
+    std::cout << "[TEST] parse real ECHConfigList (cloudflare-dns.com)..." << std::flush;
+    std::vector<uint8_t> blob(kRealEchList, kRealEchList + sizeof(kRealEchList));
+    TEST_CHECK(blob.size() == 71);
+
+    // (a) fetch-layer wire parser (u8 maximum_name_length)
+    auto configs = parse_ech_config_list(blob.data(), blob.size());
+    TEST_CHECK(configs.size() == 1);
+    TEST_CHECK(configs[0].version == 0xfe0d);
+    TEST_CHECK(configs[0].config_id == 0x48);
+    TEST_CHECK(configs[0].public_name == "cloudflare-ech.com");
+    TEST_CHECK(configs[0].public_key.size() == 32);
+    TEST_CHECK(!configs[0].cipher_suites.empty());
+
+    // (b) core parser: ECHConfigList unwrap + full wire format. Before the
+    // fix the list header was misread as the version (config_id=0x00).
+    // Gated: the fallback build's parser predates list unwrapping.
+#ifdef NCP_TEST_ECH_HPKE_PARSER
+    ECHConfig cfg;
+    TEST_CHECK(parse_ech_config(blob, cfg));
+    TEST_CHECK(cfg.version == 0xfe0d);
+    TEST_CHECK(cfg.config_id == 0x48);
+    TEST_CHECK(cfg.public_name == "cloudflare-ech.com");
+    TEST_CHECK(cfg.cipher_suites[0].kem_id == HPKEKem::DHKEM_X25519_HKDF_SHA256);
+    TEST_CHECK(cfg.raw_config == blob);
+#endif
+    std::cout << " OK" << std::endl;
+}
+
+static void test_apply_ech_rewrites_outer_sni() {
+    std::cout << "[TEST] apply_ech rewrites outer SNI to public_name..." << std::flush;
+    // SNI (19) vs public_name (11): lengths differ on purpose — the old
+    // code left the real SNI in the plaintext outer CH.
+    auto ch = make_test_client_hello("secret.example.com");
+    TEST_CHECK(ch.size() > 44);
+
+    std::vector<uint8_t> priv;
+    HPKECipherSuite suite;
+    auto cfg = create_test_ech_config("example.com", suite, priv);
+    TEST_CHECK(cfg.public_name == "example.com");
+
+    auto out = apply_ech(ch, cfg);
+    TEST_CHECK(out.size() > ch.size());  // ECH ext added (>> SNI delta)
+    TEST_CHECK(out[0] == 0x16 && out[5] == 0x01);
+
+    auto contains = [](const std::vector<uint8_t>& h, const std::string& str) {
+        if (str.empty() || h.size() < str.size()) return false;
+        for (size_t i = 0; i + str.size() <= h.size(); ++i)
+            if (std::memcmp(&h[i], str.data(), str.size()) == 0) return true;
+        return false;
+    };
+    // Real SNI must not appear in the plaintext outer CH
+    TEST_CHECK(!contains(out, "secret.example.com"));
+    TEST_CHECK(contains(out, "example.com"));
+
+    uint16_t rec_len = (out[3] << 8) | out[4];
+    TEST_CHECK(rec_len == out.size() - 5);
+    uint32_t hs_len = (out[6] << 16) | (out[7] << 8) | out[8];
+    TEST_CHECK(hs_len == out.size() - 9);
+    std::cout << " OK" << std::endl;
+}
+
 static void test_apply_ech_to_client_hello() {
     std::cout << "[TEST] apply_ech_to_client_hello..." << std::flush;
 
@@ -409,7 +509,10 @@ int main() {
 
     test_parse_ech_config();
     test_parse_ech_config_too_short();
+    test_parse_full_wire_ech_config();
+    test_parse_real_ech_config_list();
     test_apply_ech_to_client_hello();
+    test_apply_ech_rewrites_outer_sni();
     test_dpi_evasion_apply_ech_wrapper();
     test_advanced_bypass_ech_pipeline();
     test_set_ech_config_runtime();
