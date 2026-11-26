@@ -85,6 +85,7 @@ target_include_directories(ncp-qt PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/core/include
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/generated   # ncp_version.h (project(VERSION))
 )
 
 # libsodium headers (LicenseVerifier uses crypto_sign_*)

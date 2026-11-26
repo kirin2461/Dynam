@@ -290,18 +290,25 @@ import secrets as _secrets
 _API_TOKEN = _secrets.token_hex(16)
 _LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
+# NCP_WEB_PREVIEW=1 — sandbox live-preview mode: bind 0.0.0.0 and accept the
+# proxy's host/origin (the per-start API token still gates every /api call,
+# and it is only injected into the same-origin page, so cross-site callers
+# remain locked out). Default (unset) keeps the strict loopback-only policy.
+_PREVIEW = os.environ.get("NCP_WEB_PREVIEW", "") == "1"
+_BIND_HOST = "0.0.0.0" if _PREVIEW else "127.0.0.1"
+
 
 @app.before_request
 def _api_guard():
     if not request.path.startswith("/api/"):
         return None
     host = (request.host or "").split(":")[0].lower().strip("[]")
-    if host not in _LOOPBACK_HOSTS:
+    if host not in _LOOPBACK_HOSTS and not _PREVIEW:
         return jsonify({"ok": False, "error": "forbidden_host"}), 403
     if request.headers.get("X-NCP-Token", "") != _API_TOKEN:
         return jsonify({"ok": False, "error": "forbidden_token"}), 403
     origin = (request.headers.get("Origin") or request.headers.get("Referer") or "")
-    if origin:
+    if origin and not _PREVIEW:
         ohost = origin.split("://", 1)[-1].split("/")[0].split(":")[0].lower().strip("[]")
         if ohost and ohost not in _LOOPBACK_HOSTS:
             return jsonify({"ok": False, "error": "forbidden_origin"}), 403
@@ -321,11 +328,16 @@ def _web_port() -> int:
 
 
 WEB_PORT = _web_port()
-_ALLOWED_ORIGINS = [
-    f"http://127.0.0.1:{WEB_PORT}",
-    f"http://localhost:{WEB_PORT}",
-    f"http://[::1]:{WEB_PORT}",
-]
+if _PREVIEW:
+    # Live-preview proxy origin (port-sandboxId host) is not known up front;
+    # allow any origin — API calls still require the per-start token.
+    _ALLOWED_ORIGINS = "*"
+else:
+    _ALLOWED_ORIGINS = [
+        f"http://127.0.0.1:{WEB_PORT}",
+        f"http://localhost:{WEB_PORT}",
+        f"http://[::1]:{WEB_PORT}",
+    ]
 CORS(app, origins=_ALLOWED_ORIGINS)
 socketio = SocketIO(app, cors_allowed_origins=_ALLOWED_ORIGINS, async_mode="threading")
 
@@ -2434,7 +2446,7 @@ if __name__ == "__main__":
 
     if _waitress_serve is not None:
         logger.info("Serving with waitress (production WSGI server)")
-        _waitress_serve(app, host="127.0.0.1", port=port, threads=8)
+        _waitress_serve(app, host=_BIND_HOST, port=port, threads=8)
     else:
         if not _use_dev_server:
             logger.warning(
@@ -2442,5 +2454,5 @@ if __name__ == "__main__":
                 "development server. Install it (pip install waitress) or set "
                 "NCP_WEB_DEV_SERVER=1 to silence this warning."
             )
-        socketio.run(app, host="127.0.0.1", port=port, debug=False,
+        socketio.run(app, host=_BIND_HOST, port=port, debug=False,
                      allow_unsafe_werkzeug=True)

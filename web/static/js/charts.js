@@ -6,17 +6,17 @@
 // ─── Shared defaults ──────────────────────────────────────────────────────
 
 const CHART_FONT = "'JetBrains Mono', monospace";
-const COLOR_ACCENT  = '#00d4ff';
-const COLOR_GREEN   = '#00e5a0';
-const COLOR_RED     = '#ff3b5c';
-const COLOR_YELLOW  = '#ffb800';
-const COLOR_PURPLE  = '#9b5de5';
+const COLOR_ACCENT  = '#22d3ee';
+const COLOR_GREEN   = '#34d399';
+const COLOR_RED     = '#fb7185';
+const COLOR_YELLOW  = '#fbbf24';
+const COLOR_PURPLE  = '#a78bfa';
 const COLOR_MUTED   = 'rgba(127, 163, 192, 0.3)';
-const GRID_COLOR    = 'rgba(0, 212, 255, 0.06)';
+const GRID_COLOR    = 'rgba(148, 163, 184, 0.10)';
 
 Chart.defaults.font.family = CHART_FONT;
 Chart.defaults.font.size = 11;
-Chart.defaults.color = '#7fa3c0';
+Chart.defaults.color = '#9aa8bf';
 
 function makeGradient(ctx, color) {
   const g = ctx.createLinearGradient(0, 0, 0, 160);
@@ -85,7 +85,7 @@ function createTrafficChart(canvasId) {
           },
         },
         tooltip: {
-          backgroundColor: '#121920',
+          backgroundColor: '#151b28',
           borderColor: 'rgba(0, 212, 255, 0.3)',
           borderWidth: 1,
           padding: 10,
@@ -161,7 +161,7 @@ function createGenevaChart(canvasId) {
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: '#121920',
+          backgroundColor: '#151b28',
           borderColor: 'rgba(255, 184, 0, 0.3)',
           borderWidth: 1,
           padding: 10,
@@ -248,7 +248,7 @@ function createPipelineChart(canvasId) {
           },
         },
         tooltip: {
-          backgroundColor: '#121920',
+          backgroundColor: '#151b28',
           borderColor: 'rgba(155, 93, 229, 0.3)',
           borderWidth: 1,
           padding: 10,

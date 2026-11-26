@@ -23,6 +23,30 @@ public:
         setOption(QWizard::NoBackButtonOnStartPage, true);
         resize(560, 420);
 
+        // Explicit palette instead of inheriting the system/GTK one: on dark
+        // system themes the header rendered black-on-black ("Welcome" title
+        // was unreadable). Mirrors Themes::darkQss() so the wizard always
+        // matches the app regardless of ui/theme.
+        setStyleSheet(QStringLiteral(
+            "QWizard { background-color: #1f1f2e; color: #e0e0e0; }"
+            "QWizard QWidget { background-color: #1f1f2e; }"
+            "QWizardPage { background-color: #1f1f2e; color: #e0e0e0; }"
+            "QWizard QLabel, QWizardPage QLabel"
+            "  { color: #e0e0e0; background: transparent; }"
+            "QWizard QLabel { font-size: 13px; }"
+            "QWizard QPushButton { background: #3a3a55; color: #e0e0e0;"
+            "  border: 1px solid #4a4a65; padding: 6px 14px;"
+            "  border-radius: 4px; min-width: 70px; }"
+            "QWizard QPushButton:hover { background: #45456b; }"
+            "QWizard QPushButton:pressed { background: #2f2f48; }"
+            "QWizard QPushButton:disabled { background: #28283a; color: #777; }"
+            "QComboBox { background: #161620; color: #e0e0e0;"
+            "  border: 1px solid #3a3a4a; border-radius: 3px; padding: 3px; }"
+            "QComboBox QAbstractItemView { background: #161620;"
+            "  color: #e0e0e0; selection-background-color: #3a3a55; }"
+            "QCheckBox { color: #e0e0e0; background: transparent; }"
+            "QCheckBox::indicator { width: 14px; height: 14px; }"));
+
         addPage(makeWelcomePage());
         addPage(makeTourPage());
         addPage(makePreferencesPage());
