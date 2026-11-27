@@ -1,0 +1,176 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 187 94% 53%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 187 94% 53%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 223 33% 6%;
+    --foreground: 217 33% 91%;
+    --card: 222 30% 9%;
+    --card-foreground: 217 33% 91%;
+    --popover: 222 30% 9%;
+    --popover-foreground: 217 33% 91%;
+    --primary: 187 94% 53%;
+    --primary-foreground: 223 33% 6%;
+    --secondary: 221 28% 13%;
+    --secondary-foreground: 217 33% 91%;
+    --muted: 221 28% 13%;
+    --muted-foreground: 217 19% 44%;
+    --accent: 221 28% 13%;
+    --accent-foreground: 217 33% 91%;
+    --destructive: 350 89% 71%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 221 28% 16%;
+    --input: 221 28% 16%;
+    --ring: 187 94% 53%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-surface-0 text-base-200;
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* Aurora background — same language as the main panel */
+    background-image:
+      radial-gradient(1000px 500px at 15% -10%, rgba(34, 211, 238, 0.10), transparent 55%),
+      radial-gradient(900px 480px at 110% 10%, rgba(129, 140, 248, 0.09), transparent 55%),
+      radial-gradient(700px 420px at 50% 120%, rgba(52, 211, 153, 0.05), transparent 60%);
+    background-attachment: fixed;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-semibold;
+  }
+}
+
+/* Custom scrollbar — aurora */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0a0e16;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #2a3448;
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3b4760;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* Card styles */
+@layer components {
+  .card {
+    @apply bg-surface-1/80 backdrop-blur border border-base-700 rounded-xl shadow-card;
+  }
+
+  .card-header {
+    @apply px-6 py-4 border-b border-base-700;
+  }
+
+  .card-title {
+    @apply text-lg font-semibold text-base-50;
+  }
+
+  .card-content {
+    @apply px-6 py-4;
+  }
+
+  .btn {
+    @apply px-4 py-2 rounded-lg font-medium transition-all duration-150;
+  }
+
+  .btn-primary {
+    @apply text-white hover:brightness-110 active:scale-[0.98] shadow-lg;
+    background-image: linear-gradient(135deg, #22d3ee, #818cf8);
+  }
+
+  .btn-secondary {
+    @apply bg-surface-2 text-base-100 hover:bg-base-700 border border-base-600;
+  }
+
+  .btn-danger {
+    @apply bg-accent-red text-white hover:bg-accent-red/80;
+  }
+
+  .input {
+    @apply bg-surface-0 border border-base-600 rounded-lg px-3 py-2 text-base-50 placeholder-base-500 focus:outline-none focus:ring-2 focus:ring-accent-blue/60 focus:border-transparent;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply bg-accent-green/10 text-accent-green;
+  }
+
+  .badge-warning {
+    @apply bg-accent-yellow/10 text-accent-yellow;
+  }
+
+  .badge-danger {
+    @apply bg-accent-red/10 text-accent-red;
+  }
+
+  .badge-info {
+    @apply bg-accent-blue/10 text-accent-blue;
+  }
+
+  .text-gradient {
+    @apply font-semibold;
+    background: linear-gradient(135deg, #22d3ee, #818cf8);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}

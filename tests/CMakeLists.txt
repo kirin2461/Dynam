@@ -161,6 +161,7 @@ set(NCP_STANDALONE_TESTS
     test_l3_stealth
     test_mimicry_roundtrip
     test_dpi_advanced_integration
+    test_math_modules            # Pied Piper: 9 C++ math modules (header-only)
 )
 # The core compiles one of two ECHConfig parser variants: HPKE builds
 # (OpenSSL >= 3.2, HAVE_ECH_HPKE is PRIVATE to ncp_core) parse a simplified
@@ -248,3 +249,22 @@ endif()
 # CI from hanging on unreachable network endpoints or infinite loops.
 add_test(NAME ncp_tests COMMAND ncp_tests)
 set_tests_properties(ncp_tests PROPERTIES TIMEOUT 180)
+
+# ==================== Mock-ORT verification harness ====================
+# verify_all.cpp exercises the ONNX classifier against tests/mock_ort's
+# header-only stand-in for onnxruntime_cxx_api.h, so it builds and runs
+# even when ENABLE_ONNXRUNTIME=OFF and no ONNX Runtime is installed.
+add_executable(verify_all
+    verify_all.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/src/ncp_onnx_classifier.cpp)
+target_include_directories(verify_all PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/mock_ort
+    ${CMAKE_SOURCE_DIR}/src/core/include
+    ${CMAKE_SOURCE_DIR}/src/core)
+find_package(Threads REQUIRED)
+target_link_libraries(verify_all PRIVATE Threads::Threads)
+set_target_properties(verify_all PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+add_test(NAME verify_all COMMAND verify_all)
+set_tests_properties(verify_all PROPERTIES TIMEOUT 120)

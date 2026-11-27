@@ -293,8 +293,10 @@ OnnxPrediction OnnxShadowClassifier::predict(const float* features,
     }
 
     auto t1 = std::chrono::steady_clock::now();
-    result.inference_time_us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+    // Clock resolution on fast hosts can round a (mock) inference to 0µs;
+    // record a minimum of 1µs so avg_latency stays meaningful.
+    result.inference_time_us = static_cast<uint64_t>(std::max<int64_t>(
+        1, std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count()));
 
     stats_.inferences_run.fetch_add(1);
     stats_.total_latency_us.fetch_add(result.inference_time_us);

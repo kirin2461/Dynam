@@ -1,0 +1,8 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+    <qresource prefix="/">
+        <file>icons/check.svg</file>
+        <file alias="translations/dynam_ru.qm">../translations/dynam_ru.qm</file>
+        <file alias="translations/dynam_en.qm">../translations/dynam_en.qm</file>
+    </qresource>
+</RCC>

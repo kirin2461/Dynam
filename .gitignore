@@ -46,3 +46,17 @@ deploy/.env
 deploy/secrets/
 deploy/client-configs/
 deploy/awg/awg0.conf
+
+# --- Integration: build artifacts (rebuild locally, see docs) ---
+src/core/libncp_math.so
+src/core/test_math
+tests/test_math
+tests/verify_all
+attack-framework/src/math/libncp_math.so
+webui/node_modules/
+webui/dist/
+gui/translations/*.qm
+poller.db
+*.egg-info/
+.pytest_cache/
+*.so

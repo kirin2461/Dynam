@@ -305,6 +305,11 @@ def _api_guard():
     host = (request.host or "").split(":")[0].lower().strip("[]")
     if host not in _LOOPBACK_HOSTS and not _PREVIEW:
         return jsonify({"ok": False, "error": "forbidden_host"}), 403
+    # /api/token delivers the token itself (same trust model as the meta tag
+    # injected into "/"): same-origin pages can read it, cross-origin pages
+    # cannot (no CORS headers → SOP). Host + origin checks still apply.
+    if request.path == "/api/token":
+        return None
     if request.headers.get("X-NCP-Token", "") != _API_TOKEN:
         return jsonify({"ok": False, "error": "forbidden_token"}), 403
     origin = (request.headers.get("Origin") or request.headers.get("Referer") or "")
@@ -526,6 +531,8 @@ def push_log(level: str, msg: str):
     with log_lock:
         log_buffer.append(entry)
     socketio.emit("log", entry, namespace="/ws")
+    # Mirror for frontends connected to the default namespace (webui).
+    socketio.emit("message", {"type": "log", "data": entry})
 
 
 # ── API request logging + JSON 404/405 (R7-WEB-04) ──
@@ -953,6 +960,14 @@ def stats_update_loop():
             payload = {**state["stats"], "uptime": get_uptime()}
             socketio.emit("stats", payload, namespace="/ws")
             socketio.emit("module_stats", _flatten_modules(), namespace="/ws")
+            # Traffic snapshot + mirrors for the default-namespace frontends.
+            try:
+                _tp = _traffic_payload()
+                socketio.emit("traffic", _tp, namespace="/ws")
+                socketio.emit("message", {"type": "traffic", "data": _tp})
+                socketio.emit("message", {"type": "stats", "data": payload})
+            except Exception:
+                pass
 
         time.sleep(1)
 
@@ -1258,6 +1273,375 @@ def api_logs():
     if level_filter and level_filter != "ALL":
         logs = [l for l in logs if l["level"] == level_filter]
     return jsonify(logs[-n:])
+
+
+# ── Integration endpoints for the rebuilt webui / gui ──────────────────────
+# GET  /api/traffic            — live TCP table + byte/packet totals
+# DELETE /api/logs             — clear the in-memory log buffer
+# POST /api/adversary/run      — start an attack-framework campaign
+# GET  /api/adversary/status   — poll progress, deliver AdversaryTestResults
+# POST /api/stealth/benchmark  — run ncp-adversary-bench (C++ HeuristicScores)
+
+_AF_BASE = "http://127.0.0.1:8090"
+_AF_PROCESS_KEY = "af_process"
+_ADVERSARY_JOB_KEY = "adversary_job"
+
+
+def _traffic_payload() -> dict:
+    """Live ESTABLISHED TCP table (psutil) + totals from engine stats."""
+    conns = []
+    try:
+        for c in psutil.net_connections(kind="tcp"):
+            if c.status != psutil.CONN_ESTABLISHED:
+                continue
+            conns.append({
+                "proto": "tcp",
+                "laddr": f"{c.laddr.ip}:{c.laddr.port}" if c.laddr else "",
+                "raddr": f"{c.raddr.ip}:{c.raddr.port}" if c.raddr else "",
+                "status": c.status,
+                "pid": c.pid,
+            })
+            if len(conns) >= 200:
+                break
+    except Exception:
+        pass
+    with stats_lock:
+        st = dict(state.get("stats", {}))
+    total_bytes = int(st.get("bytes_recv", 0) or 0) + int(st.get("bytes_sent", 0) or 0)
+    return {
+        "connections": conns,
+        "total_bytes": total_bytes,
+        "total_packets": int(st.get("packets_processed", 0) or 0),
+    }
+
+
+@app.route("/api/traffic")
+def api_traffic():
+    return jsonify(_traffic_payload())
+
+
+@app.route("/api/logs", methods=["DELETE"])
+def api_logs_clear():
+    with log_lock:
+        log_buffer.clear()
+    push_log("INFO", "Log buffer cleared via API")
+    return jsonify({"success": True})
+
+
+def _af_request(path: str, method: str = "GET", payload: dict | None = None,
+                timeout: float = 8.0):
+    """Tiny JSON client for the local attack-framework (port 8090)."""
+    import urllib.request
+    import urllib.error
+    url = _AF_BASE + path
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Content-Type": "application/json"} if data else {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _ensure_attack_framework() -> bool:
+    """Lazily start attack-framework/run_server.py if it is not listening."""
+    try:
+        _af_request("/api/health", timeout=2.0)
+        return True
+    except Exception:
+        pass
+    with stats_lock:
+        proc = state.get(_AF_PROCESS_KEY)
+        if proc is not None and proc.poll() is None:
+            # Already starting — wait briefly for the port.
+            for _ in range(20):
+                try:
+                    _af_request("/api/health", timeout=1.0)
+                    return True
+                except Exception:
+                    time.sleep(0.25)
+            return False
+        af_dir = Path(__file__).resolve().parent.parent / "attack-framework"
+        runner = af_dir / "run_server.py"
+        if not runner.is_file():
+            return False
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(runner)],
+                cwd=str(af_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            state[_AF_PROCESS_KEY] = proc
+        except Exception:
+            return False
+    for _ in range(24):
+        try:
+            _af_request("/api/health", timeout=1.0)
+            push_log("INFO", "Attack Framework started (port 8090)")
+            return True
+        except Exception:
+            time.sleep(0.25)
+    return False
+
+
+def _target_allowed(url: str) -> bool:
+    """Campaigns default to loopback; external targets need an opt-in env."""
+    if os.environ.get("NCP_ADVERSARY_ALLOW_EXTERNAL") == "1":
+        return True
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    if host in ("localhost", "127.0.0.1", "::1"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_private
+    except ValueError:
+        return False  # raw hostname — external, deny by default
+
+
+_AF_ATTACK_IDS = [
+    "ecs", "fragment", "ttl", "http", "tls_split", "rotation",
+    "webrtc", "dns_leak", "timing", "fingerprint",
+]
+
+
+def _af_attack_ids() -> list:
+    global _AF_ATTACK_IDS
+    try:
+        data = _af_request("/api/attacks", timeout=3.0)
+        ids = [a.get("id") for a in data.get("attacks", []) if a.get("id")]
+        if ids:
+            _AF_ATTACK_IDS = ids
+    except Exception:
+        pass
+    return list(_AF_ATTACK_IDS)
+
+
+@app.route("/api/adversary/run", methods=["POST"])
+def api_adversary_run():
+    body = request.get_json(silent=True) or {}
+    attack = str(body.get("attack_type") or "ecs").lower()
+    try:
+        iterations = max(1, min(int(body.get("iterations", 100)), 5000))
+    except (TypeError, ValueError):
+        iterations = 100
+    try:
+        intensity = max(1, min(int(body.get("intensity", 5)), 10))
+    except (TypeError, ValueError):
+        intensity = 5
+    target = str(body.get("target") or "http://127.0.0.1:8085")
+    if not _target_allowed(target):
+        return jsonify({"ok": False, "error": "external_target_forbidden",
+                        "hint": "set NCP_ADVERSARY_ALLOW_EXTERNAL=1 to allow"}), 400
+
+    if not _ensure_attack_framework():
+        return jsonify({"ok": False, "error": "attack_framework_unavailable"}), 503
+
+    known = _af_attack_ids()
+    # Multi-attack campaign form (AutoAttack page): attacks: [...]
+    body_attacks = body.get("attacks")
+    if isinstance(body_attacks, list) and body_attacks:
+        attacks = []
+        for a in body_attacks:
+            a = str(a).lower()
+            if a in known and a not in attacks:
+                attacks.append(a)
+        if not attacks:
+            return jsonify({"ok": False, "error": "unknown_attack", "known": known}), 400
+        mode = str(body.get("mode") or "campaign").lower()
+        if mode not in ("campaign", "single", "sequential"):
+            mode = "campaign"
+        adaptive = bool(body.get("adaptive", True))
+    elif attack in ("all", "combined"):
+        attacks = known
+        mode = "campaign"
+        adaptive = True
+    else:
+        if attack not in known:
+            return jsonify({"ok": False, "error": "unknown_attack",
+                            "known": known}), 400
+        attacks = [attack]
+        mode = "single"
+        adaptive = False
+    try:
+        concurrent = max(1, min(int(body.get("concurrent", 4) or 4), 32))
+    except (TypeError, ValueError):
+        concurrent = 4
+    try:
+        auto_stop_rate = max(0.0, min(float(body.get("auto_stop_rate", 0) or 0), 1.0))
+    except (TypeError, ValueError):
+        auto_stop_rate = 0.0
+
+    payload = {
+        "target": target,
+        "mode": mode,
+        "attacks": attacks,
+        "iterations": iterations,
+        "intensity": intensity,
+        "duration_seconds": max(5, min(iterations, 3600)),
+        "concurrent": concurrent,
+        "auto_stop_rate": auto_stop_rate,
+        "adaptive": adaptive,
+        "params": {},
+    }
+    try:
+        resp = _af_request("/api/campaigns/start", method="POST",
+                           payload=payload, timeout=10.0)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "campaign_start_failed",
+                        "detail": str(e)}), 502
+
+    campaign_id = resp.get("campaign_id")
+    with stats_lock:
+        state[_ADVERSARY_JOB_KEY] = {
+            "campaign_id": campaign_id,
+            "attack_type": attack,
+            "iterations": iterations,
+            "intensity": intensity,
+            "target": target,
+            "started": time.time(),
+            "results": None,
+        }
+    push_log("INFO", f"Adversary campaign {campaign_id} started "
+                     f"({attack}, {iterations} iters) → {target}")
+    socketio.emit("message", {"type": "adversary",
+                              "data": {"progress": 0, "status": "running"}})
+    return jsonify({"ok": True, "campaign_id": campaign_id,
+                    "status": "started"})
+
+
+@app.route("/api/adversary/status")
+def api_adversary_status():
+    with stats_lock:
+        job = state.get(_ADVERSARY_JOB_KEY)
+    if not job:
+        return jsonify({"progress": 0, "status": "idle"})
+
+    if job.get("results") is not None:
+        return jsonify({"progress": 100, "status": "done",
+                        "results": job["results"]})
+
+    cid = job.get("campaign_id")
+    try:
+        prog = _af_request(f"/api/campaigns/{cid}", timeout=5.0)
+    except Exception:
+        return jsonify({"progress": 0, "status": "unavailable"})
+
+    status = str(prog.get("status", "running")).lower()
+    progress = int(prog.get("progress_percent", 0) or 0)
+    if status in ("running", "started", "in_progress"):
+        return jsonify({"progress": progress, "status": "running"})
+
+    # Finished — pull the summary and map it to AdversaryTestResults.
+    results = None
+    try:
+        summ = _af_request(f"/api/campaigns/{cid}/summary", timeout=5.0)
+        total = int(summ.get("total_attacks", 0) or 0)
+        detected = int(summ.get("detected", 0) or 0)
+        det_rate = float(prog.get("detection_rate", 0) or 0)
+        if not det_rate and total > 0:
+            det_rate = detected / total
+        results = {
+            "avg_stealth": float(summ.get("avg_stealth", 0) or 0),
+            "min_stealth": float(summ.get("min_stealth", 0) or 0),
+            "max_stealth": float(summ.get("max_stealth", 0) or 0),
+            "detection_rate": det_rate,
+            "onnx_detection_rate": 0.0,
+            "onnx_confidence": 0.0,
+            "total_attacks": total,
+            "successful": int(summ.get("successful", 0) or 0),
+            "success_rate": float(summ.get("success_rate", 0) or 0),
+            "campaign_id": cid,
+        }
+    except Exception:
+        results = {"avg_stealth": 0.0, "min_stealth": 0.0, "max_stealth": 0.0,
+                   "detection_rate": float(prog.get("detection_rate", 0) or 0),
+                   "onnx_detection_rate": 0.0, "onnx_confidence": 0.0,
+                   "campaign_id": cid}
+
+    with stats_lock:
+        job["results"] = results
+        state[_ADVERSARY_JOB_KEY] = job
+    push_log("INFO", f"Adversary campaign {cid} finished: "
+                     f"stealth={results['avg_stealth']:.3f} "
+                     f"detection={results['detection_rate']:.2f}")
+    out = {"progress": 100, "status": "done", "results": results}
+    socketio.emit("message", {"type": "adversary", "data": out})
+    socketio.emit("adversary", out, namespace="/ws")
+    return jsonify(out)
+
+
+@app.route("/api/af/<path:subpath>", methods=["GET", "POST", "DELETE"])
+def api_af_proxy(subpath):
+    """Generic attack-framework proxy (campaigns, reports, … → :8090)."""
+    if not _ensure_attack_framework():
+        return jsonify({"ok": False, "error": "attack_framework_unavailable"}), 503
+    method = request.method
+    payload = request.get_json(silent=True) if method in ("POST", "PUT", "DELETE") else None
+    try:
+        data = _af_request(f"/api/{subpath}", method=method,
+                           payload=payload, timeout=30.0)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "af_proxy_failed",
+                        "detail": str(e)}), 502
+
+
+@app.route("/api/detect/<path:subpath>", methods=["GET", "POST"])
+def api_detect_proxy(subpath):
+    """Proxy the attack-framework detection suite (/api/detect/* → :8090)."""
+    if not _ensure_attack_framework():
+        return jsonify({"ok": False, "error": "attack_framework_unavailable"}), 503
+    method = request.method
+    payload = request.get_json(silent=True) if method in ("POST", "PUT") else None
+    try:
+        data = _af_request(f"/api/detect/{subpath}", method=method,
+                           payload=payload, timeout=30.0)
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"ok": False, "error": "detect_failed",
+                        "detail": str(e)}), 502
+
+
+@app.route("/api/stealth/benchmark", methods=["POST"])
+def api_stealth_benchmark():
+    body = request.get_json(silent=True) or {}
+    strategy = str(body.get("strategy") or "all")
+    try:
+        samples = max(10, min(int(body.get("samples", 200)), 5000))
+    except (TypeError, ValueError):
+        samples = 200
+    try:
+        runs = max(1, min(int(body.get("runs", 8)), 100))
+    except (TypeError, ValueError):
+        runs = 8
+
+    bench = NCP_BINARY.parent / "ncp-adversary-bench"
+    if not bench.is_file():
+        return jsonify({"ok": False, "error": "bench_binary_missing",
+                        "expected": str(bench)}), 501
+    try:
+        out = subprocess.check_output(
+            [str(bench), "--strategy", strategy,
+             "--samples", str(samples), "--runs", str(runs)],
+            timeout=90, text=True, stderr=subprocess.STDOUT)
+        data = json.loads(out.strip().splitlines()[-1])
+    except subprocess.CalledProcessError as e:
+        return jsonify({"ok": False, "error": "bench_failed",
+                        "detail": (e.output or "")[-500:]}), 500
+    except Exception as e:
+        return jsonify({"ok": False, "error": "bench_failed",
+                        "detail": str(e)}), 500
+
+    data["progress"] = 100
+    data["status"] = "done"
+    push_log("INFO", f"Stealth benchmark: best={data.get('best_strategy')} "
+                     f"({data.get('best_stealth', 0):.3f})")
+    socketio.emit("stealth", data, namespace="/ws")
+    socketio.emit("message", {"type": "stealth", "data": data})
+    return jsonify(data)
 
 
 @app.route("/api/dpi/preset", methods=["POST"])
@@ -1936,6 +2320,12 @@ def api_telegram_proxy_check():
     alive = _check_proxy_alive(server, port)
     link = f"tg://proxy?server={server}&port={port}&secret={secret}"
     return jsonify({"ok": True, "alive": alive, "link": link})
+
+
+@app.route("/api/token")
+def api_token():
+    """Return the per-start API token (same exposure as the meta tag in "/")."""
+    return jsonify({"token": _API_TOKEN})
 
 
 @app.route("/api/health")

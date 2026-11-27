@@ -371,6 +371,16 @@ endif()
 
 add_subdirectory(src/core)
 
+# Adversary/stealth benchmark bridge for the web UI (/api/stealth/benchmark).
+# Small standalone tool: links ncp_core and prints JSON on stdout.
+add_executable(ncp-adversary-bench src/tools/ncp_adversary_bench.cpp)
+target_link_libraries(ncp-adversary-bench PRIVATE ncp_core)
+target_include_directories(ncp-adversary-bench PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/core/include)
+set_target_properties(ncp-adversary-bench PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON)
+
 # Lab-only protected-wire proof harness. It is excluded from production builds
 # by default and is not an independent-implementation interoperability test.
 if(ENABLE_LAB_TOOLS)
