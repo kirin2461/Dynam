@@ -106,6 +106,14 @@ if(NOT WIN32)
         test_turn_server.cpp)          # G5: TURN-over-UDP server tests
 endif()
 
+# ONNX shadow classifier tests need the runtime and the model, so they are
+# only built with ENABLE_ONNXRUNTIME=ON. Real inference tests skip unless
+# NCP_TEST_MODEL points at models/shadow_flow_classifier.onnx.
+if(ENABLE_ONNXRUNTIME)
+    target_sources(ncp_tests PRIVATE test_onnx_classifier.cpp)
+    target_link_libraries(ncp_tests PRIVATE onnxruntime::onnxruntime)
+endif()
+
 find_library(MSQUIC_LIBRARY NAMES msquic libmsquic.so.2)
 if(MSQUIC_LIBRARY)
     target_sources(ncp_tests PRIVATE
