@@ -1,0 +1,31 @@
+{
+  "features": [
+    "size_mean",
+    "size_cv",
+    "frac_small",
+    "frac_large",
+    "error_rate",
+    "timing_cov",
+    "burst_anomaly",
+    "ks_distance",
+    "upload_ratio",
+    "burst_rate"
+  ],
+  "n_features": 10,
+  "model_type": "randomforest",
+  "input_shape": [
+    null,
+    10
+  ],
+  "input_dtype": "float32",
+  "classes": [
+    0,
+    1
+  ],
+  "class_names": [
+    "normal",
+    "ncp_obfuscated"
+  ],
+  "auc": 0.991381,
+  "f1": 0.9584376564847271
+}

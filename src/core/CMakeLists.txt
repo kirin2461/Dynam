@@ -509,6 +509,22 @@ target_include_directories(ncp_core
         ${CMAKE_SOURCE_DIR}/src
 )
 
+# ==================== Optional: ONNX Runtime shadow classifier ====================
+# Phase 3 anti-ML loop: the classifier scores flow metadata to tell NCP-
+# obfuscated traffic from normal traffic and feeds the result back into
+# AdversarialPadding::report_feedback(). The module has a hard ONNX Runtime
+# dependency (no stubs, no #ifdef fallbacks), so it is compiled only when
+# ENABLE_ONNXRUNTIME=ON; cmake/ncp_onnx_classifier.cmake fails configure
+# when the runtime is missing.
+if(ENABLE_ONNXRUNTIME)
+    target_sources(ncp_core PRIVATE
+        src/ncp_onnx_classifier.cpp
+        include/ncp_onnx_classifier.hpp
+        include/ncp_onnx_integration.hpp)
+    target_link_libraries(ncp_core PRIVATE onnxruntime::onnxruntime)
+    target_compile_definitions(ncp_core PRIVATE NCP_HAS_ONNXRUNTIME)
+endif()
+
 # G4: real QUIC is optional at build time so platforms without MsQuic keep
 # the legacy components. The runtime soname is accepted because some distro
 # packages ship the runtime without an unversioned development symlink.

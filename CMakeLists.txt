@@ -36,6 +36,7 @@ option(ENABLE_LIBOQS "Enable post-quantum cryptography via liboqs" OFF)
 option(ENABLE_TOR_PROXY "Enable Tor proxy support" OFF)
 option(ENABLE_FUZZING "Enable fuzzing tests (requires Clang with LibFuzzer)" OFF)
 option(BUILD_PORTABLE_MACOS "Build a relocatable macOS layout (bin/ + lib/ with bundled dylibs)" OFF)
+option(ENABLE_ONNXRUNTIME "Enable ONNX Runtime shadow classifiers (Phase 3 anti-ML)" OFF)
 
 # ==================== Web updater version stamp ====================
 # web/ncp_update.py learns the product version from web/static/version.txt.
@@ -362,6 +363,12 @@ if(ENABLE_DOCS)
 endif()
 
 # ==================== Subdirectories ====================
+# ONNX Runtime shadow classifier (Phase 3 anti-ML). Must be resolved before
+# src/core so the imported target exists when ncp_core links against it.
+if(ENABLE_ONNXRUNTIME)
+    include(cmake/ncp_onnx_classifier.cmake)
+endif()
+
 add_subdirectory(src/core)
 
 # Lab-only protected-wire proof harness. It is excluded from production builds
@@ -413,6 +420,7 @@ message(STATUS "Components:")
 message(STATUS "  ENABLE_CLI:       ${ENABLE_CLI}")
 message(STATUS "  ENABLE_GUI:       ${ENABLE_GUI}")
 message(STATUS "  ENABLE_TESTS:     ${ENABLE_TESTS}")
+message(STATUS "  ENABLE_ONNXRUNTIME: ${ENABLE_ONNXRUNTIME}")
 message(STATUS "")
 message(STATUS "Cryptography:")
 message(STATUS "  libsodium:        REQUIRED")
